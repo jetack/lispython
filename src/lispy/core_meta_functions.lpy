@@ -1,0 +1,45 @@
+;;; This is the source for core/meta_functions.py
+
+(require lispy.macros *)
+
+(from lispy.core.nodes *)
+
+(def defmacro-transform [sexp]
+  (= [op macroname *body] sexp.list) 
+  (= macroname (str macroname))
+  (= newname (Symbol "___defmacro_temp___"))
+  (return `(do (from lispy.core.nodes *)
+               (def ~newname ~@body)
+               (= (sub (.setdefault (globals) "__macro_namespace" {})
+                       ~macroname)
+                  ~newname)
+               (del ~newname))))
+
+(def require-transform [sexp]
+  (= [op module-name *optional] sexp.list)
+  (if optional
+      (= [macro-names] optional)
+      (= macro-names None))
+  (return
+    `(do (import importlib)
+         (= ___imported-macros
+            (getattr (importlib.import-module
+                       ~(.replace (str module-name) "-" "_"))
+                     "__macro_namespace"
+                     {}))
+         ~(conde (not macro-names)
+                 `(for [k v] in (.items (.copy ___imported-macros))
+                    (= (sub (.setdefault (globals) "__macro_namespace" {})
+                            (+ ~(str module-name) "." k))
+                       v))
+                 (== (str macro-names) "*")
+                 `(.update (.setdefault (globals) "__macro_namespace" {}) ___imported-macros)
+                 
+                 ;; else
+                 `(for mac-name in ~[(str x) for x in macro-names]
+                    (= (sub (.setdefault (globals) "__macro_namespace" {})
+                            mac-name)
+                       (sub ___imported-macros mac-name)))
+                 )
+         ;; (del importlib)
+         (del ___imported-macros))))

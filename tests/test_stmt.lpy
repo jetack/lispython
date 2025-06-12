@@ -1,0 +1,102 @@
+(import ast
+        unittest)
+
+(from .utils [stmt-to-dump])
+
+
+(class TestMatchMethods [unittest.TestCase]
+
+  (def test-match-value [self]
+    (self.assertEqual (stmt-to-dump "
+(match x
+  (case \"Relevant\" ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case \"Relevant\":
+        ..."))))
+
+  (def test-match-singleton [self]
+    (self.assertEqual (stmt-to-dump "
+(match x 
+  (case None
+     ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case None:
+        ..."))))
+
+  (def test-match-sequence [self]
+    (self.assertEqual (stmt-to-dump "
+(match x 
+  (case [1 2]
+     ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case [1, 2]:
+        ..."))))
+
+  (def test-match-star [self]
+    (self.assertEqual (stmt-to-dump "
+(match x
+  (case [1 2 *rest]
+     ...)
+  (case [*_]
+    ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case [1, 2, *rest]:
+        ...
+    case [*_]:
+        ..."))))
+
+  (def test-match-mapping [self]
+    (self.assertEqual (stmt-to-dump "
+(match x
+  (case {1 _ 2 _}
+    ...)
+  (case {**rest}
+    ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case {1: _, 2: _}:
+        ...
+    case {**rest}:
+        ..."))))
+
+  (def test-match-class [self]
+    (self.assertEqual (stmt-to-dump "
+(match x
+  (case (Point2D 0 0)
+    ...)
+  (case (Point3D :x 0 :y 0 :z 0)
+    ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case Point2D(0, 0):
+        ...
+    case Point3D(x=0, y=0, z=0):
+        ..."))))
+
+  (def test-match-as [self]
+    (self.assertEqual (stmt-to-dump "
+(match x
+  (case [x] as y
+    ...)
+  (case _
+    ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case [x] as y:
+        ...
+    case _:
+        ..."))))
+
+  (def test-match-or [self]
+    (self.assertEqual (stmt-to-dump "
+(match x
+  (case (| [x] y)
+    ...))")
+                      (ast.dump (ast.parse "
+match x:
+    case [x] | (y):
+        ...")))))

@@ -1,0 +1,95 @@
+(import ast)
+(import unittest)
+
+(from lispy.tools [src-to-python-org])
+(from .utils [stmt-to-dump])
+
+(defmacro self-retrieval-assert [src]
+  (return `(equal-test ~src ~src)))
+
+(defmacro equal-test [a b]
+  (return `(self.assertEqual (src-to-python-org ~a) ~b)))
+
+(class TestNumberMethods [unittest.TestCase]
+
+  (def test-integer [self]
+    (self-retrieval-assert "1")
+    (self-retrieval-assert "21234"))
+
+  (def test-float [self]
+    (self-retrieval-assert "12.34")
+    (equal-test "12." "12.0")
+    (equal-test ".34" "0.34"))
+
+  (def test-scientific-notation [self]
+    (equal-test "1e3" "1000.0")
+    (equal-test "12.34e3" "12340.0"))
+
+  (def test-complex [self]
+    (equal-test "3j" "3j")
+    (equal-test "1+2j" "(1+2j)")
+    (equal-test "1e3-.34j" "(1000-0.34j)")))
+
+(class TestStringMethods [unittest.TestCase]
+  (def test-string [self]
+    (equal-test "\"asdfasdf\"" "'asdfasdf'"))
+
+  (def test-raw-string [self]
+    (equal-test "r\"\\n\"" "'\\\\n'")
+    (equal-test "\"\\n\"" "'\\n'"))
+
+  (def test-multi-line-string [self]
+    (equal-test "\"a
+b
+c\""
+                "'a\\nb\\nc'")
+    (equal-test "\"
+\""
+                "\'\\n'"))
+
+  (def test-f-string [self]
+    (self.assertEqual (stmt-to-dump "f\"sin({a}) is {(sin a):.3}\"")
+                      (ast.dump (ast.parse "f\"sin({a}) is {sin(a):.3}\"")))))
+
+(class TestListMethods [unittest.TestCase]
+
+  (def test-list [self]
+    (self.assertEqual (src-to-python-org "[1 2]") "[1, 2]"))
+
+  (def test-star [self]
+    (self.assertEqual (src-to-python-org "[*[1 2]]")
+                      "[*[1, 2]]")
+    (self.assertEqual (src-to-python-org "[1 2 *[3 4]]")
+                      "[1, 2, *[3, 4]]")))
+
+(class TestTupleMethods [unittest.TestCase]
+
+  (def test-tuple [self]
+    (self.assertEqual (src-to-python-org "(, 1 2)") "(1, 2)"))
+
+  (def test-star [self]
+    (self.assertEqual (src-to-python-org "(, *[1 2])")
+                      "(*[1, 2],)")
+    (self.assertEqual (src-to-python-org "(, 1 2 *[3 4])")
+                      "(1, 2, *[3, 4])")))
+
+
+(class TestDictMethods [unittest.TestCase]
+
+  (def test-dict [self]
+    (self.assertEqual (src-to-python-org "{1 2}") "{1: 2}"))
+
+  (def test-double-star [self]
+    (self.assertEqual (src-to-python-org "{1 2 **a **{3 4}}")
+                      "{1: 2, **a, **{3: 4}}")))
+
+
+(class TestSetMethods [unittest.TestCase]
+
+  (def test-set [self]
+    (self.assertEqual (src-to-python-org "{, 1 2}")
+                      "{1, 2}"))
+
+  (def test-star [self]
+    (self.assertEqual (src-to-python-org "{, *[1 2 3] 2 3 4}")
+                      "{*[1, 2, 3], 2, 3, 4}")))

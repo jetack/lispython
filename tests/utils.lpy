@@ -1,0 +1,12 @@
+(require lispy.macros *)
+
+(import ast)
+
+(from lispy.tools [parse macroexpand-then-compile])
+
+(def stmt-to-dump [src]
+  (return (-> src
+              parse
+              macroexpand-then-compile
+              (ast.Module :type-ignores [])
+              ast.dump)))
