@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "lispython"
+version = "0.2.0"
+description = "Lisp-like Syntax for Python with Lisp-like Macros"
+authors = ["Jethack <jetack@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://jetack.github.io/lispython"
+repository = "https://github.com/jetack/lispython"
+packages = [
+    {include = "lispy", from = "src"}
+]
+
+[tool.poetry.dependencies]
+python = "~3.11"
+
+[tool.poetry.scripts]
+lpy = "lispy:run"
+l2py = "lispy:l2py"
+
+
+[tool.poetry.group.dev.dependencies]
+pre-commit = "^3.6.0"
+black = "^23.12.1"
+isort = "^5.13.2"
+toml = "^0.10.2"
+
+
+[tool.poetry.group.docs.dependencies]
+mkdocs-material = "^9.6.14"
+mkdocs-macros-plugin = "^1.3.7"
+mike = "^2.1.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

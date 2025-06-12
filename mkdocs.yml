@@ -1,0 +1,64 @@
+site_name: LisPython
+
+copyright: Copytright &copy; 2023-2025 Jethack
+
+plugins:
+  - macros:
+      module_name: docs/version_macro
+  - search
+  - mike
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.indexes
+    - navigation.instant
+    - navigation.footer
+    - content.action.edit
+    - content.tabs.link
+    - header.repo
+    - header.version
+  palette:
+    scheme: default
+  icon:
+    repo: fontawesome/brands/git-alt
+
+repo_url: https://github.com/jetack/lispython
+repo_name: jetack/lispython
+edit_uri: edit/main/docs/
+
+nav:
+  - Home: index.md
+  - Why LisPy?: why-lispy.md
+  - Usage:
+      - Getting Started: usage/getting-started.md
+      - Command Line Interface: usage/cli.md
+  - Syntax:
+      - Overview: syntax/overview.md
+      - Statements: syntax/statements.md
+      - Expressions: syntax/expressions.md
+  - Macros: macros.md
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - admonition
+  - codehilite
+  - footnotes
+  - meta
+  - toc:
+      permalink: true
+
+extra:
+  version:
+    provider: mike
+  analytics:
+    provider: google
+    property: G-4S2VF6T0D0

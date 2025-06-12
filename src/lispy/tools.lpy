@@ -1,0 +1,143 @@
+(require lispy.macros *)
+
+(import argparse)
+(import ast)
+(import io)
+(import os)
+(import os.path as osp)
+(import runpy)
+(import sys)
+
+(try
+  (import black)
+  (import isort)
+  (except [ImportError]
+    (print "Optional dependencies black and/or isort not found. Formatting capabilities will be limited.")
+    (= black None)
+    (= isort None)))
+
+(from lispy.core.nodes *)
+(from lispy.core.parser [parse])
+(from lispy.core.macro [macroexpand-then-compile])
+
+(= SCOPE {})
+
+(def ast-to-python [st]
+  (return (str (ast.unparse st))))
+
+(def src-to-python-org [src :include-meta False]
+  (return (.join "\n" (map ast-to-python
+                           (macroexpand-then-compile
+                             (parse src)
+                             SCOPE
+                             :include-meta include-meta)))))
+
+(def src-to-python [src :include-meta False]
+  (= raw-pysrc (src-to-python-org src :include-meta include-meta))
+  (return (format-python-source raw-pysrc)))
+
+(def black-src [src]
+  (try
+    (= rst (.rstrip (black.format-str src :mode (black.FileMode)) "\n"))
+    (except
+      (print src)
+      (raise Exception)))
+  (return rst))
+
+(def format-python-source [pysrc]
+  (if black
+      (= pysrc (black-src pysrc)))
+  (if isort
+      (= pysrc (isort.code pysrc)))
+  (return pysrc))
+
+(= argparser (argparse.ArgumentParser))
+(argparser.add-argument "--meta"
+                        :dest "include_meta"
+                        :action "store_true")
+
+(def l2py []
+  (= [args more-args] (argparser.parse-known-args))
+  (= file (osp.join (os.getcwd) (sub more-args 0)))
+  (with [(open file "rb") as f]
+    (= org (.decode (f.read) "utf-8")))
+  (= pysrc (src-to-python org :include-meta args.include_meta))
+  (print pysrc))
+
+(def read-multiline-input [prompt_str]
+  (= paren-depth 0)
+  (= in-string False)
+  (= line (input prompt_str))
+  (= src line)
+  (while True
+    (for c in line
+      (cond in-string
+            (if (== c "\"")
+                (= in-string False)
+                (continue))
+
+            (== c "\"")
+            (= in-string True)
+            
+            (in c "([{")
+            (+= paren-depth 1)
+            
+            (in c ")]}")
+            (-= paren-depth 1)))
+    (if (== paren-depth 0)
+        (break))
+    (= line (input "...   "))
+    (+= src (+ "\n" line)))
+  (return src))
+
+(def eval-and-print [src :scope SCOPE :translate False]
+  (= parsed (parse src))
+  (= stl (macroexpand-then-compile parsed scope))
+  (if translate
+      (do ;; (print "python translation")
+        (-> (.join "\n" (list (map ast-to-python stl)))
+            (format-python-source)
+            (print))
+        ;; (print "")
+        ))
+  ;; (print "result")
+  (for st stl
+    (eval (compile (ast.Interactive :body [st]) "" "single")
+          scope))
+  ;; (print "\n")
+  )
+
+(def repl [:translate False]
+  (= scope SCOPE)
+  (eval-and-print "(require lispy.macros *)")
+  (while True
+    (try
+      (do
+        (= src (read-multiline-input "repl> "))
+        (eval-and-print src scope translate))
+      (except [EOFError as e]
+        (raise e))
+      (except [KeyboardInterrupt]
+        (print "\nKeyboard Interrupt")
+        (continue))
+      (except [Exception as e]
+        (print "Exception: " e)
+        (continue)))))
+
+(def run []
+  (cond (< (len sys.argv) 2)
+        (repl)
+
+        (== (sub sys.argv 1) "-m")
+        (do (sys.argv.pop 1)
+            (= mname (sys.argv.pop 1))
+            (runpy.run-module (.replace mname "-" "_") :run-name "__main__" :alter-sys True))
+
+        (== (sub sys.argv 1) "-t")
+        (repl True)
+
+        (do (= fpath (sys.argv.pop 1))
+            (runpy.run-path fpath :run-name "__main__"))))
+
+(if (== __name__ "__main__")
+    (run))

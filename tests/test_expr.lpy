@@ -1,0 +1,42 @@
+(import unittest)
+
+(from lispy.tools [parse src-to-python-org])
+
+(class TestUnaryOpMethods [unittest.TestCase]
+
+  (def test-unaryop [self]
+    (self.assertEqual (src-to-python-org "+2") "+2")))
+
+(class TestBinOpMethods [unittest.TestCase]
+
+  (def test-binop [self]
+    (self.assertEqual (src-to-python-org "(+ 2 3)") "2 + 3")))
+
+(class TestBoolOpMethods [unittest.TestCase]
+
+  (def test-boolop [self]
+    (self.assertEqual (src-to-python-org "(and 1 2)") "1 and 2")))
+
+(class TestCompareMethods [unittest.TestCase]
+
+  (def test-eq [self]
+    (self.assertEqual (src-to-python-org "(== 1 2 3)")
+                      "1 == 2 == 3"))
+
+  (def test-noteq [self]
+    (self.assertEqual (src-to-python-org "(!= 1 2 3)")
+                       "1 != 2 != 3"))
+
+  (def test-lt [self]
+    (self.assertEqual (src-to-python-org "(< 1 2 3)")
+                      "1 < 2 < 3"))
+
+  (def test-lte [self]
+    (self.assertEqual (src-to-python-org "(<= 1 2 3)")
+                      "1 <= 2 <= 3"))
+
+  (def test-gt [self]
+    (self.assertEqual (src-to-python-org "(> 1 2 3)")
+                      "1 > 2 > 3"))
+  ;; TODO: more tests
+  )
