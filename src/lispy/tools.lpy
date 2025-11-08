@@ -7,6 +7,7 @@
 (import os.path as osp)
 (import runpy)
 (import sys)
+(import traceback)
 
 (try
   (import black)
@@ -109,20 +110,26 @@
 
 (def repl [:translate False]
   (= scope SCOPE)
-  (eval-and-print "(require lispy.macros *)")
+  (eval-and-print "(require lispy.macros *)
+(from pprint [pprint])")
   (while True
     (try
       (do
         (= src (read-multiline-input "repl> "))
         (eval-and-print src scope translate))
+      (except [SystemExit]
+        (print "SystemExit caught. Exiting REPL.")
+        (break))
       (except [EOFError as e]
-        (raise e))
+        (print "Ctrl-d input. Exiting REPL.")
+        (break))
       (except [KeyboardInterrupt]
         (print "\nKeyboard Interrupt")
         (continue))
       (except [Exception as e]
-        (print "Exception: " e)
-        (continue)))))
+        (print "An error occurred:\n====================================")
+        (traceback.print_exc)
+        (print "====================================")))))
 
 (def run []
   (cond (< (len sys.argv) 2)
