@@ -10,7 +10,7 @@ from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
 
 
-def _is_sy_file(filename):
+def _is_lpy_file(filename):
     return osp.isfile(filename) and osp.splitext(filename)[1] == ".lpy"
 
 
@@ -19,8 +19,8 @@ importlib.machinery.SOURCE_SUFFIXES.insert(0, ".lpy")
 _org_source_to_code = importlib.machinery.SourceFileLoader.source_to_code
 
 
-def _sy_source_to_code(self, data, path, *, _optimize=-1):
-    if _is_sy_file(path):
+def _lpy_source_to_code(self, data, path, *, _optimize=-1):
+    if _is_lpy_file(path):
         source = data.decode("utf-8")
         parsed = parse(source)
         data = ast.Module(macroexpand_then_compile(parsed), type_ignores=[])
@@ -28,20 +28,20 @@ def _sy_source_to_code(self, data, path, *, _optimize=-1):
     return _org_source_to_code(self, data, path, _optimize=_optimize)
 
 
-importlib.machinery.SourceFileLoader.source_to_code = _sy_source_to_code  # type: ignore
+importlib.machinery.SourceFileLoader.source_to_code = _lpy_source_to_code  # type: ignore
 
 # runpy._get_code_from_file injection
 _org_get_code_from_file = runpy._get_code_from_file  # type: ignore
 
 
-def _sy_get_code_from_file(run_name, fname):
+def _lpy_get_code_from_file(run_name, fname):
     from pkgutil import read_code
 
     decoded_path = osp.abspath(os.fsdecode(fname))
     with io.open_code(decoded_path) as f:
         code = read_code(f)
     if code is None:
-        if _is_sy_file(fname):
+        if _is_lpy_file(fname):
             with open(decoded_path, "rb") as f:
                 src = f.read().decode("utf-8")
             parsed = parse(src)
@@ -52,6 +52,6 @@ def _sy_get_code_from_file(run_name, fname):
     return [code, fname]
 
 
-runpy._get_code_from_file = _sy_get_code_from_file  # type: ignore
+runpy._get_code_from_file = _lpy_get_code_from_file  # type: ignore
 
 sys.path_importer_cache.clear()
