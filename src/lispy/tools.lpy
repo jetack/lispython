@@ -57,13 +57,16 @@
                         :dest "include_meta"
                         :action "store_true")
 
+(def l2py-f [org :include-meta False]
+  (= pysrc (src-to-python org :include-meta include_meta))
+  (return pysrc))
+
 (def l2py []
   (= [args more-args] (argparser.parse-known-args))
   (= file (osp.join (os.getcwd) (sub more-args 0)))
   (with [(open file "rb") as f]
     (= org (.decode (f.read) "utf-8")))
-  (= pysrc (src-to-python org :include-meta args.include_meta))
-  (print pysrc))
+  (print (l2py-f org :include-meta args.include_meta)))
 
 (def read-multiline-input [prompt_str]
   (= paren-depth 0)

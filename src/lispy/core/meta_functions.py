@@ -1,3 +1,4 @@
+WARNING = "This script should be edited in .lpy file, not translated .py file."
 from lispy.core.nodes import *
 
 
@@ -105,3 +106,16 @@ def require_transform(sexp):
         ),
         Paren(Symbol("del"), Symbol("___imported-macros")),
     )
+
+
+if __name__ == "__main__":
+    import os.path as osp
+
+    from lispy.tools import l2py_f
+
+    path = osp.abspath(__file__)
+    with open(path, "r") as f:
+        org = f.read()
+    translated = l2py_f(org)
+    with open(osp.join(osp.dirname(path), "core", "meta_functions.py"), "w") as f:
+        f.write(translated)
