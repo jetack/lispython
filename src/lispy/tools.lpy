@@ -64,6 +64,9 @@
 (def l2py []
   (= [args more-args] (argparser.parse-known-args))
   (= file (osp.join (os.getcwd) (sub more-args 0)))
+  (= script-dir (osp.dirname (osp.abspath file)))
+  (if (not (in script-dir sys.path))
+      (sys.path.insert 0 script-dir))
   (with [(open file "rb") as f]
     (= org (.decode (f.read) "utf-8")))
   (print (l2py-f org :include-meta args.include_meta)))
@@ -147,6 +150,9 @@
         (repl True)
 
         (do (= fpath (sys.argv.pop 1))
+            (= script-dir (osp.dirname (osp.abspath fpath)))
+            (if (not (in script-dir sys.path))
+                (sys.path.insert 0 script-dir))
             (runpy.run-path fpath :run-name "__main__"))))
 
 (if (== __name__ "__main__")
