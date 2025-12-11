@@ -127,7 +127,7 @@ def attribute_compile(sexp, ctx):
     for attr in attrs:
         position_info["end_lineno"] = attr.position_info["end_lineno"]
         position_info["end_col_offset"] = attr.position_info["end_col_offset"]
-        rst = ast.Attribute(value=rst, attr=str(attr), ctx=ast.Load(), **position_info)
+        rst = ast.Attribute(value=rst, attr=attr.name, ctx=ast.Load(), **position_info)
     rst.ctx = ctx()
     return rst
 
