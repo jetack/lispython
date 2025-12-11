@@ -64,7 +64,7 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
             sexp = define_macro(sexp, scope, include_meta=include_meta)
         elif str(op) == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
-        elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi:
+        elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
             sexp = scope["__macro_namespace"][str(op)](*operands)
             expanded = True
         else:

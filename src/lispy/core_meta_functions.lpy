@@ -8,7 +8,7 @@
 (def defmacro-transform [sexp]
   (= [op macroname *body] sexp.list) 
   (= macroname (str macroname))
-  (= newname (Symbol "___defmacro_temp___"))
+  (= newname (Symbol (+ "___defmacro_temp___" macroname)))
   (return `(do (from lispy.core.nodes *)
                (def ~newname ~@body)
                (= (sub (.setdefault (globals) "__macro_namespace" {})

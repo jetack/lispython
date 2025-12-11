@@ -5,7 +5,7 @@ from lispy.core.nodes import *
 def defmacro_transform(sexp):
     [op, macroname, *body] = sexp.list
     macroname = str(macroname)
-    newname = Symbol("___defmacro_temp___")
+    newname = Symbol("___defmacro_temp___" + macroname)
     return Paren(
         Symbol("do"),
         Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
