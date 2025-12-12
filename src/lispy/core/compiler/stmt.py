@@ -396,8 +396,8 @@ def return_p(sexp):
 
 
 def return_compile(sexp):
-    [op, value] = sexp.list
-    return ast.Return(value=expr_compile(value), **sexp.position_info)
+    [op, value] = sexp.list if len(sexp) > 1 else [None, None]
+    return ast.Return(value=expr_compile(value) if value else None, **sexp.position_info)
 
 
 def global_compile(sexp):
