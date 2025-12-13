@@ -57,19 +57,25 @@
                         :dest "include_meta"
                         :action "store_true")
 
-(def l2py-f [org :include-meta False]
-  (= pysrc (src-to-python org :include-meta include_meta))
+(def l2py-s [src :include-meta False]
+  "Translate lispy source string to Python source string"
+  (= pysrc (src-to-python src :include-meta include_meta))
   (return pysrc))
 
-(def l2py []
-  (= [args more-args] (argparser.parse-known-args))
-  (= file (osp.join (os.getcwd) (sub more-args 0)))
-  (= script-dir (osp.dirname (osp.abspath file)))
+(def l2py-f [file-path :include-meta False]
+  "Translate lispy file to Python source string (standalone with sys.path setup)"
+  (= script-dir (osp.dirname (osp.abspath file-path)))
   (if (not (in script-dir sys.path))
       (sys.path.insert 0 script-dir))
-  (with [(open file "rb") as f]
-    (= org (.decode (f.read) "utf-8")))
-  (print (l2py-f org :include-meta args.include_meta)))
+  (with [(open file-path "rb") as f]
+    (= src (.decode (f.read) "utf-8")))
+  (return (+ (l2py-s src :include-meta include_meta) "\n")))
+
+(def l2py []
+  "CLI entry point: parse args and translate file"
+  (= [args more-args] (argparser.parse-known-args))
+  (= file (osp.join (os.getcwd) (sub more-args 0)))
+  (print (l2py-f file :include-meta args.include_meta)))
 
 (def read-multiline-input [prompt_str]
   (= paren-depth 0)
