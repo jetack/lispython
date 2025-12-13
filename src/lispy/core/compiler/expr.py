@@ -57,7 +57,7 @@ def boolop_compile(sexp):
     [op, *args] = sexp.list
     return ast.BoolOp(
         boolop_dict[op.name](), list(map(expr_compile, args)), **sexp.position_info
-    )
+    ) if len(args) >= 2 else expr_compile(args[0])
 
 
 def compare_p(sexp):
