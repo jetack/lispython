@@ -2,6 +2,7 @@
 
 (import argparse)
 (import ast)
+(import importlib)
 (import io)
 (import os)
 (import os.path as osp)
@@ -26,15 +27,19 @@
 (def ast-to-python [st]
   (return (str (ast.unparse st))))
 
-(def src-to-python-org [src :include-meta False]
+(def src-to-python-org [src :include-meta False :scope None]
+  (if (is scope None)
+      (= scope SCOPE))
   (return (.join "\n" (map ast-to-python
                            (macroexpand-then-compile
                              (parse src)
-                             SCOPE
+                             scope
                              :include-meta include-meta)))))
 
-(def src-to-python [src :include-meta False]
-  (= raw-pysrc (src-to-python-org src :include-meta include-meta))
+(def src-to-python [src :include-meta False :scope None]
+  (if (is scope None)
+      (= scope SCOPE))
+  (= raw-pysrc (src-to-python-org src :include-meta include-meta :scope scope))
   (return (format-python-source raw-pysrc)))
 
 (def black-src [src]
@@ -57,9 +62,13 @@
                         :dest "include_meta"
                         :action "store_true")
 
-(def l2py-s [src :include-meta False]
+(def l2py-s [src :include-meta False :fresh-scope False]
   "Translate lispy source string to Python source string"
-  (= pysrc (src-to-python src :include-meta include_meta))
+  (if fresh-scope
+      (= scope {"__builtins__" __builtins__
+                "__macro_namespace" {}})
+      (= scope SCOPE))
+  (= pysrc (src-to-python src :include-meta include_meta :scope scope))
   (return pysrc))
 
 (def l2py-f [file-path :include-meta False]
@@ -67,9 +76,22 @@
   (= script-dir (osp.dirname (osp.abspath file-path)))
   (if (not (in script-dir sys.path))
       (sys.path.insert 0 script-dir))
+
+  ;; Clear cached macro modules to ensure fresh reload
+  (= modules-to-remove [])
+  (for [mod-name mod] in (sys.modules.items)
+    (if (or (mod-name.startswith "lispy.macros")
+            (and mod
+                 (hasattr mod "__file__")
+                 mod.__file__
+                 (mod.__file__.endswith ".lpy")))
+        (modules-to-remove.append mod-name)))
+  (for mod-name in modules-to-remove
+    (sys.modules.pop mod-name))
+
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (+ (l2py-s src :include-meta include_meta) "\n")))
+  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True) "\n")))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
