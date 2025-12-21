@@ -10,13 +10,11 @@
 (import sys)
 (import traceback)
 
-(try
-  (import black)
-  (import isort)
-  (except [ImportError]
-    (print "Optional dependencies black and/or isort not found. Formatting capabilities will be limited.")
-    (= black None)
-    (= isort None)))
+(import subprocess)
+(import shutil)
+(import tempfile)
+
+(= HAS_RUFF (shutil.which "ruff"))
 
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
@@ -42,19 +40,25 @@
   (= raw-pysrc (src-to-python-org src :include-meta include-meta :scope scope))
   (return (format-python-source raw-pysrc)))
 
-(def black-src [src]
-  (try
-    (= rst (.rstrip (black.format-str src :mode (black.FileMode)) "\n"))
-    (except
-      (print src)
-      (raise Exception)))
-  (return rst))
-
 (def format-python-source [pysrc]
-  (if black
-      (= pysrc (black-src pysrc)))
-  (if isort
-      (= pysrc (isort.code pysrc)))
+  (if (not HAS_RUFF)
+      (return pysrc))
+  (try
+    (with [(tempfile.NamedTemporaryFile :mode "w" :suffix ".py" :delete False) as f]
+      (f.write pysrc)
+      (= tmppath f.name))
+    ;; Run ruff check --fix for import sorting (modifies file in place)
+    (subprocess.run ["ruff" "check" "--fix" "--select" "I" tmppath]
+                    :capture-output True)
+    ;; Run ruff format (modifies file in place)
+    (subprocess.run ["ruff" "format" tmppath]
+                    :capture-output True)
+    ;; Read back the formatted code
+    (with [(open tmppath "r") as f]
+      (= pysrc (.rstrip (f.read) "\n")))
+    (os.unlink tmppath)
+    (except [Exception as e]
+      (print f"Ruff formatting failed: {e}")))
   (return pysrc))
 
 (= argparser (argparse.ArgumentParser))
