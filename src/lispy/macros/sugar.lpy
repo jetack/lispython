@@ -36,3 +36,16 @@
 
 (defmacro when [condition *body]
   (return `(if ~condition (do ~@body))))
+
+(defmacro inc [elt]
+  (return `(+ ~elt 1)))
+
+(defmacro dec [elt]
+  (return `(- ~elt 1)))
+
+;;; need to update parser to catch defmacro separately
+;; (defmacro ++ [elt]
+;;   (return `(+= ~elt 1)))
+
+;; (defmacro -- [elt]
+;;   (return `(-= ~elt 1)))
