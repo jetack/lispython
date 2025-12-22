@@ -187,7 +187,7 @@ def token_parse(token, tktype, position_info):
         else star_token_parse(token, tktype, position_info)
         if token[0] == "*"
         else unary_op_parse(token, tktype, position_info)
-        if token[0] in "+-"
+        if token[0] in "+-" and (lambda rest: rest and (rest[0].isalnum() or rest[0] in "_."))(token.lstrip("+-"))
         else Symbol(token, **position_info)
     )
 

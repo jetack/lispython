@@ -6,4 +6,5 @@
 (import-macro
   test-literal
   test-expr
-  test-stmt)
+  test-stmt
+  test-parser)
