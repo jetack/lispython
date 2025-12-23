@@ -20,8 +20,28 @@
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand-then-compile])
 
+(def detect-package-name []
+  "Detect package name from current directory by checking for __init__.py"
+  (= cwd (os.getcwd))
+  (if (not (osp.exists (osp.join cwd "__init__.py")))
+      (return ""))
+  ;; Walk up to find package root
+  (= parts [])
+  (= current cwd)
+  (while (osp.exists (osp.join current "__init__.py"))
+    (parts.insert 0 (osp.basename current))
+    (= parent (osp.dirname current))
+    (if (== parent current)
+        (break))
+    (= current parent))
+  ;; Add parent of package root to sys.path if needed
+  (if (and parts (not (in current sys.path)))
+      (sys.path.insert 0 current))
+  (return (.join "." parts)))
+
 (= SCOPE {"__builtins__" __builtins__
           "__name__" "__main__"
+          "__package__" (detect-package-name)
           "__macro_namespace" {}})
 
 (def ast-to-python [st]
@@ -72,6 +92,7 @@
   "Translate lispy source string to Python source string"
   (if fresh-scope
       (= scope {"__builtins__" __builtins__
+                "__package__" ""
                 "__macro_namespace" {}})
       (= scope SCOPE))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope))
