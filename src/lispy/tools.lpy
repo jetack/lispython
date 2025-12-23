@@ -20,7 +20,9 @@
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand-then-compile])
 
-(= SCOPE {})
+(= SCOPE {"__builtins__" __builtins__
+          "__name__" "__main__"
+          "__macro_namespace" {}})
 
 (def ast-to-python [st]
   (return (str (ast.unparse st))))
