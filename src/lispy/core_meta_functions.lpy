@@ -47,14 +47,14 @@
 
 (when (== __name__ "__main__")
   (import os.path as osp)
-  (from lispy.tools [l2py-f])
+  (from lispy.tools [l2py-s])
 
   (= path (osp.abspath __file__))
 
   (with [(open path "r") as f]
     (= org (f.read)))
 
-  (= translated (l2py-f org))
+  (= translated (l2py-s org))
 
   (with [(open (-> path
                    (osp.dirname)

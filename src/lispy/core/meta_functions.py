@@ -111,11 +111,11 @@ def require_transform(sexp):
 if __name__ == "__main__":
     import os.path as osp
 
-    from lispy.tools import l2py_f
+    from lispy.tools import l2py_s
 
     path = osp.abspath(__file__)
     with open(path, "r") as f:
         org = f.read()
-    translated = l2py_f(org)
+    translated = l2py_s(org)
     with open(osp.join(osp.dirname(path), "core", "meta_functions.py"), "w") as f:
         f.write(translated)
