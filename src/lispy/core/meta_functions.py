@@ -1,4 +1,4 @@
-WARNING = "This script should be edited in .lpy file  not translated .py file."
+WARNING = "This script should be edited in .lpy file, not translated .py file."
 from lispy.core.nodes import *
 
 

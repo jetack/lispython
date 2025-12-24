@@ -7,8 +7,12 @@ from lispy.core.utils import augassignop_dict
 
 
 def tokenize(src):
-    # Remove commas except those following { or ( with optional whitespace
-    src = re.sub(r"([{(]\s*),|,", lambda m: m.group(0) if m.group(1) else " ", src)
+    # Remove commas except those following { or ( with optional whitespace, but preserve commas in strings
+    src = re.sub(
+        r'(\w*"""(?:[^\\"]|\\.)*"""|\w*\'\'\'(?:[^\\\']|\\.)*\'\'\'|\w*"(?:[^\\"]|\\.)*"|[{(]\s*,)|,',
+        lambda m: m.group(1) if m.group(1) else " ",
+        src,
+    )
     lines = src.split("\n")
     tokens = deque([])
     int_simple = r"\d+[\dA-Za-z]*(?:_[\dA-Za-z]+)*"
