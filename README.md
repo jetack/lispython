@@ -46,9 +46,12 @@ lpy -m unittest
 # Todo
 ## Environment
 - [ ] Test on more python versions
-- [ ] Some IDE plugins like hy-mode and jedhy for better editing experience.
+- [ ] REPL should track history and arrow key navigation
+- [ ] REPL multi-line input support
+- [ ] Better compileation error messages
 ## Macro System
 - [ ] `as->` macro for syntactic sugar
 - [ ] `gensym` for avoiding name collision
 ## Python AST
 - [ ] `type_comment` never considered. Later, it should be covered
+- [ ] Any missing AST nodes in the version 3.12+
