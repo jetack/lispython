@@ -1,4 +1,4 @@
-WARNING = "This script should be edited in .lpy file, not translated .py file."
+WARNING = "This script should be edited in .lpy file  not translated .py file."
 from lispy.core.nodes import *
 
 
@@ -34,6 +34,18 @@ def require_transform(sexp):
         [macro_names] = optional
     else:
         macro_names = None
+    module_name_str = str(module_name).replace("-", "_")
+    is_relative = module_name_str.startswith(".")
+    import_call = (
+        Paren(
+            Symbol("importlib.import-module"),
+            module_name_str,
+            Keyword(Symbol("package")),
+            Symbol("__package__"),
+        )
+        if is_relative
+        else Paren(Symbol("importlib.import-module"), module_name_str)
+    )
     return Paren(
         Symbol("do"),
         Paren(Symbol("import"), Symbol("importlib")),
@@ -41,13 +53,7 @@ def require_transform(sexp):
             Symbol("="),
             Symbol("___imported-macros"),
             Paren(
-                Symbol("getattr"),
-                Paren(
-                    Symbol("importlib.import-module"),
-                    str(module_name).replace("-", "_"),
-                ),
-                String('"__macro_namespace"'),
-                Brace(),
+                Symbol("getattr"), import_call, String('"__macro_namespace"'), Brace()
             ),
         ),
         Paren(

@@ -21,11 +21,15 @@
   (if optional
       (= [macro-names] optional)
       (= macro-names None))
+  (= module-name-str (.replace (str module-name) "-" "_"))
+  (= is-relative (.startswith module-name-str "."))
+  (= import-call (ife is-relative
+                      `(importlib.import-module ~module-name-str :package __package__)
+                      `(importlib.import-module ~module-name-str)))
   (return
     `(do (import importlib)
          (= ___imported-macros
-            (getattr (importlib.import-module
-                       ~(.replace (str module-name) "-" "_"))
+            (getattr ~import-call
                      "__macro_namespace"
                      {}))
          ~(conde (not macro-names)

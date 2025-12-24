@@ -20,14 +20,16 @@
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand-then-compile])
 
-(def detect-package-name []
-  "Detect package name from current directory by checking for __init__.py"
-  (= cwd (os.getcwd))
-  (if (not (osp.exists (osp.join cwd "__init__.py")))
+(def detect-package-name [:path None]
+  "Detect package name from directory by checking for __init__.py"
+  (= dir-path (ife (is path None)
+                   (os.getcwd)
+                   (osp.dirname (osp.abspath path))))
+  (if (not (osp.exists (osp.join dir-path "__init__.py")))
       (return ""))
   ;; Walk up to find package root
   (= parts [])
-  (= current cwd)
+  (= current dir-path)
   (while (osp.exists (osp.join current "__init__.py"))
     (parts.insert 0 (osp.basename current))
     (= parent (osp.dirname current))
@@ -88,11 +90,11 @@
                         :dest "include_meta"
                         :action "store_true")
 
-(def l2py-s [src :include-meta False :fresh-scope False]
+(def l2py-s [src :include-meta False :fresh-scope False :package ""]
   "Translate lispy source string to Python source string"
   (if fresh-scope
       (= scope {"__builtins__" __builtins__
-                "__package__" ""
+                "__package__" package
                 "__macro_namespace" {}})
       (= scope SCOPE))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope))
@@ -118,7 +120,8 @@
 
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True) "\n")))
+  (= pkg (detect-package-name :path file-path))
+  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg) "\n")))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
