@@ -44,7 +44,7 @@
   (return `(- ~elt 1)))
 
 (defmacro ++ [elt]
-  (return `(:= ~elt (+ ~elt 1))))
+  (return `(+= ~elt 1)))
 
 (defmacro -- [elt]
-  (return `(:= ~elt (- ~elt 1))))
+  (return `(-= ~elt 1)))
