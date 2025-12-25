@@ -98,7 +98,7 @@
                 "__macro_namespace" {}})
       (= scope SCOPE))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope))
-  (return pysrc))
+  (return (+ "import lispy\n\n" pysrc)))
 
 (def l2py-f [file-path :include-meta False]
   "Translate lispy file to Python source string (standalone with sys.path setup)"
