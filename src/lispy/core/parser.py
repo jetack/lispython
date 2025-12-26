@@ -26,9 +26,17 @@ def tokenize(src):
     )
     number_simple = "|".join(scientific_simples + float_simples + [int_simple])
     complex_simple = f"(?:(?:{number_simple})[+-])?(?:{number_simple})j"
+    # F-string pattern with nested quotes in braces: f"...{expr "str"}..."
+    inner_str = r'\"(?:[^\"\\]|\\.)*\"'
+    brace_content = r'(?:[^{}\"\\]|\\.|\{[^{}]*\}|' + inner_str + r')*'
+    brace_expr = r'\{' + brace_content + r'\}'
+    f_string_content = r'(?:[^\"{}\\]|\\.|' + brace_expr + r')*'
+    f_string_pattern = r'f\"' + f_string_content + r'\"'
     pattern_labels = [
         ["\\^?\\*{0,2}[\\(\\{\\[]", "opening"],
         ["[\\)\\}\\]]", "closing"],
+        # F-string pattern must come before regular string patterns
+        [f_string_pattern, '"'],
         *list(
             zip(
                 map(
@@ -260,15 +268,52 @@ def string_parse(token, tktype, position_info):
 conversion_dict = {"!s": 115, "!r": 114, "!a": 97}
 
 
+def find_format_spec_separator(piece):
+    """Find the index of ':' that separates expression from format spec.
+    Only matches ':' at top level (not inside strings or brackets)."""
+    depth = 0
+    in_string = None
+    i = 0
+    while i < len(piece):
+        char = piece[i]
+        if in_string:
+            if char == '\\' and i + 1 < len(piece):
+                i += 2
+                continue
+            str_len = len(in_string)
+            if piece[i:i+str_len] == in_string:
+                in_string = None
+                i += str_len
+                continue
+        else:
+            if piece[i:i+3] in ('"""', "'''"):
+                in_string = piece[i:i+3]
+                i += 3
+                continue
+            elif char in ('"', "'"):
+                in_string = char
+            elif char in '([{':
+                depth += 1
+            elif char in ')]}':
+                depth -= 1
+            elif char == ':' and depth == 0:
+                return i
+        i += 1
+    return -1
+
+
 def f_string_parse(prefix, content, tktype, position_info):
     splitted = re.split("[\\{\\}]", content)
     processed = []
     splitted.pop() if splitted[-1] == "" else None
     for [i, piece] in enumerate(splitted):
         if i % 2:
-            if ":" in piece:
-                [*quarks, format_spec] = piece.split(":")
-                piece = ":".join(quarks)
+            # Unescape \" to " (backslash-quote is escape for quotes inside f-string braces)
+            piece = piece.replace('\\"', '"')
+            sep_idx = find_format_spec_separator(piece)
+            if sep_idx >= 0:
+                format_spec = piece[sep_idx + 1:]
+                piece = piece[:sep_idx]
             else:
                 format_spec = None
             if piece[-2:] in conversion_dict:
