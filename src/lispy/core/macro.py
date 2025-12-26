@@ -13,7 +13,7 @@ def define_macro(sexp, scope, include_meta=True):
     transformed = defmacro_transform(sexp)
     eval(
         compile(
-            ast.Interactive(body=macroexpand_then_compile([transformed])),
+            ast.Interactive(body=macroexpand_then_compile([transformed], include_meta=include_meta)),
             "macro-defining",
             "single",
         ),
@@ -26,7 +26,7 @@ def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
     eval(
         compile(
-            ast.Interactive(body=macroexpand_then_compile([transformed])),
+            ast.Interactive(body=macroexpand_then_compile([transformed], include_meta=include_meta)),
             "macro-requiring",
             "single",
         ),
@@ -49,14 +49,18 @@ def macroexpand_1(sexp, scope=globals()):
 def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=True):
     expanded = False
     if isinstance(sexp, QuasiQuote):
-        sexp.value, expanded = macroexpand_1_and_check(sexp.value, scope, in_quasi=True)
+        sexp.value, expanded = macroexpand_1_and_check(
+            sexp.value, scope, in_quasi=True, include_meta=include_meta
+        )
     elif isinstance(sexp, Quote):
         pass
     elif isinstance(sexp, Unquote):
-        sexp.value, expanded = macroexpand_1_and_check(sexp.value, scope)
+        sexp.value, expanded = macroexpand_1_and_check(
+            sexp.value, scope, include_meta=include_meta
+        )
     elif isinstance(sexp, Wrapper):
         sexp.value, expanded = macroexpand_1_and_check(
-            sexp.value, scope, in_quasi=in_quasi
+            sexp.value, scope, in_quasi=in_quasi, include_meta=include_meta
         )
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list
@@ -70,7 +74,7 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         else:
             expanded_list, expanded_feedbacks = zip(
                 *map(
-                    lambda x: macroexpand_1_and_check(x, scope, in_quasi=in_quasi),
+                    lambda x: macroexpand_1_and_check(x, scope, in_quasi=in_quasi, include_meta=include_meta),
                     sexp.list,
                 )
             )
