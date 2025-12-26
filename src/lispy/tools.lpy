@@ -173,9 +173,13 @@
   )
 
 (def repl [:translate False]
+  ;; Add current directory to sys.path for local imports
+  (= cwd (os.getcwd))
+  (if (not (in cwd sys.path))
+      (sys.path.insert 0 cwd))
   (= scope SCOPE)
   (eval-and-print "(require lispy.macros *)
-(from pprint [pprint])")
+(from pprint [pprint])" scope)
   (while True
     (try
       (do
