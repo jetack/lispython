@@ -89,8 +89,11 @@
 (argparser.add-argument "--meta"
                         :dest "include_meta"
                         :action "store_true")
+(argparser.add-argument "--no-lispy"
+                        :dest "no_lispy"
+                        :action "store_true")
 
-(def l2py-s [src :include-meta False :fresh-scope False :package ""]
+(def l2py-s [src :include-meta False :fresh-scope False :package "" :no-lispy False]
   "Translate lispy source string to Python source string"
   (if fresh-scope
       (= scope {"__builtins__" __builtins__
@@ -98,9 +101,11 @@
                 "__macro_namespace" {}})
       (= scope SCOPE))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope))
+  (if no_lispy
+      (return pysrc))
   (return (+ "import lispy\n\n" pysrc)))
 
-(def l2py-f [file-path :include-meta False]
+(def l2py-f [file-path :include-meta False :no-lispy False]
   "Translate lispy file to Python source string (standalone with sys.path setup)"
   (= script-dir (osp.dirname (osp.abspath file-path)))
   (if (not (in script-dir sys.path))
@@ -121,13 +126,13 @@
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
   (= pkg (detect-package-name :path file-path))
-  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg) "\n")))
+  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy) "\n")))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
   (= [args more-args] (argparser.parse-known-args))
   (= file (osp.join (os.getcwd) (sub more-args 0)))
-  (print (l2py-f file :include-meta args.include_meta)))
+  (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy)))
 
 (def read-multiline-input [prompt_str]
   (= paren-depth 0)

@@ -58,7 +58,7 @@
   (with [(open path "r") as f]
     (= org (f.read)))
 
-  (= translated (l2py-s org))
+  (= translated (l2py-s org :no-lispy True))
 
   (with [(open (-> path
                    (osp.dirname)

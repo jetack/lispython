@@ -122,6 +122,6 @@ if __name__ == "__main__":
     path = osp.abspath(__file__)
     with open(path, "r") as f:
         org = f.read()
-    translated = l2py_s(org)
+    translated = l2py_s(org, no_lispy=True)
     with open(osp.join(osp.dirname(path), "core", "meta_functions.py"), "w") as f:
         f.write(translated)
