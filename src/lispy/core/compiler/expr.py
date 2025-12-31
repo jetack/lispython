@@ -359,20 +359,14 @@ def paren_compiler(sexp, ctx):
 
 def slice_compile(sexp):
     [_, *args] = sexp.list
-    args = deque(args)
+    [lower, upper, step] = args if len(args) == 3 else args + ["_"] if len(args) == 2 else ["_"] + args + ["_"]
     args_dict = {}
-    if args:
-        lower = args.popleft()
-        if lower != "None" and lower != "_":
-            args_dict["lower"] = expr_compile(lower)
-    if args:
-        upper = args.popleft()
-        if upper != "None" and upper != "_":
-            args_dict["upper"] = expr_compile(upper)
-    if args:
-        step = args.popleft()
-        if step != "None" and step != "_":
-            args_dict["step"] = expr_compile(step)
+    if lower != "None" and lower != "_":
+        args_dict["lower"] = expr_compile(lower)
+    if upper != "None" and upper != "_":
+        args_dict["upper"] = expr_compile(upper)
+    if step != "None" and step != "_":
+        args_dict["step"] = expr_compile(step)
     return ast.Slice(**args_dict, **sexp.position_info)
 
 
