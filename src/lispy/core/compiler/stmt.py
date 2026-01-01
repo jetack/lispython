@@ -382,7 +382,7 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
     return (ast.AsyncFunctionDef if async_p else ast.FunctionDef)(
         name=fnname.name,
         args=def_args_parse(args),
-        body=stmt_list_compile(body),
+        body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
         decorator_list=list(map(expr_compile, decorator_list))
         if decorator_list
         else [],
@@ -435,7 +435,7 @@ def classdef_compile(sexp, decorator_list):
         name=clsname.name,
         bases=bases,
         keywords=keywords,
-        body=stmt_list_compile(body),
+        body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
         decorator_list=list(map(expr_compile, decorator_list))
         if decorator_list
         else [],
