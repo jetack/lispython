@@ -58,11 +58,13 @@
                              scope
                              :include-meta include-meta)))))
 
-(def src-to-python [src :include-meta False :scope None]
+(def src-to-python [src :include-meta False :scope None :format True]
   (if (is scope None)
       (= scope SCOPE))
   (= raw-pysrc (src-to-python-org src :include-meta include-meta :scope scope))
-  (return (format-python-source raw-pysrc)))
+  (if format
+      (return (format-python-source raw-pysrc))
+      (return raw-pysrc)))
 
 (def format-python-source [pysrc]
   (if (not HAS_RUFF)
@@ -93,19 +95,19 @@
                         :dest "no_lispy"
                         :action "store_true")
 
-(def l2py-s [src :include-meta False :fresh-scope False :package "" :no-lispy False]
+(def l2py-s [src :include-meta False :fresh-scope False :package "" :no-lispy False :format True]
   "Translate lispy source string to Python source string"
   (if fresh-scope
       (= scope {"__builtins__" __builtins__
                 "__package__" package
                 "__macro_namespace" {}})
       (= scope SCOPE))
-  (= pysrc (src-to-python src :include-meta include_meta :scope scope))
+  (= pysrc (src-to-python src :include-meta include_meta :scope scope :format format))
   (if no_lispy
       (return pysrc))
   (return (+ "import lispy\n\n" pysrc)))
 
-(def l2py-f [file-path :include-meta False :no-lispy False]
+(def l2py-f [file-path :include-meta False :no-lispy False :format True]
   "Translate lispy file to Python source string (standalone with sys.path setup)"
   (= script-dir (osp.dirname (osp.abspath file-path)))
   (if (not (in script-dir sys.path))
@@ -126,7 +128,7 @@
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
   (= pkg (detect-package-name :path file-path))
-  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy) "\n")))
+  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n")))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
