@@ -18,9 +18,9 @@ class TestMetaFunctionsSync:
         with open(py_path, "r") as f:
             py_contents = f.read()
 
-        transpiled = l2py_s(lpy_src)
+        transpiled = l2py_s(lpy_src, no_lispy=True)
 
         assert transpiled == py_contents, (
             "core/meta_functions.py is out of sync with core_meta_functions.lpy. "
-            "Run `lispy src/lispy/core_meta_functions.lpy` to regenerate."
+            "Run `lpy src/lispy/core_meta_functions.lpy` to regenerate."
         )
