@@ -359,7 +359,7 @@ def paren_compiler(sexp, ctx):
 
 def slice_compile(sexp):
     [_, *args] = sexp.list
-    assert 2 <= len(args) <= 3 # temporarily block length 1 slice for breaking change alert
+    assert 1 <= len(args) <= 3
     [lower, upper, step] = args if len(args) == 3 else args + ["_"] if len(args) == 2 else ["_"] + args + ["_"]
     args_dict = {}
     if lower != "None" and lower != "_":

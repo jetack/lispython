@@ -1,6 +1,6 @@
 [project]
 name = "lispython"
-version = "0.3.2"
+version = "0.3.3"
 description = "Lisp-like Syntax for Python with Lisp-like Macros"
 authors = [{ name = "Jetack", email = "jetack23@gmail.com" }]
 license = { text = "MIT" }

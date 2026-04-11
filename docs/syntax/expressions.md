@@ -250,13 +250,13 @@ obj[start:stop:step]
 ### Slice with Emptiness
 LisPy version
 ```python
-(sub obj [: start])
-(sub obj [: _ stop])
+(sub obj [: stop])
+(sub obj [: start _])
 (sub obj [: start _ step])
 ```
 Python version
 ```python
-obj[start:]
 obj[:stop]
+obj[start:]
 obj[start::step]
 ```
