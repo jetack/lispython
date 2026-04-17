@@ -336,10 +336,15 @@
           :source "lpy-lsp"
           :message f"Parse error: {exc}"))
       (return diagnostics)))
-  ;; 2. Compile (best-effort)
+  ;; 2. Compile (best-effort) — reported as warnings, since compile-time
+  ;; macro expansion depends on the runtime environment (imports must
+  ;; actually resolve). Import errors here are often not real problems.
   (try
     (do (from lispy.core.macro [macroexpand-then-compile])
         (macroexpand-then-compile tree))
+    (except [ModuleNotFoundError]
+      ;; Silently ignore — the file may be using modules the LSP can't resolve
+      (pass))
     (except [Exception as exc]
       (= pos (extract-error-position exc source))
       (if (is pos None)
@@ -347,9 +352,9 @@
       (.append diagnostics
         (lsp.Diagnostic
           :range (make-range *pos)
-          :severity lsp.DiagnosticSeverity.Error
+          :severity lsp.DiagnosticSeverity.Warning
           :source "lpy-lsp"
-          :message f"Compile error: {exc}"))))
+          :message f"Compile warning: {exc}"))))
   (return diagnostics))
 
 (def publish-diagnostics [ls uri]
