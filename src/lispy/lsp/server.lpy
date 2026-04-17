@@ -1,8 +1,11 @@
 (require lispy.macros *)
 
 (import builtins)
+(import glob)
 (import inspect)
 (import logging)
+(import os)
+(import os.path as osp)
 (import re)
 (import pathlib)
 
@@ -141,6 +144,139 @@
 (= BUILTIN-INFO (build-builtin-info))
 
 ;; ---------------------------------------------------------------------------
+;; Workspace index
+;; ---------------------------------------------------------------------------
+
+;; Global index: {symbol_name: [Location, ...]} across all .lpy files
+(= WORKSPACE-INDEX {})
+;; Cache of parsed trees per URI: {uri: tree}
+(= FILE-TREES {})
+
+(def uri-to-path [uri]
+  "Convert a file:// URI to a filesystem path."
+  (if (.startswith uri "file://")
+      (return (sub uri [: 7 None]))
+      (return uri)))
+
+(def path-to-uri [path]
+  "Convert a filesystem path to a file:// URI."
+  (return (.as-uri (pathlib.Path path))))
+
+(def index-file [uri]
+  "Parse a .lpy file and add its definitions to the workspace index.
+   Removes old entries for this URI before re-indexing."
+  ;; Remove old entries for this URI
+  (= to-remove [])
+  (for [name locs] in (.items WORKSPACE-INDEX)
+    (= (sub WORKSPACE-INDEX name)
+       [loc for loc in locs if (!= loc.uri uri)])
+    (if (== (len (sub WORKSPACE-INDEX name)) 0)
+        (.append to-remove name)))
+  (for name in to-remove
+    (del (sub WORKSPACE-INDEX name)))
+
+  ;; Parse and collect definitions
+  (= fpath (uri-to-path uri))
+  (if (not (osp.isfile fpath))
+      (return))
+  (try
+    (with [(open fpath "rb") as f]
+      (= src (.decode (f.read) "utf-8")))
+    (= tree (parse src))
+    (= (sub FILE-TREES uri) tree)
+    (collect-definitions tree uri :defs WORKSPACE-INDEX)
+    (except [Exception as exc]
+      (logger.debug f"Failed to index {fpath}: {exc}"))))
+
+(def index-workspace [workspace-folders]
+  "Scan all .lpy files in workspace folders and index them."
+  (for folder in workspace-folders
+    (= root (uri-to-path folder.uri))
+    (for fpath in (glob.glob (osp.join root "**" "*.lpy") :recursive True)
+      (index-file (path-to-uri fpath))))
+  (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
+
+(def resolve-module-to-file [module-name workspace-folders]
+  "Resolve a LisPython module name to a .lpy file path.
+   e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'"
+  (= parts (.split (.replace module-name "-" "_") "."))
+  (= rel-path (+ (osp.join *parts) ".lpy"))
+  ;; Search in workspace folders and sys.path-like locations
+  (for folder in workspace-folders
+    (= root (uri-to-path folder.uri))
+    ;; Direct match
+    (= candidate (osp.join root rel-path))
+    (if (osp.isfile candidate)
+        (return candidate))
+    ;; Check in src/ subdirectory
+    (= candidate (osp.join root "src" rel-path))
+    (if (osp.isfile candidate)
+        (return candidate)))
+  (return None))
+
+(def find-import-target [node workspace-folders]
+  "Given an import/from/require node, resolve where the imported name is defined."
+  (= form (. node op value))
+  (cond
+    (== form "from")
+    (do ;; (from module [names...])
+        (if (< (len node) 3)
+            (return None))
+        (= module-name (. (sub node 1) value))
+        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (if fpath
+            (return fpath))
+        (return None))
+
+    (== form "import")
+    (do ;; (import module)
+        (if (< (len node) 2)
+            (return None))
+        (= module-name (. (sub node 1) value))
+        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (if fpath
+            (return fpath))
+        (return None))
+
+    (== form "require")
+    (do ;; (require module *)
+        (if (< (len node) 2)
+            (return None))
+        (= module-name (. (sub node 1) value))
+        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (if fpath
+            (return fpath))
+        (return None))
+
+    (return None)))
+
+(def find-import-for-name [tree name]
+  "Find the import/from/require node that imports a given name."
+  (for node in tree
+    (if (not (isinstance node Paren))
+        (continue))
+    (if (== (len node) 0)
+        (continue))
+    (= form (ife (isinstance node.op Symbol) node.op.value ""))
+    (cond
+      (== form "from")
+      (do ;; (from module [names...])
+          (for child in (sub node.list [: 1 None])
+            (if (isinstance child Bracket)
+                (for item in child.list
+                  (if (and (isinstance item Symbol) (== item.value name))
+                      (return node))))))
+      (== form "import")
+      (do ;; (import module) or (import module as alias)
+          (for child in (sub node.list [: 1 None])
+            (if (and (isinstance child Symbol) (== child.value name))
+                (return node))))
+      (== form "require")
+      (do ;; (require module *) - imports all macros
+          (return node))))
+  (return None))
+
+;; ---------------------------------------------------------------------------
 ;; Helpers
 ;; ---------------------------------------------------------------------------
 
@@ -254,7 +390,7 @@
           (= rng (node-range node))
           (= sel (node-range (sub node 1)))
           (= children (ife (> (len node) 3)
-                           (walk-symbols (sub node.list (: 3 None)))
+                           (walk-symbols (sub node.list [: 3 None]))
                            []))
           (.append symbols
             (lsp.DocumentSymbol
@@ -270,8 +406,8 @@
           (= rng (node-range node))
           (= sel (node-range (sub node 1)))
           (= body-nodes (ife (> (len node) 3)
-                             (sub node.list (: 3 None))
-                             (sub node.list (: 2 None))))
+                             (sub node.list [: 3 None])
+                             (sub node.list [: 2 None])))
           (= children (walk-symbols body-nodes))
           (.append symbols
             (lsp.DocumentSymbol
@@ -373,7 +509,7 @@
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)
                   (if (> (len node) 3)
-                      (collect-definitions (sub node.list (: 3 None)) uri :defs defs)))))
+                      (collect-definitions (sub node.list [: 3 None]) uri :defs defs)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
@@ -381,8 +517,8 @@
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)
                   (= body (ife (> (len node) 3)
-                               (sub node.list (: 3 None))
-                               (sub node.list (: 2 None))))
+                               (sub node.list [: 3 None])
+                               (sub node.list [: 2 None])))
                   (collect-definitions body uri :defs defs))))
 
       (== form "=")
@@ -396,10 +532,10 @@
               (do (= name (. (sub node 1) value))
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)))
-          (collect-definitions (sub node.list (: 1 None)) uri :defs defs))
+          (collect-definitions (sub node.list [: 1 None]) uri :defs defs))
 
       (in form (, "import" "from"))
-      (do (for child in (sub node.list (: 1 None))
+      (do (for child in (sub node.list [: 1 None])
             (cond
               (and (isinstance child Symbol) (not-in child.value (, "as" "*")))
               (do (= loc (lsp.Location :uri uri :range (node-range child)))
@@ -438,9 +574,19 @@
 ;; LSP event handlers
 ;; ---------------------------------------------------------------------------
 
+(deco (server.feature lsp.INITIALIZED)
+(def on-initialized [ls params]
+  (= folders (ife ls.workspace.folders
+                  (list (.values ls.workspace.folders))
+                  []))
+  (if folders
+      (index-workspace folders))))
+
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
-  (publish-diagnostics ls params.text_document.uri)))
+  (= uri params.text_document.uri)
+  (index-file uri)
+  (publish-diagnostics ls uri)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_CHANGE)
 (def did-change [ls params]
@@ -448,7 +594,9 @@
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
 (def did-save [ls params]
-  (publish-diagnostics ls params.text_document.uri)))
+  (= uri params.text_document.uri)
+  (index-file uri)
+  (publish-diagnostics ls uri)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
 (def document-symbol [ls params]
@@ -512,12 +660,42 @@
   (= name target.value)
   (if (in name SPECIAL-FORM-DOCS)
       (return None))
+
   ;; 1. Local definitions in the file
   (= defs (collect-definitions tree doc.uri))
   (= local (.get defs name))
   (if local
       (return local))
-  ;; 2. Python builtins with source files
+
+  ;; 2. Resolve via import statements — find which module imports this name
+  (= folders (ife ls.workspace.folders
+                  (list (.values ls.workspace.folders))
+                  []))
+  (= import-node (find-import-for-name tree name))
+  (if import-node
+      (do (= fpath (find-import-target import-node folders))
+          (if fpath
+              (do (= target-uri (path-to-uri fpath))
+                  ;; Make sure the target file is indexed
+                  (if (not-in target-uri FILE-TREES)
+                      (index-file target-uri))
+                  ;; Look up the name in the target file's definitions
+                  (= target-tree (.get FILE-TREES target-uri))
+                  (if target-tree
+                      (do (= target-defs (collect-definitions target-tree target-uri))
+                          (= result (.get target-defs name))
+                          (if result
+                              (return result))))))))
+
+  ;; 3. Workspace-wide index lookup
+  (= ws-result (.get WORKSPACE-INDEX name))
+  (if ws-result
+      ;; Filter out definitions from the current file (already checked)
+      (do (= external [loc for loc in ws-result if (!= loc.uri doc.uri)])
+          (if external
+              (return external))))
+
+  ;; 4. Python builtins with source files
   (= builtin-name (.replace name "-" "_"))
   (= bi (.get BUILTIN-INFO builtin-name))
   (if (and bi (sub bi "source_file"))
