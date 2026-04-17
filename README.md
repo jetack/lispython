@@ -53,6 +53,12 @@ LisPython ships with a language server (`lpy-lsp`) that speaks LSP over stdio. I
 ## Editor setup
 Point your editor's LSP client at the `lpy-lsp` command for files with the `.lpy` extension. The server speaks LSP over stdio.
 
+### VSCode
+Install the [LisPython](https://marketplace.visualstudio.com/) extension from the VSCode Marketplace.
+
+### Emacs
+Use [`lpy-mode`](https://github.com/jetack/lpy-mode) for syntax highlighting and LSP integration. For completion, install [`lpy-autocomplete`](https://github.com/jetack/lpy-autocomplete).
+
 
 # Todo
 ## Environment
