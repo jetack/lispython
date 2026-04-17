@@ -162,6 +162,17 @@
   "Convert a filesystem path to a file:// URI."
   (return (.as-uri (pathlib.Path path))))
 
+(def index-required-modules [tree]
+  "Find all (require module-name ...) forms in tree and index those packages."
+  (for node in tree
+    (if (and (isinstance node Paren)
+             (> (len node) 1)
+             (isinstance node.op Symbol)
+             (== node.op.value "require")
+             (isinstance (sub node 1) Symbol))
+        (do (= module-name (. (sub node 1) value))
+            (index-installed-package module-name)))))
+
 (def index-file [uri]
   "Parse a .lpy file and add its definitions to the workspace index.
    Removes old entries for this URI before re-indexing."
@@ -185,6 +196,9 @@
     (= tree (parse src))
     (= (sub FILE-TREES uri) tree)
     (collect-definitions tree uri :defs WORKSPACE-INDEX)
+    ;; Also eagerly index any packages this file requires so defmacros
+    ;; from required modules are discoverable for go-to-definition.
+    (index-required-modules tree)
     (except [Exception as exc]
       (logger.debug f"Failed to index {fpath}: {exc}"))))
 
@@ -201,18 +215,43 @@
    e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'"
   (= parts (.split (.replace module-name "-" "_") "."))
   (= rel-path (+ (osp.join *parts) ".lpy"))
-  ;; Search in workspace folders and sys.path-like locations
+  ;; 1. Workspace folders (direct or in src/)
   (for folder in workspace-folders
     (= root (uri-to-path folder.uri))
-    ;; Direct match
     (= candidate (osp.join root rel-path))
     (if (osp.isfile candidate)
         (return candidate))
-    ;; Check in src/ subdirectory
     (= candidate (osp.join root "src" rel-path))
     (if (osp.isfile candidate)
         (return candidate)))
+  ;; 2. Python's sys.path (finds installed packages, including lispython itself)
+  (try
+    (do (import importlib.util)
+        (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+        (if (and spec spec.origin (.endswith spec.origin ".lpy"))
+            (return spec.origin))
+        ;; Package without __init__.lpy but has submodule files
+        (if (and spec spec.submodule-search-locations)
+            (for search-path in spec.submodule-search-locations
+              (= candidate (osp.join search-path "init.lpy"))
+              (if (osp.isfile candidate)
+                  (return candidate)))))
+    (except [Exception]
+      (pass)))
   (return None))
+
+(def index-installed-package [module-name]
+  "Index all .lpy files in an installed Python package (e.g., lispython).
+   Used to make defmacros in required modules discoverable."
+  (try
+    (do (import importlib.util)
+        (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+        (if (and spec spec.submodule-search-locations)
+            (for search-path in spec.submodule-search-locations
+              (for fpath in (glob.glob (osp.join search-path "**" "*.lpy") :recursive True)
+                (index-file (path-to-uri fpath))))))
+    (except [Exception]
+      (pass))))
 
 (def find-import-target [node workspace-folders]
   "Given an import/from/require node, resolve where the imported name is defined."
