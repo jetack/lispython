@@ -6,7 +6,7 @@ authors = [{ name = "Jetack", email = "jetack23@gmail.com" }]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["pygls>=1.0.0"]
 
 [project.urls]
 Homepage = "https://jetack.github.io/lispython"
@@ -15,6 +15,7 @@ Repository = "https://github.com/jetack/lispython"
 [project.scripts]
 lpy = "lispy:run"
 l2py = "lispy:l2py"
+lpy-lsp = "lispy.lsp:main"
 test = "pytest:main"
 
 [project.optional-dependencies]
