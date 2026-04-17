@@ -1,3 +1,4 @@
+import lispy  # register .lpy import hook
 from lispy.lsp.server import server
 
 

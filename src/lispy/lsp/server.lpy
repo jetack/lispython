@@ -1,0 +1,543 @@
+(require lispy.macros *)
+
+(import builtins)
+(import inspect)
+(import logging)
+(import re)
+(import pathlib)
+
+(from lsprotocol [types as lsp])
+(from pygls.lsp.server [LanguageServer])
+
+(from lispy.core.nodes *)
+(from lispy.core.parser [parse])
+
+(= logger (logging.getLogger __name__))
+
+;; ---------------------------------------------------------------------------
+;; Server instance
+;; ---------------------------------------------------------------------------
+
+(= server (LanguageServer "lpy-lsp" "v0.1.0"))
+
+;; ---------------------------------------------------------------------------
+;; Special-form documentation (for hover)
+;; ---------------------------------------------------------------------------
+
+(= SPECIAL-FORM-DOCS
+  {;; Statement forms
+   "def"       "```\n(def name [params] body...)\n```\n\nDefine a function. Parameters are given in a bracket list. An optional docstring can follow the parameter list."
+   "async-def" "```\n(async-def name [params] body...)\n```\n\nDefine an async function (coroutine)."
+   "class"     "```\n(class Name [bases] body...)\n```\n\nDefine a class. Bases are given in a bracket list."
+   "defmacro"  "```\n(defmacro name [params] body...)\n```\n\nDefine a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression."
+   "if"        "```\n(if condition then-body)\n(if condition then-body else-body)\n```\n\nConditional statement. Compiles to Python `if/else`."
+   "while"     "```\n(while condition body...)\n```\n\nWhile loop."
+   "for"       "```\n(for target iterable body...)\n```\n\nFor loop. `target` is bound to each element of `iterable`."
+   "async-for" "```\n(async-for target iterable body...)\n```\n\nAsync for loop — use inside `async-def`."
+   "do"        "```\n(do body...)\n```\n\nExecute a sequence of statements (block). Used where a single expression is expected but multiple statements are needed."
+   "match"     "```\n(match subject case...)\n```\n\nStructural pattern matching (Python 3.10+)."
+   "try"       "```\n(try body except-clauses... [finally-clause])\n```\n\nTry/except/finally statement."
+   "with"      "```\n(with [ctx-expr as-name] body...)\n```\n\nContext manager statement."
+   "async-with" "```\n(async-with [ctx-expr as-name] body...)\n```\n\nAsync context manager — use inside `async-def`."
+   "import"    "```\n(import module)\n(import module :as alias)\n```\n\nImport a module."
+   "from"      "```\n(from module [names...])\n(from module [name :as alias ...])\n```\n\nImport specific names from a module."
+   "require"   "```\n(require module *)\n(require module [names...])\n```\n\nImport macros from a LisPython macro module at compile time."
+   "="         "```\n(= target value)\n```\n\nAssignment statement."
+   ":="        "```\n(:= target value)\n```\n\nWalrus operator (assignment expression)."
+   "return"    "```\n(return value)\n```\n\nReturn a value from a function."
+   "raise"     "```\n(raise exception)\n```\n\nRaise an exception."
+   "assert"    "```\n(assert condition)\n(assert condition message)\n```\n\nAssert that a condition is true."
+   "del"       "```\n(del target)\n```\n\nDelete a name or item."
+   "pass"      "```\n(pass)\n```\n\nNo-op placeholder statement."
+   "break"     "```\n(break)\n```\n\nBreak out of a loop."
+   "continue"  "```\n(continue)\n```\n\nContinue to the next loop iteration."
+   "global"    "```\n(global name...)\n```\n\nDeclare names as global variables."
+   "nonlocal"  "```\n(nonlocal name...)\n```\n\nDeclare names as nonlocal variables."
+   "yield"     "```\n(yield value)\n```\n\nYield a value from a generator."
+   "yield-from" "```\n(yield-from iterable)\n```\n\nYield all values from a sub-generator."
+   "await"     "```\n(await expr)\n```\n\nAwait a coroutine."
+   "deco"      "```\n(deco decorator (def ...))\n```\n\nApply a decorator to the following function/class definition."
+   "lambda"    "```\n(lambda [params] body)\n```\n\nAnonymous function (lambda expression)."
+   ;; Expression forms
+   "ife"       "```\n(ife condition then-expr else-expr)\n```\n\nTernary conditional expression (`then-expr if condition else else-expr`)."
+   "."         "```\n(. obj attr)\n```\n\nAttribute access (`obj.attr`)."
+   "sub"       "```\n(sub obj index)\n```\n\nSubscript access (`obj[index]`)."
+   ","         "```\n(, a b c)\n```\n\nTuple literal."
+   "fn"        "```\n(fn [params] body)\n```\n\nLambda alias — same as `lambda`."
+   ;; Operators
+   "+"  "Arithmetic addition / unary positive."
+   "-"  "Arithmetic subtraction / unary negative."
+   "*"  "Arithmetic multiplication / iterable unpacking."
+   "/"  "True division."
+   "//" "Floor (integer) division."
+   "%"  "Modulo (remainder)."
+   "**" "Exponentiation."
+   "@"  "Matrix multiplication."
+   "<<" "Bitwise left shift."
+   ">>" "Bitwise right shift."
+   "|"  "Bitwise OR."
+   "^"  "Bitwise XOR."
+   "&"  "Bitwise AND."
+   "~"  "Bitwise NOT / unquote (inside quasiquote)."
+   "and" "Logical AND (short-circuit)."
+   "or"  "Logical OR (short-circuit)."
+   "not" "Logical NOT."
+   "==" "Equality test."
+   "!=" "Inequality test."
+   "<"  "Less than."
+   "<=" "Less than or equal."
+   ">"  "Greater than."
+   ">=" "Greater than or equal."
+   "is"     "Identity test (`x is y`)."
+   "is-not" "Negated identity test (`x is not y`)."
+   "in"     "Membership test (`x in y`)."
+   "not-in" "Negated membership test (`x not in y`)."
+   ;; Macro-related
+   "'"  "Quote — prevent evaluation; return the form as data."
+   "`"  "Quasiquote — like quote but allows unquote (`~`) splicing."
+   "~@" "Unquote-splice — splice a list into a quasiquote."
+   "f-string" "```\nf\"text {expr} more\"\n```\n\nFormatted string literal (f-string)."})
+
+;; ---------------------------------------------------------------------------
+;; Python builtins introspection
+;; ---------------------------------------------------------------------------
+
+(def build-builtin-info []
+  "Build a dict of Python builtin names -> {signature, doc, source_file, lineno}."
+  (= info {})
+  (for name in (dir builtins)
+    (if (.startswith name "_")
+        (continue))
+    (= obj (getattr builtins name))
+    (if (and (not (callable obj)) (not (isinstance obj type)))
+        (continue))
+    (= entry {"name" name})
+    ;; Signature
+    (try
+      (do (= sig (inspect.signature obj))
+          (= (sub entry "signature") f"{name}{sig}"))
+      (except [(, ValueError TypeError)]
+        (= (sub entry "signature") name)))
+    ;; Docstring
+    (= doc (inspect.getdoc obj))
+    (if doc
+        (= (sub entry "doc") (sub (.split doc "\n\n") 0))
+        (= (sub entry "doc") ""))
+    ;; Source file
+    (try
+      (do (= source-file (inspect.getfile obj))
+          (try
+            (do (= (, _ lineno) (inspect.getsourcelines obj))
+                (= (sub entry "lineno") lineno))
+            (except [(, OSError TypeError)]
+              (= (sub entry "lineno") 1)))
+          (= (sub entry "source_file") source-file))
+      (except [(, TypeError OSError)]
+        (= (sub entry "source_file") None)
+        (= (sub entry "lineno") None)))
+    (= (sub info name) entry))
+  (return info))
+
+(= BUILTIN-INFO (build-builtin-info))
+
+;; ---------------------------------------------------------------------------
+;; Helpers
+;; ---------------------------------------------------------------------------
+
+(def make-position [line char]
+  (return (lsp.Position :line line :character char)))
+
+(def make-range [start-line start-char end-line end-char]
+  (return (lsp.Range
+    :start (make-position start-line start-char)
+    :end (make-position end-line end-char))))
+
+(def node-range [node]
+  "Convert a LisPython AST node's position info to an LSP Range.
+   The parser uses 1-based line numbers; LSP uses 0-based."
+  (return (make-range
+    (- node.lineno 1)
+    node.col_offset
+    (- node.end_lineno 1)
+    node.end_col_offset)))
+
+(def extract-error-position [exc src]
+  "Best-effort extraction of line/col from a parse or compile error."
+  ;; Some Python exceptions carry lineno/offset
+  (= lineno (getattr exc "lineno" None))
+  (if (is-not lineno None)
+      (do (= col (- (or (getattr exc "offset" None) 1) 1))
+          (return (, (- lineno 1) col (- lineno 1) col))))
+  ;; Try to extract from the message
+  (= msg (str exc))
+  (= m (re.search "line\\s+(\\d+)" msg re.IGNORECASE))
+  (if m
+      (do (= line (- (int (.group m 1)) 1))
+          (= col 0)
+          (= mc (re.search "col(?:umn)?\\s+(\\d+)" msg re.IGNORECASE))
+          (if mc
+              (= col (int (.group mc 1))))
+          (return (, line col line col))))
+  (return None))
+
+;; ---------------------------------------------------------------------------
+;; Diagnostics
+;; ---------------------------------------------------------------------------
+
+(def compute-diagnostics [source uri]
+  (= diagnostics [])
+  ;; 1. Parse
+  (try
+    (= tree (parse source))
+    (except [Exception as exc]
+      (= pos (extract-error-position exc source))
+      (if (is pos None)
+          (= pos (, 0 0 0 0)))
+      (.append diagnostics
+        (lsp.Diagnostic
+          :range (make-range *pos)
+          :severity lsp.DiagnosticSeverity.Error
+          :source "lpy-lsp"
+          :message f"Parse error: {exc}"))
+      (return diagnostics)))
+  ;; 2. Compile (best-effort)
+  (try
+    (do (from lispy.core.macro [macroexpand-then-compile])
+        (macroexpand-then-compile tree))
+    (except [Exception as exc]
+      (= pos (extract-error-position exc source))
+      (if (is pos None)
+          (= pos (, 0 0 0 0)))
+      (.append diagnostics
+        (lsp.Diagnostic
+          :range (make-range *pos)
+          :severity lsp.DiagnosticSeverity.Error
+          :source "lpy-lsp"
+          :message f"Compile error: {exc}"))))
+  (return diagnostics))
+
+(def publish-diagnostics [ls uri]
+  (= doc (.get-text-document ls.workspace uri))
+  (= diagnostics (compute-diagnostics doc.source uri))
+  (.text-document-publish-diagnostics ls
+    (lsp.PublishDiagnosticsParams :uri uri :diagnostics diagnostics)))
+
+;; ---------------------------------------------------------------------------
+;; Document symbols
+;; ---------------------------------------------------------------------------
+
+(def symbol-name [node]
+  "Extract a string name from a node."
+  (cond (isinstance node Symbol)
+        (return node.value)
+        (isinstance node Annotation)
+        (return (symbol-name node.value))
+        (isinstance node String)
+        (return (.strip node.value "\"'"))
+        (return (str node))))
+
+(def walk-symbols [nodes]
+  "Walk top-level parsed forms and produce DocumentSymbol entries."
+  (= symbols [])
+  (for node in nodes
+    (if (or (not (isinstance node Paren)) (== (len node) 0))
+        (continue))
+    (= op node.op)
+    (if (not (isinstance op Symbol))
+        (continue))
+    (= form op.value)
+
+    (cond
+      (in form (, "def" "async-def"))
+      (do (if (< (len node) 2) (continue))
+          (= name (symbol-name (sub node 1)))
+          (= rng (node-range node))
+          (= sel (node-range (sub node 1)))
+          (= children (ife (> (len node) 3)
+                           (walk-symbols (sub node.list (: 3 None)))
+                           []))
+          (.append symbols
+            (lsp.DocumentSymbol
+              :name name
+              :kind lsp.SymbolKind.Function
+              :range rng
+              :selection-range sel
+              :children (or children None))))
+
+      (== form "class")
+      (do (if (< (len node) 2) (continue))
+          (= name (symbol-name (sub node 1)))
+          (= rng (node-range node))
+          (= sel (node-range (sub node 1)))
+          (= body-nodes (ife (> (len node) 3)
+                             (sub node.list (: 3 None))
+                             (sub node.list (: 2 None))))
+          (= children (walk-symbols body-nodes))
+          (.append symbols
+            (lsp.DocumentSymbol
+              :name name
+              :kind lsp.SymbolKind.Class
+              :range rng
+              :selection-range sel
+              :children (or children None))))
+
+      (== form "defmacro")
+      (do (if (< (len node) 2) (continue))
+          (.append symbols
+            (lsp.DocumentSymbol
+              :name (symbol-name (sub node 1))
+              :kind lsp.SymbolKind.Function
+              :range (node-range node)
+              :selection-range (node-range (sub node 1))
+              :detail "macro")))
+
+      (== form "=")
+      (do (if (< (len node) 2) (continue))
+          (.append symbols
+            (lsp.DocumentSymbol
+              :name (symbol-name (sub node 1))
+              :kind lsp.SymbolKind.Variable
+              :range (node-range node)
+              :selection-range (node-range (sub node 1)))))
+
+      (in form (, "import" "from"))
+      (do (if (< (len node) 2) (continue))
+          (.append symbols
+            (lsp.DocumentSymbol
+              :name (symbol-name (sub node 1))
+              :kind lsp.SymbolKind.Module
+              :range (node-range node)
+              :selection-range (node-range (sub node 1)))))
+
+      (== form "require")
+      (do (if (< (len node) 2) (continue))
+          (.append symbols
+            (lsp.DocumentSymbol
+              :name (symbol-name (sub node 1))
+              :kind lsp.SymbolKind.Module
+              :range (node-range node)
+              :selection-range (node-range (sub node 1))
+              :detail "macro require")))))
+
+  (return symbols))
+
+;; ---------------------------------------------------------------------------
+;; Hover
+;; ---------------------------------------------------------------------------
+
+(def node-at-position [nodes line-0 col]
+  "Find the most specific node at the given 0-based position."
+  (for node in nodes
+    (= n-start-line (- node.lineno 1))
+    (= n-start-col node.col_offset)
+    (= n-end-line (- node.end_lineno 1))
+    (= n-end-col node.end_col_offset)
+    ;; Check if position is inside this node's range
+    (if (< (, line-0 col) (, n-start-line n-start-col))
+        (continue))
+    (if (> (, line-0 col) (, n-end-line n-end-col))
+        (continue))
+    ;; Position is within this node — try to go deeper
+    (if (isinstance node Expression)
+        (do (= deeper (node-at-position node.list line-0 col))
+            (if (is-not deeper None)
+                (return deeper))))
+    (if (isinstance node (, Wrapper MetaIndicator))
+        (do (= deeper (node-at-position [node.value] line-0 col))
+            (if (is-not deeper None)
+                (return deeper))))
+    (return node))
+  (return None))
+
+;; ---------------------------------------------------------------------------
+;; Definition index
+;; ---------------------------------------------------------------------------
+
+(def collect-definitions [nodes uri :defs None]
+  "Walk AST and collect all definition locations keyed by symbol name."
+  (if (is defs None)
+      (= defs {}))
+
+  (for node in nodes
+    (if (or (not (isinstance node Paren)) (== (len node) 0))
+        (continue))
+    (= op node.op)
+    (if (not (isinstance op Symbol))
+        (continue))
+    (= form op.value)
+
+    (cond
+      (in form (, "def" "async-def" "defmacro"))
+      (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
+              (do (= name (. (sub node 1) value))
+                  (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
+                  (.append (.setdefault defs name []) loc)
+                  (if (> (len node) 3)
+                      (collect-definitions (sub node.list (: 3 None)) uri :defs defs)))))
+
+      (== form "class")
+      (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
+              (do (= name (. (sub node 1) value))
+                  (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
+                  (.append (.setdefault defs name []) loc)
+                  (= body (ife (> (len node) 3)
+                               (sub node.list (: 3 None))
+                               (sub node.list (: 2 None))))
+                  (collect-definitions body uri :defs defs))))
+
+      (== form "=")
+      (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
+              (do (= name (. (sub node 1) value))
+                  (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
+                  (.append (.setdefault defs name []) loc))))
+
+      (in form (, "for" "async-for"))
+      (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
+              (do (= name (. (sub node 1) value))
+                  (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
+                  (.append (.setdefault defs name []) loc)))
+          (collect-definitions (sub node.list (: 1 None)) uri :defs defs))
+
+      (in form (, "import" "from"))
+      (do (for child in (sub node.list (: 1 None))
+            (cond
+              (and (isinstance child Symbol) (not-in child.value (, "as" "*")))
+              (do (= loc (lsp.Location :uri uri :range (node-range child)))
+                  (.append (.setdefault defs child.value []) loc))
+              (isinstance child Bracket)
+              (for item in child.list
+                (if (and (isinstance item Symbol) (!= item.value "as"))
+                    (do (= loc (lsp.Location :uri uri :range (node-range item)))
+                        (.append (.setdefault defs item.value []) loc)))))))
+
+      ;; Default: recurse into nested paren forms
+      (do (collect-definitions
+            [c for c in node.list if (isinstance c Paren)]
+            uri :defs defs))))
+
+  (return defs))
+
+;; ---------------------------------------------------------------------------
+;; References
+;; ---------------------------------------------------------------------------
+
+(def collect-references [nodes name uri]
+  "Find all occurrences of a symbol name in the AST."
+  (= refs [])
+  (for node in nodes
+    (if (and (isinstance node Symbol) (== node.value name))
+        (.append refs (lsp.Location :uri uri :range (node-range node))))
+    (if (isinstance node Expression)
+        (.extend refs (collect-references node.list name uri)))
+    (if (and (isinstance node (, Wrapper MetaIndicator))
+             (is-not node.value None))
+        (.extend refs (collect-references [node.value] name uri))))
+  (return refs))
+
+;; ---------------------------------------------------------------------------
+;; LSP event handlers
+;; ---------------------------------------------------------------------------
+
+(deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
+(def did-open [ls params]
+  (publish-diagnostics ls params.text_document.uri)))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_DID_CHANGE)
+(def did-change [ls params]
+  (publish-diagnostics ls params.text_document.uri)))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
+(def did-save [ls params]
+  (publish-diagnostics ls params.text_document.uri)))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
+(def document-symbol [ls params]
+  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (try
+    (= tree (parse doc.source))
+    (except [Exception]
+      (return [])))
+  (return (walk-symbols tree))))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_HOVER)
+(def hover [ls params]
+  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (try
+    (= tree (parse doc.source))
+    (except [Exception]
+      (return None)))
+  (= pos params.position)
+  (= target (node-at-position tree pos.line pos.character))
+  (if (is target None)
+      (return None))
+  ;; Look up documentation for the symbol
+  (if (isinstance target Symbol)
+      (do
+        (= name target.value)
+        ;; 1. LisPython special forms
+        (= doc-text (.get SPECIAL-FORM-DOCS name))
+        (if doc-text
+            (return (lsp.Hover
+              :contents (lsp.MarkupContent
+                :kind lsp.MarkupKind.Markdown
+                :value doc-text)
+              :range (node-range target))))
+        ;; 2. Python builtins
+        (= builtin-name (.replace name "-" "_"))
+        (= bi (.get BUILTIN-INFO builtin-name))
+        (if bi
+            (do (= sig (sub bi "signature"))
+                (= doc-body (sub bi "doc"))
+                (= hover-md f"```python\n{sig}\n```\n\n*(Python builtin)*")
+                (if doc-body
+                    (+= hover-md f"\n\n{doc-body}"))
+                (return (lsp.Hover
+                  :contents (lsp.MarkupContent
+                    :kind lsp.MarkupKind.Markdown
+                    :value hover-md)
+                  :range (node-range target)))))))
+  (return None)))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_DEFINITION)
+(def definition [ls params]
+  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (try
+    (= tree (parse doc.source))
+    (except [Exception]
+      (return None)))
+  (= pos params.position)
+  (= target (node-at-position tree pos.line pos.character))
+  (if (or (is target None) (not (isinstance target Symbol)))
+      (return None))
+  (= name target.value)
+  (if (in name SPECIAL-FORM-DOCS)
+      (return None))
+  ;; 1. Local definitions in the file
+  (= defs (collect-definitions tree doc.uri))
+  (= local (.get defs name))
+  (if local
+      (return local))
+  ;; 2. Python builtins with source files
+  (= builtin-name (.replace name "-" "_"))
+  (= bi (.get BUILTIN-INFO builtin-name))
+  (if (and bi (sub bi "source_file"))
+      (do (= source-path (pathlib.Path (sub bi "source_file")))
+          (if (.exists source-path)
+              (do (= lineno (- (or (sub bi "lineno") 1) 1))
+                  (return [(lsp.Location
+                    :uri (.as-uri source-path)
+                    :range (make-range lineno 0 lineno 0))])))))
+  (return None)))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
+(def references [ls params]
+  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (try
+    (= tree (parse doc.source))
+    (except [Exception]
+      (return None)))
+  (= pos params.position)
+  (= target (node-at-position tree pos.line pos.character))
+  (if (or (is target None) (not (isinstance target Symbol)))
+      (return None))
+  (return (collect-references tree target.value doc.uri))))
