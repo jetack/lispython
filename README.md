@@ -42,6 +42,17 @@ python -m unittest
 lpy -m unittest
 ```
 
+# LSP Server
+LisPython ships with a language server (`lpy-lsp`) that speaks LSP over stdio. It provides:
+
+- Diagnostics (parse / compile errors)
+- Hover documentation for special forms
+- Document symbols
+- Go-to-definition, including across `.lpy` files in the workspace
+
+## Editor setup
+Point your editor's LSP client at the `lpy-lsp` command for files with the `.lpy` extension. The server speaks LSP over stdio.
+
 
 # Todo
 ## Environment
