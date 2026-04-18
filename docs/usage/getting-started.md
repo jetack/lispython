@@ -9,12 +9,12 @@ pip install lispython
 ```
 ### Manual Installation (for development)
 ```bash
-poetry install --no-root # for dependency
-pip install -e . # for development
+uv sync # install dependencies
+uv pip install -e . # for development
 ```
-#### Poetry
-I recommend using [Poetry](https://python-poetry.org/) for development.
-And turn off virtual environment creation in Poetry settings.
+#### uv
+I recommend using [uv](https://docs.astral.sh/uv/) for development.
+It manages the virtual environment and dependencies from `pyproject.toml` / `uv.lock` automatically.
 ```bash
-poetry config virtualenvs.create false
+uv run lpy # run commands inside the project environment
 ```

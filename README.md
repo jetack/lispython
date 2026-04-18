@@ -7,8 +7,8 @@ You can find the documentation at [https://jetack.github.io/lispython/](https://
 # Installation
 ## Manual Installation (for development)
 ```bash
-poetry install --no-root # for dependency
-pip install -e . # for development
+uv sync # install dependencies
+uv pip install -e . # for development
 ```
 ## Using pip
 ```bash
