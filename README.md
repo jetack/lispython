@@ -81,8 +81,6 @@ Use [`lpy-mode`](https://github.com/jetack/lpy-mode) for syntax highlighting and
 - [ ] REPL should track history and arrow key navigation
 - [ ] REPL multi-line input support
 - [ ] Better compilation error messages
-### Macro System
-- [ ] `as->` macro for syntactic sugar
 ### Python AST
 - [ ] `type_comment` never considered. Later, it should be covered
 - [ ] Any missing AST nodes in the version 3.12+
