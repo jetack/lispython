@@ -455,13 +455,8 @@
   (srv.listen 5)
   (= [_ actual-port] (srv.getsockname))
 
-  ;; Write port file for editor discovery
-  (= port-file (osp.join cwd ".lpy-nrepl-port"))
-  (with [(open port-file "w") as f]
-    (f.write (str actual-port)))
-
   (print f"nREPL server started on {host}:{actual-port}")
-  (print f"Port written to {port-file}")
+  (sys.stdout.flush)
 
   (try
     (while True
@@ -473,8 +468,6 @@
     (except [KeyboardInterrupt]
       (print "\nnREPL server stopped."))
     (finally
-      (try (os.unlink port-file)
-        (except [OSError] None))
       (srv.close))))
 
 (def run []
