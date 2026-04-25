@@ -322,3 +322,11 @@ tags
 poetry.lock
 **test.hy
 **temp*
+
+# AI agent instructions (per-user, not committed)
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Git worktrees
+.worktrees/
