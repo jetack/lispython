@@ -133,8 +133,10 @@
 (def l2py []
   "CLI entry point: parse args and translate file"
   (= [args more-args] (argparser.parse-known-args))
-  (= file (osp.join (os.getcwd) (sub more-args 0)))
-  (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy)))
+  (if (and (>= (len more-args) 2) (== (sub more-args 0) "-c"))
+      (print (l2py-s (sub more-args 1) :include-meta args.include_meta :no-lispy args.no_lispy))
+      (do (= file (osp.join (os.getcwd) (sub more-args 0)))
+          (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy)))))
 
 (def _make-open-handler [o c]
   (def handler [event]
@@ -368,6 +370,11 @@
         (do (sys.argv.pop 1)
             (= mname (sys.argv.pop 1))
             (runpy.run-module (.replace mname "-" "_") :run-name "__main__" :alter-sys True))
+
+        (== (sub sys.argv 1) "-c")
+        (do (sys.argv.pop 1)
+            (= src (sys.argv.pop 1))
+            (eval-and-print src))
 
         (== (sub sys.argv 1) "-t")
         (repl True)
