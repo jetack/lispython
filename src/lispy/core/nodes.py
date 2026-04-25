@@ -44,7 +44,11 @@ class Node:
 
 
 def data_to_generator_expression(data):
-    if isinstance(data, str):
+    if isinstance(data, bool) or data is None:
+        return Constant(str(data))
+    elif isinstance(data, (int, float, complex)):
+        return Constant(str(data))
+    elif isinstance(data, str):
         return String('"' + data + '"')
     elif isinstance(data, list):
         return Bracket(*data)

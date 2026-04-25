@@ -8,6 +8,22 @@ from lispy.core.nodes import *
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
+_ast_literal_eval = __import__("ast").literal_eval
+
+
+def _unwrap_literal(node):
+    if isinstance(node, Constant):
+        try:
+            return _ast_literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            return node
+    elif isinstance(node, String):
+        try:
+            return _ast_literal_eval(node.value)
+        except (ValueError, SyntaxError):
+            return node
+    return node
+
 
 def define_macro(sexp, scope, include_meta=True):
     transformed = defmacro_transform(sexp)
@@ -69,7 +85,9 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         elif str(op) == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
-            sexp = scope["__macro_namespace"][str(op)](*operands)
+            sexp = scope["__macro_namespace"][str(op)](*[_unwrap_literal(o) for o in operands])
+            if not isinstance(sexp, Node):
+                sexp = data_to_generator_expression(sexp)
             expanded = True
         else:
             expanded_list, expanded_feedbacks = zip(
