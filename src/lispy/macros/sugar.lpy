@@ -28,6 +28,16 @@
           (return `(->> ~f ~@rest)))
       (return `(-> (~f ~x) ~@rest))))
 
+(defmacro as-> [expr name *forms]
+  (if (== 0 (len forms))
+      (return expr))
+  (= stmts [])
+  (stmts.append `(= ~name ~expr))
+  (for f in forms
+    (stmts.append `(= ~name ~f)))
+  (stmts.append name)
+  (return `(do ~@stmts)))
+
 (defmacro fn [*body]
   (return `(lambda ~@body)))
 

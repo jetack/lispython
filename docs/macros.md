@@ -56,6 +56,25 @@ Just change `def` in function definition to `defmacro`. And macros usually retur
 ```
 You can find more in `src/lispython/macros/sugar.lpy`.
 
+### `as->`
+Unlike `->` (thread first) and `->>` (thread last), `as->` lets you name the threaded value and place it anywhere in each form:
+```python
+(as-> 0 x
+  (+ x 10)     ;; x = 10
+  (* 2 x)      ;; x = 20
+  (str x))     ;; x = "20"
+```
+
+This expands to:
+```python
+x = 0
+x = x + 10
+x = 2 * x
+x = str(x)
+```
+
+Useful when the threaded value doesn't always go in the first or last position.
+
 ## gensym
 `gensym` generates unique symbols to avoid variable name collisions in macros. It is automatically available inside `defmacro` bodies.
 
