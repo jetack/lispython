@@ -136,10 +136,69 @@
   (= file (osp.join (os.getcwd) (sub more-args 0)))
   (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy)))
 
-(def read-multiline-input [prompt_str]
+(def _make-open-handler [o c]
+  (def handler [event]
+    (= buf event.app.current-buffer)
+    (buf.insert-text (+ o c))
+    (buf.cursor-left))
+  (return handler))
+
+(def _make-close-handler [c]
+  (def handler [event]
+    (= buf event.app.current-buffer)
+    (if (== buf.document.current-char c)
+        (buf.cursor-right)
+        (buf.insert-text c)))
+  (return handler))
+
+(def _make-quote-handler [q]
+  (def handler [event]
+    (= buf event.app.current-buffer)
+    (if (== buf.document.current-char q)
+        (buf.cursor-right)
+        (do
+          (buf.insert-text (+ q q))
+          (buf.cursor-left))))
+  (return handler))
+
+(def make-repl-session []
+  (from prompt-toolkit [PromptSession])
+  (from prompt-toolkit.history [FileHistory])
+  (from prompt-toolkit.key-binding [KeyBindings])
+  (from prompt-toolkit.keys [Keys])
+
+  (= kb (KeyBindings))
+  (= _pairs {"(" ")" "[" "]" "{" "}" "'" "'" "\"" "\""})
+
+  (for [o c] in (_pairs.items)
+    ((kb.add o) (_make-open-handler o c)))
+
+  (for c in (_pairs.values)
+    ((kb.add c) (_make-close-handler c)))
+
+  (for q in ["'" "\""]
+    ((kb.add q) (_make-quote-handler q)))
+
+  ;; Backspace deletes both chars of an empty pair
+  (= _bp _pairs)
+  (def handle-backspace [event]
+    (= buf event.app.current-buffer)
+    (= doc buf.document)
+    (= before doc.char-before-cursor)
+    (= after doc.current-char)
+    (if (and (in before _bp) (== (sub _bp before) after))
+        (do (buf.delete) (buf.delete-before-cursor))
+        (buf.delete-before-cursor)))
+  ((kb.add Keys.Backspace) handle-backspace)
+
+  (= histfile (osp.join (osp.expanduser "~") ".lpy_history"))
+  (return (PromptSession :history (FileHistory histfile)
+                         :key-bindings kb)))
+
+(def read-multiline-input [session prompt_str]
   (= paren-depth 0)
   (= in-string False)
-  (= line (input prompt_str))
+  (= line (session.prompt prompt_str))
   (= src line)
   (while True
     (for c in line
@@ -150,15 +209,15 @@
 
             (== c "\"")
             (= in-string True)
-            
+
             (in c "([{")
             (+= paren-depth 1)
-            
+
             (in c ")]}")
             (-= paren-depth 1)))
     (if (== paren-depth 0)
         (break))
-    (= line (input "...   "))
+    (= line (session.prompt "...   "))
     (+= src (+ "\n" line)))
   (return src))
 
@@ -184,13 +243,15 @@
   (= cwd (os.getcwd))
   (if (not (in cwd sys.path))
       (sys.path.insert 0 cwd))
+
+  (= session (make-repl-session))
   (= scope SCOPE)
   (eval-and-print "(require lispy.macros *)
 (from pprint [pprint])" scope)
   (while True
     (try
       (do
-        (= src (read-multiline-input "repl> "))
+        (= src (read-multiline-input session "repl> "))
         (eval-and-print src scope translate))
       (except [SystemExit]
         (print "SystemExit caught. Exiting REPL.")
