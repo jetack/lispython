@@ -4,10 +4,13 @@
 (import ast)
 (import importlib)
 (import io)
+(import json)
 (import os)
 (import os.path as osp)
 (import runpy)
+(import socket)
 (import sys)
+(import threading)
 (import traceback)
 
 (import subprocess)
@@ -362,6 +365,110 @@
         (traceback.print_exc)
         (print "====================================")))))
 
+(def nrepl-eval [src scope]
+  "Evaluate LisPython source, capturing stdout/stderr and return value."
+  (= result {"value" None "stdout" "" "error" None})
+  (= stdout-capture (io.StringIO))
+  (= stderr-capture (io.StringIO))
+  (= old-stdout sys.stdout)
+  (= old-stderr sys.stderr)
+  (try
+    (= sys.stdout stdout-capture)
+    (= sys.stderr stderr-capture)
+    (= parsed (parse src))
+    (= stl (macroexpand-then-compile parsed scope))
+    (= last-val None)
+    (for st stl
+      (if (isinstance st ast.Expr)
+          (= last-val
+             (eval (compile (ast.Expression :body st.value) "" "eval")
+                   scope))
+          (do
+            (exec (compile (ast.Module :body [st] :type-ignores []) "" "exec")
+                  scope)
+            (= last-val None))))
+    (if (is-not last-val None)
+        (= (sub result "value") (repr last-val)))
+    (except [Exception as e]
+      (= (sub result "error") (str e)))
+    (finally
+      (= sys.stdout old-stdout)
+      (= sys.stderr old-stderr)))
+  (= (sub result "stdout") (.getvalue stdout-capture))
+  (= stderr-out (.getvalue stderr-capture))
+  (if stderr-out
+      (= (sub result "stderr") stderr-out))
+  (return result))
+
+(def _nrepl-handle-client [conn addr scope]
+  (= buf "")
+  (try
+    (while True
+      (= data (.decode (conn.recv 4096) "utf-8"))
+      (if (not data)
+          (break))
+      (+= buf data)
+      ;; Process complete JSON messages (newline-delimited)
+      (while (in "\n" buf)
+        (= [line buf] (.split buf "\n" 1))
+        (= line (.strip line))
+        (if (not line)
+            (continue))
+        (try
+          (= msg (json.loads line))
+          (= op (.get msg "op" "eval"))
+          (cond (== op "eval")
+                (do (= src (sub msg "code"))
+                    (= result (nrepl-eval src scope))
+                    (= (sub result "op") "eval-result")
+                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+                (== op "ping")
+                (conn.sendall (.encode (+ (json.dumps {"op" "pong"}) "\n") "utf-8")))
+          (except [json.JSONDecodeError as e]
+            (conn.sendall
+              (.encode (+ (json.dumps {"op" "error" "error" (str e)}) "\n")
+                       "utf-8"))))))
+    (except [ConnectionResetError] None)
+    (except [BrokenPipeError] None)
+    (finally
+      (conn.close))))
+
+(def nrepl-server [:host "127.0.0.1" :port 0]
+  (= cwd (os.getcwd))
+  (if (not (in cwd sys.path))
+      (sys.path.insert 0 cwd))
+  (= scope SCOPE)
+  (nrepl-eval "(require lispy.macros *)\n(from pprint [pprint])" scope)
+
+  (= srv (socket.socket socket.AF-INET socket.SOCK-STREAM))
+  (srv.setsockopt socket.SOL-SOCKET socket.SO-REUSEADDR 1)
+  (srv.bind (, host port))
+  (srv.listen 5)
+  (= [_ actual-port] (srv.getsockname))
+
+  ;; Write port file for editor discovery
+  (= port-file (osp.join cwd ".lpy-nrepl-port"))
+  (with [(open port-file "w") as f]
+    (f.write (str actual-port)))
+
+  (print f"nREPL server started on {host}:{actual-port}")
+  (print f"Port written to {port-file}")
+
+  (try
+    (while True
+      (= [conn addr] (srv.accept))
+      (= t (threading.Thread :target _nrepl-handle-client
+                              :args (, conn addr scope)
+                              :daemon True))
+      (t.start))
+    (except [KeyboardInterrupt]
+      (print "\nnREPL server stopped."))
+    (finally
+      (try (os.unlink port-file)
+        (except [OSError] None))
+      (srv.close))))
+
 (def run []
   (cond (< (len sys.argv) 2)
         (repl)
@@ -375,6 +482,11 @@
         (do (sys.argv.pop 1)
             (= src (sys.argv.pop 1))
             (eval-and-print src))
+
+        (== (sub sys.argv 1) "--nrepl")
+        (do (sys.argv.pop 1)
+            (= port (ife (> (len sys.argv) 1) (int (sys.argv.pop 1)) 0))
+            (nrepl-server :port port))
 
         (== (sub sys.argv 1) "-t")
         (repl True)
