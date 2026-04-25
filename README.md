@@ -83,7 +83,7 @@ Use [`lpy-mode`](https://github.com/jetack/lpy-mode) for syntax highlighting and
 - [ ] Better compilation error messages
 ### Macro System
 - [ ] `as->` macro for syntactic sugar
-- [ ] `gensym` for avoiding name collision
+- [x] `gensym` for avoiding name collision
 ### Python AST
 - [ ] `type_comment` never considered. Later, it should be covered
 - [ ] Any missing AST nodes in the version 3.12+
