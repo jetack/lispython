@@ -390,7 +390,7 @@
     (if (is-not last-val None)
         (= (sub result "value") (repr last-val)))
     (except [Exception as e]
-      (= (sub result "error") (str e)))
+      (= (sub result "error") (.rstrip (traceback.format-exc))))
     (finally
       (= sys.stdout old-stdout)
       (= sys.stderr old-stderr)))
