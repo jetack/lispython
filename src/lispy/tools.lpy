@@ -161,6 +161,70 @@
           (buf.cursor-left))))
   (return handler))
 
+(= _SPECIAL-FORMS
+   {, "def" "defn" "defmacro" "async-def"
+      "if" "cond" "conde" "when" "unless"
+      "while" "for" "async-for"
+      "do" "try" "with" "async-with"
+      "class" "deco"
+      "lambda" "fn"
+      "let" "match" "case"
+      "except" "except*" "finally" "else"})
+
+(def _col-of [text pos]
+  "Column of position pos in text (0-based)."
+  (= nl (.rfind text "\n" 0 pos))
+  (return (- pos nl 1)))
+
+(def _calc-indent [text]
+  "Calculate indent for the next line based on text before cursor."
+  (= in-string False)
+  (= stack [])
+  (= i 0)
+  (= n (len text))
+  (while (< i n)
+    (= c (sub text i))
+    (cond in-string
+          (if (== c "\"")
+              (= in-string False))
+
+          (== c "\"")
+          (= in-string True)
+
+          (== c ";")
+          (break)
+
+          (in c "([{")
+          (do
+            (= paren-col (_col-of text i))
+            ;; Skip whitespace after open paren
+            (= j (+ i 1))
+            (while (and (< j n) (== (sub text j) " "))
+              (+= j 1))
+            ;; Read the operator token
+            (= op-start j)
+            (while (and (< j n) (not (in (sub text j) " \n\t()[]{}'\"")))
+              (+= j 1))
+            (= op (sub text [: op-start j]))
+            (if (or (== op "") (in op _SPECIAL-FORMS))
+                (stack.append (+ paren-col 2))
+                (do
+                  ;; Skip spaces after operator to find first arg
+                  (= arg-pos j)
+                  (while (and (< arg-pos n) (== (sub text arg-pos) " "))
+                    (+= arg-pos 1))
+                  (if (and (< arg-pos n) (not (in (sub text arg-pos) "\n")))
+                      (stack.append (_col-of text arg-pos))
+                      (stack.append (+ paren-col 2))))))
+
+          (in c ")]}")
+          (if stack
+              (stack.pop)))
+    (+= i 1))
+  (if stack
+      (return (sub stack -1))
+      (return 0)))
+
 (def _parens-balanced? [text]
   (= depth 0)
   (= in-string False)
@@ -215,10 +279,34 @@
     (event.app.current-buffer.validate-and-handle))
   ((kb.add Keys.Enter) handle-enter)
 
-  ;; Ctrl+J: insert newline
+  ;; Ctrl+J: insert newline with auto-indent
   (def handle-newline [event]
-    (event.app.current-buffer.insert-text "\n"))
+    (= buf event.app.current-buffer)
+    (= text-before buf.document.text-before-cursor)
+    (= indent (_calc-indent text-before))
+    (buf.insert-text (+ "\n" (* " " indent))))
   ((kb.add "c-j") handle-newline)
+
+  ;; Tab: auto-indent current line
+  (def handle-tab [event]
+    (= buf event.app.current-buffer)
+    (= doc buf.document)
+    ;; Get all text up to start of current line
+    (= lines (.split doc.text-before-cursor "\n"))
+    (if (> (len lines) 1)
+        (= text-before (.join "\n" (sub lines [: -1])))
+        (= text-before ""))
+    (= indent (_calc-indent text-before))
+    ;; Replace leading whitespace on current line
+    (= current-line doc.current-line-before-cursor)
+    (= stripped (.lstrip current-line))
+    (= old-indent (- (len current-line) (len stripped)))
+    (= new-indent-str (* " " indent))
+    ;; Delete old indent, insert new
+    (buf.cursor-left :count old-indent)
+    (buf.delete :count old-indent)
+    (buf.insert-text new-indent-str))
+  ((kb.add "c-i") handle-tab)
 
   (= histfile (osp.join (osp.expanduser "~") ".lpy_history"))
   (return (PromptSession :history (FileHistory histfile)
