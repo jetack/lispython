@@ -161,6 +161,25 @@
           (buf.cursor-left))))
   (return handler))
 
+(def _parens-balanced? [text]
+  (= depth 0)
+  (= in-string False)
+  (for c in text
+    (cond in-string
+          (if (== c "\"")
+              (= in-string False)
+              (continue))
+
+          (== c "\"")
+          (= in-string True)
+
+          (in c "([{")
+          (+= depth 1)
+
+          (in c ")]}")
+          (-= depth 1)))
+  (return (<= depth 0)))
+
 (def make-repl-session []
   (from prompt-toolkit [PromptSession])
   (from prompt-toolkit.history [FileHistory])
@@ -191,35 +210,21 @@
         (buf.delete-before-cursor)))
   ((kb.add Keys.Backspace) handle-backspace)
 
+  ;; Enter: submit
+  (def handle-enter [event]
+    (event.app.current-buffer.validate-and-handle))
+  ((kb.add Keys.Enter) handle-enter)
+
+  ;; Ctrl+J: insert newline
+  (def handle-newline [event]
+    (event.app.current-buffer.insert-text "\n"))
+  ((kb.add "c-j") handle-newline)
+
   (= histfile (osp.join (osp.expanduser "~") ".lpy_history"))
   (return (PromptSession :history (FileHistory histfile)
-                         :key-bindings kb)))
-
-(def read-multiline-input [session prompt_str]
-  (= paren-depth 0)
-  (= in-string False)
-  (= line (session.prompt prompt_str))
-  (= src line)
-  (while True
-    (for c in line
-      (cond in-string
-            (if (== c "\"")
-                (= in-string False)
-                (continue))
-
-            (== c "\"")
-            (= in-string True)
-
-            (in c "([{")
-            (+= paren-depth 1)
-
-            (in c ")]}")
-            (-= paren-depth 1)))
-    (if (== paren-depth 0)
-        (break))
-    (= line (session.prompt "...   "))
-    (+= src (+ "\n" line)))
-  (return src))
+                         :key-bindings kb
+                         :multiline True
+                         :prompt-continuation "...   ")))
 
 (def eval-and-print [src :scope SCOPE :translate False]
   (= parsed (parse src))
@@ -251,7 +256,7 @@
   (while True
     (try
       (do
-        (= src (read-multiline-input session "repl> "))
+        (= src (session.prompt "repl> "))
         (eval-and-print src scope translate))
       (except [SystemExit]
         (print "SystemExit caught. Exiting REPL.")
