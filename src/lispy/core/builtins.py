@@ -1,4 +1,4 @@
-from lispy.core.nodes import Symbol
+from lispy.core.nodes import Expression, Symbol, Wrapper
 
 _gensym_counter = 0
 
@@ -17,3 +17,13 @@ def gensym(prefix="gensym"):
 def reset_gensym_counter():
     global _gensym_counter
     _gensym_counter = 0
+
+
+def replace_symbol(node, old, new):
+    if isinstance(node, Symbol) and node.value == old.value:
+        return new
+    if isinstance(node, Expression):
+        node.list = [replace_symbol(child, old, new) for child in node.list]
+    elif isinstance(node, Wrapper):
+        node.value = replace_symbol(node.value, old, new)
+    return node

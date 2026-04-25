@@ -31,11 +31,12 @@
 (defmacro as-> [expr name *forms]
   (if (== 0 (len forms))
       (return expr))
+  (= sym (gensym (str name)))
   (= stmts [])
-  (stmts.append `(= ~name ~expr))
+  (stmts.append `(= ~sym ~expr))
   (for f in forms
-    (stmts.append `(= ~name ~f)))
-  (stmts.append name)
+    (stmts.append `(= ~sym ~(replace-symbol f name sym))))
+  (stmts.append sym)
   (return `(do ~@stmts)))
 
 (defmacro fn [*body]
