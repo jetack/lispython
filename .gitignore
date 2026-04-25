@@ -330,3 +330,6 @@ GEMINI.md
 
 # Git worktrees
 .worktrees/
+
+# Agent-generated docs (not mkdocs content)
+docs/superpowers/

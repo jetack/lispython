@@ -55,3 +55,41 @@ Just change `def` in function definition to `defmacro`. And macros usually retur
       (return `(-> (~f ~x) ~@rest))))
 ```
 You can find more in `src/lispython/macros/sugar.lpy`.
+
+## gensym
+`gensym` generates unique symbols to avoid variable name collisions in macros. It is automatically available inside `defmacro` bodies.
+
+```python
+(gensym)          ;; => Symbol("__gensym_0")
+(gensym "tmp")    ;; => Symbol("__tmp_1")
+(gensym 'tmp)     ;; => Symbol("__tmp_2")  (also accepts a quoted Symbol)
+```
+
+The prefix can be a string or a symbol. Each call increments a global counter, so every generated symbol is unique.
+
+### Why gensym?
+Without `gensym`, a macro that introduces a local variable can accidentally shadow a variable in the caller's scope:
+```python
+;; BAD: if the caller has a variable named `tmp`, this breaks
+(defmacro broken-swap [a b]
+  (return `(do (= tmp ~a)
+               (= ~a ~b)
+               (= ~b tmp))))
+```
+
+Using `gensym` prevents this:
+```python
+(defmacro swap [a b]
+  (= tmp (gensym "tmp"))
+  (return `(do (= ~tmp ~a)
+               (= ~a ~b)
+               (= ~b ~tmp))))
+```
+
+Now `(swap x y)` expands to something like:
+```python
+__tmp_0 = x
+x = y
+y = __tmp_0
+```
+The generated name `__tmp_0` won't collide with user variables.

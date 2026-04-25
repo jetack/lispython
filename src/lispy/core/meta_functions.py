@@ -9,6 +9,7 @@ def defmacro_transform(sexp):
     return Paren(
         Symbol("do"),
         Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
+        Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
         Paren(Symbol("def"), newname, *body),
         Paren(
             Symbol("="),
