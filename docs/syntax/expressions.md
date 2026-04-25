@@ -38,11 +38,11 @@ Python version
 expr1 == expr2 == expr3 == ...
 ```
 #### `>`
-Python version
+LisPy version
 ```python
 (> expr1 expr2 expr3 ...)
 ```
-LisPy version
+Python version
 ```python
 expr1 > expr2 > expr3 > ...
 ```

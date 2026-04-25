@@ -1,6 +1,6 @@
 site_name: LisPython
 
-copyright: Copytright &copy; 2023-2025 Jetack
+copyright: Copyright &copy; 2023-2026 Jetack
 
 plugins:
   - macros:
