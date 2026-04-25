@@ -202,25 +202,33 @@
           (in c "([{")
           (do
             (= paren-col (_col-of text i))
-            ;; Skip whitespace after open paren
-            (= j (+ i 1))
-            (while (and (< j n) (== (sub text j) " "))
-              (+= j 1))
-            ;; Read the operator token
-            (= op-start j)
-            (while (and (< j n) (not (in (sub text j) " \n\t()[]{}'\"")))
-              (+= j 1))
-            (= op (sub text [: op-start j]))
-            (if (or (== op "") (in op _SPECIAL-FORMS))
-                (stack.append (+ paren-col 2))
+            (if (!= c "(")
+                ;; [ and {: align to first element
                 (do
-                  ;; Skip spaces after operator to find first arg
-                  (= arg-pos j)
-                  (while (and (< arg-pos n) (== (sub text arg-pos) " "))
-                    (+= arg-pos 1))
-                  (if (and (< arg-pos n) (not (in (sub text arg-pos) "\n")))
-                      (stack.append (_col-of text arg-pos))
-                      (stack.append (+ paren-col 2))))))
+                  (= j (+ i 1))
+                  (while (and (< j n) (== (sub text j) " "))
+                    (+= j 1))
+                  (if (and (< j n) (not (in (sub text j) "\n")))
+                      (stack.append (_col-of text j))
+                      (stack.append (+ paren-col 1))))
+                ;; (: special form vs function call
+                (do
+                  (= j (+ i 1))
+                  (while (and (< j n) (== (sub text j) " "))
+                    (+= j 1))
+                  (= op-start j)
+                  (while (and (< j n) (not (in (sub text j) " \n\t()[]{}'\"")))
+                    (+= j 1))
+                  (= op (sub text [: op-start j]))
+                  (if (or (== op "") (in op _SPECIAL-FORMS))
+                      (stack.append (+ paren-col 2))
+                      (do
+                        (= arg-pos j)
+                        (while (and (< arg-pos n) (== (sub text arg-pos) " "))
+                          (+= arg-pos 1))
+                        (if (and (< arg-pos n) (not (in (sub text arg-pos) "\n")))
+                            (stack.append (_col-of text arg-pos))
+                            (stack.append (+ paren-col 2))))))))
 
           (in c ")]}")
           (if stack
