@@ -6,7 +6,10 @@ authors = [{ name = "Jetack", email = "jetack23@gmail.com" }]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pygls>=1.0.0"]
+dependencies = [
+    "prompt-toolkit>=3.0.52",
+    "pygls>=1.0.0",
+]
 
 [project.urls]
 Homepage = "https://jetack.github.io/lispython"
