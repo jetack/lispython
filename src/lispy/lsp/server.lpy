@@ -751,6 +751,85 @@
                     :range (make-range lineno 0 lineno 0))])))))
   (return None)))
 
+;; ---------------------------------------------------------------------------
+;; Completion
+;; ---------------------------------------------------------------------------
+
+(= _LPY-KEYWORDS
+   ["defn" "cond" "conde" "ife" "when" "unless"
+    "do" "deco" "require" "fn" "match" "case"
+    "async-def" "async-for" "async-with"
+    "yield-from" "except*"
+    "->" "->>" "as->"
+    "gensym" "pprint"])
+
+(deco (server.feature
+        lsp.TEXT_DOCUMENT_COMPLETION
+        (lsp.CompletionOptions :trigger-characters ["." "-"]))
+(def completion [ls params]
+  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (= pos params.position)
+  (= items [])
+  (= seen (set))
+
+  ;; 1. Special forms
+  (for name in SPECIAL-FORM-DOCS
+    (if (not (in name seen))
+        (do (seen.add name)
+            (items.append
+              (lsp.CompletionItem
+                :label name
+                :kind lsp.CompletionItemKind.Keyword
+                :detail "special form")))))
+
+  ;; 2. LisPython-specific keywords
+  (for name in _LPY-KEYWORDS
+    (if (not (in name seen))
+        (do (seen.add name)
+            (items.append
+              (lsp.CompletionItem
+                :label name
+                :kind lsp.CompletionItemKind.Keyword
+                :detail "keyword")))))
+
+  ;; 3. Python builtins
+  (for [name info] in (BUILTIN-INFO.items)
+    (if (not (in name seen))
+        (do (seen.add name)
+            (= kind (ife (isinstance (getattr builtins name None) type)
+                         lsp.CompletionItemKind.Class
+                         lsp.CompletionItemKind.Function))
+            (items.append
+              (lsp.CompletionItem
+                :label name
+                :kind kind
+                :detail (or (.get info "signature") ""))))))
+
+  ;; 4. Symbols from current file
+  (try
+    (= tree (parse doc.source))
+    (= defs (collect-definitions tree doc.uri))
+    (for name in defs
+      (if (not (in name seen))
+          (do (seen.add name)
+              (items.append
+                (lsp.CompletionItem
+                  :label name
+                  :kind lsp.CompletionItemKind.Variable)))))
+    (except [Exception] (pass)))
+
+  ;; 5. Workspace symbols
+  (for name in WORKSPACE-INDEX
+    (if (not (in name seen))
+        (do (seen.add name)
+            (items.append
+              (lsp.CompletionItem
+                :label name
+                :kind lsp.CompletionItemKind.Variable
+                :detail "workspace")))))
+
+  (return (lsp.CompletionList :is-incomplete False :items items))))
+
 (deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
 (def references [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))

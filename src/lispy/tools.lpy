@@ -495,6 +495,36 @@
         (for k in keyword.kwlist
           (if (.startswith k prefix)
               (matches.append k)))
+        ;; LisPython special forms and syntax
+        (for k in [;; Definitions
+                   "def" "defn" "defmacro" "async-def"
+                   ;; Looping
+                   "for" "async-for" "while"
+                   ;; Flow
+                   "return" "if" "ife" "when" "unless"
+                   "cond" "conde" "else"
+                   "break" "continue" "pass"
+                   "match" "case" "do" "comment"
+                   ;; Threading
+                   "->" "->>" "as->"
+                   ;; Functional
+                   "fn" "lambda" "await"
+                   "yield" "yield-from"
+                   ;; Context
+                   "with" "async-with" "deco"
+                   ;; Error handling
+                   "try" "except" "except*" "finally" "raise"
+                   ;; Data
+                   "del" "sub"
+                   ;; Import / macro
+                   "import" "from" "require"
+                   "global" "nonlocal" "assert"
+                   ;; Class
+                   "class"
+                   ;; Misc
+                   "gensym" "pprint"]
+          (if (.startswith k prefix)
+              (matches.append k)))
         (return {"op" "complete-result"
                  "completions" (sorted (set matches))}))))
 
@@ -568,6 +598,13 @@
       (return {"op" "annotate-result"
                "annotation" "unknown"}))))
 
+(def _nrepl-reply [conn msg result]
+  "Send result back, echoing the request id if present."
+  (= req-id (.get msg "id"))
+  (if req-id
+      (= (sub result "id") req-id))
+  (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
 (def _nrepl-handle-client [conn addr scope]
   (= buf "")
   (try
@@ -589,31 +626,31 @@
                 (do (= src (sub msg "code"))
                     (= result (nrepl-eval src scope))
                     (= (sub result "op") "eval-result")
-                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+                    (_nrepl-reply conn msg result))
 
                 (== op "load-file")
                 (do (= result (nrepl-load-file (sub msg "path") scope))
                     (= (sub result "op") "load-file-result")
-                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+                    (_nrepl-reply conn msg result))
 
                 (== op "macroexpand")
                 (do (= result (nrepl-macroexpand (sub msg "code") scope))
-                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+                    (_nrepl-reply conn msg result))
 
                 (== op "complete")
                 (do (= result (nrepl-complete (sub msg "prefix") scope))
-                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+                    (_nrepl-reply conn msg result))
 
                 (== op "docs")
                 (do (= result (nrepl-docs (sub msg "symbol") scope))
-                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+                    (_nrepl-reply conn msg result))
 
                 (== op "annotate")
                 (do (= result (nrepl-annotate (sub msg "symbol") scope))
-                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+                    (_nrepl-reply conn msg result))
 
                 (== op "ping")
-                (conn.sendall (.encode (+ (json.dumps {"op" "pong"}) "\n") "utf-8")))
+                (_nrepl-reply conn msg {"op" "pong"}))
           (except [json.JSONDecodeError as e]
             (conn.sendall
               (.encode (+ (json.dumps {"op" "error" "error" (str e)}) "\n")
