@@ -896,3 +896,17 @@
   (if (or (is target None) (not (isinstance target Symbol)))
       (return None))
   (return (collect-references tree target.value doc.uri))))
+
+(deco (server.feature lsp.WORKSPACE_SYMBOL)
+(def workspace-symbol [ls params]
+  (= query (.lower params.query))
+  (= results [])
+  (for [name locs] in (.items WORKSPACE-INDEX)
+    (if (in query (.lower name))
+        (for loc in locs
+          (.append results
+            (lsp.SymbolInformation
+              :name name
+              :kind lsp.SymbolKind.Variable
+              :location loc)))))
+  (return results)))
