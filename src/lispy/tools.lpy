@@ -718,6 +718,11 @@
   (print f"nREPL server started on {host}:{actual-port}")
   (sys.stdout.flush)
 
+  ;; Write port file for editor auto-discovery
+  (= port-file (osp.join (os.getcwd) ".nrepl-port"))
+  (with [(open port-file "w") as f]
+    (f.write (str actual-port)))
+
   (try
     (while True
       (= [conn addr] (srv.accept))
@@ -728,7 +733,9 @@
     (except [KeyboardInterrupt]
       (print "\nnREPL server stopped."))
     (finally
-      (srv.close))))
+      (srv.close)
+      (try (os.unlink port-file)
+        (except [OSError] (pass))))))
 
 (def run []
   (try
