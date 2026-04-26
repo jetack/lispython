@@ -811,46 +811,60 @@
 
 (def find-enclosing-function [source offset]
   "Find the name of the function being called at offset.
-   Scans backward for the innermost unclosed paren and returns
-   the symbol immediately after it, or None."
-  (= depth 0)
+   Forward-scans from the start of the source, tracking a stack of
+   enclosing paren-head symbols.  Returns the innermost function name
+   at the cursor position, or None."
   (= in-string False)
-  (= i (- offset 1))
-  (while (>= i 0)
+  (= call-stack [])
+  (= i 0)
+  (= n (len source))
+  (while (and (< i n) (< i offset))
     (= c (sub source i))
     (cond
       in-string
-      (if (and (== c "\"")
-               (or (== i 0) (!= (sub source (- i 1)) "\\")))
-          (= in-string False))
+      (do (if (== c "\\")
+              (+= i 1)
+              (if (== c "\"")
+                  (= in-string False)))
+          (+= i 1))
 
       (== c "\"")
-      (= in-string True)
+      (do (= in-string True)
+          (+= i 1))
 
       (== c ";")
-      (do (while (and (>= i 0) (!= (sub source i) "\n"))
-            (-= i 1))
-          (continue))
+      (do (while (and (< i n) (!= (sub source i) "\n"))
+            (+= i 1)))
 
-      (in c ")]}")
-      (+= depth 1)
+      (== c "(")
+      (do (= j (+ i 1))
+          (while (and (< j n) (in (sub source j) " \t\n"))
+            (+= j 1))
+          (= name-start j)
+          (while (and (< j n) (not (in (sub source j) " \t\n()[]{}\"';,")))
+            (+= j 1))
+          (= func-name (sub source [: name-start j]))
+          (call-stack.append func-name)
+          (+= i 1))
 
-      (in c "([{")
-      (if (> depth 0)
-          (-= depth 1)
-          (if (!= c "(")
-              (return None)
-              (do
-                (= j (+ i 1))
-                (= n (len source))
-                (while (and (< j n) (in (sub source j) " \t\n"))
-                  (+= j 1))
-                (= name-start j)
-                (while (and (< j n) (not (in (sub source j) " \t\n()[]{}\"';,")))
-                  (+= j 1))
-                (= func-name (sub source [: name-start j]))
-                (return (ife func-name func-name None))))))
-    (-= i 1))
+      (== c ")")
+      (do (if call-stack (call-stack.pop))
+          (+= i 1))
+
+      (in c "[{")
+      (do (call-stack.append None)
+          (+= i 1))
+
+      (in c "]}")
+      (do (if call-stack (call-stack.pop))
+          (+= i 1))
+
+      True
+      (+= i 1)))
+  ;; Return the innermost enclosing function call (skip brackets/braces)
+  (for name in (reversed call-stack)
+    (if name
+        (return name)))
   (return None))
 
 (def offset-of [source line col]
@@ -863,7 +877,7 @@
 
 (deco (server.feature
         lsp.TEXT_DOCUMENT_SIGNATURE_HELP
-        (lsp.SignatureHelpOptions :trigger-characters ["(" " "]))
+        (lsp.SignatureHelpOptions :trigger-characters ["("]))
 (def signature-help [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
   (= pos params.position)

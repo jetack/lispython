@@ -328,6 +328,9 @@ AGENTS.md
 CLAUDE.md
 GEMINI.md
 
+# nREPL port file (written by `lpy --nrepl`)
+.nrepl-port
+
 # Git worktrees
 .worktrees/
 
