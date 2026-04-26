@@ -62,25 +62,36 @@ lpy -m pytest
 LisPython ships with a language server (`lpy-lsp`) that speaks LSP over stdio. It provides:
 
 - Diagnostics (parse / compile errors)
-- Hover documentation for special forms
+- Completions (special forms, builtins, file/workspace symbols)
+- Hover documentation for special forms and builtins
 - Document symbols
 - Go-to-definition, including across `.lpy` files in the workspace
 
-### Editor setup
-Point your editor's LSP client at the `lpy-lsp` command for files with the `.lpy` extension. The server speaks LSP over stdio.
+## nREPL Server
+LisPython includes an nREPL server for REPL-driven development:
 
-#### VSCode
-Install the [LisPython](https://marketplace.visualstudio.com/items?itemName=jetack.vscode-lispython) extension from the VSCode Marketplace.
+```bash
+lpy --nrepl         # start on a random port
+lpy --nrepl 7888    # start on a specific port
+```
+
+The server accepts newline-delimited JSON over TCP and supports:
+- `eval` — evaluate LisPython code, return value/stdout/error
+- `load-file` — load a `.lpy` file into the session
+- `macroexpand` — expand macros and return the result
+- `complete` — prefix and dot-completion from the live scope
+- `docs` — signature and docstring for a symbol
+- `annotate` — type tag (function/class/module/macro)
+
+### Editor setup
+
+#### VS Code
+Install the [LisPython](https://marketplace.visualstudio.com/items?itemName=jetack.vscode-lispython) extension. It connects to both LSP and nREPL automatically.
 
 #### Emacs
-Use [`lpy-mode`](https://github.com/jetack/lpy-mode) for syntax highlighting and LSP integration. For completion, install [`lpy-autocomplete`](https://github.com/jetack/lpy-autocomplete).
+Use [`lpy-mode`](https://github.com/jetack/lpy-mode). It provides nREPL integration (eval, completion, eldoc, macroexpand) and LSP via eglot.
 
 ## Todo
-### Environment
-- [ ] Test on more python versions
-- [ ] REPL should track history and arrow key navigation
-- [ ] REPL multi-line input support
-- [ ] Better compilation error messages
 ### Python AST
 - [ ] `type_comment` never considered. Later, it should be covered
 - [ ] Any missing AST nodes in the version 3.12+
