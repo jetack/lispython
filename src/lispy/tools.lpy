@@ -3,8 +3,10 @@
 (import argparse)
 (import ast)
 (import importlib)
+(import inspect)
 (import io)
 (import json)
+(import keyword)
 (import os)
 (import os.path as osp)
 (import runpy)
@@ -432,28 +434,139 @@
                "expansion" None
                "error" (.rstrip (traceback.format-exc))}))))
 
+(def _mangle [s]
+  (return (.replace s "-" "_")))
+
+(def _unmangle [s]
+  "Convert Python identifier to lispy symbol, preserving leading/trailing underscores."
+  (if (not s) (return ""))
+  (= leading (- (len s) (len (.lstrip s "_"))))
+  (= trailing (- (len s) (len (.rstrip s "_"))))
+  (if (>= (+ leading trailing) (len s))
+      (return s))
+  (= middle (sub s [: leading (ife trailing (- (len s) trailing) None)]))
+  (= middle (.replace middle "_" "-"))
+  (return (+ (* "_" leading) middle (* "_" trailing))))
+
+(def _resolve-obj [symbol scope]
+  "Resolve a symbol string to a Python object in scope."
+  (= mangled (_mangle symbol))
+  (try
+    (return (eval mangled scope))
+    (except [Exception]
+      (return None))))
+
 (def nrepl-complete [prefix scope]
-  "Return completions matching prefix from the REPL scope."
-  (= matches [])
-  (= py-prefix (.replace prefix "-" "_"))
-  ;; Scope variables (match both hyphen and underscore forms)
-  (for k in scope
-    (if (or (.startswith k prefix) (.startswith k py-prefix))
-        (matches.append (.replace k "_" "-"))))
-  ;; Builtins
-  (= builtins (ife (isinstance __builtins__ dict)
-                   __builtins__
-                   (vars __builtins__)))
-  (for k in builtins
-    (if (or (.startswith k prefix) (.startswith k py-prefix))
-        (matches.append k)))
-  ;; Macro namespace
-  (= macros (.get scope "__macro_namespace" {}))
-  (for k in macros
-    (if (.startswith k prefix)
-        (matches.append k)))
-  (return {"op" "complete-result"
-           "completions" (sorted (set matches))}))
+  "Return completions matching prefix, including dot-completion."
+  (= has-dot (in "." prefix))
+  (if has-dot
+      (do
+        ;; Dot completion: resolve object, list its attributes
+        (= parts (.split prefix "."))
+        (= obj-part (.join "." (sub parts [: -1])))
+        (= attr-prefix (sub parts -1))
+        (= obj (_resolve-obj obj-part scope))
+        (if (is obj None)
+            (return {"op" "complete-result" "completions" []}))
+        (= py-attr (.replace attr-prefix "-" "_"))
+        (= matches [])
+        (for attr in (dir obj)
+          (if (.startswith attr py-attr)
+              (matches.append (+ obj-part "." (_unmangle attr)))))
+        (return {"op" "complete-result"
+                 "completions" (sorted matches)}))
+      (do
+        ;; Prefix completion from scope, builtins, macros, keywords
+        (= matches [])
+        (= py-prefix (_mangle prefix))
+        (for k in scope
+          (if (or (.startswith k prefix) (.startswith k py-prefix))
+              (matches.append (_unmangle k))))
+        (= builtins (ife (isinstance __builtins__ dict)
+                         __builtins__
+                         (vars __builtins__)))
+        (for k in builtins
+          (if (or (.startswith k prefix) (.startswith k py-prefix))
+              (matches.append k)))
+        (= macros (.get scope "__macro_namespace" {}))
+        (for k in macros
+          (if (.startswith k prefix)
+              (matches.append k)))
+        (for k in keyword.kwlist
+          (if (.startswith k prefix)
+              (matches.append k)))
+        (return {"op" "complete-result"
+                 "completions" (sorted (set matches))}))))
+
+(def nrepl-docs [symbol scope]
+  "Return documentation for a symbol."
+  (try
+    (= obj (_resolve-obj symbol scope))
+    ;; Check macros
+    (if (is obj None)
+        (do (= macros (.get scope "__macro_namespace" {}))
+            (= obj (.get macros (_mangle symbol)))))
+    (if (is obj None)
+        (return {"op" "docs-result" "docs" None "error" None}))
+    ;; Build docs string
+    (= parts [])
+    (= name (_unmangle symbol))
+    ;; Signature
+    (try
+      (= sig (inspect.signature obj))
+      (= params [])
+      (for [pname p] in (.items sig.parameters)
+        (= kind p.kind)
+        (cond (== kind inspect.Parameter.VAR-POSITIONAL)
+              (params.append (+ "*" (_unmangle pname)))
+              (== kind inspect.Parameter.VAR-KEYWORD)
+              (params.append (+ "**" (_unmangle pname)))
+              (and (!= p.default inspect.Parameter.empty)
+                   (in kind [inspect.Parameter.KEYWORD-ONLY
+                             inspect.Parameter.POSITIONAL-OR-KEYWORD]))
+              (params.append (+ ":" (_unmangle pname) " " (repr p.default)))
+              True
+              (params.append (_unmangle pname))))
+      (parts.append (+ name " [" (.join " " params) "]"))
+      (except [TypeError ValueError]
+        (parts.append name)))
+    ;; Docstring
+    (= docstring (getattr obj "__doc__" None))
+    (if docstring
+        (parts.append (.strip (sub (.splitlines docstring) 0))))
+    (return {"op" "docs-result"
+             "docs" (.join " - " parts)
+             "error" None})
+    (except [Exception as e]
+      (return {"op" "docs-result"
+               "docs" None
+               "error" (str e)}))))
+
+(def nrepl-annotate [symbol scope]
+  "Return type annotation for a symbol."
+  (try
+    (= obj (_resolve-obj symbol scope))
+    (if (is obj None)
+        (do (= macros (.get scope "__macro_namespace" {}))
+            (= obj (.get macros (_mangle symbol)))))
+    (if (is obj None)
+        (return {"op" "annotate-result" "annotation" "unknown"}))
+    (= klass (. (type obj) __name__))
+    (cond (in klass ["function" "builtin_function_or_method"])
+          (= annotation "function")
+          (== klass "type")
+          (= annotation "class")
+          (== klass "module")
+          (= annotation "module")
+          (in symbol (.get scope "__macro_namespace" {}))
+          (= annotation "macro")
+          True
+          (= annotation "instance"))
+    (return {"op" "annotate-result"
+             "annotation" (+ "<" annotation " " (_unmangle symbol) ">")})
+    (except [Exception as e]
+      (return {"op" "annotate-result"
+               "annotation" "unknown"}))))
 
 (def _nrepl-handle-client [conn addr scope]
   (= buf "")
@@ -489,6 +602,14 @@
 
                 (== op "complete")
                 (do (= result (nrepl-complete (sub msg "prefix") scope))
+                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+                (== op "docs")
+                (do (= result (nrepl-docs (sub msg "symbol") scope))
+                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+                (== op "annotate")
+                (do (= result (nrepl-annotate (sub msg "symbol") scope))
                     (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
 
                 (== op "ping")
