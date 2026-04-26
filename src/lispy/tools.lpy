@@ -509,14 +509,24 @@
         (= attr-prefix (sub parts -1))
         (= obj (_resolve-obj obj-part scope))
         (if (is obj None)
-            (return {"op" "complete-result" "completions" []}))
+            (return {"op" "complete-result" "completions" [] "kinds" {}}))
         (= py-attr (.replace attr-prefix "-" "_"))
         (= matches [])
+        (= kinds {})
         (for attr in (dir obj)
           (if (.startswith attr py-attr)
-              (matches.append (+ obj-part "." (_unmangle attr)))))
+              (do (= full-name (+ obj-part "." (_unmangle attr)))
+                  (matches.append full-name)
+                  (= attr-obj (getattr obj attr None))
+                  (cond (isinstance attr-obj type)
+                        (= (sub kinds full-name) "class")
+                        (callable attr-obj)
+                        (= (sub kinds full-name) "function")
+                        True
+                        (= (sub kinds full-name) "variable")))))
         (return {"op" "complete-result"
-                 "completions" (sorted matches)}))
+                 "completions" (sorted matches)
+                 "kinds" kinds}))
       (do
         ;; Prefix completion from scope, builtins, macros, keywords
         (= matches [])
@@ -567,8 +577,40 @@
                    "gensym" "pprint"]
           (if (.startswith k prefix)
               (matches.append k)))
+        ;; Build kinds dict
+        (= kinds {})
+        (= builtins-dict (ife (isinstance __builtins__ dict)
+                              __builtins__
+                              (vars __builtins__)))
+        (for name in (set matches)
+          (= mangled (_mangle name))
+          (cond (in name macros)
+                (= (sub kinds name) "macro")
+                (in name _SPECIAL-FORMS)
+                (= (sub kinds name) "keyword")
+                (in name keyword.kwlist)
+                (= (sub kinds name) "keyword")
+                (in mangled builtins-dict)
+                (do (= obj (sub builtins-dict mangled))
+                    (cond (isinstance obj type)
+                          (= (sub kinds name) "class")
+                          (callable obj)
+                          (= (sub kinds name) "function")
+                          True
+                          (= (sub kinds name) "variable")))
+                (in mangled scope)
+                (do (= obj (sub scope mangled))
+                    (cond (isinstance obj type)
+                          (= (sub kinds name) "class")
+                          (callable obj)
+                          (= (sub kinds name) "function")
+                          True
+                          (= (sub kinds name) "variable")))
+                True
+                (= (sub kinds name) "variable")))
         (return {"op" "complete-result"
-                 "completions" (sorted (set matches))}))))
+                 "completions" (sorted (set matches))
+                 "kinds" kinds}))))
 
 (def nrepl-docs [symbol scope]
   "Return documentation for a symbol."
