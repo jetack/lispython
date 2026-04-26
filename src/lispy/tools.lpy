@@ -21,7 +21,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
-(from lispy.core.macro [macroexpand-then-compile])
+(from lispy.core.macro [macroexpand macroexpand-then-compile])
 
 (def detect-package-name [:path None]
   "Detect package name from directory by checking for __init__.py"
@@ -408,6 +408,53 @@
       (= (sub result "stderr") stderr-out))
   (return result))
 
+(def nrepl-load-file [file-path scope]
+  "Load a .lpy file into the REPL scope."
+  (= script-dir (osp.dirname (osp.abspath file-path)))
+  (if (not (in script-dir sys.path))
+      (sys.path.insert 0 script-dir))
+  (with [(open file-path "rb") as f]
+    (= src (.decode (f.read) "utf-8")))
+  (return (nrepl-eval src scope)))
+
+(def nrepl-macroexpand [src scope]
+  "Macroexpand LisPython source and return the expanded s-expression."
+  (try
+    (= parsed (parse src))
+    (= expanded [])
+    (for sexp in parsed
+      (expanded.append (str (macroexpand sexp scope))))
+    (return {"op" "macroexpand-result"
+             "expansion" (.join "\n" expanded)
+             "error" None})
+    (except [Exception as e]
+      (return {"op" "macroexpand-result"
+               "expansion" None
+               "error" (.rstrip (traceback.format-exc))}))))
+
+(def nrepl-complete [prefix scope]
+  "Return completions matching prefix from the REPL scope."
+  (= matches [])
+  (= py-prefix (.replace prefix "-" "_"))
+  ;; Scope variables (match both hyphen and underscore forms)
+  (for k in scope
+    (if (or (.startswith k prefix) (.startswith k py-prefix))
+        (matches.append (.replace k "_" "-"))))
+  ;; Builtins
+  (= builtins (ife (isinstance __builtins__ dict)
+                   __builtins__
+                   (vars __builtins__)))
+  (for k in builtins
+    (if (or (.startswith k prefix) (.startswith k py-prefix))
+        (matches.append k)))
+  ;; Macro namespace
+  (= macros (.get scope "__macro_namespace" {}))
+  (for k in macros
+    (if (.startswith k prefix)
+        (matches.append k)))
+  (return {"op" "complete-result"
+           "completions" (sorted (set matches))}))
+
 (def _nrepl-handle-client [conn addr scope]
   (= buf "")
   (try
@@ -429,6 +476,19 @@
                 (do (= src (sub msg "code"))
                     (= result (nrepl-eval src scope))
                     (= (sub result "op") "eval-result")
+                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+                (== op "load-file")
+                (do (= result (nrepl-load-file (sub msg "path") scope))
+                    (= (sub result "op") "load-file-result")
+                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+                (== op "macroexpand")
+                (do (= result (nrepl-macroexpand (sub msg "code") scope))
+                    (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+                (== op "complete")
+                (do (= result (nrepl-complete (sub msg "prefix") scope))
                     (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
 
                 (== op "ping")
