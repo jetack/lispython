@@ -333,3 +333,5 @@ GEMINI.md
 
 # Agent-generated docs (not mkdocs content)
 docs/superpowers/.stacks
+.agents/skills/
+.claude/skills/
