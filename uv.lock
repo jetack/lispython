@@ -260,7 +260,7 @@ wheels = [
 
 [[package]]
 name = "lispython"
-version = "0.4.6"
+version = "0.4.7"
 source = { editable = "." }
 dependencies = [
     { name = "prompt-toolkit" },
