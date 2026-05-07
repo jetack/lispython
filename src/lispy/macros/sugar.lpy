@@ -5,8 +5,8 @@
           (return `(if ~test ~then (cond ~@orelse))))))
 
 (defmacro conde [*body]
-  (if (< (len body) 4)
-      (return `(ife ~@body))
+  (if (<= (len body) 2)
+      (return (sub body -1))
       (do (= [test then *orelse] body)
           (return `(ife ~test ~then (conde ~@orelse))))))
 
