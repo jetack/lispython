@@ -107,7 +107,8 @@ def ifexp_p(sexp):
 
 
 def ifexp_compile(sexp):
-    [_, test, body, orelse] = sexp.list
+    [_, test, body, *rest] = sexp.list
+    orelse = rest[0] if rest else Constant("None", **sexp.position_info)
     return ast.IfExp(
         test=expr_compile(test),
         body=expr_compile(body),

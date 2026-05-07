@@ -40,14 +40,19 @@ def define_macro(sexp, scope, include_meta=True):
 
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
-    eval(
-        compile(
-            ast.Interactive(body=macroexpand_then_compile([transformed], include_meta=include_meta)),
-            "macro-requiring",
-            "single",
-        ),
-        scope,
-    )
+    try:
+        eval(
+            compile(
+                ast.Interactive(body=macroexpand_then_compile([transformed], include_meta=include_meta)),
+                "macro-requiring",
+                "single",
+            ),
+            scope,
+        )
+    except (ModuleNotFoundError, ImportError):
+        import sys
+        module_name = str(sexp.list[1])
+        print(f"l2py: warning: could not load macros from '{module_name}' (module not found)", file=sys.stderr)
     return transformed if include_meta else None
 
 

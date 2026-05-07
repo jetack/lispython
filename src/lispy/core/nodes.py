@@ -369,7 +369,7 @@ class Symbol(Literal):
 
     @property
     def name(self):
-        return self.value.replace("-", "_")
+        return self.value.replace("->", "_to_").replace("-", "_").replace("?", "_p")
 
     def __repr__(self):
         return "Sym(" + self.value + ")"

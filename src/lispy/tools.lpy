@@ -25,17 +25,21 @@
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
 
+(def has-init-file [dir-path]
+  (return (or (osp.exists (osp.join dir-path "__init__.py"))
+              (osp.exists (osp.join dir-path "__init__.lpy")))))
+
 (def detect-package-name [:path None]
-  "Detect package name from directory by checking for __init__.py"
+  "Detect package name from directory by checking for __init__.py or __init__.lpy"
   (= dir-path (ife (is path None)
                    (os.getcwd)
                    (osp.dirname (osp.abspath path))))
-  (if (not (osp.exists (osp.join dir-path "__init__.py")))
+  (if (not (has-init-file dir-path))
       (return ""))
   ;; Walk up to find package root
   (= parts [])
   (= current dir-path)
-  (while (osp.exists (osp.join current "__init__.py"))
+  (while (has-init-file current)
     (parts.insert 0 (osp.basename current))
     (= parent (osp.dirname current))
     (if (== parent current)
@@ -114,9 +118,12 @@
 
 (def l2py-f [file-path :include-meta False :no-lispy False :format True]
   "Translate lispy file to Python source string (standalone with sys.path setup)"
-  (= script-dir (osp.dirname (osp.abspath file-path)))
-  (if (not (in script-dir sys.path))
-      (sys.path.insert 0 script-dir))
+  ;; Detect package first so we add the right directory to sys.path
+  (= pkg (detect-package-name :path file-path))
+  (if (not pkg)
+      (do (= script-dir (osp.dirname (osp.abspath file-path)))
+          (if (not (in script-dir sys.path))
+              (sys.path.insert 0 script-dir))))
 
   ;; Clear cached macro modules to ensure fresh reload
   (= modules-to-remove [])
@@ -132,7 +139,6 @@
 
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (= pkg (detect-package-name :path file-path))
   (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n")))
 
 (def l2py []
