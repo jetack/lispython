@@ -1,8 +1,8 @@
-import ast
 import re
 from collections import deque
 from functools import reduce
 
+from lispy.core.compiler.literal import string_literal_value
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
 from lispy.core.nodes import (
@@ -417,22 +417,6 @@ def _field_end(content, start, kind, position_info):
     raise _interpolation_error(kind, "expecting '}'", position_info)
 
 
-def _literal_value(piece, raw):
-    """The str value of a literal stretch of an f/t-string body."""
-    if raw:
-        return piece
-    src = []
-    i = 0
-    while i < len(piece):
-        if piece[i] == "\\" and i + 1 < len(piece):
-            src.append(piece[i : i + 2])
-            i += 2
-        else:
-            src.append({'"': '\\"', "\n": "\\n", "\r": "\\r"}.get(piece[i], piece[i]))
-            i += 1
-    return ast.literal_eval('"' + "".join(src) + '"')
-
-
 # A trailing "=" after one of these is part of an operator symbol, not a
 # self-documenting "=" (``{x=}``).
 _DEBUG_BLOCKERS = "=!<>:+-*/%&|^@~"
@@ -543,7 +527,7 @@ def interpolated_parse(symbol, raw, content, position_info, kind=None):
     """
     kind = kind or symbol
     pieces = scan_interpolated(content, raw, kind, position_info)
-    literals = [_literal_value(piece, raw) for piece in pieces[0::2]]
+    literals = [string_literal_value("r" if raw else "", p) for p in pieces[0::2]]
     fields = []
     for [k, field] in enumerate(pieces[1::2]):
         [fstr_expr, debug_text] = field_parse(field, kind, raw, position_info)

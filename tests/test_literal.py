@@ -1,4 +1,5 @@
 import ast
+import re
 
 import pytest
 
@@ -121,6 +122,64 @@ class TestInterpolatedStringScanner:
             src_to_python_org("\n  " + lpy)
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == (2, 3)
+
+
+class TestStringLineEndings:
+    """Every string literal reads line endings as CPython reads a source file."""
+
+    @pytest.mark.parametrize(
+        "literal",
+        [
+            '"a\r\nb"',
+            'r"a\r\nb"',
+            '"a\rb"',
+            'r"a\rb"',
+            'b"a\r\nb"',
+            'rb"a\r\nb"',
+            '"a\\\r\nb"',
+            'f"a\r\nb{x}"',
+            'rf"a\r\n\\{x}"',
+        ],
+    )
+    def test_value_matches_cpython(self, literal):
+        lpy = f"(= x 1)\r\n(= s {literal})\r\n"
+        scope = {}
+        exec(compile(ast.Module(compile_lpy(lpy), []), "<lpy>", "exec"), scope)
+        # Python needs triple quotes for a multi-line literal; the value rule is
+        # the same.
+        prefix, body = re.fullmatch(r'([A-Za-z]*)"(.*)"', literal, re.S).groups()
+        python = {}
+        source = f'x = 1\r\ns = {prefix}"""{body}"""\r\n'.encode()
+        exec(compile(source, "<py>", "exec"), python)
+        assert scope["s"] == python["s"]
+
+    def test_macro_arguments_use_the_same_rules(self):
+        src = '(defmacro width [s] (return (len s)))\r\n(= n (width "a\r\nb"))'
+        scope = {}
+        module = ast.Module(compile_lpy(src, scope), [])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        assert scope["n"] == 3
+
+    @pytest.mark.parametrize(
+        ["literal", "msg"],
+        [
+            ('xyz"a"', "invalid string prefix 'xyz'"),
+            ('b"\u00e9"', "bytes can only contain ASCII literal characters"),
+        ],
+    )
+    def test_refused(self, literal, msg):
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy("\n  " + literal)
+        assert info.value.msg.startswith(msg)
+        assert (info.value.lineno, info.value.offset) == (2, 3)
+
+
+def compile_lpy(src, scope=None):
+    from lispy.tools import macroexpand_then_compile, parse
+
+    return macroexpand_then_compile(
+        parse(src), {"__macro_namespace": {}} if scope is None else scope
+    )
 
 
 class TestListMethods:

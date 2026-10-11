@@ -3,6 +3,8 @@ import importlib
 from typing import Callable, Dict
 
 from lispy.core.compiler import def_args_parse, stmt_list_compile
+from lispy.core.compiler.literal import string_node_value
+from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
 
@@ -19,8 +21,8 @@ def _unwrap_literal(node):
             return node
     elif isinstance(node, String):
         try:
-            return _ast_literal_eval(node.value)
-        except (ValueError, SyntaxError):
+            return string_node_value(node)
+        except LispyCompileError:
             return node
     return node
 
