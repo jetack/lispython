@@ -8,6 +8,7 @@ interpreter by monkeypatching it below a feature's minimum.
 import ast
 import builtins
 import importlib
+import pathlib
 import re
 import sys
 
@@ -949,3 +950,49 @@ class TestCompilerSyntaxErrors:
             with compile_errors("<mine>", src):
                 compile_src(src)
         assert (info.value.filename, info.value.text) == ("other.lpy", None)
+
+
+# --------------------------------------------------------------------------
+# Capability probes: version-dependent AST shapes are decided in features.py
+
+
+class TestCapabilityProbes:
+    def test_is_lazy_probe_matches_the_running_ast(self):
+        assert features.import_has_is_lazy() == ("is_lazy" in ast.Import._fields)
+
+    # Forcing True where the field does not exist passes an unknown keyword on
+    # purpose; 3.13/3.14 warn about exactly that.
+    @pytest.mark.filterwarnings("ignore:Import.__init__ got an unexpected keyword")
+    @pytest.mark.parametrize("has_field", [True, False])
+    def test_plain_import_shape_follows_the_probe(self, has_field, monkeypatch):
+        monkeypatch.setattr(features, "import_has_is_lazy", lambda: has_field)
+        [node] = compile_src("(import json)")
+        assert ("is_lazy" in vars(node)) is has_field
+        if has_field:
+            assert node.is_lazy == 0
+
+    @needs_314
+    def test_whitespace_probe_matches_the_running_parser(self):
+        python = ast.parse('t"{ x }"', mode="eval").body.values[0].str
+        assert features.interpolation_keeps_trailing_whitespace() == (python == " x ")
+
+    @needs_314
+    @pytest.mark.parametrize(["keeps", "text"], [(True, " x "), (False, " x")])
+    def test_interpolation_text_follows_the_probe(self, keeps, text, monkeypatch):
+        monkeypatch.setattr(
+            features, "interpolation_keeps_trailing_whitespace", lambda: keeps
+        )
+        assert compile_expr('t"{ x }"').body.values[0].str == text
+
+    def test_no_version_checks_outside_features(self):
+        """features.py is the only compiler module that looks at the version or
+        probes the ast module's shape."""
+        compiler = pathlib.Path(features.__file__).parent
+        offenders = [
+            f"{path.name}: {pattern}"
+            for path in sorted(compiler.glob("*.py"))
+            if path.name != "features.py"
+            for pattern in ("version_info", "._fields", "hasattr(ast")
+            if pattern in path.read_text(encoding="utf-8")
+        ]
+        assert offenders == []

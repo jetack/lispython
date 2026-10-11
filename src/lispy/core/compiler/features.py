@@ -1,14 +1,27 @@
-"""The single home for version gating in the compiler.
+"""The single home for everything in the compiler that depends on the
+running CPython.
 
-Every form that only some CPython releases can compile is listed in
-``FEATURES`` and checked with ``require(name, sexp)`` at the point the compile
-function recognises the form, before it builds any node.  The running version
-is read only through ``running_version()`` (tests monkeypatch it), and no other
-``sys.version_info`` comparison belongs in the compiler: a form the interpreter
-cannot run must fail here with a lispython error, never as a CPython traceback
-or a silent mistranslation.
+Forms: every form that only some releases can compile is listed in
+``FEATURES`` and checked with ``require(name, sexp)`` where it is recognised,
+before any node is built.  The version is read only through
+``running_version()`` (tests monkeypatch it): a form the interpreter cannot run
+must fail here with a lispython error, never as a CPython traceback or a
+silent mistranslation.
+
+AST shapes: where releases build the same form differently, a named
+capability probe below asks the running ``ast`` module instead of comparing
+version numbers, so a backported change is followed automatically.  The
+compiler calls the probes through this module (``features.probe()``), which
+is also how tests replace them.
+
+No other ``sys.version_info`` comparison belongs in the compiler.  The one
+exception in the package is ``_PY312_PLUS`` in core/importer.py: it chooses
+the calling convention of ``runpy._get_code_from_file``, a runtime API rather
+than a form or an AST shape, and runs before any lispython code is compiled.
 """
 
+import ast
+import functools
 import sys
 from dataclasses import dataclass
 
@@ -34,6 +47,25 @@ FEATURES = {
 
 def running_version():
     return sys.version_info
+
+
+@functools.cache
+def interpolation_keeps_trailing_whitespace():
+    """Whether Interpolation.str keeps the whitespace after the expression.
+
+    CPython 3.14 strips it and 3.15 keeps it (``{ x }`` -> " x" vs " x ").
+    """
+    probe = ast.parse('t"{x }"', mode="eval").body
+    return probe.values[0].str == "x "
+
+
+def import_has_is_lazy():
+    """Whether Import/ImportFrom have ``is_lazy`` (3.15).
+
+    ast.parse sets it to 0 on every plain import where the field exists; it
+    must never be passed where it does not.
+    """
+    return "is_lazy" in ast.Import._fields
 
 
 def require(name, sexp):

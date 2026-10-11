@@ -3,6 +3,7 @@ from collections import deque
 from functools import reduce
 
 from lispy.core.compiler.expr import def_args_parse, expr_compile
+from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
@@ -93,16 +94,11 @@ def parse_names(names):
     return rst
 
 
-# 3.15 added Import/ImportFrom.is_lazy, and ast.parse sets it to 0 on every
-# plain import.  Match that where the field exists; never pass it elsewhere.
-_IMPORT_HAS_IS_LAZY = "is_lazy" in ast.Import._fields
-
-
 def lazy_kwargs(sexp, lazy):
     if lazy:
         require("lazy-import", sexp)
         return {"is_lazy": 1}
-    return {"is_lazy": 0} if _IMPORT_HAS_IS_LAZY else {}
+    return {"is_lazy": 0} if features.import_has_is_lazy() else {}
 
 
 def import_compile(sexp, lazy=False):

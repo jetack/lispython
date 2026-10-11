@@ -1,8 +1,8 @@
 import ast
-import functools
 from collections import deque
 from functools import reduce
 
+from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import *
 from lispy.core.compiler.utils import *
@@ -340,20 +340,15 @@ def f_string_compile(sexp):
     )
 
 
-@functools.cache
-def _interpolation_keeps_trailing_whitespace():
-    # CPython 3.14 strips trailing whitespace from Interpolation.str and 3.15
-    # keeps it ({ x } -> " x" vs " x ").  Ask the running parser instead of
-    # comparing versions, so a backport follows automatically.
-    probe = ast.parse('t"{x }"', mode="eval").body
-    return probe.values[0].str == "x "
-
-
 def interpolation_compile(sexp):
     text = sexp.expr_text
     return ast.Interpolation(
         value=expr_compile(sexp.value),
-        str=text if _interpolation_keeps_trailing_whitespace() else text.rstrip(),
+        str=(
+            text
+            if features.interpolation_keeps_trailing_whitespace()
+            else text.rstrip()
+        ),
         conversion=sexp.conversion,
         **format_spec_dict(sexp),
         **sexp.position_info
