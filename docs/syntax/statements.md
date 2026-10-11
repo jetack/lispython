@@ -277,6 +277,34 @@ match x:
     case [x] | y:
         ...
 ```
+### Signed Literal Patterns
+A negative number or a complex literal is a value pattern. A leading `+` needs
+Python 3.15+; on an older Python it is a compile error naming the version.
+
+LisPy version
+```python
+(match x
+  (case -1
+    ...)
+  (case -1-2j
+    ...)
+  (case {-1 _}
+    ...)
+  (case +1  ; Python 3.15+
+    ...))
+```
+Python version
+```python
+match x:
+    case -1:
+        ...
+    case -1 - 2j:
+        ...
+    case {-1: _}:
+        ...
+    case +1:  # Python 3.15+
+        ...
+```
 
 ## `raise`
 LisPy version
