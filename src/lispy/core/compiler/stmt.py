@@ -2,8 +2,8 @@ import ast
 from collections import deque
 from functools import reduce
 
-from lispy.core.compiler.expr import def_args_parse, expr_compile
 from lispy.core.compiler import features
+from lispy.core.compiler.expr import def_args_parse, expr_compile
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
