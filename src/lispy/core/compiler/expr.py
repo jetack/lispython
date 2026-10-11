@@ -292,33 +292,43 @@ def await_compile(sexp):
     return ast.Await(value=expr_compile(value), **sexp.position_info)
 
 
-def f_str_value_compile(sexp):
-    format_spec_dict = (
+def interpolated_values(sexp, field_compile):
+    """Values of an f/t-string node: literals alternate with fields (FStrExpr).
+
+    Empty literals are dropped, as in the AST CPython builds.
+    """
+    values = []
+    for [i, v] in enumerate(sexp.operands):
+        if i % 2:
+            values.append(field_compile(v))
+        else:
+            literal = string_compile(v)
+            if literal.value:
+                values.append(literal)
+    return values
+
+
+def format_spec_dict(sexp):
+    return (
         {}
         if sexp.format_spec is None
-        else {
-            "format_spec": ast.JoinedStr(
-                values=[ast.Constant(value=sexp.format_spec, **sexp.position_info)],
-                **sexp.position_info
-            )
-        }
+        else {"format_spec": f_string_compile(sexp.format_spec)}
     )
+
+
+def f_str_value_compile(sexp):
     return ast.FormattedValue(
         value=expr_compile(sexp.value),
         conversion=sexp.conversion,
-        **format_spec_dict,
+        **format_spec_dict(sexp),
         **sexp.position_info
     )
 
 
 def f_string_compile(sexp):
-    values = sexp.operands
-    compiled = []
-    for [i, v] in enumerate(values):
-        compiled.append(f_str_value_compile(v)) if i % 2 else compiled.append(
-            string_compile(v)
-        )
-    return ast.JoinedStr(values=compiled, **sexp.position_info)
+    return ast.JoinedStr(
+        values=interpolated_values(sexp, f_str_value_compile), **sexp.position_info
+    )
 
 
 def paren_compiler(sexp, ctx):

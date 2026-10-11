@@ -1,8 +1,11 @@
+import ast
 import re
 from collections import deque
 from functools import reduce
 
+from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
+from lispy.core.nodes import FStrExpr, Paren, String, Symbol
 from lispy.core.utils import augassignop_dict
 
 
@@ -31,7 +34,7 @@ def tokenize(src):
     brace_content = r'(?:[^{}\"\\]|\\.|\{[^{}]*\}|' + inner_str + r')*'
     brace_expr = r'\{' + brace_content + r'\}'
     f_string_content = r'(?:[^\"{}\\]|\\.|' + brace_expr + r')*'
-    f_string_pattern = r'f\"' + f_string_content + r'\"'
+    f_string_pattern = r'(?:[rR]?[fF]|[fF][rR])\"' + f_string_content + r'\"'
     pattern_labels = [
         ["\\^?\\*{0,2}[\\(\\{\\[]", "opening"],
         ["[\\)\\}\\]]", "closing"],
@@ -256,81 +259,249 @@ def unary_op_parse(token, tktype, position_info):
 
 def string_parse(token, tktype, position_info):
     [prefix, *contents, _] = token.split(tktype)
+    node = String(token, **position_info)
+    kind = interpolated_kind(prefix, node)
     return (
-        f_string_parse(
-            prefix.replace("f", ""), tktype.join(contents), tktype, position_info
+        interpolated_parse(
+            kind, "r" in prefix.lower(), tktype.join(contents), position_info
         )
-        if "f" in prefix
-        else String(token, **position_info)
+        if kind
+        else node
     )
 
 
-conversion_dict = {"!s": 115, "!r": 114, "!a": 97}
+def interpolated_kind(prefix, node):
+    """``"f-string"`` for an f-prefixed literal, else None (a plain string).
+
+    Python's rules: f/F, alone or with r/R in either order and case.
+    """
+    lowered = prefix.lower()
+    if "f" not in lowered:
+        return None
+    if lowered in ("f", "rf", "fr"):
+        return "f-string"
+    raise LispyCompileError(f"invalid string prefix {prefix!r}", node)
 
 
-def find_format_spec_separator(piece):
-    """Find the index of ':' that separates expression from format spec.
-    Only matches ':' at top level (not inside strings or brackets)."""
+conversion_dict = {"s": 115, "r": 114, "a": 97}
+
+
+def _interpolation_error(kind, msg, position_info):
+    return LispyCompileError(f"{kind}: {msg}", String('""', **position_info))
+
+
+def scan_interpolated(content, raw, kind, position_info):
+    """Split an f/t-string body into ``[literal, field, literal, ..., literal]``.
+
+    Literals are still source text (escapes unprocessed) with ``{{``/``}}``
+    collapsed to one brace; fields are the text between a replacement field's
+    braces, nested braces (format specs) included.
+    """
+    pieces = []
+    buf = []
+    i = 0
+    n = len(content)
+    while i < n:
+        c = content[i]
+        if c == "\\" and i + 1 < n:
+            nxt = content[i + 1]
+            if not raw and content.startswith("N{", i + 1):
+                end = content.find("}", i + 3)
+                end = n - 1 if end < 0 else end
+                buf.append(content[i : end + 1])
+                i = end + 1
+            elif nxt in "{}":
+                # A backslash never escapes a brace: it is a literal backslash.
+                buf.append("\\" if raw else "\\\\")
+                i += 1
+            else:
+                buf.append(content[i : i + 2])
+                i += 2
+        elif c == "{" and content.startswith("{", i + 1):
+            buf.append("{")
+            i += 2
+        elif c == "}" and content.startswith("}", i + 1):
+            buf.append("}")
+            i += 2
+        elif c == "{":
+            end = _field_end(content, i + 1, kind, position_info)
+            pieces.append("".join(buf))
+            pieces.append(content[i + 1 : end])
+            buf = []
+            i = end + 1
+        elif c == "}":
+            raise _interpolation_error(kind, "single '}' is not allowed", position_info)
+        else:
+            buf.append(c)
+            i += 1
+    pieces.append("".join(buf))
+    return pieces
+
+
+def _field_end(content, start, kind, position_info):
+    """Index of the ``}`` closing the replacement field that starts at ``start``."""
     depth = 0
-    in_string = None
+    quote = None
+    i = start
+    n = len(content)
+    while i < n:
+        if quote:
+            if content.startswith(quote, i):
+                i += len(quote)
+                quote = None
+            else:
+                i += 2 if content[i] == "\\" else 1
+            continue
+        if content.startswith('\\"', i):
+            quote = '\\"'
+            i += 2
+            continue
+        c = content[i]
+        if c == '"':
+            quote = '"'
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0 and c == "}":
+                return i
+            depth -= 1
+        i += 1
+    raise _interpolation_error(kind, "expecting '}'", position_info)
+
+
+def _literal_value(piece, raw):
+    """The str value of a literal stretch of an f/t-string body."""
+    if raw:
+        return piece
+    src = []
     i = 0
     while i < len(piece):
-        char = piece[i]
+        if piece[i] == "\\" and i + 1 < len(piece):
+            src.append(piece[i : i + 2])
+            i += 2
+        else:
+            src.append({'"': '\\"', "\n": "\\n", "\r": "\\r"}.get(piece[i], piece[i]))
+            i += 1
+    return ast.literal_eval('"' + "".join(src) + '"')
+
+
+# A trailing "=" after one of these is part of an operator symbol, not a
+# self-documenting "=" (``{x=}``).
+_DEBUG_BLOCKERS = "=!<>:+-*/%&|^@~"
+
+
+def field_parse(field, kind, raw, position_info):
+    """Parse one replacement field into ``(FStrExpr, debug_text)``.
+
+    Follows Python: ``expr[=][!conv][:spec]``; whitespace around ``expr`` is
+    part of its text; ``=`` echoes the text before it (and implies ``!r``
+    unless a conversion or spec is given); the spec is itself an f-string body.
+    """
+    # \" is the escape for a quote inside braces (see the tokenizer).
+    text = field.replace('\\"', '"')
+    depth = 0
+    in_string = False
+    expr_end = len(text)
+    delimiter = "}"
+    conversion = None
+    spec = None
+    i = 0
+    while i < len(text):
+        c = text[i]
         if in_string:
-            if char == '\\' and i + 1 < len(piece):
-                i += 2
-                continue
-            str_len = len(in_string)
-            if piece[i:i+str_len] == in_string:
-                in_string = None
-                i += str_len
-                continue
-        else:
-            if piece[i:i+3] in ('"""', "'''"):
-                in_string = piece[i:i+3]
-                i += 3
-                continue
-            elif char in ('"', "'"):
-                in_string = char
-            elif char in '([{':
-                depth += 1
-            elif char in ')]}':
-                depth -= 1
-            elif char == ':' and depth == 0:
-                return i
-        i += 1
-    return -1
-
-
-def f_string_parse(prefix, content, tktype, position_info):
-    splitted = re.split("[\\{\\}]", content)
-    processed = []
-    splitted.pop() if splitted[-1] == "" else None
-    for [i, piece] in enumerate(splitted):
-        if i % 2:
-            # Unescape \" to " (backslash-quote is escape for quotes inside f-string braces)
-            piece = piece.replace('\\"', '"')
-            sep_idx = find_format_spec_separator(piece)
-            if sep_idx >= 0:
-                format_spec = piece[sep_idx + 1:]
-                piece = piece[:sep_idx]
-            else:
-                format_spec = None
-            if piece[-2:] in conversion_dict:
-                conversion = conversion_dict[piece[-2:]]
-                piece = piece[:-2]
-            else:
-                conversion = -1
-            processed.append(
-                FStrExpr(
-                    parse(piece).pop(),
-                    conversion=conversion,
-                    format_spec=format_spec,
-                    **position_info,
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and c == "!" and not text.startswith("!=", i):
+            expr_end = i
+            delimiter = "!"
+            j = i + 1
+            while j < len(text) and (text[j].isalnum() or text[j] == "_"):
+                j += 1
+            conversion = text[i + 1 : j]
+            if not conversion:
+                if j < len(text) and text[j].isspace():
+                    msg = "conversion type must come right after the exclamation mark"
+                else:
+                    msg = "missing conversion character"
+                raise _interpolation_error(kind, msg, position_info)
+            if conversion not in conversion_dict:
+                raise _interpolation_error(
+                    kind,
+                    f"invalid conversion character {conversion!r}: "
+                    "expected 's', 'r', or 'a'",
+                    position_info,
                 )
-            )
-        else:
-            processed.append(
-                string_parse(prefix + tktype + piece + tktype, tktype, position_info)
-            )
-    return Paren(Symbol("f-string", **position_info), *processed)
+            rest = text[j:].lstrip()
+            if rest.startswith(":"):
+                spec = rest[1:]
+            elif rest:
+                raise _interpolation_error(kind, "expecting '}'", position_info)
+            break
+        elif depth == 0 and c == ":":
+            expr_end = i
+            delimiter = ":"
+            spec = text[i + 1 :]
+            break
+        i += 1
+
+    expr_text = text[:expr_end]
+    debug_text = ""
+    stripped = expr_text.rstrip()
+    if stripped.endswith("=") and stripped[-2:-1] not in _DEBUG_BLOCKERS:
+        debug_text = expr_text
+        expr_text = stripped[:-1]
+        delimiter = "="
+        if conversion is None and spec is None:
+            conversion = "r"
+    forms = parse(expr_text) if expr_text.strip() else []
+    if len(forms) != 1:
+        raise _interpolation_error(
+            kind,
+            f"valid expression required before {delimiter!r}"
+            if not forms
+            else "expecting a single expression in a replacement field",
+            position_info,
+        )
+    format_spec = (
+        None
+        if spec is None
+        else interpolated_parse("f-string", raw, spec, position_info, kind)
+    )
+    return (
+        FStrExpr(
+            forms[0],
+            conversion=conversion_dict.get(conversion, -1),
+            format_spec=format_spec,
+            expr_text=expr_text,
+            **position_info,
+        ),
+        debug_text,
+    )
+
+
+def interpolated_parse(symbol, raw, content, position_info, kind=None):
+    """``(f-string lit field lit ... lit)``: literals alternate with FStrExprs.
+
+    ``kind`` names the literal in error messages; a format spec is always an
+    f-string body, even inside a t-string.
+    """
+    kind = kind or symbol
+    pieces = scan_interpolated(content, raw, kind, position_info)
+    literals = [_literal_value(piece, raw) for piece in pieces[0::2]]
+    fields = []
+    for [k, field] in enumerate(pieces[1::2]):
+        [fstr_expr, debug_text] = field_parse(field, kind, raw, position_info)
+        literals[k] += debug_text
+        fields.append(fstr_expr)
+    processed = [String(repr(literals[0]), **position_info)]
+    for [fstr_expr, literal] in zip(fields, literals[1:]):
+        processed += [fstr_expr, String(repr(literal), **position_info)]
+    return Paren(Symbol(symbol, **position_info), *processed, **position_info)

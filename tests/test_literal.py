@@ -1,5 +1,8 @@
 import ast
 
+import pytest
+
+from lispy.core.errors import LispyCompileError
 from lispy.tools import src_to_python_org
 
 from .utils import stmt_to_dump
@@ -59,6 +62,65 @@ c"''') == "'a\\nb\\nc'"
         assert stmt_to_dump(r'f"time: {(.get d \"H:M:S\")}"') == ast.dump(
             ast.parse('f"time: {d.get(\'H:M:S\')}"')
         )
+
+
+class TestInterpolatedStringScanner:
+    """f-string bodies follow Python's rules (shared with t-strings)."""
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ('f"{{a}} {x} }}"', 'f"{{a}} {x} }}"'),
+            ('f"{x=}"', 'f"{x=}"'),
+            ('f"{ x = :>4}"', 'f"{ x = :>4}"'),
+            ('f"{x = !s}"', 'f"{x = !s}"'),
+            ('f"{x:>{w}.{p}}"', 'f"{x:>{w}.{p}}"'),
+            # 3.11's own grammar has no whitespace after !r; the AST is the same.
+            ('f"{ x !r : >10 }"', 'f"{ x !r: >10 }"'),
+            ('f"{x:}"', 'f"{x:}"'),
+            ('f""', 'f""'),
+            ('F"{x}"', 'F"{x}"'),
+            ('rf"\\n{x}"', 'rf"\\n{x}"'),
+            ('fR"\\n{x}"', 'fR"\\n{x}"'),
+            ('f"\\N{BULLET} {x}"', 'f"\\N{BULLET} {x}"'),
+            ('f"{(!= a b)}"', 'f"{a != b}"'),
+        ],
+    )
+    def test_matches_python(self, lpy, py):
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
+
+    def test_self_documenting_echoes_lispython_text(self):
+        scope = {"a": 2}
+        exec(src_to_python_org('(= s f"{(+ a 1) = }")'), scope)
+        assert scope["s"] == "(+ a 1) = 3"
+
+    @pytest.mark.parametrize(
+        ["lpy", "msg"],
+        [
+            ('f"{}"', "f-string: valid expression required before '}'"),
+            ('f"{x!}"', "f-string: missing conversion character"),
+            (
+                'f"{x!z}"',
+                "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+            ),
+            (
+                'f"{x! r}"',
+                "f-string: conversion type must come right after the exclamation mark",
+            ),
+            (
+                'f"{a b}"',
+                "f-string: expecting a single expression in a replacement field",
+            ),
+            ('f"a}b"', "f-string: single '}' is not allowed"),
+            ('f"{x"', "f-string: expecting '}'"),
+            ('bf"x"', "invalid string prefix 'bf'"),
+        ],
+    )
+    def test_refused_like_python(self, lpy, msg):
+        with pytest.raises(LispyCompileError) as info:
+            src_to_python_org("\n  " + lpy)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (2, 3)
 
 
 class TestListMethods:
