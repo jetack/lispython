@@ -1015,3 +1015,19 @@ class TestTStringQuasiquote:
             (42, 84),
             [(42, "x", "r", ">6"), (84, "(* 2 x)", None, "")],
         )
+
+
+@needs_312
+class TestTypeParamSpans:
+    """A type parameter spans its name through its bound and default."""
+
+    def test_bound(self):
+        [fn] = compile_src("(def f[T ^int *Ts **P] [] (pass))")
+        spans = [(p.col_offset, p.end_col_offset) for p in fn.type_params]
+        assert spans == [(7, 13), (14, 17), (18, 21)]
+
+    @needs_313
+    def test_default(self):
+        [fn] = compile_src("(def f[:T ^int bool :*Ts *(sub tuple int)] [] (pass))")
+        spans = [(p.col_offset, p.end_col_offset) for p in fn.type_params]
+        assert spans == [(8, 19), (21, 41)]

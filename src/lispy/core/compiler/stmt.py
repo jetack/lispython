@@ -459,6 +459,7 @@ def type_params_parse(glued):
         param = q.popleft()
         has_default = isinstance(param, Keyword)
         target = param.value if has_default else param
+        last = target
         # Class names, resolved only after the gates: 3.11's ast has none.
         [kind, symbol] = (
             ["TypeVarTuple", target.value]
@@ -475,14 +476,22 @@ def type_params_parse(glued):
             if kind != "TypeVar":
                 raise LispyCompileError(f"cannot use bound with {kind}", bound)
             fields["bound"] = expr_compile(bound.value)
+            last = bound
         if has_default:
             require("type-param-default", param)
             if not q:
                 raise LispyCompileError(
                     f"type parameter {symbol.value} needs a default value", param
                 )
-            fields["default_value"] = expr_compile(q.popleft())
-        rst.append(getattr(ast, kind)(**fields, **param.position_info))
+            last = q.popleft()
+            fields["default_value"] = expr_compile(last)
+        # As in ast.parse, the node spans its name through any bound and default.
+        span = {
+            **target.position_info,
+            "end_lineno": last.end_lineno,
+            "end_col_offset": last.end_col_offset,
+        }
+        rst.append(getattr(ast, kind)(**fields, **span))
     return rst
 
 
