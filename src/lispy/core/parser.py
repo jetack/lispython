@@ -35,12 +35,9 @@ _COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
 _TOKEN_PATTERNS = [
     ["\\^?\\*{0,2}[\\(\\{\\[]", "opening"],
     ["[\\)\\}\\]]", "closing"],
-    # Only the opening of an f/t-string: scan_interpolated finds its end, so
-    # nesting inside replacement fields is unlimited.
-    ["(?:[rR]?[fFtT]|[fFtT][rR])(?:\"\"\"|'''|\")", "interpolated"],
-    ["\\w*'''(?:[^\\\\']|\\\\.)*'''", "'''"],
-    ['\\w*"""(?:[^\\\\"]|\\\\.)*"""', '"""'],
-    ['\\w*"(?:[^\\\\"]|\\\\.)*"', '"'],
+    # Only the opening of a string (prefix and quote): scan_interpolated, the
+    # one scanner of string bodies, finds where it ends.
+    ["\\w*(?:\"\"\"|'''|\")", "string"],
     ["\\^?\\*{0,2}(?:'|`|~@|~)(?!\\s|$)", "meta-indicator"],
     [";[^\\n]*", "comment"],
     [
@@ -84,16 +81,18 @@ def _source_locator(src):
     return locate
 
 
-def _interpolated_token(src, start, opening):
-    """Extent of the f/t-string opening at ``start``: [token, quote, error].
+def _string_token(src, start, opening):
+    """Extent of the string opening at ``start``: [token, quote, error].
 
     A malformed literal is not reported here: it runs to the end of the
-    source and carries its error, which string_parse raises after the t-string
-    version gate, so an old interpreter hears about the version first.
+    source and carries its error, which string_parse raises after the prefix
+    check and the t-string version gate, so an old interpreter hears about the
+    version first.
     """
-    quote = opening.lstrip("rRfFtT")
-    raw = "r" in opening[: -len(quote)].lower()
-    kind = "t-string" if "t" in opening.lower() else "f-string"
+    quote = opening.lstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+    prefix = opening[: -len(quote)].lower()
+    raw = "r" in prefix
+    kind = "t-string" if "t" in prefix else "f-string" if "f" in prefix else "string"
     try:
         [_, end] = scan_interpolated(
             src, start + len(opening), None, quote, raw, kind, _source_locator(src)
@@ -118,8 +117,8 @@ def tokenize(src):
         tk = m.group()
         tktype = _TOKEN_LABELS[m.lastindex - 1]
         error = None
-        if tktype == "interpolated":
-            [tk, tktype, error] = _interpolated_token(src, m.start(), tk)
+        if tktype == "string":
+            [tk, tktype, error] = _string_token(src, m.start(), tk)
         elif tktype == "comma":
             # A comma is whitespace, except right after "(" or "{": (, a b) is a
             # tuple and {, a b} a set.
@@ -495,8 +494,9 @@ def _interpolation_error(kind, msg, locate, i, j=None):
 
 
 def scan_interpolated(text, start, end, quote, raw, kind, locate):
-    """The one scanner of f/t-string bodies: the tokenizer uses it for the
-    literal's extent, the parser for its pieces.
+    """The one scanner of string bodies: the tokenizer uses it for every
+    string literal's extent, the parser for an f/t-string's pieces.  For a
+    plain string (``kind`` "string") braces are ordinary characters.
 
     Scans ``text`` from ``start`` to the closing ``quote`` (or to ``end`` for a
     format spec, which has no quote) and returns ``[pieces, after]``: pieces
@@ -506,6 +506,7 @@ def scan_interpolated(text, start, end, quote, raw, kind, locate):
     text between them.  ``after`` is the index past the closing quote.
     """
     end = len(text) if end is None else end
+    interpolated = kind != "string"
     pieces = []
     buf = []
     literal_start = i = start
@@ -521,14 +522,17 @@ def scan_interpolated(text, start, end, quote, raw, kind, locate):
                 close = end - 1 if close < 0 else close
                 buf.append(text[i : close + 1])
                 i = close + 1
-            elif nxt in "{}":
+            elif nxt in "{}" and interpolated:
                 # A backslash never escapes a brace: it is a literal backslash.
                 buf.append("\\" if raw else "\\\\")
                 i += 1
             else:
                 buf.append(text[i : i + 2])
                 i += 2
-        elif c in "{}" and text.startswith(c, i + 1):
+        elif not interpolated or c not in "{}":
+            buf.append(c)
+            i += 1
+        elif text.startswith(c, i + 1):
             buf.append(c)
             i += 2
         elif c == "{":
@@ -545,8 +549,11 @@ def scan_interpolated(text, start, end, quote, raw, kind, locate):
             buf.append(c)
             i += 1
     if quote is not None:
+        triple = "triple-quoted " if len(quote) == 3 else ""
         raise LispyCompileError(
-            f"unterminated {kind} literal", String('""', **locate(start, end))
+            f"unterminated {triple}{kind} literal",
+            # At the opening quote, as CPython reports it.
+            String('""', **locate(start - len(quote), start)),
         )
     pieces.append(["".join(buf), literal_start, end])
     return [pieces, end]

@@ -360,3 +360,42 @@ class TestUnquotedFields:
     def test_written_field_keeps_its_text(self):
         scope = self.run('(= y 2)\n(defmacro dbg [] (return `f"{y=}"))\n(= s (dbg))')
         assert scope["s"] == "y=2"
+
+
+class TestPlainStringExtent:
+    """Plain strings end where CPython's do: the f/t-string scanner finds them."""
+
+    @pytest.mark.parametrize(
+        "literal",
+        [
+            '"a\\\nb"',
+            '"""a"b"""',
+            '"""say "hi" """',
+            "'''it's'''",
+            'r"a\\"b"',
+            'b"""a"b"""',
+            '"x{y}"',
+            'f"""a"{x}"""',
+        ],
+    )
+    def test_value_matches_cpython(self, literal):
+        scope = {}
+        module = ast.Module(compile_lpy(f"(= x 1)\n(= s {literal})"), [])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        python = {}
+        exec(f"x = 1\ns = {literal}", python)
+        assert scope["s"] == python["s"]
+
+    @pytest.mark.parametrize(
+        ["lpy", "msg", "col"],
+        [
+            ('(= s "abc', "unterminated string literal", 6),
+            ('(= s """abc"', "unterminated triple-quoted string literal", 6),
+            ('(= s f"abc', "unterminated f-string literal", 7),
+        ],
+    )
+    def test_unterminated(self, lpy, msg, col):
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(lpy)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (1, col)
