@@ -7,6 +7,7 @@ interpreter by monkeypatching it below a feature's minimum.
 
 import ast
 import importlib
+import re
 import sys
 
 import pytest
@@ -505,3 +506,138 @@ class TestMatchUnaryPlusRefused:
     def test_minus_needs_no_new_python(self):
         module = ast.Module(compile_src(match_src("-1")), type_ignores=[])
         assert ast.unparse(module) == "match x:\n    case -1:\n        ..."
+
+
+# --------------------------------------------------------------------------
+# Type parameters on def/class (PEP 695: 3.12; defaults PEP 696: 3.13)
+
+needs_312 = pytest.mark.skipif(sys.version_info < (3, 12), reason="needs 3.12+")
+before_312 = pytest.mark.skipif(sys.version_info >= (3, 12), reason="runs on <3.12")
+needs_313 = pytest.mark.skipif(sys.version_info < (3, 13), reason="needs 3.13+")
+before_313 = pytest.mark.skipif(sys.version_info >= (3, 13), reason="runs on <3.13")
+
+TYPE_PARAMS_MSG = "type parameters f[T] needs Python 3.12+, running {}"
+DEFAULTS_MSG = "type parameter defaults f[:T int] needs Python 3.13+, running {}"
+TYPE_PARAM_CASES = [
+    ("(def f[T] [x ^T] ^T (return x))", "def f[T](x: T) -> T:\n    return x"),
+    (
+        "(def f[T ^int U ^(, int str) *Ts **P] [] (pass))",
+        "def f[T: int, U: (int, str), *Ts, **P]():\n    pass",
+    ),
+    ("(async-def f[T] [x] (return x))", "async def f[T](x):\n    return x"),
+    ("(class Box[T] [Base] (pass))", "class Box[T](Base):\n    pass"),
+    ("(deco dec (def f[T] [x] (return x)))", "@dec\ndef f[T](x):\n    return x"),
+    ("(def my-fn[my-T] [] (pass))", "def my_fn[my_T]():\n    pass"),
+]
+DEFAULT_CASES = [
+    (
+        "(def f[:T str :U ^int bool :*Ts *(sub tuple int) :**P [int str]] [] (pass))",
+        "def f[T = str, U: int = bool, *Ts = *tuple[int], **P = [int, str]]():\n"
+        "    pass",
+    ),
+    ("(class C[T :U int] [] (pass))", "class C[T, U = int]:\n    pass"),
+]
+
+
+def module_dump(src):
+    return ast.dump(ast.Module(compile_src(src), type_ignores=[]))
+
+
+def run_module(src, scope=None):
+    scope = {} if scope is None else scope
+    module = ast.Module(compile_src(src), type_ignores=[])
+    exec(compile(module, "<lpy>", "exec"), scope)
+    return scope
+
+
+@needs_312
+class TestTypeParamsSupported:
+    @pytest.mark.parametrize(["lpy", "py"], TYPE_PARAM_CASES)
+    def test_same_ast_as_python(self, lpy, py):
+        assert module_dump(lpy) == ast.dump(ast.parse(py))
+
+    def test_runtime(self):
+        scope = run_module(
+            "(def f[T ^int U ^(, int str) *Ts **P] [x ^T] ^T (return x))\n"
+            "(class Box[T] [] (pass))"
+        )
+        [t, u, ts, p] = scope["f"].__type_params__
+        assert (t.__name__, t.__bound__) == ("T", int)
+        assert (u.__name__, u.__constraints__) == ("U", (int, str))
+        assert [type(x).__name__ for x in (ts, p)] == ["TypeVarTuple", "ParamSpec"]
+        assert scope["f"](3) == 3
+        assert scope["f"].__annotations__["x"] is t
+        assert [x.__name__ for x in scope["Box"].__type_params__] == ["T"]
+
+    def test_l2py(self):
+        assert tools.src_to_python_org("(class Box[T ^int] [] (pass))") == (
+            "class Box[T: int]:\n    pass"
+        )
+
+
+@needs_313
+class TestTypeParamDefaultsSupported:
+    @pytest.mark.parametrize(["lpy", "py"], DEFAULT_CASES)
+    def test_same_ast_as_python(self, lpy, py):
+        assert module_dump(lpy) == ast.dump(ast.parse(py))
+
+    def test_runtime(self):
+        scope = run_module(DEFAULT_CASES[0][0])
+        [t, u, ts, p] = scope["f"].__type_params__
+        assert (t.__default__, u.__bound__, u.__default__) == (str, int, bool)
+        assert ts.__default__ == next(iter(tuple[int]))
+        assert p.__default__ == [int, str]
+
+
+class TestTypeParamsRefused:
+    FORMS = [
+        "(def f[T] [x] x)",
+        "(async-def f[T] [x] x)",
+        "(class Box[T] [] (pass))",
+        "(deco dec (def f[T] [x] x))",
+    ]
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_below_312(self, lpy):
+        err = refusal("(= a 1)\n" + lpy)
+        assert err.msg == TYPE_PARAMS_MSG.format("3.11.13")
+        name_col = re.search(r"[\w-]+\[", lpy).start()
+        assert (err.lineno, err.offset) == (2, name_col + 1)
+
+    @before_312
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_on_this_interpreter(self, lpy):
+        err = refusal(lpy)
+        running = ".".join(map(str, sys.version_info[:3]))
+        assert err.msg == TYPE_PARAMS_MSG.format(running)
+
+    def test_defaults_refused_below_313(self, monkeypatch):
+        monkeypatch.setattr(features, "running_version", lambda: (3, 12, 9))
+        err = refusal("(def f[:T str] [] (pass))")
+        assert err.msg == DEFAULTS_MSG.format("3.12.9")
+        assert (err.lineno, err.offset) == (1, 8)
+
+    @before_313
+    def test_defaults_refused_on_this_interpreter(self):
+        err = refusal("(def f[:T str] [] (pass))")
+        running = ".".join(map(str, sys.version_info[:3]))
+        expected = (
+            TYPE_PARAMS_MSG if sys.version_info < (3, 12) else DEFAULTS_MSG
+        ).format(running)
+        assert err.msg == expected
+
+    @needs_312
+    @pytest.mark.parametrize(
+        ["lpy", "msg", "col"],
+        [
+            ("(def f[] [] (pass))", "Type parameter list cannot be empty", 6),
+            ("(def f[*Ts ^int] [] (pass))", "cannot use bound with TypeVarTuple", 12),
+            ("(def f[**P ^int] [] (pass))", "cannot use bound with ParamSpec", 12),
+            ("(def f[a.b] [] (pass))", "invalid type parameter a.b", 8),
+        ],
+    )
+    def test_malformed_like_python(self, lpy, msg, col):
+        err = refusal(lpy)
+        assert err.msg == msg
+        assert (err.lineno, err.offset) == (1, col)

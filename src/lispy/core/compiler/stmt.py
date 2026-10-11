@@ -7,7 +7,7 @@ from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import constant_compile
 from lispy.core.compiler.utils import *
 from lispy.core.errors import LispyCompileError
-from lispy.core.nodes import Constant, Paren
+from lispy.core.nodes import Constant, GluedHead, Paren
 from lispy.core.utils import *
 
 
@@ -419,6 +419,59 @@ def match_compile(sexp):
     return ast.Match(subject=expr_compile(subject), cases=cases, **sexp.position_info)
 
 
+def type_params_parse(glued):
+    """The bracket of ``f[T ...]``, read with the def-argument markers.
+
+    ``T`` TypeVar, ``T ^bound`` (a tuple bound is a constraint list),
+    ``*Ts`` TypeVarTuple, ``**P`` ParamSpec; ``:T default`` (3.13) gives any
+    of them a default, after its bound.
+    """
+    require("type-params", glued)
+    q = deque(glued.params.list)
+    if not q:
+        raise LispyCompileError("Type parameter list cannot be empty", glued)
+    rst = []
+    while q:
+        param = q.popleft()
+        has_default = isinstance(param, Keyword)
+        target = param.value if has_default else param
+        # Class names, resolved only after the gates: 3.11's ast has none.
+        [kind, symbol] = (
+            ["TypeVarTuple", target.value]
+            if isinstance(target, Starred)
+            else ["ParamSpec", target.value]
+            if isinstance(target, DoubleStarred)
+            else ["TypeVar", target]
+        )
+        if type(symbol) is not Symbol or "." in symbol.value:
+            raise LispyCompileError(f"invalid type parameter {param}", param)
+        fields = {"name": symbol.name}
+        if q and isinstance(q[0], Annotation):
+            bound = q.popleft()
+            if kind != "TypeVar":
+                raise LispyCompileError(f"cannot use bound with {kind}", bound)
+            fields["bound"] = expr_compile(bound.value)
+        if has_default:
+            require("type-param-default", param)
+            if not q:
+                raise LispyCompileError(
+                    f"type parameter {symbol.value} needs a default value", param
+                )
+            fields["default_value"] = expr_compile(q.popleft())
+        rst.append(getattr(ast, kind)(**fields, **param.position_info))
+    return rst
+
+
+def def_name_parse(name):
+    """Name of a def/class and, for ``name[T ...]``, its ``type_params`` keyword.
+
+    type_params is passed only when present, so 3.11's constructors never see it.
+    """
+    if isinstance(name, GluedHead):
+        return [name.head.name, {"type_params": type_params_parse(name)}]
+    return [name.name, {}]
+
+
 def deco_compile(sexp, decorator_list):
     [op, decorator, def_statement] = sexp.list
     new_deco_list = decorator.list if isinstance(decorator, Bracket) else [decorator]
@@ -433,12 +486,14 @@ def functiondef_p(sexp):
 
 def functiondef_compile(sexp, decorator_list, async_p=False):
     [op, fnname, args, *body] = sexp.list
+    [name, type_params] = def_name_parse(fnname)
     if body and isinstance(body[0], Annotation):
         [ann, *body] = body
     else:
         ann = None
     return (ast.AsyncFunctionDef if async_p else ast.FunctionDef)(
-        name=fnname.name,
+        name=name,
+        **type_params,
         args=def_args_parse(args),
         body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
         decorator_list=list(map(expr_compile, decorator_list))
@@ -488,9 +543,11 @@ def classdef_args_parse(args):
 
 def classdef_compile(sexp, decorator_list):
     [_, clsname, args, *body] = sexp.list
+    [name, type_params] = def_name_parse(clsname)
     [bases, keywords] = classdef_args_parse(args)
     return ast.ClassDef(
-        name=clsname.name,
+        name=name,
+        **type_params,
         bases=bases,
         keywords=keywords,
         body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],

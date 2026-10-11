@@ -25,6 +25,8 @@ FEATURES = {
     "t-string": Feature((3, 14), 't-string t"..."'),
     "comprehension-unpacking": Feature((3, 15), "comprehension unpacking [*x for ...]"),
     "match-unary-plus": Feature((3, 15), "unary plus in a match pattern"),
+    "type-params": Feature((3, 12), "type parameters f[T]"),
+    "type-param-default": Feature((3, 13), "type parameter defaults f[:T int]"),
 }
 
 
