@@ -34,7 +34,10 @@ def tokenize(src):
     brace_content = r'(?:[^{}\"\\]|\\.|\{[^{}]*\}|' + inner_str + r')*'
     brace_expr = r'\{' + brace_content + r'\}'
     f_string_content = r'(?:[^\"{}\\]|\\.|' + brace_expr + r')*'
-    f_string_pattern = r'(?:[rR]?[fF]|[fF][rR])\"' + f_string_content + r'\"'
+    # (?!"") leaves triple-quoted f/t-strings to the triple-quote pattern below.
+    f_string_pattern = (
+        r'(?:[rR]?[fFtT]|[fFtT][rR])\"(?!\"\")' + f_string_content + r'\"'
+    )
     pattern_labels = [
         ["\\^?\\*{0,2}[\\(\\{\\[]", "opening"],
         ["[\\)\\}\\]]", "closing"],
@@ -271,14 +274,25 @@ def string_parse(token, tktype, position_info):
 
 
 def interpolated_kind(prefix, node):
-    """``"f-string"`` for an f-prefixed literal, else None (a plain string).
+    """``"f-string"``/``"t-string"`` for an f/t-prefixed literal, else None.
 
-    Python's rules: f/F, alone or with r/R in either order and case.
+    Python's rules: f/F or t/T, alone or with r/R in either order and case;
+    f, t, b and u never combine.  Any other prefix containing f or t is
+    refused here, so it can never reach the eval() of a plain string literal
+    (which would evaluate a t-string's interpolations inside the compiler).
     """
     lowered = prefix.lower()
-    if "f" not in lowered:
+    if "t" in lowered:
+        if lowered in ("t", "rt", "tr"):
+            return "t-string"
+        for other in "fbu":
+            if other in lowered:
+                raise LispyCompileError(
+                    f"'{other}' and 't' prefixes are incompatible", node
+                )
+    elif "f" not in lowered:
         return None
-    if lowered in ("f", "rf", "fr"):
+    elif lowered in ("f", "rf", "fr"):
         return "f-string"
     raise LispyCompileError(f"invalid string prefix {prefix!r}", node)
 

@@ -5,6 +5,7 @@ compiler reads the interpreter version, so refusal is tested on every
 interpreter by monkeypatching it below a feature's minimum.
 """
 
+import ast
 import importlib
 import sys
 
@@ -28,25 +29,26 @@ def compile_src(src):
     return macroexpand_then_compile(parse(src), {"__macro_namespace": {}})
 
 
-# A statement the compiler gates as a t-string, until real gated forms exist.
-GATED_SRC = "(= a 1)\n(print  (gated-form))\n"
+def compile_expr(src):
+    """Compile one lispython expression to an ``ast.Expression``."""
+    [stmt] = compile_src(src)
+    return ast.Expression(stmt.value)
+
+
+def eval_lpy(src, scope):
+    return eval(compile(compile_expr(src), "<lpy>", "eval"), dict(scope))
+
+
+def refusal(src):
+    with pytest.raises(LispyCompileError) as info:
+        compile_src(src)
+    return info.value
+
+
+# A source whose second line holds a t-string, refused below 3.14.
+GATED_SRC = '(= a 1)\n(print  t"hi {a}")\n'
 GATED_MSG = 't-string t"..." needs Python 3.14+, running 3.11.13'
 GATED_LINE, GATED_COL = 2, 9
-
-
-@pytest.fixture
-def gated_form(monkeypatch):
-    from lispy.core.compiler import stmt
-
-    original = stmt.stmt_compile
-
-    def gated(sexp, decorator_list=None):
-        for node in getattr(sexp, "list", []):
-            if str(node) == "(gated-form)":
-                features.require("t-string", node)
-        return original(sexp, decorator_list)
-
-    monkeypatch.setattr(stmt, "stmt_compile", gated)
 
 
 # --------------------------------------------------------------------------
@@ -127,7 +129,7 @@ def run_cli(entry, argv, monkeypatch, capsys):
     return info.value.code, out, err
 
 
-@pytest.mark.usefixtures("old_python", "gated_form")
+@pytest.mark.usefixtures("old_python")
 class TestEntryPoints:
     def test_importer_fills_filename_and_text(self, lpy_file):
         sys.path.insert(0, str(lpy_file.parent))
@@ -210,3 +212,124 @@ class TestEntryPoints:
         assert diag.range.start.line == GATED_LINE - 1
         assert diag.range.start.character == GATED_COL - 1
         assert GATED_MSG in diag.message
+
+
+# --------------------------------------------------------------------------
+# t-strings (PEP 750, Python 3.14)
+
+needs_314 = pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings: 3.14+")
+before_314 = pytest.mark.skipif(sys.version_info >= (3, 14), reason="runs on <3.14")
+
+# (lispython, Python) pairs that must build the same TemplateStr and Template.
+T_STRING_CASES = [
+    ('t"hi {x}"', 't"hi {x}"'),
+    ('t"{ x }"', 't"{ x }"'),
+    ('t"{x\t}"', 't"{x\t}"'),
+    ('t"""{\n x \n}"""', 't"""{\n x \n}"""'),
+    ('t"{x!r}"', 't"{x!r}"'),
+    ('t"{ x !r}"', 't"{ x !r}"'),
+    ('t"{x!s:}"', 't"{x!s:}"'),
+    ('t"{x:>10}"', 't"{x:>10}"'),
+    ('t"{x:}"', 't"{x:}"'),
+    ('t"{ x !r : >10 }"', 't"{ x !r : >10 }"'),
+    ('t"{x:{width}}"', 't"{x:{width}}"'),
+    ('t"{x:{x}{x}}"', 't"{x:{x}{x}}"'),
+    ('t"{x=}"', 't"{x=}"'),
+    ('t"{ x = }"', 't"{ x = }"'),
+    ('t"{x = !r}"', 't"{x = !r}"'),
+    ('t"{x=!s:>5}"', 't"{x=!s:>5}"'),
+    ('t"{x=:>5}"', 't"{x=:>5}"'),
+    ('t"{{lit}} {x} }}"', 't"{{lit}} {x} }}"'),
+    ('t""', 't""'),
+    ('t"{x}{name}"', 't"{x}{name}"'),
+    ('T"a\\nb{x}"', 'T"a\\nb{x}"'),
+    ('t"\\N{BULLET} {x}"', 't"\\N{BULLET} {x}"'),
+    ('rt"\\n{x}"', 'rt"\\n{x}"'),
+    ('Rt"\\n{x}"', 'Rt"\\n{x}"'),
+    ('tR"\\n{x}"', 'tR"\\n{x}"'),
+    ('TR"\\{x}"', 'TR"\\{x}"'),
+]
+T_SCOPE = {"x": 42, "name": "bob", "width": 8}
+
+
+def template_fields(template):
+    return (
+        template.strings,
+        template.values,
+        [
+            (i.value, i.expression, i.conversion, i.format_spec)
+            for i in template.interpolations
+        ],
+    )
+
+
+@needs_314
+class TestTStringSupported:
+    @pytest.mark.parametrize(["lpy", "py"], T_STRING_CASES)
+    def test_same_ast_as_python(self, lpy, py):
+        assert ast.dump(compile_expr(lpy).body) == ast.dump(
+            ast.parse(py, mode="eval").body
+        )
+
+    @pytest.mark.parametrize(["lpy", "py"], T_STRING_CASES)
+    def test_same_template_as_python(self, lpy, py):
+        from string.templatelib import Template
+
+        ours = eval_lpy(lpy, T_SCOPE)
+        assert isinstance(ours, Template)
+        assert template_fields(ours) == template_fields(eval(py, dict(T_SCOPE)))
+
+    def test_expression_is_the_lispython_text(self):
+        template = eval_lpy('t"{(* 2 name)!r:>{width}} and { x = }"', T_SCOPE)
+        assert template.strings == ("", " and  x = ", "")
+        assert template.values == ("bobbob", 42)
+        [first, second] = template.interpolations
+        assert (first.expression, first.conversion, first.format_spec) == (
+            "(* 2 name)",
+            "r",
+            ">8",
+        )
+        # Whitespace follows the running CPython (3.14 strips it, 3.15 keeps it).
+        python = eval('t"{ x = }"', dict(T_SCOPE)).interpolations[0]
+        assert (second.expression, second.conversion) == (python.expression, "r")
+
+    def test_interpolations_are_not_evaluated_at_compile_time(self):
+        # A plain-string path would eval() the literal inside the compiler.
+        tree = compile_expr('t"{(undefined-at-compile-time)}"')
+        assert isinstance(tree.body, ast.TemplateStr)
+
+
+class TestTStringRefused:
+    @pytest.mark.usefixtures("old_python")
+    def test_refused_below_314(self):
+        err = refusal('(= a 1)\n(print  t"hi {a}")')
+        assert err.msg == 't-string t"..." needs Python 3.14+, running 3.11.13'
+        assert (err.lineno, err.offset) == (2, 9)
+
+    @before_314
+    def test_refused_on_this_interpreter(self):
+        err = refusal('(print  rt"hi {a}")')
+        running = ".".join(map(str, sys.version_info[:3]))
+        assert err.msg == f't-string t"..." needs Python 3.14+, running {running}'
+        assert (err.lineno, err.offset) == (1, 9)
+
+    @pytest.mark.parametrize(
+        ["lpy", "msg"],
+        [
+            ('ft"x"', "'f' and 't' prefixes are incompatible"),
+            ('tf"x"', "'f' and 't' prefixes are incompatible"),
+            ('bt"x"', "'b' and 't' prefixes are incompatible"),
+            ('Ut"x"', "'u' and 't' prefixes are incompatible"),
+            ('tt"x"', "invalid string prefix 'tt'"),
+            (
+                't"{x!z}"',
+                "t-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+            ),
+            ('t"{}"', "t-string: valid expression required before '}'"),
+            ('t"a}"', "t-string: single '}' is not allowed"),
+        ],
+    )
+    def test_malformed_refused_on_every_version(self, lpy, msg):
+        err = refusal("\n   " + lpy)
+        assert err.msg == msg
+        assert (err.lineno, err.offset) == (2, 4)
