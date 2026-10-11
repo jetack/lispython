@@ -42,6 +42,62 @@ class class_name(base_class1, base_class2):
     body
 ```
 
+## Generic Functions and Classes
+Python 3.12+ ([PEP 695](https://peps.python.org/pep-0695/)); defaults need
+Python 3.13+ ([PEP 696](https://peps.python.org/pep-0696/)). Write the type
+parameters glued to the name, with no space: `f[T]` is a generic name, while
+`f [T]` is a name followed by a list. The bracket uses the argument markers of
+`def`: `^` for a bound (a tuple bound is a constraint list), `*` for a
+TypeVarTuple, `**` for a ParamSpec and `:` for a default. On an older Python
+these forms are a compile error naming the version they need.
+
+A glued name is only valid as the name of `def`, `async-def`, `class` and
+`type`; to subscript, use `(sub xs ...)`.
+
+LisPy version
+```python
+(def first[T] [xs ^(sub list T)] ^T
+  (return (sub xs 0)))
+
+(class Box[T ^(, int str) *Ts **P] [Base]
+  (pass))
+
+(def f[:T str :U ^int bool :*Ts *(sub tuple int) :**P [int str]] []  ; Python 3.13+
+  (pass))
+```
+Python version
+```python
+def first[T](xs: list[T]) -> T:
+    return xs[0]
+
+class Box[T: (int, str), *Ts, **P](Base):
+    pass
+
+def f[T = str, U: int = bool, *Ts = *tuple[int], **P = [int, str]]():  # Python 3.13+
+    pass
+```
+
+## Type Alias
+Python 3.12+ ([PEP 695](https://peps.python.org/pep-0695/)). As in Python,
+`type` is a soft keyword: `(type NAME value)` and `(type NAME[T ...] value)`
+are a type alias only as a statement with exactly two operands whose first is a
+plain name. Every other shape is a call to the builtin `type`, so
+`(= t (type x))` and `(type "N" (, object) {})` are unchanged. If you rebind
+`type` and need a bare two-argument call as a statement, write
+`(= _ (type a b))`. On an older Python the alias is a compile error naming the
+version it needs.
+
+LisPy version
+```python
+(type Number (| int float))
+(type Vec[T] (sub list T))
+```
+Python version
+```python
+type Number = int | float
+type Vec[T] = list[T]
+```
+
 ## `del`
 LisPy version
 ```python
@@ -418,6 +474,26 @@ Python version
 from module import name1
 from module import name2 as alias
 from module import name3
+```
+### Lazy imports
+Python 3.15+ ([PEP 810](https://peps.python.org/pep-0810/)). `lazy-import` and
+`lazy-from` take the same arguments as `import` and `from`; the module is
+loaded when a name is first used. As in Python, `lazy-from` refuses `*` and
+`__future__`, and a lazy import is not allowed inside a function, a class or a
+`try` block. On an older Python these forms are a compile error naming the
+version they need.
+
+LisPy version
+```python
+(lazy-import json)
+(lazy-import numpy as np)
+(lazy-from json [dumps loads as load-json])
+```
+Python version
+```python
+lazy import json
+lazy import numpy as np
+lazy from json import dumps, loads as load_json
 ```
 
 ## `global`
