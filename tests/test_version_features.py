@@ -333,3 +333,96 @@ class TestTStringRefused:
         err = refusal("\n   " + lpy)
         assert err.msg == msg
         assert (err.lineno, err.offset) == (2, 4)
+
+
+# --------------------------------------------------------------------------
+# Comprehension unpacking (PEP 798, Python 3.15)
+
+needs_315 = pytest.mark.skipif(sys.version_info < (3, 15), reason="needs 3.15+")
+before_315 = pytest.mark.skipif(sys.version_info >= (3, 15), reason="runs on <3.15")
+
+UNPACK_MSG = "comprehension unpacking [*x for ...] needs Python 3.15+, running {}"
+# (lispython, Python, value of the Python expression with UNPACK_SCOPE)
+UNPACK_CASES = [
+    ("[*L for L lists]", "[*L for L in lists]", [1, 2, 3]),
+    ("[*L for L in lists if L]", "[*L for L in lists if L]", [1, 2, 3]),
+    ("(list (*L for L lists))", "list((*L for L in lists))", [1, 2, 3]),
+    ("{, *s for s sets}", "{*s for s in sets}", {1, 2, 3}),
+    ("{**d for d dicts}", "{**d for d in dicts}", {"a": 1, "b": 3}),
+    ("[*(f L) for L lists]", "[*f(L) for L in lists]", [1, 2, 3]),
+]
+UNPACK_SCOPE = {
+    "lists": [[1, 2], [], [3]],
+    "sets": [{1, 2}, {2, 3}],
+    "dicts": [{"a": 1, "b": 2}, {"b": 3}],
+    "f": list,
+}
+ASYNC_UNPACK_CASES = [
+    ("[*L async-for L lists]", "[*L async for L in lists]"),
+    ("(*L async-for L lists)", "(*L async for L in lists)"),
+    ("{, *s async-for s sets}", "{*s async for s in sets}"),
+    ("{**d async-for d dicts}", "{**d async for d in dicts}"),
+]
+
+
+@needs_315
+class TestComprehensionUnpackingSupported:
+    @pytest.mark.parametrize(["lpy", "py", "value"], UNPACK_CASES)
+    def test_same_ast_and_value_as_python(self, lpy, py, value):
+        assert ast.dump(compile_expr(lpy).body) == ast.dump(
+            ast.parse(py, mode="eval").body
+        )
+        assert eval_lpy(lpy, UNPACK_SCOPE) == value == eval(py, dict(UNPACK_SCOPE))
+
+    @pytest.mark.parametrize(["lpy", "py"], ASYNC_UNPACK_CASES)
+    def test_async_same_ast_as_python(self, lpy, py):
+        assert ast.dump(compile_expr(lpy).body) == ast.dump(
+            ast.parse(py, mode="eval").body
+        )
+
+    def test_async_runs(self):
+        import asyncio
+
+        scope = {}
+        src = """
+(async-def agen [xs]
+  (for x xs (yield x)))
+(async-def flat [xs]
+  (return [*L async-for L (agen xs)]))
+"""
+        module = ast.Module(compile_src(src), type_ignores=[])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        assert asyncio.run(scope["flat"]([[1], [2, 3]])) == [1, 2, 3]
+
+
+class TestComprehensionUnpackingRefused:
+    FORMS = [
+        "[*L for L lists]",
+        "(*L for L lists)",
+        "{, *s for s sets}",
+        "{**d for d dicts}",
+        "[*L async-for L lists]",
+    ]
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_below_315(self, lpy):
+        # The error points at the unpacked element.
+        err = refusal("(= x 1)\n" + lpy)
+        assert err.msg == UNPACK_MSG.format("3.11.13")
+        assert (err.lineno, err.offset) == (2, lpy.index("*") + 1)
+
+    @before_315
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_on_this_interpreter(self, lpy):
+        err = refusal(lpy)
+        assert err.msg == UNPACK_MSG.format(".".join(map(str, sys.version_info[:3])))
+        assert (err.lineno, err.offset) == (1, lpy.index("*") + 1)
+
+    @pytest.mark.usefixtures("old_python")
+    def test_plain_comprehensions_still_compile(self):
+        assert ast.unparse(compile_expr("[L for L lists]")) == "[L for L in lists]"
+        assert ast.unparse(compile_expr("{k v for (, k v) items}")) == (
+            "{k: v for k, v in items}"
+        )
+        assert ast.unparse(compile_expr("{, *s 1}")) == "{*s, 1}"
