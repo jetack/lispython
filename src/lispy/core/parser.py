@@ -5,7 +5,16 @@ from functools import reduce
 
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
-from lispy.core.nodes import FStrExpr, Paren, String, Symbol
+from lispy.core.nodes import (
+    Expression,
+    FStrExpr,
+    GluedHead,
+    MetaIndicator,
+    Paren,
+    String,
+    Symbol,
+    Wrapper,
+)
 from lispy.core.utils import augassignop_dict
 
 
@@ -64,7 +73,8 @@ def tokenize(src):
             + ")(?=\\s|$|\\)|\\}|\\])",
             "number",
         ],
-        ['[^\\s\\)\\}\\]\\"]+', "symbol"],
+        # "[" ends a symbol so that f[T] is a symbol glued to a bracket.
+        ['[^\\s\\)\\}\\]\\"\\[]+', "symbol"],
         ["\\n", "new-line"],
         [" +", "spaces"],
     ]
@@ -121,6 +131,18 @@ opening_dict = {"(": Paren, "{": Brace, "[": Bracket}
 meta_indicator_dict = {"'": Quote, "`": QuasiQuote, "~": Unquote, "~@": UnquoteSplice}
 
 
+def _glued_symbol(container, lineno, col_offset):
+    """The bare Symbol ending exactly where a ``[`` at (lineno, col) starts."""
+    items = container if isinstance(container, list) else container.list
+    last = items[-1] if items else None
+    return (
+        last
+        if type(last) is Symbol
+        and (last.end_lineno, last.end_col_offset) == (lineno, col_offset)
+        else None
+    )
+
+
 def parse(src):
     tokens = tokenize(src)
     stack = []
@@ -133,6 +155,17 @@ def parse(src):
         if tktype == "opening":
             wrapper = t[:-1]
             opening = t[-1]
+            container = stack[-1] if stack else rst
+            glueable = isinstance(container, (list, Expression))
+            head = (
+                _glued_symbol(container, lineno, col_offset)
+                if opening == "[" and not wrapper and glueable
+                else None
+            )
+            if head is not None:
+                (container if isinstance(container, list) else container.list).pop()
+                position = {"lineno": head.lineno, "col_offset": head.col_offset}
+                stack.append(GluedHead(head, None, **position))
             if wrapper:
                 stack.append(
                     wrapper_dict[wrapper](
@@ -173,11 +206,12 @@ def parse(src):
                 e.update_dict("end_col_offset", end_col_offset)
             else:
                 e = token_parse(t, tktype, position_info)
-            while stack and (
-                isinstance(stack[-1], MetaIndicator) or isinstance(stack[-1], Wrapper)
-            ):
+            while stack and isinstance(stack[-1], (MetaIndicator, Wrapper, GluedHead)):
                 popped = stack.pop()
-                popped.value = e
+                if isinstance(popped, GluedHead):
+                    popped.params = e
+                else:
+                    popped.value = e
                 popped.update_dict("end_lineno", end_lineno)
                 popped.update_dict("end_col_offset", end_col_offset)
                 e = popped

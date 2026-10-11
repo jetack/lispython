@@ -83,6 +83,10 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         sexp.value, expanded = macroexpand_1_and_check(
             sexp.value, scope, in_quasi=in_quasi, include_meta=include_meta
         )
+    elif isinstance(sexp, GluedHead):
+        sexp.params, expanded = macroexpand_1_and_check(
+            sexp.params, scope, in_quasi=in_quasi, include_meta=include_meta
+        )
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list
         if str(op) == "defmacro" and not in_quasi:

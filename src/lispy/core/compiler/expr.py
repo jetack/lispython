@@ -527,6 +527,8 @@ def metaindicator_compile(sexp):
 
 
 def expr_compile(sexp, ctx=ast.Load):
+    if isinstance(sexp, GluedHead):
+        raise sexp.misuse_error()
     return (
         paren_compiler(sexp, ctx)
         if paren_p(sexp)

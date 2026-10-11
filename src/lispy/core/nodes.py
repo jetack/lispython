@@ -356,6 +356,52 @@ class DoubleStarred(Wrapper):
         return self.value.update_dict(key, value)
 
 
+class GluedHead(Node):
+    """``name[params]`` written with no space: a generic def/class/type name.
+
+    The parser builds it only when ``[`` starts exactly where a bare symbol
+    ends (``f [T]`` stays two forms).  It is meaningful only as the name of
+    def, async-def, class and type; reading ``.name`` anywhere else is the
+    misuse, so it raises the compile error instead of returning a string.
+    """
+
+    def __init__(self, head, params, **kwargs):
+        super().__init__(**kwargs)
+        self.head = head
+        self.params = params
+        self.classname = "GluedHead"
+
+    def misuse_error(self):
+        from lispy.core.errors import LispyCompileError
+
+        text = self.head.value
+        return LispyCompileError(
+            f"{text}[...] is only valid as a def/class/type name; "
+            f"use (sub {text} ...)",
+            self,
+        )
+
+    @property
+    def name(self):
+        raise self.misuse_error()
+
+    def generator_expression(self, in_quasi=False):
+        return Paren(
+            Symbol(self.classname, **self.position_info),
+            self.head.generator_expression(in_quasi),
+            self.params.generator_expression(in_quasi),
+            **self.position_info
+        )
+
+    def __repr__(self):
+        return "Glued(" + repr(self.head) + ", " + repr(self.params) + ")"
+
+    def get_source(self, indent=0):
+        return self.head.get_source(indent) + self.params.get_source(
+            indent + len(self.head.get_source())
+        )
+
+
 class Literal(Node):
     def operands_generate(self, in_quasi):
         return String('"' + self.value + '"', **self.position_info)

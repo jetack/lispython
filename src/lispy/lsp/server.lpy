@@ -406,10 +406,21 @@
 ;; Document symbols
 ;; ---------------------------------------------------------------------------
 
+(def def-name-symbol [node]
+  "The Symbol naming a def/class: the node itself, or the head of f[T]."
+  (cond (isinstance node Symbol)
+        (return node)
+        (isinstance node GluedHead)
+        (return node.head)
+        True
+        (return None)))
+
 (def symbol-name [node]
   "Extract a string name from a node."
   (cond (isinstance node Symbol)
         (return node.value)
+        (isinstance node GluedHead)
+        (return (symbol-name node.head))
         (isinstance node Annotation)
         (return (symbol-name node.value))
         (isinstance node String)
@@ -526,6 +537,10 @@
         (do (= deeper (node-at-position [node.value] line-0 col))
             (if (is-not deeper None)
                 (return deeper))))
+    (if (isinstance node GluedHead)
+        (do (= deeper (node-at-position [node.head node.params] line-0 col))
+            (if (is-not deeper None)
+                (return deeper))))
     (return node))
   (return None))
 
@@ -548,17 +563,19 @@
 
     (cond
       (in form (, "def" "async-def" "defmacro"))
-      (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
-              (do (= name (. (sub node 1) value))
-                  (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
+      (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
+              (do (= name-node (def-name-symbol (sub node 1)))
+                  (= name name-node.value)
+                  (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri :defs defs)))))
 
       (== form "class")
-      (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
-              (do (= name (. (sub node 1) value))
-                  (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
+      (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
+              (do (= name-node (def-name-symbol (sub node 1)))
+                  (= name name-node.value)
+                  (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
@@ -611,7 +628,9 @@
         (.extend refs (collect-references node.list name uri)))
     (if (and (isinstance node (, Wrapper MetaIndicator))
              (is-not node.value None))
-        (.extend refs (collect-references [node.value] name uri))))
+        (.extend refs (collect-references [node.value] name uri)))
+    (if (isinstance node GluedHead)
+        (.extend refs (collect-references [node.head node.params] name uri))))
   (return refs))
 
 ;; ---------------------------------------------------------------------------
