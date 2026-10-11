@@ -3,21 +3,18 @@ import importlib
 from typing import Callable, Dict
 
 from lispy.core.compiler import def_args_parse, stmt_list_compile
-from lispy.core.compiler.literal import string_node_value
+from lispy.core.compiler.literal import constant_compile, string_node_value
 from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
-_ast_literal_eval = __import__("ast").literal_eval
-
-
 def _unwrap_literal(node):
     if isinstance(node, Constant):
         try:
-            return _ast_literal_eval(node.value)
-        except (ValueError, SyntaxError):
+            return constant_compile(node).value
+        except LispyCompileError:
             return node
     elif isinstance(node, String):
         try:

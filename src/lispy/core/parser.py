@@ -733,7 +733,13 @@ def interpolated_node(symbol, kind, text, pieces, raw, locate, position_info):
     f-string body, even inside a t-string.
     """
     literals = [
-        [string_literal_value("r" if raw else "", p[0]), p[1], p[2]]
+        [
+            string_literal_value(
+                "r" if raw else "", p[0], String('""', **locate(p[1], p[2]))
+            ),
+            p[1],
+            p[2],
+        ]
         for p in pieces[0::2]
     ]
     fields = []

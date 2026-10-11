@@ -44,6 +44,19 @@ def _apply_signs(value, signs):
     return value
 
 
+def literal_value(text, node):
+    """``ast.literal_eval(text)``, the only evaluation of literal text.
+
+    A malformed literal (``09``, a truncated ``\\x`` escape, non-ASCII bytes) is
+    a LispyCompileError at ``node``, so every caller reports it at the token.
+    """
+    try:
+        return ast.literal_eval(text)
+    except (SyntaxError, ValueError) as err:
+        msg = err.msg if isinstance(err, SyntaxError) else str(err)
+        raise LispyCompileError(msg, node) from err
+
+
 def constant_compile(constant):
     """A Constant node in an expression, with the value Python computes.
 
@@ -51,21 +64,21 @@ def constant_compile(constant):
     """
     text = constant.value
     if text in SPECIAL_CONSTANTS:
-        return ast.Constant(value=ast.literal_eval(text), **constant.position_info)
+        return ast.Constant(
+            value=literal_value(text, constant), **constant.position_info
+        )
     parts = number_parts(text)
     if parts is None:
         # Numbers a macro returned, written by str(): "(1+2j)", "-1.5".
-        try:
-            value = ast.literal_eval(text)
-        except (ValueError, SyntaxError):
-            value = None
+        # CPython's own message for a malformed number ("leading zeros ...").
+        value = literal_value(text, constant)
         if type(value) not in (int, float, complex):
             raise LispyCompileError(f"invalid number literal {text}", constant)
         return ast.Constant(value=value, **constant.position_info)
     [signs, real, op, imag] = parts
-    value = _apply_signs(ast.literal_eval(real), signs)
+    value = _apply_signs(literal_value(real, constant), signs)
     if op:
-        imag_value = ast.literal_eval(imag)
+        imag_value = literal_value(imag, constant)
         value = value + imag_value if op == "+" else value - imag_value
     return ast.Constant(value=value, **constant.position_info)
 
@@ -78,6 +91,9 @@ def number_pattern_expr(text, sexp):
     complex-literal rules apply: a real part, then an imaginary one.
     """
     parts = number_parts(text)
+    if parts is None:
+        # CPython's own message for a malformed number ("leading zeros ...").
+        literal_value(text.lstrip("+-"), sexp)
     if parts is None or len(parts[0]) > 1:
         raise LispyCompileError(
             "only a number literal can be signed in a match pattern", sexp
@@ -86,7 +102,7 @@ def number_pattern_expr(text, sexp):
     position_info = sexp.position_info
     if signs == "+":
         require("match-unary-plus", sexp)
-    real_value = ast.literal_eval(real)
+    real_value = literal_value(real, sexp)
     if op and isinstance(real_value, complex):
         raise LispyCompileError("real number required in complex literal", sexp)
     expr = ast.Constant(value=real_value, **position_info)
@@ -94,7 +110,7 @@ def number_pattern_expr(text, sexp):
         unary = ast.USub if signs == "-" else ast.UAdd
         expr = ast.UnaryOp(unary(), expr, **position_info)
     if op:
-        imag_value = ast.literal_eval(imag)
+        imag_value = literal_value(imag, sexp)
         if not isinstance(imag_value, complex):
             raise LispyCompileError(
                 "imaginary number required in complex literal", sexp
@@ -110,19 +126,25 @@ _PLAIN_STRING_PREFIXES = ("", "r", "u", "b", "br", "rb")
 _QUOTES = ('"""', "'''", '"', "'")
 
 
-def string_literal_value(prefix, body):
+def string_literal_value(prefix, body, node):
     """The value of a string literal's body, as CPython computes it from source.
 
     The one home for string evaluation: plain strings, the literal stretches of
     f/t-strings and macro arguments all come here.  Like CPython reading a
     source file, every line ending (\\r\\n or a lone \\r) becomes \\n, raw
     strings included; a raw body is its own value; otherwise escapes are
-    decoded by ast.literal_eval, which never runs code.
+    decoded by literal_value.  Errors are LispyCompileErrors at ``node``.
     """
     body = body.replace("\r\n", "\n").replace("\r", "\n")
     lowered = prefix.lower()
     if "r" in lowered:
-        return body.encode("ascii") if "b" in lowered else body
+        if "b" not in lowered:
+            return body
+        if not body.isascii():
+            raise LispyCompileError(
+                "bytes can only contain ASCII literal characters", node
+            )
+        return body.encode("ascii")
     src = []
     i = 0
     while i < len(body):
@@ -132,7 +154,8 @@ def string_literal_value(prefix, body):
         else:
             src.append({'"': '\\"', "\n": "\\n"}.get(body[i], body[i]))
             i += 1
-    return ast.literal_eval(("b" if "b" in lowered else "") + '"' + "".join(src) + '"')
+    source = ("b" if "b" in lowered else "") + '"' + "".join(src) + '"'
+    return literal_value(source, node)
 
 
 def string_node_value(string):
@@ -145,11 +168,7 @@ def string_node_value(string):
         raise LispyCompileError(f"invalid string literal {token}", string)
     if prefix.lower() not in _PLAIN_STRING_PREFIXES:
         raise LispyCompileError(f"invalid string prefix {prefix!r}", string)
-    try:
-        return string_literal_value(prefix, rest[len(quote) : -len(quote)])
-    except (SyntaxError, ValueError, UnicodeEncodeError) as err:
-        msg = err.msg if isinstance(err, SyntaxError) else str(err)
-        raise LispyCompileError(msg, string) from err
+    return string_literal_value(prefix, rest[len(quote) : -len(quote)], string)
 
 
 def string_compile(string):

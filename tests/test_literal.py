@@ -275,3 +275,53 @@ class TestInterpolatedQuasiquote:
         module = ast.Module(compile_lpy(src, scope), [])
         exec(compile(module, "<lpy>", "exec"), scope)
         assert scope["s"] == f"[{42!r:>6}] x=42 {43:42}"
+
+
+class TestMalformedLiterals:
+    """A malformed literal is reported at its token, with CPython's message."""
+
+    @pytest.mark.parametrize(
+        ["lpy", "msg", "col"],
+        [
+            (
+                "(print 09)",
+                "leading zeros in decimal integer literals are not permitted; "
+                "use an 0o prefix for octal integers",
+                10,
+            ),
+            ("(print 0x)", "invalid hexadecimal literal", 10),
+            (
+                "(match x (case 09 ...))",
+                "leading zeros in decimal integer literals are not permitted; "
+                "use an 0o prefix for octal integers",
+                18,
+            ),
+            (
+                '(print f"bad \\x4 {1}")',
+                "(unicode error) 'unicodeescape' codec can't decode bytes in "
+                "position 4-6: truncated \\xXX escape",
+                12,
+            ),
+            (
+                '(print "bad \\x4")',
+                "(unicode error) 'unicodeescape' codec can't decode bytes in "
+                "position 4-6: truncated \\xXX escape",
+                10,
+            ),
+            ('(print rb"é")', "bytes can only contain ASCII literal characters", 10),
+            (
+                "(defmacro m [x] (return x))\n  (print (m 09))",
+                "leading zeros in decimal integer literals are not permitted; "
+                "use an 0o prefix for octal integers",
+                13,
+            ),
+        ],
+    )
+    def test_positioned(self, lpy, msg, col):
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy("\n  " + lpy)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (
+            lpy.count("\n") + 2,
+            col,
+        )
