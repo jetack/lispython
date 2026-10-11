@@ -193,7 +193,7 @@
   (try
     (with [(open fpath "rb") as f]
       (= src (.decode (f.read) "utf-8")))
-    (= tree (parse src))
+    (= tree (parse src :partial True))
     (= (sub FILE-TREES uri) tree)
     (collect-definitions tree uri :defs WORKSPACE-INDEX)
     ;; Also eagerly index any packages this file requires so defmacros
@@ -665,7 +665,7 @@
 (def document-symbol [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
   (try
-    (= tree (parse doc.source))
+    (= tree (parse doc.source :partial True))
     (except [Exception]
       (return [])))
   (return (walk-symbols tree))))
@@ -674,7 +674,7 @@
 (def hover [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
   (try
-    (= tree (parse doc.source))
+    (= tree (parse doc.source :partial True))
     (except [Exception]
       (return None)))
   (= pos params.position)
@@ -713,7 +713,7 @@
 (def definition [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
   (try
-    (= tree (parse doc.source))
+    (= tree (parse doc.source :partial True))
     (except [Exception]
       (return None)))
   (= pos params.position)
@@ -826,7 +826,7 @@
 
   ;; 4. Symbols from current file
   (try
-    (= tree (parse doc.source))
+    (= tree (parse doc.source :partial True))
     (= defs (collect-definitions tree doc.uri))
     (for name in defs
       (if (not (in name seen))
@@ -853,7 +853,7 @@
 (def references [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
   (try
-    (= tree (parse doc.source))
+    (= tree (parse doc.source :partial True))
     (except [Exception]
       (return None)))
   (= pos params.position)

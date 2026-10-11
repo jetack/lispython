@@ -1,3 +1,4 @@
+import contextvars
 import re
 from collections import deque
 
@@ -228,10 +229,35 @@ def _check_all_closed(stack):
         )
 
 
-def parse(src):
+# Set while parse(..., partial=True) runs: version gates are skipped.
+_PARTIAL = contextvars.ContextVar("lispy_partial_parse", default=False)
+
+
+def parse(src, partial=False):
+    """The top-level forms of ``src``.
+
+    Strict by default: any malformed input raises LispyCompileError.  With
+    ``partial=True`` (for the LSP, whose buffer is mid-edit) it never raises:
+    it returns the complete top-level forms before the first error and skips
+    version gates, so symbols, hover and definitions survive an unfinished
+    form.  The LSP's diagnostics still use the strict parse to report it.
+    """
+    if not partial:
+        return _parse(src, [])
+    rst = []
+    token = _PARTIAL.set(True)
+    try:
+        _parse(src, rst)
+    except Exception:
+        pass
+    finally:
+        _PARTIAL.reset(token)
+    return rst
+
+
+def _parse(src, rst):
     tokens = tokenize(src)
     stack = []
-    rst = []
     while tokens:
         [t, tktype, position_info, error] = tokens.popleft()
         [lineno, col_offset, end_lineno, end_col_offset] = position_info_into_list(
@@ -403,7 +429,8 @@ def string_parse(token, tktype, position_info, error=None):
     if kind == "t-string":
         # Gate where the prefix is seen, so an old interpreter reports the
         # version before any complaint about the literal's contents.
-        require("t-string", node)
+        if not _PARTIAL.get():
+            require("t-string", node)
     if error is not None:
         raise error
     if not kind:
