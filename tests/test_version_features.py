@@ -816,3 +816,53 @@ class TestLazyImportRefused:
         err = refusal("\n " + lpy)
         assert err.msg == msg
         assert (err.lineno, err.offset) == (2, 2)
+
+
+# --------------------------------------------------------------------------
+# SyntaxErrors from CPython's compiler on a .lpy module read like ours
+
+RETURN_SRC = "(= a 1)\n  (return 1)\n"
+SCOPED_LAZY_SRC = "(= a 1)\n(def f []\n  (lazy-import json))\n"
+
+
+class TestCompilerSyntaxErrors:
+    @pytest.fixture
+    def write_lpy(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+
+        def write(name, src):
+            path = tmp_path / f"{name}.lpy"
+            path.write_text(src, encoding="utf-8")
+            monkeypatch.delitem(sys.modules, name, raising=False)
+            return path
+
+        return write
+
+    def test_importer_converts_with_lpy_position(self, write_lpy):
+        path = write_lpy("return_mod", RETURN_SRC)
+        with pytest.raises(LispyCompileError) as info:
+            importlib.import_module("return_mod")
+        err = info.value
+        assert err.msg == "'return' outside function"
+        assert (err.filename, err.lineno, err.offset) == (str(path), 2, 3)
+        assert err.text == "  (return 1)"
+
+    def test_lpy_file(self, write_lpy, monkeypatch, capsys):
+        path = write_lpy("return_script", RETURN_SRC)
+        code, out, err = run_cli(tools.run, ["lpy", str(path)], monkeypatch, capsys)
+        assert code == 1
+        assert err == (
+            f"{path}:2:3: error: 'return' outside function\n  (return 1)\n  ^\n"
+        )
+        assert "Traceback" not in out + err
+
+    @needs_315
+    def test_lazy_import_inside_def(self, write_lpy, monkeypatch, capsys):
+        path = write_lpy("scoped_lazy", SCOPED_LAZY_SRC)
+        code, out, err = run_cli(tools.run, ["lpy", str(path)], monkeypatch, capsys)
+        assert code == 1
+        assert err == (
+            f"{path}:3:3: error: lazy import not allowed inside functions\n"
+            "  (lazy-import json))\n  ^\n"
+        )
+        assert "Traceback" not in out + err

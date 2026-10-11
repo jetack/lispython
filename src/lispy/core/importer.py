@@ -15,12 +15,21 @@ def _is_lpy_file(filename):
     return osp.isfile(filename) and osp.splitext(filename)[1] == ".lpy"
 
 
-def _lpy_module_ast(source, path):
-    """Parse and compile .lpy source; a refused form names this file and line."""
+def _lpy_code(source, path, compile_module):
+    """Compile .lpy source to code through ``compile_module(ast.Module)``.
+
+    Every error names this file and line as a LispyCompileError: the forms
+    lispython refuses, and the SyntaxErrors CPython's compiler raises on the
+    AST (e.g. a lazy import inside a def), whose positions are already ours.
+    """
     try:
-        return ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
+        tree = ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
+        return compile_module(tree)
     except LispyCompileError as err:
         raise attach_source(err, os.fsdecode(path), source)
+    except SyntaxError as err:
+        converted = LispyCompileError.from_syntax_error(err)
+        raise attach_source(converted, os.fsdecode(path), source) from err
 
 
 # # importlib.machinery.SourceFileLoader.source_to_code injection
@@ -33,8 +42,11 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
     # CPython releases (3.15 added a positional ``fullname``), and only the
     # original implementation knows what each release accepts.
     if _is_lpy_file(path):
-        data = _lpy_module_ast(data.decode("utf-8"), path)
-
+        return _lpy_code(
+            data.decode("utf-8"),
+            path,
+            lambda tree: _org_source_to_code(self, tree, path, *args, **kwargs),
+        )
     return _org_source_to_code(self, data, path, *args, **kwargs)
 
 
@@ -64,7 +76,7 @@ def _lpy_get_code_from_file(*args):
         if _is_lpy_file(fname):
             with open(decoded_path, "rb") as f:
                 src = f.read().decode("utf-8")
-            code = compile(_lpy_module_ast(src, fname), fname, "exec")
+            code = _lpy_code(src, fname, lambda tree: compile(tree, fname, "exec"))
         else:
             code = _org_get_code_from_file(*args)
             if not _PY312_PLUS:

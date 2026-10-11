@@ -35,6 +35,23 @@ class LispyCompileError(SyntaxError):
             ),
         )
 
+    @classmethod
+    def from_syntax_error(cls, err):
+        """The same error, from CPython compiling a lispython-built AST.
+
+        Its positions already come from the lispython source, since the AST
+        carries them; only the type changes, so every entry point reports it
+        the same way.
+        """
+        new = cls(err.msg)
+        for attr in ("filename", "lineno", "offset", "text", "end_lineno"):
+            setattr(new, attr, getattr(err, attr))
+        new.end_offset = err.end_offset
+        if new.text is not None:
+            # CPython reads the line with its newline; ours never carry one.
+            new.text = new.text.rstrip("\r\n")
+        return new
+
 
 def attach_source(err, filename=None, source=None):
     """Fill ``err.filename`` and ``err.text`` where still unset; return ``err``.
