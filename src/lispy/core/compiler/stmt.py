@@ -4,7 +4,7 @@ from functools import reduce
 
 from lispy.core.compiler.expr import def_args_parse, expr_compile
 from lispy.core.compiler.features import require
-from lispy.core.compiler.literal import constant_compile
+from lispy.core.compiler.literal import constant_compile, name_compile
 from lispy.core.compiler.utils import *
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import Constant, GluedHead, Paren
@@ -472,6 +472,37 @@ def def_name_parse(name):
     return [name.name, {}]
 
 
+def type_alias_p(sexp):
+    # `type` is a soft keyword, as in Python: only the statement
+    # (type NAME value) / (type NAME[T ...] value) -- two operands, the first a
+    # bare undotted symbol or a glued head -- is a type alias.  Every other shape
+    # (one or three operands, any expression position, a non-symbol first
+    # operand) is a call to the builtin type.  Code that rebinds `type` and calls
+    # it as a bare two-argument statement must write (= _ (type a b)).
+    if str(sexp.op) != "type" or len(sexp) != 3:
+        return False
+    name = sexp[1]
+    return isinstance(name, GluedHead) or (
+        type(name) is Symbol and "." not in name.value
+    )
+
+
+def type_alias_compile(sexp):
+    require("type-alias", sexp)
+    [_, name, value] = sexp.list
+    [head, type_params] = (
+        [name.head, type_params_parse(name)]
+        if isinstance(name, GluedHead)
+        else [name, []]
+    )
+    return ast.TypeAlias(
+        name=name_compile(head, ast.Store),
+        type_params=type_params,
+        value=expr_compile(value),
+        **sexp.position_info
+    )
+
+
 def deco_compile(sexp, decorator_list):
     [op, decorator, def_statement] = sexp.list
     new_deco_list = decorator.list if isinstance(decorator, Bracket) else [decorator]
@@ -614,6 +645,8 @@ def stmt_compile(sexp, decorator_list=None):
         if str(sexp.op) == "async-for"
         else with_compile(sexp, async_p=True)
         if str(sexp.op) == "async-with"
+        else type_alias_compile(sexp)
+        if type_alias_p(sexp)
         else expr_wrapper(sexp)
     )
 

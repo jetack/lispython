@@ -641,3 +641,83 @@ class TestTypeParamsRefused:
         err = refusal(lpy)
         assert err.msg == msg
         assert (err.lineno, err.offset) == (1, col)
+
+
+# --------------------------------------------------------------------------
+# Type alias: `type` as a soft keyword (PEP 695, 3.12)
+
+ALIAS_MSG = "type alias statement (type ...) needs Python 3.12+, running {}"
+ALIAS_CASES = [
+    ("(type X int)", "type X = int"),
+    ("(type Vec[T] (sub list T))", "type Vec[T] = list[T]"),
+    ("(type Num[T ^(, int float)] T)", "type Num[T: (int, float)] = T"),
+    ("(type my-alias (| int None))", "type my_alias = int | None"),
+    ("(if x (type X int))", "if x:\n    type X = int"),
+]
+
+
+@needs_312
+class TestTypeAliasSupported:
+    @pytest.mark.parametrize(["lpy", "py"], ALIAS_CASES)
+    def test_same_ast_as_python(self, lpy, py):
+        assert module_dump(lpy) == ast.dump(ast.parse(py))
+
+    def test_runtime(self):
+        scope = run_module("(type Vec[T] (sub list T))\n(type X (| int None))")
+        vec = scope["Vec"]
+        assert type(vec).__name__ == "TypeAliasType"
+        assert [t.__name__ for t in vec.__type_params__] == ["T"]
+        assert scope["X"].__value__ == int | None
+
+    @needs_313
+    def test_with_default(self):
+        assert module_dump("(type Pair[:T int] (, T T))") == ast.dump(
+            ast.parse("type Pair[T = int] = (T, T)")
+        )
+
+
+class TestTypeSoftKeyword:
+    """Every other shape stays a call to the builtin, on every version."""
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ("(= t (type x))", "t = type(x)"),
+            ("(type x)", "type(x)"),
+            ('(type "N" (, object) {})', "type('N', (object,), {})"),
+            (
+                "(def f [a b] (return (type a b)))",
+                "def f(a, b):\n    return type(a, b)",
+            ),
+            ("(print (type a b))", "print(type(a, b))"),
+            ("(type x.y int)", "type(x.y, int)"),
+            ('(type "N" int)', "type('N', int)"),
+            ("(type (f) int)", "type(f(), int)"),
+        ],
+    )
+    @pytest.mark.usefixtures("old_python")
+    def test_call(self, lpy, py):
+        assert tools.src_to_python_org(lpy) == py
+
+    @pytest.mark.usefixtures("old_python")
+    def test_call_runs(self):
+        scope = run_module('(= N (type "N" (, object) {"a" 1}))\n(= t (type 1))')
+        assert scope["N"].a == 1 and scope["t"] is int
+
+
+class TestTypeAliasRefused:
+    FORMS = ["(type X int)", "(type Vec[T] (sub list T))"]
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_below_312(self, lpy):
+        err = refusal("(= a 1)\n  " + lpy)
+        assert err.msg == ALIAS_MSG.format("3.11.13")
+        assert (err.lineno, err.offset) == (2, 3)
+
+    @before_312
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_on_this_interpreter(self, lpy):
+        err = refusal(lpy)
+        assert err.msg == ALIAS_MSG.format(".".join(map(str, sys.version_info[:3])))
+        assert (err.lineno, err.offset) == (1, 1)
