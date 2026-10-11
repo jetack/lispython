@@ -426,3 +426,69 @@ class TestComprehensionUnpackingRefused:
             "{k: v for k, v in items}"
         )
         assert ast.unparse(compile_expr("{, *s 1}")) == "{*s, 1}"
+
+
+# --------------------------------------------------------------------------
+# Unary plus in a match pattern (Python 3.15)
+
+PLUS_MSG = "unary plus in a match pattern needs Python 3.15+, running {}"
+PLUS_CASES = [
+    ("+1", "+1"),
+    ("+1.5", "+1.5"),
+    ("+1j", "+1j"),
+    ("+1+2j", "+1 + 2j"),
+    ("[+1 -1]", "[+1, -1]"),
+    ("{+1 _}", "{+1: _}"),
+]
+
+
+def match_src(pattern):
+    return f"(match x\n  (case {pattern} ...))"
+
+
+@needs_315
+class TestMatchUnaryPlusSupported:
+    @pytest.mark.parametrize(["lpy", "py"], PLUS_CASES)
+    def test_same_ast_as_python(self, lpy, py):
+        module = ast.Module(compile_src(match_src(lpy)), type_ignores=[])
+        assert ast.dump(module) == ast.dump(
+            ast.parse(f"match x:\n    case {py}:\n        ...")
+        )
+
+    def test_runtime(self):
+        src = """
+(def classify [n]
+  (match n
+    (case +1 (return "plus one"))
+    (case +1+2j (return "complex"))
+    (case _ (return "other"))))
+"""
+        scope = {}
+        module = ast.Module(compile_src(src), type_ignores=[])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        assert scope["classify"](1) == "plus one"
+        assert scope["classify"](1 + 2j) == "complex"
+        assert scope["classify"](-1) == "other"
+
+
+class TestMatchUnaryPlusRefused:
+    FORMS = ["+1", "+1.5", "+1+2j", "[0 +1]", "{+1 _}"]
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("pattern", FORMS)
+    def test_refused_below_315(self, pattern):
+        err = refusal(match_src(pattern))
+        assert err.msg == PLUS_MSG.format("3.11.13")
+        assert (err.lineno, err.offset) == (2, 9 + pattern.index("+"))
+
+    @before_315
+    @pytest.mark.parametrize("pattern", FORMS)
+    def test_refused_on_this_interpreter(self, pattern):
+        err = refusal(match_src(pattern))
+        assert err.msg == PLUS_MSG.format(".".join(map(str, sys.version_info[:3])))
+        assert (err.lineno, err.offset) == (2, 9 + pattern.index("+"))
+
+    @pytest.mark.usefixtures("old_python")
+    def test_minus_needs_no_new_python(self):
+        module = ast.Module(compile_src(match_src("-1")), type_ignores=[])
+        assert ast.unparse(module) == "match x:\n    case -1:\n        ..."

@@ -3,7 +3,11 @@ from collections import deque
 from functools import reduce
 
 from lispy.core.compiler.expr import def_args_parse, expr_compile
+from lispy.core.compiler.features import require
+from lispy.core.compiler.literal import constant_compile
 from lispy.core.compiler.utils import *
+from lispy.core.errors import LispyCompileError
+from lispy.core.nodes import Constant, Paren
 from lispy.core.utils import *
 
 
@@ -278,13 +282,67 @@ def with_compile(sexp, async_p=False):
     )
 
 
+def signed_number_p(sexp):
+    return isinstance(sexp, Paren) and len(sexp) == 2 and str(sexp.op) in ("+", "-")
+
+
+def _complex_sign_index(text):
+    """Index of the sign joining the real and imaginary parts of ``1+2j``."""
+    if not text.lower().endswith("j"):
+        return None
+    for i in range(len(text) - 1, 0, -1):
+        if text[i] in "+-" and text[i - 1] not in "eE":
+            return i
+    return None
+
+
+def _number_expr(constant, wrap_real):
+    """A number literal as ast.parse builds it in a pattern: ``1+2j`` is a BinOp
+    of a real and an imaginary constant; ``wrap_real`` signs the real part."""
+    text = constant.value
+    i = _complex_sign_index(text)
+    if i is None:
+        return wrap_real(constant_compile(constant))
+    position_info = constant.position_info
+    real = constant_compile(Constant(text[:i], **position_info))
+    imag = constant_compile(Constant(text[i + 1 :], **position_info))
+    return ast.BinOp(
+        wrap_real(real), binop_dict[text[i]](), imag, **position_info
+    )
+
+
+def literal_pattern_expr(sexp):
+    """The expression of a literal pattern (MatchValue value or mapping key).
+
+    Signed numbers are the one Paren a literal pattern may be: ``-1`` is
+    ``UnaryOp(USub, 1)`` on every version, ``+1`` (``UAdd``) only from 3.15.
+    """
+    if signed_number_p(sexp):
+        [sign, number] = sexp.list
+        if not constant_p(number) or str(number) in ("True", "False", "None", "..."):
+            raise LispyCompileError(
+                "only a number literal can be signed in a match pattern", sexp
+            )
+        if str(sign) == "+":
+            require("match-unary-plus", sexp)
+        return _number_expr(
+            number,
+            lambda real: ast.UnaryOp(
+                unaryop_dict[str(sign)](), real, **sexp.position_info
+            ),
+        )
+    if constant_p(sexp) and str(sexp) not in ("True", "False", "None", "..."):
+        return _number_expr(sexp, lambda real: real)
+    return expr_compile(sexp)
+
+
 def match_mapping_parse(lst):
     keys = lst[::2]
     patterns = lst[1::2]
     rst = {}
     if isinstance(keys[-1], DoubleStarred):
         rst["rest"] = keys.pop().value.name
-    rst["keys"] = list(map(expr_compile, keys))
+    rst["keys"] = list(map(literal_pattern_expr, keys))
     rst["patterns"] = list(map(pattern_parse, patterns))
     return rst
 
@@ -317,8 +375,8 @@ def pattern_parse(sexp):
             **sexp.position_info
         )
         if isinstance(sexp, Starred)
-        else ast.MatchValue(value=expr_compile(sexp), **sexp.position_info)
-        if not isinstance(sexp, Expression)
+        else ast.MatchValue(value=literal_pattern_expr(sexp), **sexp.position_info)
+        if not isinstance(sexp, Expression) or signed_number_p(sexp)
         else ast.MatchSequence(
             patterns=list(map(pattern_parse, sexp.list)), **sexp.position_info
         )
