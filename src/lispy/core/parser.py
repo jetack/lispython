@@ -89,8 +89,8 @@ def _string_token(src, start, opening):
     check and the t-string version gate, so an old interpreter hears about the
     version first.
     """
-    quote = opening.lstrip("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
-    prefix = opening[: -len(quote)].lower()
+    prefix = opening.rstrip("\"'").lower()
+    quote = opening[len(prefix) :]
     raw = "r" in prefix
     kind = "t-string" if "t" in prefix else "f-string" if "f" in prefix else "string"
     try:
