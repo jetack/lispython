@@ -14,6 +14,8 @@ from lispy.core.nodes import (
     Paren,
     String,
     Symbol,
+    Unquote,
+    UnquoteSplice,
     Wrapper,
 )
 from lispy.core.utils import augassignop_dict
@@ -155,15 +157,36 @@ opening_dict = {"(": Paren, "{": Brace, "[": Bracket}
 meta_indicator_dict = {"'": Quote, "`": QuasiQuote, "~": Unquote, "~@": UnquoteSplice}
 
 
-def _glued_symbol(container, lineno, col_offset):
-    """The bare Symbol ending exactly where a ``[`` at (lineno, col) starts."""
+def _glue_target(container, lineno, col_offset):
+    """``[prefixes, head]`` when a ``[`` at (lineno, col) is glued to the last form.
+
+    The head is the bare Symbol (or an unquoted ``~symbol``, so a quasiquote
+    can splice the name of a generic def) that ends exactly where the bracket
+    starts, found under any prefixes of the last form: ``^list[int]``,
+    ``*args[0]``, ``:k[0]``, ``'f[T]``.  The prefixes then wrap the GluedHead.
+    """
     items = container if isinstance(container, list) else container.list
-    last = items[-1] if items else None
+    node = items[-1] if items else None
+    prefixes = []
+    while isinstance(node, (Wrapper, MetaIndicator)) and not isinstance(
+        node, FStrExpr
+    ):
+        if _unquoted_symbol_p(node):
+            break
+        prefixes.append(node)
+        node = node.value
+    glued = (
+        (type(node) is Symbol or _unquoted_symbol_p(node))
+        and (node.end_lineno, node.end_col_offset) == (lineno, col_offset)
+    )
+    return [prefixes, node] if glued else None
+
+
+def _unquoted_symbol_p(node):
     return (
-        last
-        if type(last) is Symbol
-        and (last.end_lineno, last.end_col_offset) == (lineno, col_offset)
-        else None
+        isinstance(node, Unquote)
+        and not isinstance(node, UnquoteSplice)
+        and type(node.value) is Symbol
     )
 
 
@@ -181,13 +204,19 @@ def parse(src):
             opening = t[-1]
             container = stack[-1] if stack else rst
             glueable = isinstance(container, (list, Expression))
-            head = (
-                _glued_symbol(container, lineno, col_offset)
+            target = (
+                _glue_target(container, lineno, col_offset)
                 if opening == "[" and not wrapper and glueable
                 else None
             )
-            if head is not None:
+            if target is not None:
+                [prefixes, head] = target
                 (container if isinstance(container, list) else container.list).pop()
+                # Reopen the prefixes around a pending head: when the bracket
+                # closes, the GluedHead takes it and the prefixes close over it.
+                for prefix in prefixes:
+                    prefix.value = None
+                    stack.append(prefix)
                 position = {"lineno": head.lineno, "col_offset": head.col_offset}
                 stack.append(GluedHead(head, None, **position))
             if wrapper:

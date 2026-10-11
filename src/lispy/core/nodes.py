@@ -313,7 +313,7 @@ class Keyword(Wrapper):
 
     def update_dict(self, key, value):
         self.__dict__[key] = value
-        return self.value.update_dict(value)
+        return self.value.update_dict(key, value)
 
 
 class Starred(Wrapper):
@@ -374,7 +374,7 @@ class GluedHead(Node):
     def misuse_error(self):
         from lispy.core.errors import LispyCompileError
 
-        text = self.head.value
+        text = str(self.head)
         return LispyCompileError(
             f"{text}[...] is only valid as a def/class/type name; "
             f"use (sub {text} ...)",

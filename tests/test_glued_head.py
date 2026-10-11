@@ -5,12 +5,25 @@ It names a generic def/class/type; anywhere else it is refused, pointing at
 """
 
 import importlib
+import sys
 
 import pytest
 
 from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand
-from lispy.core.nodes import Bracket, GluedHead, Paren, Symbol
+from lispy.core.nodes import (
+    Annotation,
+    Bracket,
+    GluedHead,
+    Keyword,
+    MetaIndicator,
+    Paren,
+    Quote,
+    Starred,
+    Symbol,
+    Unquote,
+    Wrapper,
+)
 from lispy.tools import macroexpand_then_compile, parse
 
 
@@ -39,15 +52,42 @@ class TestParse:
         assert str(form) == "(def my-fn[T] [x] x)"
         assert (form[1].col_offset, form[1].end_col_offset) == (5, 13)
 
-    @pytest.mark.parametrize("src", ["f [T]", "(f [T])", "(sub xs [1])", "'f[T]"])
-    def test_space_or_prefix_keeps_two_forms(self, src):
+    @pytest.mark.parametrize("src", ["f [T]", "(f [T])", "(sub xs [1])"])
+    def test_space_keeps_two_forms(self, src):
         def glued(nodes):
             return any(
-                isinstance(n, GluedHead) or (isinstance(n, Paren) and glued(n.list))
+                isinstance(n, GluedHead)
+                or (isinstance(n, Paren) and glued(n.list))
+                or (isinstance(n, (Wrapper, MetaIndicator)) and glued([n.value]))
                 for n in nodes
             )
 
         assert not glued(parse(src))
+
+    @pytest.mark.parametrize(
+        ["src", "wrappers"],
+        [
+            ("'f[T]", [Quote]),
+            ("^list[int]", [Annotation]),
+            ("*args[0]", [Starred]),
+            (":k[0]", [Keyword]),
+            ("^*xs[0]", [Annotation, Starred]),
+        ],
+    )
+    def test_glued_under_prefixes(self, src, wrappers):
+        [node] = parse(src)
+        for wrapper in wrappers:
+            assert type(node) is wrapper
+            node = node.value
+        assert isinstance(node, GluedHead)
+        assert str(node.head) == src.lstrip("'^*:").split("[")[0]
+        assert node.col_offset == len(src) - len(src.lstrip("'^*:"))
+
+    def test_unquoted_head_in_quasiquote(self):
+        [form] = parse("`(def ~n[T] [x] x)")
+        glued = form.value[1]
+        assert isinstance(glued, GluedHead) and isinstance(glued.head, Unquote)
+        assert str(form) == "`(def ~n[T] [x] x)"
 
 
 class TestMisuse:
@@ -59,6 +99,11 @@ class TestMisuse:
             ("(import json[x])", 1, 9),
             ("(global g[T])", 1, 9),
             ("(f :k my-list[1])", 1, 7),
+            ("(def f [x ^list[int]] (return x))", 1, 12),
+            ("(def f [x] ^list[int] (return x))", 1, 13),
+            ("(print *args[0])", 1, 9),
+            ("(f :k[0] 1)", 1, 5),
+            ("(type a.b[T] int)", 1, 7),
         ],
     )
     def test_refused_with_sub_hint(self, src, line, col):
@@ -113,3 +158,48 @@ class TestLsp:
         assert type(target) is Symbol and target.value == "f"
         refs = server.collect_references(parse(self.SRC), "f", "file:///g.lpy")
         assert [r.range.start.line for r in refs] == [0, 2]
+
+
+class TestGenericNames:
+    def test_quoted_glued_head_is_data(self):
+        scope = {"__macro_namespace": {}}
+        src = "(from lispy.core.nodes *)\n(= q 'f[T])"
+        module = __import__("ast").Module(
+            macroexpand_then_compile(parse(src), scope), []
+        )
+        exec(compile(module, "<lpy>", "exec"), scope)
+        assert isinstance(scope["q"], GluedHead) and str(scope["q"]) == "f[T]"
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="type params: 3.12+")
+    def test_macro_splices_the_name_of_a_generic_def(self):
+        scope = {"__macro_namespace": {}}
+        src = "(defmacro gen3 [n] (return `(def ~n[T] [x] (return x))))\n(gen3 k)"
+        module = __import__("ast").Module(
+            macroexpand_then_compile(parse(src), scope), []
+        )
+        exec(compile(module, "<lpy>", "exec"), scope)
+        assert [t.__name__ for t in scope["k"].__type_params__] == ["T"]
+        assert scope["k"](5) == 5
+
+    @pytest.mark.parametrize(
+        ["src", "msg"],
+        [
+            (
+                "(def ~n[T] [] (pass))",
+                "~n is not a valid name for a generic definition",
+            ),
+            (
+                "(def a.b[T] [] (pass))",
+                "a.b is not a valid name for a generic definition",
+            ),
+            (
+                "(class a.B[T] [] (pass))",
+                "a.B is not a valid name for a generic definition",
+            ),
+        ],
+    )
+    def test_invalid_generic_names(self, src, msg):
+        with pytest.raises(LispyCompileError) as info:
+            compile_src(src)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (1, src.index(" ") + 2)

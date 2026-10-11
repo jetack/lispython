@@ -494,8 +494,17 @@ def def_name_parse(name):
     type_params is passed only when present, so 3.11's constructors never see it.
     """
     if isinstance(name, GluedHead):
+        if not plain_name_p(name.head):
+            raise LispyCompileError(
+                f"{name.head} is not a valid name for a generic definition", name
+            )
         return [name.head.name, {"type_params": type_params_parse(name)}]
     return [name.name, {}]
+
+
+def plain_name_p(sexp):
+    """A bare, undotted symbol: what Python accepts as a def/class/type name."""
+    return type(sexp) is Symbol and "." not in sexp.value
 
 
 def type_alias_p(sexp):
@@ -508,9 +517,7 @@ def type_alias_p(sexp):
     if str(sexp.op) != "type" or len(sexp) != 3:
         return False
     name = sexp[1]
-    return isinstance(name, GluedHead) or (
-        type(name) is Symbol and "." not in name.value
-    )
+    return plain_name_p(name.head if isinstance(name, GluedHead) else name)
 
 
 def type_alias_compile(sexp):
