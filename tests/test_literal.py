@@ -1,5 +1,6 @@
 import ast
 import re
+import sys
 
 import pytest
 
@@ -38,11 +39,17 @@ class TestStringMethods:
         assert src_to_python_org('"\\n"') == "'\\n'"
 
     def test_multi_line_string(self):
-        assert src_to_python_org('''"a
+        assert (
+            src_to_python_org('''"a
 b
-c"''') == "'a\\nb\\nc'"
-        assert src_to_python_org('''\"
-\"''') == "'\\n'"
+c"''')
+            == "'a\\nb\\nc'"
+        )
+        assert (
+            src_to_python_org("""\"
+\"""")
+            == "'\\n'"
+        )
 
     def test_f_string(self):
         assert stmt_to_dump('f"sin({a}) is {(sin a):.3}"') == ast.dump(
@@ -55,13 +62,13 @@ c"''') == "'a\\nb\\nc'"
         assert stmt_to_dump(
             r'f"Started at {(.strftime (datetime.now) \"%Y-%m-%d %H:%M:%S\")}"'
         ) == ast.dump(
-            ast.parse('f"Started at {datetime.now().strftime(\'%Y-%m-%d %H:%M:%S\')}"')
+            ast.parse("f\"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\"")
         )
 
     def test_f_string_with_colon_in_nested_string(self):
         # Colon inside nested string should not be treated as format spec
         assert stmt_to_dump(r'f"time: {(.get d \"H:M:S\")}"') == ast.dump(
-            ast.parse('f"time: {d.get(\'H:M:S\')}"')
+            ast.parse("f\"time: {d.get('H:M:S')}\"")
         )
 
 
@@ -96,32 +103,71 @@ class TestInterpolatedStringScanner:
         assert scope["s"] == "(+ a 1) = 3"
 
     @pytest.mark.parametrize(
-        ["lpy", "msg"],
+        ["lpy", "msg", "at"],
         [
-            ('f"{}"', "f-string: valid expression required before '}'"),
-            ('f"{x!}"', "f-string: missing conversion character"),
+            ('f"{}"', "f-string: valid expression required before '}'", "{"),
+            ('f"{x!}"', "f-string: missing conversion character", "!"),
             (
                 'f"{x!z}"',
                 "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+                "!",
             ),
             (
                 'f"{x! r}"',
                 "f-string: conversion type must come right after the exclamation mark",
+                "!",
             ),
             (
-                'f"{a b}"',
+                'f"a{a b}"',
                 "f-string: expecting a single expression in a replacement field",
+                "{",
             ),
-            ('f"a}b"', "f-string: single '}' is not allowed"),
-            ('f"{x"', "f-string: expecting '}'"),
-            ('bf"x"', "invalid string prefix 'bf'"),
+            ('f"a}b"', "f-string: single '}' is not allowed", "}"),
+            ('f"ab{x"', "f-string: expecting '}'", "{"),
+            ('f"ab{x:{y}"', "f-string: expecting '}'", "{"),
+            ('bf"x"', "invalid string prefix 'bf'", "b"),
         ],
     )
-    def test_refused_like_python(self, lpy, msg):
+    def test_refused_like_python(self, lpy, msg, at):
+        """Errors point at the offending field or character, as Python's do."""
         with pytest.raises(LispyCompileError) as info:
             src_to_python_org("\n  " + lpy)
         assert info.value.msg == msg
-        assert (info.value.lineno, info.value.offset) == (2, 3)
+        assert (info.value.lineno, info.value.offset) == (2, 3 + lpy.index(at))
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 12), reason="3.11 positions f-string nodes differently"
+    )
+    @pytest.mark.parametrize(
+        "src", ['f"a{x!r:>{width}}b"', 'f"{x=}"', 'f"ab{ x = !s:<{w}.{p}}"']
+    )
+    def test_positions_match_cpython(self, src):
+        [stmt] = compile_lpy(src)
+        assert ast.dump(stmt, include_attributes=True) == ast.dump(
+            ast.parse(src).body[0], include_attributes=True
+        )
+
+    def test_keyword_argument_in_a_field(self):
+        assert src_to_python_org('f"{(f :k 1)}"') == "f'{f(k=1)}'"
+
+    def test_unlimited_nesting(self):
+        lpy = 'f"{ {"a" {1 {2 "}"}}} } {(g {1 {2 "x"}})}"'
+        py = "f\"{ {'a': {1: {2: '}'}}} } {g({1: {2: 'x'}})}\""
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
+
+    def test_commas_inside_nested_strings_are_kept(self):
+        assert src_to_python_org('f"{(f "a,b" 1,2)}"') == "f\"{f('a,b', 1, 2)}\""
+
+    def test_field_positions(self):
+        [stmt] = compile_lpy('(print\n  f"ab{(+ x 1)!r:>{w}}")')
+        joined = stmt.value.args[0]
+        [literal, field] = joined.values
+        assert (literal.lineno, literal.col_offset, literal.end_col_offset) == (2, 4, 6)
+        assert (field.lineno, field.col_offset, field.end_col_offset) == (2, 6, 22)
+        assert (field.value.col_offset, field.value.end_col_offset) == (7, 14)
+        assert field.value.left.col_offset == 10
+        nested = field.format_spec.values[1]
+        assert (nested.col_offset, nested.value.col_offset) == (18, 19)
 
 
 class TestStringLineEndings:

@@ -300,6 +300,13 @@ class TestTStringSupported:
         tree = compile_expr('t"{(undefined-at-compile-time)}"')
         assert isinstance(tree.body, ast.TemplateStr)
 
+    @pytest.mark.parametrize("src", ['t"a{x!r:>{width}}b"', 't"{ x = }"'])
+    def test_positions_match_cpython(self, src):
+        [stmt] = compile_src(src)
+        assert ast.dump(stmt, include_attributes=True) == ast.dump(
+            ast.parse(src).body[0], include_attributes=True
+        )
+
     def test_l2py_writes_python_text(self):
         """Python source gets the Python text; the compiled tree keeps lispython's."""
         [stmt] = compile_src('(= tpl t"Hi {(* 2 name)!r:>{width}} { {1 2} }")')
@@ -329,24 +336,33 @@ class TestTStringRefused:
         assert (err.lineno, err.offset) == (1, 9)
 
     @pytest.mark.parametrize(
-        ["lpy", "msg"],
+        ["lpy", "msg", "at"],
         [
-            ('ft"x"', "'f' and 't' prefixes are incompatible"),
-            ('tf"x"', "'f' and 't' prefixes are incompatible"),
-            ('bt"x"', "'b' and 't' prefixes are incompatible"),
-            ('Ut"x"', "'u' and 't' prefixes are incompatible"),
-            ('tt"x"', "invalid string prefix 'tt'"),
+            ('ft"x"', "'f' and 't' prefixes are incompatible", "f"),
+            ('tf"x"', "'f' and 't' prefixes are incompatible", "t"),
+            ('bt"x"', "'b' and 't' prefixes are incompatible", "b"),
+            ('Ut"x"', "'u' and 't' prefixes are incompatible", "U"),
+            ('tt"x"', "invalid string prefix 'tt'", "t"),
             (
                 't"{x!z}"',
                 "t-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+                "!",
             ),
-            ('t"{}"', "t-string: valid expression required before '}'"),
-            ('t"a}"', "t-string: single '}' is not allowed"),
+            ('t"a{}"', "t-string: valid expression required before '}'", "{"),
+            ('t"a}"', "t-string: single '}' is not allowed", "}"),
         ],
     )
-    def test_malformed_refused_on_every_version(self, lpy, msg):
+    def test_malformed_refused_like_python(self, lpy, msg, at, monkeypatch):
+        monkeypatch.setattr(features, "running_version", lambda: (3, 14, 0))
         err = refusal("\n   " + lpy)
         assert err.msg == msg
+        assert (err.lineno, err.offset) == (2, 4 + lpy.index(at))
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("lpy", ['t"a{}"', 't"{x!z}"', 't"{x"', 'rt"a}"'])
+    def test_version_reported_before_the_contents(self, lpy):
+        err = refusal("\n   " + lpy)
+        assert err.msg == 't-string t"..." needs Python 3.14+, running 3.11.13'
         assert (err.lineno, err.offset) == (2, 4)
 
 
