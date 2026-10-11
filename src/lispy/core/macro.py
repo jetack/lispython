@@ -28,6 +28,11 @@ def _unwrap_literal(node):
 
 
 def define_macro(sexp, scope, include_meta=True):
+    name = sexp[1] if len(sexp) > 1 else None
+    if isinstance(name, GluedHead):
+        raise name.misuse_error()
+    if type(name) is not Symbol:
+        raise LispyCompileError(f"(defmacro ...) expects a name, got {name}", sexp)
     transformed = defmacro_transform(sexp)
     eval(
         compile(

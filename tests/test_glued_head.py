@@ -203,3 +203,20 @@ class TestGenericNames:
             compile_src(src)
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == (1, src.index(" ") + 2)
+
+
+class TestMacroNames:
+    @pytest.mark.parametrize(
+        ["src", "msg"],
+        [
+            (
+                "(defmacro m[T] [] (return 1))",
+                "m[...] is only valid as a def/class/type name; use (sub m ...)",
+            ),
+            ('(defmacro "m" [] (return 1))', '(defmacro ...) expects a name, got "m"'),
+        ],
+    )
+    def test_refused(self, src, msg):
+        with pytest.raises(LispyCompileError) as info:
+            compile_src(src)
+        assert info.value.msg == msg
