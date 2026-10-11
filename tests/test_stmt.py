@@ -199,3 +199,47 @@ class TestSignedNumberExpressions:
             "only a number literal can be signed in a match pattern"
         )
         assert (info.value.lineno, info.value.offset) == (2, 9)
+
+
+class TestImportNames:
+    """Every import form checks its names in one place."""
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ("(from . [a])", "from . import a"),
+            ("(from .. [a b as c])", "from .. import a, b as c"),
+            ("(from .m [a])", "from .m import a"),
+            ("(import os.path as p)", "import os.path as p"),
+        ],
+    )
+    def test_same_ast_as_python(self, lpy, py):
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
+
+    @pytest.mark.parametrize(
+        ["lpy", "msg", "at"],
+        [
+            ('(import "x")', '(import ...) expects a name, got "x"', '"'),
+            ("(import)", "(import ...) needs at least one module name", "("),
+            ("(import os as a.b)", "(import ...) expects a name, got a.b", "a."),
+            ("(from json)", "(from ...) takes module and [names] pairs", "("),
+            (
+                '(from json "dumps")',
+                '(from ...) expects [names] or * after a module, got "dumps"',
+                '"',
+            ),
+            ("(from json [1])", "(from ...) expects a name, got 1", "1"),
+            ('(from "json" [a])', '(from ...) expects a name, got "json"', '"'),
+            (
+                "(import json[x])",
+                "json[...] is only valid as a def/class/type name; "
+                "use (sub json ...)",
+                "j",
+            ),
+        ],
+    )
+    def test_refused(self, lpy, msg, at):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump(lpy)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (1, lpy.index(at) + 1)

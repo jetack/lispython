@@ -82,14 +82,25 @@ def del_compile(sexp):
     )
 
 
-def parse_names(names):
+def import_name(sexp, form, dotted=True):
+    """The one check on every name an import form reads: a bare symbol
+    (dotted for a module path), as in Python, or a LispyCompileError at it."""
+    if isinstance(sexp, GluedHead):
+        raise sexp.misuse_error()
+    if type(sexp) is not Symbol or (not dotted and "." in sexp.value):
+        raise LispyCompileError(f"({form} ...) expects a name, got {sexp}", sexp)
+    return sexp
+
+
+def parse_names(names, form):
     rst = []
     q = deque([names] if names == "*" else names)
     while q:
         n = q.popleft()
-        if n == "as":
-            rst[-1].asname = str(q.popleft()).replace("-", "_")
+        if n == "as" and rst and q:
+            rst[-1].asname = import_name(q.popleft(), form, dotted=False).name
         else:
+            n = import_name(n, form)
             rst.append(ast.alias(name=n.name, **n.position_info))
     return rst
 
@@ -102,16 +113,31 @@ def lazy_kwargs(sexp, lazy):
 
 
 def import_compile(sexp, lazy=False):
-    [_, *names] = sexp.list
+    [op, *names] = sexp.list
     is_lazy = lazy_kwargs(sexp, lazy)
-    return ast.Import(names=parse_names(names), **is_lazy, **sexp.position_info)
+    if not names:
+        raise LispyCompileError(f"({op} ...) needs at least one module name", sexp)
+    return ast.Import(
+        names=parse_names(names, str(op)), **is_lazy, **sexp.position_info
+    )
 
 
 def importfrom_compile(sexp, lazy=False):
-    [_, *args] = sexp.list
+    [op, *args] = sexp.list
+    form = str(op)
     is_lazy = lazy_kwargs(sexp, lazy)
-    modules = args[::2]
+    if not args or len(args) % 2:
+        raise LispyCompileError(
+            f"({form} ...) takes module and [names] pairs", sexp
+        )
+    modules = [import_name(module, form) for module in args[::2]]
     namess = args[1::2]
+    for names in namess:
+        if names != "*" and not isinstance(names, Bracket):
+            raise LispyCompileError(
+                f"({form} ...) expects [names] or * after a module, got {names}",
+                names,
+            )
     if lazy:
         # CPython's own static checks on `lazy from`, with its messages.
         for [module, names] in zip(modules, namess):
@@ -125,17 +151,16 @@ def importfrom_compile(sexp, lazy=False):
                 )
 
     def helper(module):
-        i = 0
+        # Leading dots are the relative level; "." alone has no module name.
         x = module.name
-        while x[i] == ".":
-            i += 1
-        return [x[i:], i, module.position_info]
+        level = len(x) - len(x.lstrip("."))
+        return [x[level:] or None, level, module.position_info]
 
     module_level = map(helper, modules)
     return [
         ast.ImportFrom(
             module=module,
-            names=parse_names(names),
+            names=parse_names(names, form),
             level=level,
             **is_lazy,
             **merge_position_infos(module_pos_info, names.position_info)
