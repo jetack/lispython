@@ -107,7 +107,7 @@ def parse_names(names, form):
 
 def lazy_kwargs(sexp, lazy):
     if lazy:
-        require("lazy-import", sexp)
+        require(str(sexp.op), sexp)
         return {"is_lazy": 1}
     return {"is_lazy": 0} if features.import_has_is_lazy() else {}
 

@@ -34,14 +34,19 @@ class Feature:
     description: str
 
 
+# Each description names the construct, then its lispython shape with "..."
+# for the parts that vary (never a made-up example name).
 FEATURES = {
     "t-string": Feature((3, 14), 't-string t"..."'),
-    "comprehension-unpacking": Feature((3, 15), "comprehension unpacking [*x for ...]"),
-    "match-unary-plus": Feature((3, 15), "unary plus in a match pattern"),
-    "type-params": Feature((3, 12), "type parameters f[T]"),
-    "type-param-default": Feature((3, 13), "type parameter defaults f[:T int]"),
-    "type-alias": Feature((3, 12), "type alias statement (type ...)"),
+    "comprehension-unpacking": Feature(
+        (3, 15), "comprehension unpacking [*... for ...]"
+    ),
+    "match-unary-plus": Feature((3, 15), "unary plus pattern (case +... ...)"),
+    "type-params": Feature((3, 12), "type parameters name[...]"),
+    "type-param-default": Feature((3, 13), "type parameter default name[:... ...]"),
+    "type-alias": Feature((3, 12), "type alias (type name ...)"),
     "lazy-import": Feature((3, 15), "lazy import (lazy-import ...)"),
+    "lazy-from": Feature((3, 15), "lazy from-import (lazy-from ...)"),
 }
 
 

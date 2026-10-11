@@ -79,7 +79,7 @@ class TestRequire:
         err = info.value
         assert isinstance(err, SyntaxError)
         assert err.msg == (
-            "comprehension unpacking [*x for ...] needs Python 3.15+, running 3.11.13"
+            "comprehension unpacking [*... for ...] needs Python 3.15+, running 3.11.13"
         )
         assert (err.lineno, err.offset) == (2, 3)
         assert (err.end_lineno, err.end_offset) == (2, 8)
@@ -373,7 +373,7 @@ class TestTStringRefused:
 needs_315 = pytest.mark.skipif(sys.version_info < (3, 15), reason="needs 3.15+")
 before_315 = pytest.mark.skipif(sys.version_info >= (3, 15), reason="runs on <3.15")
 
-UNPACK_MSG = "comprehension unpacking [*x for ...] needs Python 3.15+, running {}"
+UNPACK_MSG = "comprehension unpacking [*... for ...] needs Python 3.15+, running {}"
 # (lispython, Python, value of the Python expression with UNPACK_SCOPE)
 UNPACK_CASES = [
     ("[*L for L lists]", "[*L for L in lists]", [1, 2, 3]),
@@ -463,7 +463,7 @@ class TestComprehensionUnpackingRefused:
 # --------------------------------------------------------------------------
 # Unary plus in a match pattern (Python 3.15)
 
-PLUS_MSG = "unary plus in a match pattern needs Python 3.15+, running {}"
+PLUS_MSG = "unary plus pattern (case +... ...) needs Python 3.15+, running {}"
 PLUS_CASES = [
     ("+1", "+1"),
     ("+1.5", "+1.5"),
@@ -534,8 +534,8 @@ before_312 = pytest.mark.skipif(sys.version_info >= (3, 12), reason="runs on <3.
 needs_313 = pytest.mark.skipif(sys.version_info < (3, 13), reason="needs 3.13+")
 before_313 = pytest.mark.skipif(sys.version_info >= (3, 13), reason="runs on <3.13")
 
-TYPE_PARAMS_MSG = "type parameters f[T] needs Python 3.12+, running {}"
-DEFAULTS_MSG = "type parameter defaults f[:T int] needs Python 3.13+, running {}"
+TYPE_PARAMS_MSG = "type parameters name[...] needs Python 3.12+, running {}"
+DEFAULTS_MSG = "type parameter default name[:... ...] needs Python 3.13+, running {}"
 TYPE_PARAM_CASES = [
     ("(def f[T] [x ^T] ^T (return x))", "def f[T](x: T) -> T:\n    return x"),
     (
@@ -664,7 +664,7 @@ class TestTypeParamsRefused:
 # --------------------------------------------------------------------------
 # Type alias: `type` as a soft keyword (PEP 695, 3.12)
 
-ALIAS_MSG = "type alias statement (type ...) needs Python 3.12+, running {}"
+ALIAS_MSG = "type alias (type name ...) needs Python 3.12+, running {}"
 ALIAS_CASES = [
     ("(type X int)", "type X = int"),
     ("(type Vec[T] (sub list T))", "type Vec[T] = list[T]"),
@@ -745,7 +745,10 @@ class TestTypeAliasRefused:
 # --------------------------------------------------------------------------
 # Lazy imports (PEP 810, 3.15)
 
-LAZY_MSG = "lazy import (lazy-import ...) needs Python 3.15+, running {}"
+LAZY_MSG = {
+    "lazy-import": "lazy import (lazy-import ...) needs Python 3.15+, running {}",
+    "lazy-from": "lazy from-import (lazy-from ...) needs Python 3.15+, running {}",
+}
 LAZY_CASES = [
     ("(lazy-import json)", "lazy import json"),
     ("(lazy-import json as j os)", "lazy import json as j, os"),
@@ -804,14 +807,15 @@ class TestLazyImportRefused:
     @pytest.mark.parametrize("lpy", FORMS)
     def test_refused_below_315(self, lpy):
         err = refusal("(= a 1)\n  " + lpy)
-        assert err.msg == LAZY_MSG.format("3.11.13")
+        assert err.msg == LAZY_MSG[lpy[1:].split()[0]].format("3.11.13")
         assert (err.lineno, err.offset) == (2, 3)
 
     @before_315
     @pytest.mark.parametrize("lpy", FORMS)
     def test_refused_on_this_interpreter(self, lpy):
         err = refusal(lpy)
-        assert err.msg == LAZY_MSG.format(".".join(map(str, sys.version_info[:3])))
+        running = ".".join(map(str, sys.version_info[:3]))
+        assert err.msg == LAZY_MSG[lpy[1:].split()[0]].format(running)
         assert (err.lineno, err.offset) == (1, 1)
 
     @pytest.mark.parametrize(
