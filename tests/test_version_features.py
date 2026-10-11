@@ -298,6 +298,19 @@ class TestTStringSupported:
         tree = compile_expr('t"{(undefined-at-compile-time)}"')
         assert isinstance(tree.body, ast.TemplateStr)
 
+    def test_l2py_writes_python_text(self):
+        """Python source gets the Python text; the compiled tree keeps lispython's."""
+        [stmt] = compile_src('(= tpl t"Hi {(* 2 name)!r:>{width}} { {1 2} }")')
+        pysrc = tools.ast_to_python(stmt)
+        assert pysrc == "tpl = t'Hi {2 * name!r:>{width}} { {1: 2}}'"
+        scope = dict(T_SCOPE)
+        exec(pysrc, scope)
+        assert [i.expression for i in scope["tpl"].interpolations] == [
+            "2 * name",
+            " {1: 2}",
+        ]
+        assert stmt.value.values[1].str == "(* 2 name)"
+
 
 class TestTStringRefused:
     @pytest.mark.usefixtures("old_python")

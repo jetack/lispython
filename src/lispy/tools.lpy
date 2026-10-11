@@ -2,6 +2,7 @@
 
 (import argparse)
 (import ast)
+(import copy)
 (import importlib)
 (import inspect)
 (import io)
@@ -61,8 +62,23 @@
           "__package__" (detect-package-name)
           "__macro_namespace" {}})
 
+(def _python-interpolations [st]
+  "Copy of st whose t-string interpolations unparse from their values.
+   The compiler sets Interpolation.str to the lispython text, which is what a
+   Template reports at runtime; ast.unparse writes str verbatim unless it is
+   None, and Python source needs the Python text."
+  (= interpolation (getattr ast "Interpolation" None))
+  (if (or (is interpolation None)
+          (not (any ((isinstance n interpolation) for n in (ast.walk st)))))
+      (return st))
+  (= st (copy.deepcopy st))
+  (for n in (ast.walk st)
+    (if (isinstance n interpolation)
+        (= n.str None)))
+  (return st))
+
 (def ast-to-python [st]
-  (return (str (ast.unparse st))))
+  (return (str (ast.unparse (_python-interpolations st)))))
 
 (def src-to-python-org [src :include-meta False :scope None]
   (if (is scope None)
