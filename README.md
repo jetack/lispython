@@ -90,8 +90,3 @@ Install the [LisPython](https://marketplace.visualstudio.com/items?itemName=jeta
 
 #### Emacs
 Use [`lpy-mode`](https://github.com/jetack/lpy-mode). It provides nREPL integration (eval, completion, eldoc, macroexpand) and LSP via eglot.
-
-## Todo
-### Python AST
-- [ ] `type_comment` never considered. Later, it should be covered
-- [ ] Any missing AST nodes in the version 3.12+
