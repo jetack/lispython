@@ -996,3 +996,18 @@ class TestCapabilityProbes:
             if pattern in path.read_text(encoding="utf-8")
         ]
         assert offenders == []
+
+
+@needs_314
+class TestTStringQuasiquote:
+    def test_round_trip_through_a_macro(self):
+        scope = run_module(
+            "(= x 42)\n"
+            '(defmacro tshow [] (return `t"{x!r:>6} {(* 2 x)}"))\n'
+            "(= tpl (tshow))"
+        )
+        assert template_fields(scope["tpl"]) == (
+            ("", " ", ""),
+            (42, 84),
+            [(42, "x", "r", ">6"), (84, "(* 2 x)", None, "")],
+        )

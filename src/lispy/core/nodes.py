@@ -262,6 +262,25 @@ class FStrExpr(Wrapper):
     def get_source(self, indent=0):
         return "(FStrExpr " + str(self.value) + ")"
 
+    def generator_expression(self, in_quasi=False):
+        """Rebuild with conversion, format spec and expression text, so an
+        f/t-string survives a quasiquote."""
+        position_info = self.position_info
+        format_spec = getattr(self, "format_spec", None)
+        return Paren(
+            Symbol(self.classname, **position_info),
+            self.value.generator_expression(in_quasi),
+            Keyword(Symbol("conversion")),
+            Constant(str(getattr(self, "conversion", -1))),
+            Keyword(Symbol("format-spec")),
+            Constant("None")
+            if format_spec is None
+            else format_spec.generator_expression(in_quasi),
+            Keyword(Symbol("expr-text")),
+            String(repr(getattr(self, "expr_text", ""))),
+            **position_info
+        )
+
     @property
     def name(self):
         return self.value.name

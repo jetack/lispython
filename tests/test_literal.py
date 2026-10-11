@@ -260,3 +260,18 @@ class TestSetMethods:
 
     def test_star(self):
         assert src_to_python_org("{, *[1 2 3] 2 3 4}") == "{*[1, 2, 3], 2, 3, 4}"
+
+
+class TestInterpolatedQuasiquote:
+    """An f-string inside a quasiquote keeps conversion, spec and text."""
+
+    def test_round_trip_through_a_macro(self):
+        src = (
+            "(= x 42)\n"
+            '(defmacro show [] (return `f"[{x!r:>6}] {x=} {(+ x 1):{x}}"))\n'
+            "(= s (show))"
+        )
+        scope = {}
+        module = ast.Module(compile_lpy(src, scope), [])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        assert scope["s"] == f"[{42!r:>6}] x=42 {43:42}"
