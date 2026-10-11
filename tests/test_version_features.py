@@ -685,6 +685,7 @@ class TestTypeSoftKeyword:
             ("(= t (type x))", "t = type(x)"),
             ("(type x)", "type(x)"),
             ('(type "N" (, object) {})', "type('N', (object,), {})"),
+            ("(type name bases ns)", "type(name, bases, ns)"),
             (
                 "(def f [a b] (return (type a b)))",
                 "def f(a, b):\n    return type(a, b)",
