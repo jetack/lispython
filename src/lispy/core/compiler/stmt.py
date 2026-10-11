@@ -4,10 +4,15 @@ from functools import reduce
 
 from lispy.core.compiler.expr import def_args_parse, expr_compile
 from lispy.core.compiler.features import require
-from lispy.core.compiler.literal import constant_compile, name_compile
+from lispy.core.compiler.literal import (
+    SPECIAL_CONSTANTS,
+    name_compile,
+    number_parts,
+    number_pattern_expr,
+)
 from lispy.core.compiler.utils import *
 from lispy.core.errors import LispyCompileError
-from lispy.core.nodes import Constant, GluedHead, Paren
+from lispy.core.nodes import GluedHead, Paren
 from lispy.core.utils import *
 
 
@@ -312,53 +317,25 @@ def signed_number_p(sexp):
     return isinstance(sexp, Paren) and len(sexp) == 2 and str(sexp.op) in ("+", "-")
 
 
-def _complex_sign_index(text):
-    """Index of the sign joining the real and imaginary parts of ``1+2j``."""
-    if not text.lower().endswith("j"):
-        return None
-    for i in range(len(text) - 1, 0, -1):
-        if text[i] in "+-" and text[i - 1] not in "eE":
-            return i
-    return None
-
-
-def _number_expr(constant, wrap_real):
-    """A number literal as ast.parse builds it in a pattern: ``1+2j`` is a BinOp
-    of a real and an imaginary constant; ``wrap_real`` signs the real part."""
-    text = constant.value
-    i = _complex_sign_index(text)
-    if i is None:
-        return wrap_real(constant_compile(constant))
-    position_info = constant.position_info
-    real = constant_compile(Constant(text[:i], **position_info))
-    imag = constant_compile(Constant(text[i + 1 :], **position_info))
-    return ast.BinOp(
-        wrap_real(real), binop_dict[text[i]](), imag, **position_info
-    )
-
-
 def literal_pattern_expr(sexp):
     """The expression of a literal pattern (MatchValue value or mapping key).
 
-    Signed numbers are the one Paren a literal pattern may be: ``-1`` is
-    ``UnaryOp(USub, 1)`` on every version, ``+1`` (``UAdd``) only from 3.15.
+    A signed number is the one Paren a literal pattern may be; numbers go
+    through number_pattern_expr, which builds ast.parse's shapes.
     """
     if signed_number_p(sexp):
         [sign, number] = sexp.list
-        if not constant_p(number) or str(number) in ("True", "False", "None", "..."):
+        if (
+            not constant_p(number)
+            or str(number) in SPECIAL_CONSTANTS
+            or (number_parts(number.value) or [None] * 4)[2] is not None
+        ):
             raise LispyCompileError(
                 "only a number literal can be signed in a match pattern", sexp
             )
-        if str(sign) == "+":
-            require("match-unary-plus", sexp)
-        return _number_expr(
-            number,
-            lambda real: ast.UnaryOp(
-                unaryop_dict[str(sign)](), real, **sexp.position_info
-            ),
-        )
-    if constant_p(sexp) and str(sexp) not in ("True", "False", "None", "..."):
-        return _number_expr(sexp, lambda real: real)
+        return number_pattern_expr(str(sign) + number.value, sexp)
+    if constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
+        return number_pattern_expr(sexp.value, sexp)
     return expr_compile(sexp)
 
 

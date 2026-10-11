@@ -2,7 +2,7 @@ import re
 from collections import deque
 
 from lispy.core.compiler.features import require
-from lispy.core.compiler.literal import string_literal_value
+from lispy.core.compiler.literal import number_parts, string_literal_value
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
 from lispy.core.nodes import (
@@ -26,9 +26,9 @@ _FLOATS = [
     "\\d+(?:_\\d+)*\\.\\d*",
     "\\d*\\.\\d+(?:_\\d+)*",
 ]
-_SCIENTIFIC = [x + "e[\\-\\+]?\\d+(?:_\\d+)*" for x in _FLOATS + [_INT]]
+_SCIENTIFIC = [x + "[eE][\\-\\+]?\\d+(?:_\\d+)*" for x in _FLOATS + [_INT]]
 _NUMBER = "|".join(_SCIENTIFIC + _FLOATS + [_INT])
-_COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})j"
+_COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
 _TOKEN_PATTERNS = [
     ["\\^?\\*{0,2}[\\(\\{\\[]", "opening"],
     ["[\\)\\}\\]]", "closing"],
@@ -284,7 +284,7 @@ def token_parse(token, tktype, position_info):
         else Constant(token, **position_info)
         if token in special_literals
         else Constant(token, **position_info)
-        if tktype == "number" and (not token[0] in "+-")
+        if tktype == "number" and (token[0] not in "+-" or _signed_complex_p(token))
         else string_parse(token, tktype, position_info)
         if tktype in ["'''", '"""', '"']
         else Symbol(token, **position_info)
@@ -299,6 +299,13 @@ def token_parse(token, tktype, position_info):
         if token[0] in "+-" and (lambda rest: rest and (rest[0].isalnum() or rest[0] in "_."))(token.lstrip("+-"))
         else Symbol(token, **position_info)
     )
+
+
+def _signed_complex_p(token):
+    # -1+2j is one Constant, so the sign binds to the real part as in Python;
+    # a plain signed number stays (- 1), a unary op.
+    parts = number_parts(token)
+    return parts is not None and parts[2] is not None
 
 
 def annotation_token_parse(token, tktype, position_info):
