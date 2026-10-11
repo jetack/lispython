@@ -6,6 +6,7 @@ interpreter by monkeypatching it below a feature's minimum.
 """
 
 import ast
+import builtins
 import importlib
 import re
 import sys
@@ -722,3 +723,96 @@ class TestTypeAliasRefused:
         err = refusal(lpy)
         assert err.msg == ALIAS_MSG.format(".".join(map(str, sys.version_info[:3])))
         assert (err.lineno, err.offset) == (1, 1)
+
+
+# --------------------------------------------------------------------------
+# Lazy imports (PEP 810, 3.15)
+
+LAZY_MSG = "lazy import (lazy-import ...) needs Python 3.15+, running {}"
+LAZY_CASES = [
+    ("(lazy-import json)", "lazy import json"),
+    ("(lazy-import json as j os)", "lazy import json as j, os"),
+    ("(lazy-import __future__)", "lazy import __future__"),
+    ("(lazy-from json [dumps loads as l])", "lazy from json import dumps, loads as l"),
+    (
+        "(lazy-from json [dumps] os [path])",
+        "lazy from json import dumps\nlazy from os import path",
+    ),
+    ("(lazy-from .mod [x])", "lazy from .mod import x"),
+]
+
+
+class TestPlainImportsMatchPython:
+    """On 3.15 ast.parse marks plain imports is_lazy=0; earlier there is no field."""
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ("(import json)", "import json"),
+            ("(import json as j os)", "import json as j, os"),
+            ("(from json [dumps])", "from json import dumps"),
+            ("(from json *)", "from json import *"),
+        ],
+    )
+    def test_same_ast_as_python(self, lpy, py):
+        assert module_dump(lpy) == ast.dump(ast.parse(py))
+
+
+@needs_315
+class TestLazyImportSupported:
+    @pytest.mark.parametrize(["lpy", "py"], LAZY_CASES)
+    def test_same_ast_as_python(self, lpy, py):
+        assert module_dump(lpy) == ast.dump(ast.parse(py))
+
+    def test_loads_on_first_use(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+        loaded = []
+        monkeypatch.setattr(builtins, "LAZY_TEST_LOADED", loaded, raising=False)
+        (tmp_path / "lazy_test_mod.py").write_text(
+            "LAZY_TEST_LOADED.append(1)\nVALUE = 7\n"
+        )
+        monkeypatch.delitem(sys.modules, "lazy_test_mod", raising=False)
+        scope = run_module(
+            "(lazy-from lazy-test-mod [VALUE])\n"
+            "(= before (len LAZY_TEST_LOADED))\n"
+            "(= value VALUE)"
+        )
+        assert (scope["before"], scope["value"], loaded) == (0, 7, [1])
+
+
+class TestLazyImportRefused:
+    FORMS = ["(lazy-import json)", "(lazy-from json [dumps])"]
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_below_315(self, lpy):
+        err = refusal("(= a 1)\n  " + lpy)
+        assert err.msg == LAZY_MSG.format("3.11.13")
+        assert (err.lineno, err.offset) == (2, 3)
+
+    @before_315
+    @pytest.mark.parametrize("lpy", FORMS)
+    def test_refused_on_this_interpreter(self, lpy):
+        err = refusal(lpy)
+        assert err.msg == LAZY_MSG.format(".".join(map(str, sys.version_info[:3])))
+        assert (err.lineno, err.offset) == (1, 1)
+
+    @pytest.mark.parametrize(
+        ["lpy", "msg"],
+        [
+            ("(lazy-from json *)", "lazy from ... import * is not allowed"),
+            (
+                "(lazy-from os [path] json *)",
+                "lazy from ... import * is not allowed",
+            ),
+            (
+                "(lazy-from __future__ [annotations])",
+                "lazy from __future__ import is not allowed",
+            ),
+        ],
+    )
+    def test_static_restrictions_like_python(self, lpy, msg, monkeypatch):
+        monkeypatch.setattr(features, "running_version", lambda: (3, 15, 0))
+        err = refusal("\n " + lpy)
+        assert err.msg == msg
+        assert (err.lineno, err.offset) == (2, 2)

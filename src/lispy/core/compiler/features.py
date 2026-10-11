@@ -28,6 +28,7 @@ FEATURES = {
     "type-params": Feature((3, 12), "type parameters f[T]"),
     "type-param-default": Feature((3, 13), "type parameter defaults f[:T int]"),
     "type-alias": Feature((3, 12), "type alias statement (type ...)"),
+    "lazy-import": Feature((3, 15), "lazy import (lazy-import ...)"),
 }
 
 

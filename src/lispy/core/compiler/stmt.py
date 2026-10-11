@@ -88,15 +88,40 @@ def parse_names(names):
     return rst
 
 
-def import_compile(sexp):
+# 3.15 added Import/ImportFrom.is_lazy, and ast.parse sets it to 0 on every
+# plain import.  Match that where the field exists; never pass it elsewhere.
+_IMPORT_HAS_IS_LAZY = "is_lazy" in ast.Import._fields
+
+
+def lazy_kwargs(sexp, lazy):
+    if lazy:
+        require("lazy-import", sexp)
+        return {"is_lazy": 1}
+    return {"is_lazy": 0} if _IMPORT_HAS_IS_LAZY else {}
+
+
+def import_compile(sexp, lazy=False):
     [_, *names] = sexp.list
-    return ast.Import(names=parse_names(names), **sexp.position_info)
+    is_lazy = lazy_kwargs(sexp, lazy)
+    return ast.Import(names=parse_names(names), **is_lazy, **sexp.position_info)
 
 
-def importfrom_compile(sexp):
+def importfrom_compile(sexp, lazy=False):
     [_, *args] = sexp.list
+    is_lazy = lazy_kwargs(sexp, lazy)
     modules = args[::2]
     namess = args[1::2]
+    if lazy:
+        # CPython's own static checks on `lazy from`, with its messages.
+        for [module, names] in zip(modules, namess):
+            if names == "*":
+                raise LispyCompileError(
+                    "lazy from ... import * is not allowed", sexp
+                )
+            if str(module) == "__future__":
+                raise LispyCompileError(
+                    "lazy from __future__ import is not allowed", sexp
+                )
 
     def helper(module):
         i = 0
@@ -111,6 +136,7 @@ def importfrom_compile(sexp):
             module=module,
             names=parse_names(names),
             level=level,
+            **is_lazy,
             **merge_position_infos(module_pos_info, names.position_info)
         )
         for [[module, level, module_pos_info], names] in zip(module_level, namess)
@@ -607,6 +633,10 @@ def stmt_compile(sexp, decorator_list=None):
         if str(sexp.op) == "import"
         else importfrom_compile(sexp)
         if str(sexp.op) == "from"
+        else import_compile(sexp, lazy=True)
+        if str(sexp.op) == "lazy-import"
+        else importfrom_compile(sexp, lazy=True)
+        if str(sexp.op) == "lazy-from"
         else if_stmt_compile(sexp)
         if if_p(sexp)
         else while_compile(sexp)
