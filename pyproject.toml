@@ -46,7 +46,11 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 # AST constructor misuse (unknown keywords, missing fields) warns on 3.13/3.14
 # and is a TypeError from 3.15: fail the suite on the warning.
-filterwarnings = ["error::DeprecationWarning"]
+filterwarnings = [
+    "error::DeprecationWarning",
+    # pygls (third-party) calls asyncio.iscoroutinefunction, deprecated in 3.14.
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 88

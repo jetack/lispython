@@ -6,12 +6,21 @@ import os.path as osp
 import runpy
 import sys
 
+from lispy.core.errors import LispyCompileError, attach_source
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
 
 
 def _is_lpy_file(filename):
     return osp.isfile(filename) and osp.splitext(filename)[1] == ".lpy"
+
+
+def _lpy_module_ast(source, path):
+    """Parse and compile .lpy source; a refused form names this file and line."""
+    try:
+        return ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
+    except LispyCompileError as err:
+        raise attach_source(err, os.fsdecode(path), source)
 
 
 # # importlib.machinery.SourceFileLoader.source_to_code injection
@@ -24,9 +33,7 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
     # CPython releases (3.15 added a positional ``fullname``), and only the
     # original implementation knows what each release accepts.
     if _is_lpy_file(path):
-        source = data.decode("utf-8")
-        parsed = parse(source)
-        data = ast.Module(macroexpand_then_compile(parsed), type_ignores=[])
+        data = _lpy_module_ast(data.decode("utf-8"), path)
 
     return _org_source_to_code(self, data, path, *args, **kwargs)
 
@@ -57,9 +64,7 @@ def _lpy_get_code_from_file(*args):
         if _is_lpy_file(fname):
             with open(decoded_path, "rb") as f:
                 src = f.read().decode("utf-8")
-            parsed = parse(src)
-            ast_module = ast.Module(macroexpand_then_compile(parsed), type_ignores=[])
-            code = compile(ast_module, fname, "exec")
+            code = compile(_lpy_module_ast(src, fname), fname, "exec")
         else:
             code = _org_get_code_from_file(*args)
             if not _PY312_PLUS:

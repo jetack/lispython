@@ -24,6 +24,12 @@
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
+(from lispy.core.errors [LispyCompileError attach-source format-compile-error])
+
+(def report-compile-error [err :filename None :source None]
+  "Print a LispyCompileError compiler-style (path:line:col, source, caret) to stderr."
+  (print (format-compile-error (attach-source err filename source))
+         :file sys.stderr))
 
 (def has-init-file [dir-path]
   (return (or (osp.exists (osp.join dir-path "__init__.py"))
@@ -139,15 +145,26 @@
 
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n")))
+  (try
+    (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n"))
+    (except [LispyCompileError as e]
+      (raise (attach-source e file-path src)))))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
   (= [args more-args] (argparser.parse-known-args))
-  (if (and (>= (len more-args) 2) (== (sub more-args 0) "-c"))
-      (print (l2py-s (sub more-args 1) :include-meta args.include_meta :no-lispy args.no_lispy))
-      (do (= file (osp.join (os.getcwd) (sub more-args 0)))
-          (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy)))))
+  (try
+    (if (and (>= (len more-args) 2) (== (sub more-args 0) "-c"))
+        (do (= src (sub more-args 1))
+            (try
+              (print (l2py-s src :include-meta args.include_meta :no-lispy args.no_lispy))
+              (except [LispyCompileError as e]
+                (raise (attach-source e "<string>" src)))))
+        (do (= file (osp.join (os.getcwd) (sub more-args 0)))
+            (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy))))
+    (except [LispyCompileError as e]
+      (report-compile-error e)
+      (sys.exit 1))))
 
 (def _make-open-handler [o c]
   (def handler [event]
@@ -376,12 +393,14 @@
       (except [KeyboardInterrupt]
         (print "\nKeyboard Interrupt")
         (continue))
+      (except [LispyCompileError as e]
+        (report-compile-error e "<repl>" src))
       (except [Exception as e]
         (print "An error occurred:\n====================================")
         (traceback.print_exc)
         (print "====================================")))))
 
-(def nrepl-eval [src scope]
+(def nrepl-eval [src scope :filename "<nrepl>"]
   "Evaluate LisPython source, capturing stdout/stderr and return value."
   (= result {"value" None "stdout" "" "error" None})
   (= stdout-capture (io.StringIO))
@@ -405,6 +424,9 @@
             (= last-val None))))
     (if (is-not last-val None)
         (= (sub result "value") (repr last-val)))
+    (except [LispyCompileError as e]
+      (= (sub result "error")
+         (format-compile-error (attach-source e filename src))))
     (except [Exception as e]
       (= (sub result "error") (.rstrip (traceback.format-exc))))
     (finally
@@ -423,7 +445,7 @@
       (sys.path.insert 0 script-dir))
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (nrepl-eval src scope)))
+  (return (nrepl-eval src scope :filename file-path)))
 
 (def nrepl-macroexpand [src scope]
   "Macroexpand LisPython source and return the expanded s-expression."
@@ -695,6 +717,13 @@
       (srv.close))))
 
 (def run []
+  (try
+    (_run)
+    (except [LispyCompileError as e]
+      (report-compile-error e)
+      (sys.exit 1))))
+
+(def _run []
   (cond (< (len sys.argv) 2)
         (repl)
 
@@ -706,7 +735,10 @@
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)
             (= src (sys.argv.pop 1))
-            (eval-and-print src))
+            (try
+              (eval-and-print src)
+              (except [LispyCompileError as e]
+                (raise (attach-source e "<string>" src)))))
 
         (== (sub sys.argv 1) "--nrepl")
         (do (sys.argv.pop 1)
