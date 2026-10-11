@@ -7,6 +7,8 @@ understands Python syntax errors (tracebacks, IDEs, the LSP's
 into text.
 """
 
+import contextlib
+
 
 class LispyCompileError(SyntaxError):
     """A lispython form the compiler refuses, positioned at its s-expression.
@@ -61,11 +63,39 @@ def attach_source(err, filename=None, source=None):
     """
     if err.filename is None and filename is not None:
         err.filename = filename
-    if err.text is None and source is not None and err.lineno:
+    # The source line only belongs to an error in this same file (a module
+    # imported while expanding macros may raise its own).
+    if (
+        err.text is None
+        and source is not None
+        and err.lineno
+        and err.filename == filename
+    ):
         lines = source.splitlines()
         if 0 < err.lineno <= len(lines):
             err.text = lines[err.lineno - 1]
     return err
+
+
+@contextlib.contextmanager
+def compile_errors(filename, source):
+    """Report what goes wrong compiling ``source`` as a LispyCompileError.
+
+    The one place every entry point (import hooks, lpy -c, REPL, nREPL, l2py)
+    turns compile failures into lispython errors: a LispyCompileError gets
+    ``filename`` and its source line, and a SyntaxError CPython raises while
+    compiling the AST lispython built (e.g. a lazy import inside a def) is
+    converted, keeping its positions, which come from the lispython source.
+    Wrap parsing and compiling only, never running the code: a SyntaxError
+    the program raises at run time is not a lispython compile error.
+    """
+    try:
+        yield
+    except LispyCompileError as err:
+        raise attach_source(err, filename, source)
+    except SyntaxError as err:
+        converted = LispyCompileError.from_syntax_error(err)
+        raise attach_source(converted, filename, source) from err
 
 
 def format_compile_error(err):

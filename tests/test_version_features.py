@@ -15,7 +15,7 @@ import pytest
 
 import lispy.tools as tools
 from lispy.core.compiler import features
-from lispy.core.errors import LispyCompileError, format_compile_error
+from lispy.core.errors import LispyCompileError, compile_errors, format_compile_error
 from lispy.tools import macroexpand_then_compile, parse
 
 OLD = (3, 11, 13)
@@ -882,3 +882,70 @@ class TestCompilerSyntaxErrors:
             "  (lazy-import json))\n  ^\n"
         )
         assert "Traceback" not in out + err
+
+    def test_lpy_string(self, monkeypatch, capsys):
+        code, out, err = run_cli(
+            tools.run, ["lpy", "-c", RETURN_SRC], monkeypatch, capsys
+        )
+        assert code == 1
+        assert err == (
+            "<string>:2:3: error: 'return' outside function\n  (return 1)\n  ^\n"
+        )
+        assert "Traceback" not in out + err
+
+    @needs_315
+    def test_lpy_string_lazy_import_inside_def(self, monkeypatch, capsys):
+        src = "(def f [] (lazy-import os))"
+        code, out, err = run_cli(tools.run, ["lpy", "-c", src], monkeypatch, capsys)
+        assert code == 1
+        assert err == (
+            "<string>:1:11: error: lazy import not allowed inside functions\n"
+            f"{src}\n          ^\n"
+        )
+
+    def test_repl_reports_and_continues(self, monkeypatch, capsys):
+        inputs = iter([RETURN_SRC, "(print (+ 40 2))"])
+
+        class Session:
+            def prompt(self, _):
+                try:
+                    return next(inputs)
+                except StopIteration:
+                    raise EOFError from None
+
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        monkeypatch.setattr(tools, "make_repl_session", Session)
+        tools.repl()
+        out, err = capsys.readouterr()
+        assert err == (
+            "<repl>:2:3: error: 'return' outside function\n  (return 1)\n  ^\n"
+        )
+        assert "42" in out and "Traceback" not in out + err
+
+    def test_nrepl_eval(self):
+        result = tools.nrepl_eval(RETURN_SRC, {"__macro_namespace": {}})
+        assert result["error"] == (
+            "<nrepl>:2:3: error: 'return' outside function\n  (return 1)\n  ^"
+        )
+
+    def test_nothing_runs_before_a_compile_error(self):
+        result = tools.nrepl_eval('(print "ran")\n' + RETURN_SRC, {})
+        assert "'return' outside function" in result["error"]
+        assert result["stdout"] == ""
+
+    def test_runtime_syntax_error_is_the_programs_own(self, monkeypatch):
+        src = '(compile "x = (" "<user>" "exec")'
+        monkeypatch.setattr(sys, "argv", ["lpy", "-c", src])
+        with pytest.raises(SyntaxError) as info:
+            tools.run()
+        assert type(info.value) is SyntaxError
+        assert info.value.filename == "<user>"
+
+    def test_source_line_only_for_the_same_file(self):
+        src = (
+            '(defmacro m [] (raise (SyntaxError "boom" (, "other.lpy" 1 1 None))))\n(m)'
+        )
+        with pytest.raises(LispyCompileError) as info:
+            with compile_errors("<mine>", src):
+                compile_src(src)
+        assert (info.value.filename, info.value.text) == ("other.lpy", None)

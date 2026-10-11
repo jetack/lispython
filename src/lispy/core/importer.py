@@ -6,7 +6,7 @@ import os.path as osp
 import runpy
 import sys
 
-from lispy.core.errors import LispyCompileError, attach_source
+from lispy.core.errors import compile_errors
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
 
@@ -22,14 +22,9 @@ def _lpy_code(source, path, compile_module):
     lispython refuses, and the SyntaxErrors CPython's compiler raises on the
     AST (e.g. a lazy import inside a def), whose positions are already ours.
     """
-    try:
+    with compile_errors(os.fsdecode(path), source):
         tree = ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
         return compile_module(tree)
-    except LispyCompileError as err:
-        raise attach_source(err, os.fsdecode(path), source)
-    except SyntaxError as err:
-        converted = LispyCompileError.from_syntax_error(err)
-        raise attach_source(converted, os.fsdecode(path), source) from err
 
 
 # # importlib.machinery.SourceFileLoader.source_to_code injection
