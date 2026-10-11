@@ -304,16 +304,21 @@ def await_compile(sexp):
 def interpolated_values(sexp, field_compile):
     """Values of an f/t-string node: literals alternate with fields (FStrExpr).
 
-    Empty literals are dropped, as in the AST CPython builds.
+    A ``{expr=}`` field echoes ``expr_text + debug`` at the end of the literal
+    before it, built here so a field expanded from a quasiquote echoes its
+    expanded text.  Empty literals are dropped, as in the AST CPython builds.
     """
+    literals = [string_compile(v) for v in sexp.operands[0::2]]
+    fields = sexp.operands[1::2]
+    for [k, field] in enumerate(fields):
+        if getattr(field, "debug", None) is not None:
+            literals[k].value += field.expr_text + field.debug
     values = []
-    for [i, v] in enumerate(sexp.operands):
-        if i % 2:
-            values.append(field_compile(v))
-        else:
-            literal = string_compile(v)
-            if literal.value:
-                values.append(literal)
+    for [k, literal] in enumerate(literals):
+        if literal.value:
+            values.append(literal)
+        if k < len(fields):
+            values.append(field_compile(fields[k]))
     return values
 
 

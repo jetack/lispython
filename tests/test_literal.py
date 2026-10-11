@@ -325,3 +325,38 @@ class TestMalformedLiterals:
             lpy.count("\n") + 2,
             col,
         )
+
+
+class TestUnquotedFields:
+    """An unquoted f-string field holds the expanded expression, and its text is
+    what the user would have written after expansion."""
+
+    def run(self, src):
+        scope = {}
+        module = ast.Module(compile_lpy(src, scope), [])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        return scope
+
+    def test_literal_argument_as_the_whole_field(self):
+        scope = self.run(
+            '(defmacro show-val [x] (return `f"<{~x}>"))\n(= s (show-val 41))'
+        )
+        assert scope["s"] == "<41>"
+
+    @pytest.mark.parametrize(
+        ["field", "expected"],
+        [
+            ("{~x=}", "(+ 40 1)=41"),
+            ("{ ~x = }", " (+ 40 1) = 41"),
+            ("{~x=!s:>4}", "(+ 40 1)=  41"),
+        ],
+    )
+    def test_self_documenting_echo_uses_the_expanded_text(self, field, expected):
+        scope = self.run(
+            f'(defmacro dbg [x] (return `f"{field}"))\n(= s (dbg (+ 40 1)))'
+        )
+        assert scope["s"] == expected
+
+    def test_written_field_keeps_its_text(self):
+        scope = self.run('(= y 2)\n(defmacro dbg [] (return `f"{y=}"))\n(= s (dbg))')
+        assert scope["s"] == "y=2"

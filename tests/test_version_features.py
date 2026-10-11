@@ -1031,3 +1031,17 @@ class TestTypeParamSpans:
         [fn] = compile_src("(def f[:T ^int bool :*Ts *(sub tuple int)] [] (pass))")
         spans = [(p.col_offset, p.end_col_offset) for p in fn.type_params]
         assert spans == [(8, 19), (21, 41)]
+
+
+@needs_314
+class TestUnquotedInterpolation:
+    def test_expression_is_the_expanded_text(self):
+        scope = run_module(
+            "(= y 5)\n"
+            '(defmacro tshow [x] (return `t"{ ~x !r}"))\n'
+            "(= tpl (tshow (* 2 y)))"
+        )
+        [interpolation] = scope["tpl"].interpolations
+        assert interpolation.value == 10
+        python = eval('t"{ x !r}"', {"x": 0}).interpolations[0].expression
+        assert interpolation.expression == python.replace("x", "(* 2 y)")

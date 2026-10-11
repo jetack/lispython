@@ -43,6 +43,19 @@ class Node:
         return str(self) == other
 
 
+def contains_unquote(node):
+    """Whether an Unquote (or ~@) occurs anywhere in ``node``."""
+    if isinstance(node, Unquote):
+        return True
+    if isinstance(node, Node):
+        return any(
+            contains_unquote(v) for v in vars(node).values() if v is not node
+        )
+    if isinstance(node, list):
+        return any(contains_unquote(v) for v in node)
+    return False
+
+
 def data_to_generator_expression(data):
     if isinstance(data, bool) or data is None:
         return Constant(str(data))
@@ -251,9 +264,22 @@ class Wrapper(Node):
 
 
 class FStrExpr(Wrapper):
-    def __init__(self, value, **kwargs):
+    """A replacement field of an f/t-string.
+
+    ``expr_text`` is the expression's source text (Interpolation.str, and
+    the ``{expr=}`` echo, which is ``expr_text + debug``).  Built from a
+    quasiquote with an unquote inside, the text is that of the expanded
+    expression, padded as written: what the user would have typed.
+    """
+
+    def __init__(self, value, expr_text=None, expr_padding=("", ""), **kwargs):
         super().__init__(**kwargs)
-        self.value = value
+        self.value = data_to_generator_expression(value)
+        self.expr_text = (
+            expr_padding[0] + str(self.value) + expr_padding[1]
+            if expr_text is None
+            else expr_text
+        )
         self.classname = "FStrExpr"
 
     def __repr__(self):
@@ -267,6 +293,18 @@ class FStrExpr(Wrapper):
         f/t-string survives a quasiquote."""
         position_info = self.position_info
         format_spec = getattr(self, "format_spec", None)
+        debug = getattr(self, "debug", None)
+        text = self.expr_text
+        if in_quasi and contains_unquote(self.value):
+            # The text is only known once the unquote is expanded.
+            lead = text[: len(text) - len(text.lstrip())]
+            trail = text[len(text.rstrip()) :]
+            text_args = [
+                Keyword(Symbol("expr-padding")),
+                Paren(Symbol(","), String(repr(lead)), String(repr(trail))),
+            ]
+        else:
+            text_args = [Keyword(Symbol("expr-text")), String(repr(text))]
         return Paren(
             Symbol(self.classname, **position_info),
             self.value.generator_expression(in_quasi),
@@ -276,8 +314,9 @@ class FStrExpr(Wrapper):
             Constant("None")
             if format_spec is None
             else format_spec.generator_expression(in_quasi),
-            Keyword(Symbol("expr-text")),
-            String(repr(getattr(self, "expr_text", ""))),
+            Keyword(Symbol("debug")),
+            Constant("None") if debug is None else String(repr(debug)),
+            *text_args,
             **position_info
         )
 

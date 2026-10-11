@@ -720,6 +720,7 @@ def field_parse(text, field, kind, raw, locate):
             conversion=conversion_dict.get(conversion, -1),
             format_spec=format_spec,
             expr_text=expr_text,
+            debug=debug_text[len(expr_text) :] if debug_text else None,
             **locate(open_brace, after),
         ),
         debug_text,
@@ -752,7 +753,6 @@ def interpolated_node(symbol, kind, text, pieces, raw, locate, position_info):
             if not literals[k][0]:
                 literals[k][1] = echo_start
             literals[k][2] = echo_start + len(debug_text)
-            literals[k][0] += debug_text
         fields.append(fstr_expr)
     processed = []
     for [k, [value, start, end]] in enumerate(literals):
