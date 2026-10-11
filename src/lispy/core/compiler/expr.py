@@ -212,7 +212,8 @@ def gen_exp_compile(sexp):
 
 def def_args_parse(sexp):
     q = deque(sexp.list)
-    rst = ast.arguments(posonlyargs=[], **sexp.position_info)
+    # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
+    rst = ast.arguments(posonlyargs=[])
     args = []
     defaults = []
     kwonlyargs = []

@@ -19,13 +19,16 @@ importlib.machinery.SOURCE_SUFFIXES.insert(0, ".lpy")
 _org_source_to_code = importlib.machinery.SourceFileLoader.source_to_code
 
 
-def _lpy_source_to_code(self, data, path, *, _optimize=-1):
+def _lpy_source_to_code(self, data, path, *args, **kwargs):
+    # Forward everything after (data, path) untouched: the signature grows across
+    # CPython releases (3.15 added a positional ``fullname``), and only the
+    # original implementation knows what each release accepts.
     if _is_lpy_file(path):
         source = data.decode("utf-8")
         parsed = parse(source)
         data = ast.Module(macroexpand_then_compile(parsed), type_ignores=[])
 
-    return _org_source_to_code(self, data, path, _optimize=_optimize)
+    return _org_source_to_code(self, data, path, *args, **kwargs)
 
 
 importlib.machinery.SourceFileLoader.source_to_code = _lpy_source_to_code  # type: ignore
