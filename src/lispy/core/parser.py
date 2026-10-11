@@ -6,6 +6,8 @@ from lispy.core.compiler.literal import number_parts, string_literal_value
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
 from lispy.core.nodes import (
+    Brace,
+    Bracket,
     Expression,
     FStrExpr,
     GluedHead,
@@ -190,6 +192,42 @@ def _unquoted_symbol_p(node):
     )
 
 
+_OPENERS = {Paren: "(", Bracket: "[", Brace: "{"}
+_CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def _check_closing(stack, closing, position_info):
+    """CPython's errors for a closing bracket with nothing (or the wrong
+    kind) open, instead of popping the wrong node or an empty stack."""
+    top = stack[-1] if stack else None
+    if type(top) not in _OPENERS:
+        raise LispyCompileError(
+            f"unmatched '{closing}'", Symbol(closing, **position_info)
+        )
+    if _OPENERS[type(top)] != _CLOSERS[closing]:
+        raise LispyCompileError(
+            f"closing parenthesis '{closing}' does not match opening "
+            f"parenthesis '{_OPENERS[type(top)]}'",
+            Symbol(closing, **position_info),
+        )
+
+
+def _check_all_closed(stack):
+    unclosed = [node for node in stack if type(node) in _OPENERS]
+    if unclosed:
+        opener = unclosed[-1]
+        position_info = {
+            "lineno": opener.lineno,
+            "col_offset": opener.col_offset,
+            "end_lineno": opener.lineno,
+            "end_col_offset": opener.col_offset + 1,
+        }
+        raise LispyCompileError(
+            f"'{_OPENERS[type(opener)]}' was never closed",
+            Symbol(_OPENERS[type(opener)], **position_info),
+        )
+
+
 def parse(src):
     tokens = tokenize(src)
     stack = []
@@ -254,6 +292,7 @@ def parse(src):
             )
         else:
             if tktype == "closing":
+                _check_closing(stack, t, position_info)
                 e = stack.pop()
                 e.update_dict("end_lineno", end_lineno)
                 e.update_dict("end_col_offset", end_col_offset)
@@ -271,6 +310,7 @@ def parse(src):
                 popped.update_dict("end_col_offset", end_col_offset)
                 e = popped
             (stack[-1] if stack else rst).append(e)
+    _check_all_closed(stack)
     return rst
 
 
@@ -551,6 +591,16 @@ def _relocate(node, locate, origin):
             _relocate(value, locate, origin)
 
 
+def _relocate_error(err, start):
+    """Move an error raised parsing a field's text to where that text sits."""
+    for [line_attr, col_attr] in [["lineno", "offset"], ["end_lineno", "end_offset"]]:
+        line = getattr(err, line_attr)
+        if line:
+            if line == 1 and getattr(err, col_attr):
+                setattr(err, col_attr, getattr(err, col_attr) + start["col_offset"])
+            setattr(err, line_attr, line + start["lineno"] - 1)
+
+
 def field_parse(text, field, kind, raw, locate):
     """Parse one replacement field into ``[FStrExpr, debug_text]``.
 
@@ -611,7 +661,11 @@ def field_parse(text, field, kind, raw, locate):
         delimiter = "="
         if conversion is None and spec_start is None:
             conversion = "r"
-    forms = parse(expr_text) if expr_text.strip() else []
+    try:
+        forms = parse(expr_text) if expr_text.strip() else []
+    except LispyCompileError as err:
+        _relocate_error(err, locate(start))
+        raise
     if len(forms) != 1:
         raise _interpolation_error(
             kind,
