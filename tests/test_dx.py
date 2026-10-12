@@ -173,6 +173,13 @@ def test_reindexing_a_file_replaces_its_symbols(workspace, tmp_path):
     assert "load-config" not in server.WORKSPACE_INDEX
 
 
+def test_a_deleted_file_leaves_no_symbols(workspace, tmp_path):
+    (tmp_path / "config.lpy").unlink()
+    server.index_file(workspace)
+    assert symbols_matching("") == {}
+    assert server.WORKSPACE_INDEX == {}
+
+
 SCOPES_FILE = """\
 (def handler []
   (= handler-local 1)
