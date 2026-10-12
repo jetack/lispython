@@ -498,6 +498,38 @@
     (except [Exception]
       (return None))))
 
+;; LisPython syntax offered by nREPL completion and reported as "keyword"
+;; (unless a macro of the same name is loaded).  _SPECIAL-FORMS is a
+;; different set: the forms the REPL indents as bodies.
+(= _COMPLETION-SYNTAX
+   [;; Definitions
+    "def" "defn" "defmacro" "async-def"
+    ;; Looping
+    "for" "async-for" "while"
+    ;; Flow
+    "return" "if" "ife" "when" "unless"
+    "cond" "conde" "else"
+    "break" "continue" "pass"
+    "match" "case" "do" "comment"
+    ;; Threading
+    "->" "->>" "as->"
+    ;; Functional
+    "fn" "lambda" "await"
+    "yield" "yield-from"
+    ;; Context
+    "with" "async-with" "deco"
+    ;; Error handling
+    "try" "except" "except*" "finally" "raise"
+    ;; Data
+    "del" "sub"
+    ;; Import / macro
+    "import" "from" "require"
+    "global" "nonlocal" "assert"
+    ;; Class
+    "class"
+    ;; Misc
+    "gensym" "pprint"])
+
 (def _completion-kind [obj]
   "The nREPL completion kind of a value: class, function or variable."
   (cond (isinstance obj type) (return "class")
@@ -557,33 +589,7 @@
           (if (.startswith k prefix)
               (matches.append k)))
         ;; LisPython special forms and syntax
-        (for k in [;; Definitions
-                   "def" "defn" "defmacro" "async-def"
-                   ;; Looping
-                   "for" "async-for" "while"
-                   ;; Flow
-                   "return" "if" "ife" "when" "unless"
-                   "cond" "conde" "else"
-                   "break" "continue" "pass"
-                   "match" "case" "do" "comment"
-                   ;; Threading
-                   "->" "->>" "as->"
-                   ;; Functional
-                   "fn" "lambda" "await"
-                   "yield" "yield-from"
-                   ;; Context
-                   "with" "async-with" "deco"
-                   ;; Error handling
-                   "try" "except" "except*" "finally" "raise"
-                   ;; Data
-                   "del" "sub"
-                   ;; Import / macro
-                   "import" "from" "require"
-                   "global" "nonlocal" "assert"
-                   ;; Class
-                   "class"
-                   ;; Misc
-                   "gensym" "pprint"]
+        (for k in _COMPLETION-SYNTAX
           (if (.startswith k prefix)
               (matches.append k)))
         ;; Build kinds dict
@@ -595,9 +601,7 @@
           (= mangled (_mangle name))
           (cond (in name macros)
                 (= (sub kinds name) "macro")
-                (in name _SPECIAL-FORMS)
-                (= (sub kinds name) "keyword")
-                (in name keyword.kwlist)
+                (or (in name _COMPLETION-SYNTAX) (in name keyword.kwlist))
                 (= (sub kinds name) "keyword")
                 (in mangled builtins-dict)
                 (= (sub kinds name) (_completion-kind (sub builtins-dict mangled)))

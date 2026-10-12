@@ -202,6 +202,10 @@ def complete(prefix, scope):
         ["con", "cond", "macro"],
         ["de", "def", "keyword"],
         ["whi", "while", "keyword"],
+        ["if", "ife", "keyword"],
+        ["su", "sub", "keyword"],
+        ["yield", "yield-from", "keyword"],
+        ["req", "require", "keyword"],
         ["my", "my-var", "variable"],
         ["my", "my-fn", "function"],
         ["My", "MyClass", "class"],
@@ -212,6 +216,14 @@ def complete(prefix, scope):
 )
 def test_completion_kinds(scope, prefix, name, kind):
     assert complete(prefix, scope)[name] == kind
+
+
+@pytest.mark.parametrize(
+    ["prefix", "name"],
+    [["->", "->"], ["->", "->>"], ["as", "as->"], ["gen", "gensym"]],
+)
+def test_syntax_without_its_macros_is_a_keyword(prefix, name):
+    assert complete(prefix, {"__macro_namespace": {}})[name] == "keyword"
 
 
 class Gadget:
