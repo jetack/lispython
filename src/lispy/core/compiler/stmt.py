@@ -580,8 +580,11 @@ def return_p(sexp):
 
 
 def return_compile(sexp):
-    [op, value] = sexp.list if len(sexp) > 1 else [None, None]
-    return ast.Return(value=expr_compile(value) if value else None, **sexp.position_info)
+    # An empty [] () {} node is falsy (Expression.__len__): test presence by length.
+    if len(sexp) > 2:
+        raise LispyCompileError("(return ...) takes at most one value", sexp)
+    value = expr_compile(sexp[1]) if len(sexp) > 1 else None
+    return ast.Return(value=value, **sexp.position_info)
 
 
 def global_compile(sexp):

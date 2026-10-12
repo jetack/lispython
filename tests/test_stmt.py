@@ -243,3 +243,34 @@ class TestImportNames:
             stmt_to_dump(lpy)
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == (1, lpy.index(at) + 1)
+
+
+class TestEmptyLiteralOperands:
+    """An empty [] () {} is an Expression of length 0, hence falsy: every form
+    with an optional operand must test presence by length, not truthiness."""
+
+    @pytest.mark.parametrize(
+        ("lispy", "python"),
+        [
+            ("(return [])", "return []"),
+            ("(return {})", "return {}"),
+            ("(return)", "return"),
+            ("(return (list))", "return list()"),
+            ("(yield [])", "yield []"),
+            ("(yield {})", "yield {}"),
+            ("(yield)", "yield"),
+            ("(raise [])", "raise []"),
+            ("(assert x [])", "assert x, []"),
+            ("(assert x {})", "assert x, {}"),
+            ("(= x [])", "x = []"),
+            ("(def f [:a [] *args :b {}] ...)", "def f(a=[], *args, b={}): ..."),
+            ("(def f [:a []] (return []))", "def f(a=[]):\n    return []"),
+            ("(lambda [:a []] [])", "lambda a=[]: []"),
+        ],
+    )
+    def test_matches_ast_parse(self, lispy, python):
+        assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))
+
+    def test_return_takes_one_operand(self):
+        with pytest.raises(LispyCompileError):
+            stmt_to_dump("(return [] [])")
