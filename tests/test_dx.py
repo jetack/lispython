@@ -293,11 +293,11 @@ def test_definition_publishes_symbols_only_for_workspace_files(
     folder = SimpleNamespace(uri=ws.as_uri())
 
     def go_to(module, name):
-        # A name brought in by (require ...) is resolved through the module
-        # file, which definition indexes on first use.
+        # A name brought in by (require module *) is resolved through the
+        # module file, which definition indexes on first use.
         main = ws / "main.lpy"
         document = SimpleNamespace(
-            source=f"(require {module})\n({name})\n", uri=main.as_uri()
+            source=f"(require {module} *)\n({name})\n", uri=main.as_uri()
         )
         ls = SimpleNamespace(
             workspace=SimpleNamespace(

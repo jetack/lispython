@@ -142,3 +142,77 @@ def test_type_call_is_not_a_definition():
     ls = ls_with(CALLS)
     assert server.document_symbol(ls, position(0, 0)) == []
     assert server.collect_definitions(parse(CALLS), URI) == {}
+
+
+class TestRequireSelection:
+    """go-to-definition and hover follow the compiler's (require ...) rule:
+    absent list = every macro as module.name, * = every macro, [a b] = those,
+    [] = none."""
+
+    MACROS = "(defmacro twice [x] x)\n(defmacro thrice [x] x)\n"
+
+    @staticmethod
+    def _find(source, name):
+        return server.find_import_for_name(parse(source), name)
+
+    @pytest.fixture
+    def workspace(self, tmp_path, monkeypatch):
+        (tmp_path / "macmod.lpy").write_text(self.MACROS)
+        monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
+        monkeypatch.setattr(server, "FILE_TREES", {})
+        return {"macmod": SimpleNamespace(uri=tmp_path.as_uri())}
+
+    @staticmethod
+    def _definition(workspace, source, line, character):
+        document = SimpleNamespace(source=source, uri=URI)
+        ls = SimpleNamespace(
+            workspace=SimpleNamespace(
+                get_text_document=lambda uri: document, folders=workspace
+            )
+        )
+        return server.definition(ls, position(line, character))
+
+    def test_absent_list_binds_only_the_qualified_names(self):
+        source = "(require macmod)\n(macmod.twice 1)"
+        assert self._find(source, "macmod.twice") is not None
+        assert self._find(source, "twice") is None
+
+    def test_empty_list_binds_nothing(self):
+        source = "(require macmod [])\n(twice 1)"
+        assert self._find(source, "twice") is None
+        assert self._find(source, "macmod.twice") is None
+
+    def test_named_list_binds_those_names(self):
+        source = "(require macmod [twice])\n(twice 1)"
+        assert self._find(source, "twice") is not None
+        assert self._find(source, "thrice") is None
+
+    def test_star_binds_every_name(self):
+        assert self._find("(require macmod *)\n(thrice 1)", "thrice") is not None
+
+    def test_unrelated_name_is_not_bound_by_a_require(self):
+        # Previously any require node answered for any name.
+        assert self._find("(require macmod [twice])", "print") is None
+
+    def test_definition_through_a_named_require(self, workspace):
+        [loc] = self._definition(workspace, "(require macmod [twice])\n(twice 1)", 1, 2)
+        assert loc.uri.endswith("macmod.lpy")
+
+    def test_definition_through_a_bare_require(self, workspace):
+        [loc] = self._definition(workspace, "(require macmod)\n(macmod.twice 1)", 1, 4)
+        assert loc.uri.endswith("macmod.lpy")
+
+    def test_definition_through_an_empty_list_finds_nothing(self, workspace):
+        got = self._definition(workspace, "(require macmod [])\n(twice 1)", 1, 2)
+        assert not got
+
+    def test_hover_text_covers_bare_and_empty_forms(self):
+        text = server.SPECIAL_FORM_DOCS["require"]
+        assert "(require module)" in text
+        assert "[]" in text and "none" in text
+
+    @pytest.mark.parametrize(
+        "form", ["(require m foo)", "(require m [a] b)", '(require m "ab")', "(require m :as x)"]
+    )
+    def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
+        assert self._find(form + "\n(print 1)", "print") is None

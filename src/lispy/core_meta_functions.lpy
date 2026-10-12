@@ -17,11 +17,25 @@
                   ~newname)
                (del ~newname))))
 
+(= REQUIRE-QUALIFIED "qualified")
+(= REQUIRE-ALL "all")
+(= REQUIRE-NAMED "named")
+
+(def require-selection [optional]
+  "Which macros a (require module ...) form registers, from the forms after
+   the module name, as (kind, names).  Absent: every macro, qualified by the
+   module name.  *: every macro, unqualified.  A list: exactly those names,
+   so an empty [] registers none.  The compiler and the LSP both read this."
+  (if (not optional)
+      (return (, REQUIRE-QUALIFIED None)))
+  (= [macro-names] optional)
+  (if (== (str macro-names) "*")
+      (return (, REQUIRE-ALL None)))
+  (return (, REQUIRE-NAMED [(str x) for x in macro-names])))
+
 (def require-transform [sexp]
   (= [op module-name *optional] sexp.list)
-  (if optional
-      (= [macro-names] optional)
-      (= macro-names None))
+  (= [kind names] (require-selection optional))
   (= module-name-str (.replace (str module-name) "-" "_"))
   (= is-relative (.startswith module-name-str "."))
   (= import-call (ife is-relative
@@ -33,18 +47,16 @@
             (getattr ~import-call
                      "__macro_namespace"
                      {}))
-         ;; Absent (None) registers every macro under its qualified name; an
-         ;; empty [] is present and registers none, so never test truthiness.
-         ~(conde (is macro-names None)
+         ~(conde (== kind REQUIRE-QUALIFIED)
                  `(for [k v] in (.items (.copy ___imported-macros))
                     (= (sub (.setdefault (globals) "__macro_namespace" {})
                             (+ ~(str module-name) "." k))
                        v))
-                 (== (str macro-names) "*")
+                 (== kind REQUIRE-ALL)
                  `(.update (.setdefault (globals) "__macro_namespace" {}) ___imported-macros)
-                 
-                 ;; else
-                 `(for mac-name in ~[(str x) for x in macro-names]
+
+                 ;; else: an empty list loops over nothing
+                 `(for mac-name in ~names
                     (= (sub (.setdefault (globals) "__macro_namespace" {})
                             mac-name)
                        (sub ___imported-macros mac-name)))

@@ -29,12 +29,27 @@ def defmacro_transform(sexp):
     )
 
 
+REQUIRE_QUALIFIED = "qualified"
+REQUIRE_ALL = "all"
+REQUIRE_NAMED = "named"
+
+
+def require_selection(optional):
+    """Which macros a (require module ...) form registers, from the forms after
+    the module name, as (kind, names).  Absent: every macro, qualified by the
+    module name.  *: every macro, unqualified.  A list: exactly those names,
+    so an empty [] registers none.  The compiler and the LSP both read this."""
+    if not optional:
+        return (REQUIRE_QUALIFIED, None)
+    [macro_names] = optional
+    if str(macro_names) == "*":
+        return (REQUIRE_ALL, None)
+    return (REQUIRE_NAMED, [str(x) for x in macro_names])
+
+
 def require_transform(sexp):
     [op, module_name, *optional] = sexp.list
-    if optional:
-        [macro_names] = optional
-    else:
-        macro_names = None
+    [kind, names] = require_selection(optional)
     module_name_str = str(module_name).replace("-", "_")
     is_relative = module_name_str.startswith(".")
     import_call = (
@@ -79,7 +94,7 @@ def require_transform(sexp):
                 Symbol("v"),
             ),
         )
-        if macro_names is None
+        if kind == REQUIRE_QUALIFIED
         else Paren(
             Symbol(".update"),
             Paren(
@@ -90,12 +105,12 @@ def require_transform(sexp):
             ),
             Symbol("___imported-macros"),
         )
-        if str(macro_names) == "*"
+        if kind == REQUIRE_ALL
         else Paren(
             Symbol("for"),
             Symbol("mac-name"),
             Symbol("in"),
-            [str(x) for x in macro_names],
+            names,
             Paren(
                 Symbol("="),
                 Paren(
