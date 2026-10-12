@@ -101,15 +101,20 @@ def test_partial_parse_of_a_valid_t_string_is_complete():
 ALIASES = (
     "(type Alias int)\n"
     "(type Pair[T] (tuple T T))\n"
-    "(def use [x] (type Alias x))\n"  # a call of the builtin, not an alias
+    "(def use [x] (type Inner x))\n"
     "(type Pair2[T] (tuple T T)\n"  # mid-edit: unclosed
 )
+# Shapes that call the builtin `type`: one or three operands, a dotted or
+# non-symbol first operand.
+CALLS = '(type x)\n(type 1 2 3)\n(type a.b c)\n(type "s" c)\n(type)\n'
 
 
 def test_type_alias_document_symbols():
     symbols = server.document_symbol(ls_with(ALIASES), position(0, 0))
     assert [s.name for s in symbols] == ["Alias", "Pair", "use"]
-    assert symbols[1].selection_range.start.character == 6
+    assert [c.name for c in symbols[2].children] == ["Inner"]
+    # The selection covers the whole head, as it does for def and class.
+    assert symbols[1].selection_range.end.character == 13
 
 
 def test_type_alias_definition():
@@ -128,10 +133,12 @@ def test_type_alias_hover_on_the_keyword():
     assert "type alias" in hover.contents.value
 
 
+def test_type_call_keeps_the_builtin_hover():
+    hover = server.hover(ls_with("(type x)\n(type A int)"), position(0, 2))
+    assert "Python builtin" in hover.contents.value
+
+
 def test_type_call_is_not_a_definition():
-    ls = ls_with("(= x (type 1))\n(= y (type 1 2 3))\n(def g [] (type Z q))\n")
-    assert [s.name for s in server.document_symbol(ls, position(0, 0))] == [
-        "x",
-        "y",
-        "g",
-    ]
+    ls = ls_with(CALLS)
+    assert server.document_symbol(ls, position(0, 0)) == []
+    assert server.collect_definitions(parse(CALLS), URI) == {}

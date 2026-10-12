@@ -32,7 +32,6 @@
   {;; Statement forms
    "def"       "```\n(def name [params] body...)\n```\n\nDefine a function. Parameters are given in a bracket list. An optional docstring can follow the parameter list."
    "async-def" "```\n(async-def name [params] body...)\n```\n\nDefine an async function (coroutine)."
-   "type"      "```\n(type Name value)\n(type Name[T] value)\n```\n\nDefine a type alias (Python 3.12+). Any other shape calls the builtin `type`."
    "class"     "```\n(class Name [bases] body...)\n```\n\nDefine a class. Bases are given in a bracket list."
    "defmacro"  "```\n(defmacro name [params] body...)\n```\n\nDefine a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression."
    "if"        "```\n(if condition then-body)\n(if condition then-body else-body)\n```\n\nConditional statement. Compiles to Python `if/else`."
@@ -480,7 +479,7 @@
           :name (symbol-name (sub node 1))
           :kind lsp.SymbolKind.Class
           :range (node-range node)
-          :selection-range (node-range (def-name-symbol (sub node 1)))
+          :selection-range (node-range (sub node 1))
           :detail "type alias"))
 
       (== form "defmacro")
@@ -686,6 +685,18 @@
       (return [])))
   (return (walk-symbols tree))))
 
+(= TYPE-ALIAS-DOC
+   "```\n(type Name value)\n(type Name[T] value)\n```\n\nDefine a type alias (Python 3.12+).")
+
+(def alias-keyword-p [nodes target]
+  "True when target is the `type` of a (type NAME value) alias statement."
+  (for node in nodes
+    (if (isinstance node Paren)
+        (if (or (and (is node.op target) (type-alias-p node))
+                (alias-keyword-p node.list target))
+            (return True))))
+  (return False))
+
 (deco (server.feature lsp.TEXT_DOCUMENT_HOVER)
 (def hover [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
@@ -701,6 +712,12 @@
   (if (isinstance target Symbol)
       (do
         (= name target.value)
+        (if (and (== name "type") (alias-keyword-p tree target))
+            (return (lsp.Hover
+              :contents (lsp.MarkupContent
+                :kind lsp.MarkupKind.Markdown
+                :value TYPE-ALIAS-DOC)
+              :range (node-range target))))
         ;; 1. LisPython special forms
         (= doc-text (.get SPECIAL-FORM-DOCS name))
         (if doc-text
