@@ -173,6 +173,34 @@ def test_reindexing_a_file_replaces_its_symbols(workspace, tmp_path):
     assert "load-config" not in server.WORKSPACE_INDEX
 
 
+SCOPES_FILE = """\
+(def handler []
+  (= handler-local 1)
+  (when True (= nested-local 2)))
+(defmacro expander [x] (= macro-local 1) x)
+(class Settings []
+  (= class-attr 1)
+  (def method [self] (= method-local 1)))
+(when True (= guarded-global 1))
+"""
+
+
+def test_locals_inside_def_bodies_are_not_workspace_symbols(workspace, tmp_path):
+    path = tmp_path / "scopes.lpy"
+    path.write_text(SCOPES_FILE)
+    server.index_file(path.as_uri())
+    local_names = {"handler-local", "nested-local", "macro-local", "method-local"}
+    # go-to-definition still finds them ...
+    assert local_names <= set(server.WORKSPACE_INDEX)
+    # ... but only module and class-body assignments are searchable.
+    symbols = symbols_matching("")
+    assert not local_names & set(symbols)
+    kind = server.lsp.SymbolKind
+    assert symbols["class-attr"] == kind.Variable
+    assert symbols["guarded-global"] == kind.Variable
+    assert symbols["method"] == kind.Function
+
+
 def test_required_packages_are_not_workspace_symbols(workspace, tmp_path, monkeypatch):
     site = tmp_path / "site"
     (site / "dx_fake_package").mkdir(parents=True)

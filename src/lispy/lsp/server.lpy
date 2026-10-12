@@ -571,7 +571,7 @@
   (if (is-not symbols None)
       (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
 
-(def collect-definitions [nodes uri :defs None :symbols None]
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
   "Walk AST and collect all definition locations keyed by symbol name.
 
    defs feeds go-to-definition and completion, so it also holds the names
@@ -579,7 +579,9 @@
    pass appends an lsp.SymbolInformation for each declaration a user searches
    for with workspace/symbol -- def, async-def, defmacro, class and = -- so
    the kind of a definition is decided only here.  Imports and loop
-   variables bind names but declare nothing, so they get no symbol.  A macro
+   variables bind names but declare nothing, so they get no symbol, and an
+   = inside a def body (in-function) is a local, so it gets none either;
+   module and class-body assignments do.  A macro
    is reported as Function, as document symbols report it: SymbolKind has
    no macro kind, and Operator would misdescribe a named form."
   (if (is defs None)
@@ -603,7 +605,8 @@
                   (_add-symbol symbols name lsp.SymbolKind.Function loc)
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
-                                           :defs defs :symbols symbols)))))
+                                           :defs defs :symbols symbols
+                                           :in-function True)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -627,7 +630,8 @@
               (do (= name (. (sub node 1) value))
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)
-                  (_add-symbol symbols name lsp.SymbolKind.Variable loc))))
+                  (if (not in-function)
+                      (_add-symbol symbols name lsp.SymbolKind.Variable loc)))))
 
       (in form (, "for" "async-for"))
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
@@ -635,7 +639,8 @@
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)))
           (collect-definitions (sub node.list [: 1 None]) uri
-                               :defs defs :symbols symbols))
+                               :defs defs :symbols symbols
+                               :in-function in-function))
 
       (in form (, "import" "from"))
       (do (for child in (sub node.list [: 1 None])
@@ -652,7 +657,7 @@
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs :symbols symbols))))
+            uri :defs defs :symbols symbols :in-function in-function))))
 
   (return defs))
 
