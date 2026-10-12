@@ -168,13 +168,21 @@ def subscript_p(sexp):
     return str(sexp.op) == "sub"
 
 
+def subscript_slice_compile(slice):
+    """A lone ``*x`` slice is a one-element Tuple, as ``t[*x]`` parses."""
+    node = expr_compile(slice)
+    if isinstance(node, ast.Starred):
+        return ast.Tuple(elts=[node], ctx=ast.Load(), **slice.position_info)
+    return node
+
+
 def subscript_compile(sexp, ctx):
     [op, value, *slices] = sexp.list
     op_pos = op.position_info
     rst = reduce(
         lambda rst, slice: ast.Subscript(
             value=rst,
-            slice=expr_compile(slice),
+            slice=subscript_slice_compile(slice),
             ctx=ast.Load(),
             **merge_position_infos(op_pos, slice.position_info)
         ),

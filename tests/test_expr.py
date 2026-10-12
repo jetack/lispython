@@ -1,4 +1,27 @@
+import ast
+
+import pytest
+
 from lispy.tools import parse, src_to_python_org
+from tests.utils import stmt_to_dump
+
+
+class TestStarredSubscript:
+    """``t[*Ts]`` is Subscript(slice=Tuple([Starred])) on every supported CPython."""
+
+    @pytest.mark.parametrize(
+        "lpy, py",
+        [
+            ("(sub tuple *Ts)", "tuple[*Ts]"),
+            ("(= (sub x *a) 1)", "x[*a] = 1"),
+            ("(+= (sub x *a) 1)", "x[*a] += 1"),
+            ("(del (sub x *a))", "del x[*a]"),
+            ("(sub x *a *b)", "x[*a][*b]"),
+            ("(sub x (, *a 1))", "x[*a, 1]"),
+        ],
+    )
+    def test_matches_python(self, lpy, py):
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
 
 
 class TestUnaryOpMethods:
