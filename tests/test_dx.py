@@ -1,6 +1,7 @@
 """Editor features beyond the parse-tolerance contract in test_lsp.py:
 signatureHelp, workspace/symbol, nREPL completion kinds and .nrepl-port."""
 
+import functools
 import importlib
 from types import SimpleNamespace
 
@@ -317,6 +318,65 @@ def test_attribute_completion_survives_a_raising_property(scope):
         "gadget.build": "function",
     }
     assert complete("gadget.si", scope) == {"gadget.size": "variable"}
+
+
+class Counted:
+    reads = 0
+
+    @property
+    def counted(self):
+        Counted.reads += 1
+        return len
+
+    @functools.cached_property
+    def cached(self):
+        Counted.reads += 1
+        return len
+
+    @staticmethod
+    def static_helper():
+        pass
+
+    @classmethod
+    def class_helper(cls):
+        pass
+
+    def method(self):
+        pass
+
+    Inner = int
+
+
+def test_attribute_completion_runs_no_property_code(scope):
+    scope["counted"] = Counted()
+    kinds = complete("counted.", scope)
+    assert {
+        name: kinds[f"counted.{name}"]
+        for name in [
+            "counted",
+            "cached",
+            "static-helper",
+            "class-helper",
+            "method",
+            "Inner",
+            "reads",
+        ]
+    } == {
+        "counted": "variable",
+        "cached": "variable",
+        "static-helper": "function",
+        "class-helper": "function",
+        "method": "function",
+        "Inner": "class",
+        "reads": "variable",
+    }
+    assert Counted.reads == 0
+
+
+def test_attribute_kinds_of_builtin_types(scope):
+    scope["text"] = "abc"
+    assert complete("text.upp", scope) == {"text.upper": "function"}
+    assert complete("int.from", scope) == {"int.from-bytes": "function"}
 
 
 def test_port_file_is_written_and_removed(tmp_path):

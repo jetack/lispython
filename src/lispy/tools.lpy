@@ -15,6 +15,7 @@
 (import sys)
 (import threading)
 (import traceback)
+(import types)
 
 (import subprocess)
 (import shutil)
@@ -536,14 +537,29 @@
         (callable obj) (return "function")
         True (return "variable")))
 
+(= _FUNCTION-DESCRIPTORS
+   (, staticmethod classmethod
+      types.FunctionType types.BuiltinFunctionType types.MethodType
+      types.MethodDescriptorType types.ClassMethodDescriptorType
+      types.WrapperDescriptorType types.MethodWrapperType))
+
 (def _attribute-kind [obj attr]
-  "The completion kind of obj.attr.  Reading the attribute runs a property
-   or __getattr__, which may raise anything; one bad attribute must not fail
-   the whole completion, so any error reads as a variable."
+  "The completion kind of obj.attr, found without running user code.
+
+   getattr would run a property, a descriptor or __getattr__ -- side effects
+   and exceptions in the middle of a completion -- so the attribute is read
+   with inspect.getattr_static and its raw object classified: functions,
+   methods and static/class methods are functions; any other descriptor
+   (property, cached_property, slots) yields a value, so is a variable; a
+   plain object is classified like a scope value.  An attribute only
+   __getattr__ knows about is a variable."
   (try
-    (return (_completion-kind (getattr obj attr)))
+    (= raw (inspect.getattr-static obj attr))
     (except [Exception]
-      (return "variable"))))
+      (return "variable")))
+  (cond (isinstance raw _FUNCTION-DESCRIPTORS) (return "function")
+        (hasattr (type raw) "__get__") (return "variable")
+        True (return (_completion-kind raw))))
 
 (def nrepl-complete [prefix scope]
   "Return completions matching prefix, including dot-completion."
