@@ -744,6 +744,9 @@
         (== (sub sys.argv 1) "-m")
         (do (sys.argv.pop 1)
             (= mname (sys.argv.pop 1))
+            ;; python -m prepends the cwd unless -P / PYTHONSAFEPATH is set
+            (if (not sys.flags.safe-path)
+                (sys.path.insert 0 (os.getcwd)))
             (runpy.run-module (.replace mname "-" "_") :run-name "__main__" :alter-sys True))
 
         (== (sub sys.argv 1) "-c")
