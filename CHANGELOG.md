@@ -18,8 +18,8 @@ follows [Semantic Versioning](https://semver.org/).
   defaults (parameters 3.12+, defaults 3.13+).
 - t-strings compile to `TemplateStr` (3.14+).
 - `lazy-import` and `lazy-from` (3.15+).
-- Comprehension unpacking (3.15+) and signed literal match patterns, with
-  unary plus gated to 3.15+.
+- Comprehension unpacking (3.15+), including `{**d for d dicts}`, which was
+  mistranslated as a dict display; unary plus is gated to 3.15+.
 - Errors the CPython compiler raises on `.lpy` modules, and lispython's own
   compile errors, are reported with the file, line and caret instead of a
   traceback by `lpy` (file, `-m`, `-c`), `l2py`, the REPL and nREPL eval.
@@ -31,9 +31,21 @@ follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **The REPL and nREPL compile every statement of an input before running any
-  of it**, and `lpy -c` compiles its whole input first. A compile error now
-  stops the input before any side effect; a `SyntaxError` the program raises
+  of it**, and `lpy -c` compiles its whole input first. A compile error,
+  lispython's or CPython's, now stops the input before any statement runs
+  (macro expansion still happens first); a `SyntaxError` the program raises
   at run time keeps its own traceback.
+- **Stricter parsing** rejects input that used to be accepted silently: an
+  unclosed final form or mismatched closing bracket, an unterminated string,
+  an f-string field holding more than one form, a lone `}` in an f-string,
+  non-symbol macro names (`(defmacro m[T] ...)`), `(import "x")`,
+  `(lazy-import "numpy")`, `(return a b)`, and `name[...]` glued under a
+  prefix such as `^list[int]` in a parameter list. Malformed literals such as
+  `09` or `\x4` are reported at their token.
+- **Literal values**: `-1+2j` is now `(-1+2j)` rather than `-(1+2j)`; `\r\n`
+  and lone `\r` become `\n` in f-strings too; a multi-line raw string no
+  longer gains a literal `\n`; backslash-newline continues a string; a lone
+  `"` inside `"""..."""` no longer ends the token.
 - **F-strings follow Python's rules.** An uppercase `F` prefix (and `rf`,
   `fR`, ...) is a real f-string rather than being evaluated at compile time,
   `{x=}` echoes the expression text and defaults to `!r`, and format specs
@@ -43,7 +55,7 @@ follows [Semantic Versioning](https://semver.org/).
   an absent list (`(require mod)`) registers all of them. The LSP follows the
   same rule in go-to-definition and hover.
 - `lpy -m` puts the current directory on `sys.path` like `python -m`,
-  honouring `-P` and `PYTHONSAFEPATH`.
+  honouring `PYTHONSAFEPATH`.
 - Requires `pygls` 2.0 or later.
 
 ### Fixed
@@ -51,6 +63,12 @@ follows [Semantic Versioning](https://semver.org/).
 - `(return [])` compiled to a bare `return` (yielding `None`); it now returns
   the empty list.
 - `(case {})` accepts an empty mapping pattern.
+- Signed literal match patterns: `(case -1 ...)` compiled to `case _(1):`.
+- `(from . [a])` compiles; it raised `IndexError`.
+- Quasiquoted f/t-string fields keep their conversion, spec and `=` text
+  (`f"{x!r:>6}"` used to come back as `{x}`), and `f"{~x}"` with a literal
+  macro argument no longer crashes.
+- `l2py` emits valid Python for t-string interpolations.
 - A lone starred subscript slice compiles to a one-element `Tuple`, like
   Python's `t[*s]`.
 - LSP: workspace symbols no longer include installed packages or function
