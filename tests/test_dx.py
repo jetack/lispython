@@ -100,3 +100,72 @@ def test_signature_help_reads_the_client_position_as_utf16(marked, expected):
 def test_signature_help_never_raises_on_a_mid_edit_buffer(source):
     for col in range(len(source) + 1):
         signature_at(source[:col] + CURSOR + source[col:])
+
+
+WORKSPACE_FILE = """\
+(import os)
+(from os.path [join :as pjoin])
+(def load-config [path] (for line in [1] (pass)) 1)
+(async-def fetch [] None)
+(defmacro unless-config [x] x)
+(class ConfigError [Exception]
+  (def describe [self] "x"))
+(= config-path "a")
+(async-for item in (fetch) (pass))
+"""
+
+
+@pytest.fixture
+def workspace(tmp_path, monkeypatch):
+    for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
+        monkeypatch.setattr(server, name, {}, raising=False)
+    path = tmp_path / "config.lpy"
+    path.write_text(WORKSPACE_FILE)
+    uri = path.as_uri()
+    server.index_file(uri)
+    return uri
+
+
+def symbols_matching(query):
+    result = server.workspace_symbol(None, SimpleNamespace(query=query))
+    return {s.name: s.kind for s in result}
+
+
+def test_workspace_symbol_reports_each_definition_with_its_kind(workspace):
+    kind = server.lsp.SymbolKind
+    assert symbols_matching("") == {
+        "load-config": kind.Function,
+        "fetch": kind.Function,
+        "unless-config": kind.Function,
+        "ConfigError": kind.Class,
+        "describe": kind.Function,
+        "config-path": kind.Variable,
+    }
+
+
+def test_workspace_symbol_matches_a_case_insensitive_substring(workspace):
+    assert set(symbols_matching("CONFIG")) == {
+        "load-config",
+        "unless-config",
+        "ConfigError",
+        "config-path",
+    }
+
+
+def test_workspace_symbol_points_at_the_definition(workspace):
+    [symbol] = server.workspace_symbol(None, SimpleNamespace(query="fetch"))
+    assert symbol.location.uri == workspace
+    assert symbol.location.range.start.line == 3
+
+
+def test_imports_and_loop_variables_stay_in_the_definition_index(workspace):
+    # go-to-definition and completion still see every bound name.
+    assert {"os", "pjoin", "line", "item"} <= set(server.WORKSPACE_INDEX)
+    assert not {"os", "pjoin", "line", "item"} & set(symbols_matching(""))
+
+
+def test_reindexing_a_file_replaces_its_symbols(workspace, tmp_path):
+    (tmp_path / "config.lpy").write_text("(def renamed [] 1)\n")
+    server.index_file(workspace)
+    assert set(symbols_matching("")) == {"renamed"}
+    assert "load-config" not in server.WORKSPACE_INDEX

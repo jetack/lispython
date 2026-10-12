@@ -152,6 +152,8 @@
 (= WORKSPACE-INDEX {})
 ;; Cache of parsed trees per URI: {uri: tree}
 (= FILE-TREES {})
+;; workspace/symbol results per URI: {uri: [SymbolInformation, ...]}
+(= WORKSPACE-SYMBOLS {})
 
 (def uri-to-path [uri]
   "Convert a file:// URI to a filesystem path."
@@ -186,6 +188,7 @@
         (.append to-remove name)))
   (for name in to-remove
     (del (sub WORKSPACE-INDEX name)))
+  (.pop WORKSPACE-SYMBOLS uri None)
 
   ;; Parse and collect definitions
   (= fpath (uri-to-path uri))
@@ -196,7 +199,9 @@
       (= src (.decode (f.read) "utf-8")))
     (= tree (parse src :partial True))
     (= (sub FILE-TREES uri) tree)
-    (collect-definitions tree uri :defs WORKSPACE-INDEX)
+    (= symbols [])
+    (collect-definitions tree uri :defs WORKSPACE-INDEX :symbols symbols)
+    (= (sub WORKSPACE-SYMBOLS uri) symbols)
     ;; Also eagerly index any packages this file requires so defmacros
     ;; from required modules are discoverable for go-to-definition.
     (index-required-modules tree)
@@ -558,8 +563,21 @@
 ;; Definition index
 ;; ---------------------------------------------------------------------------
 
-(def collect-definitions [nodes uri :defs None]
-  "Walk AST and collect all definition locations keyed by symbol name."
+(def _add-symbol [symbols name kind loc]
+  (if (is-not symbols None)
+      (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
+
+(def collect-definitions [nodes uri :defs None :symbols None]
+  "Walk AST and collect all definition locations keyed by symbol name.
+
+   defs feeds go-to-definition and completion, so it also holds the names
+   bound by import/from and for/async-for.  When symbols is a list, the same
+   pass appends an lsp.SymbolInformation for each declaration a user searches
+   for with workspace/symbol -- def, async-def, defmacro, class and = -- so
+   the kind of a definition is decided only here.  Imports and loop
+   variables bind names but declare nothing, so they get no symbol.  A macro
+   is reported as Function, as document symbols report it: SymbolKind has
+   no macro kind, and Operator would misdescribe a named form."
   (if (is defs None)
       (= defs {}))
 
@@ -578,8 +596,10 @@
                   (= name name-node.value)
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
+                  (_add-symbol symbols name lsp.SymbolKind.Function loc)
                   (if (> (len node) 3)
-                      (collect-definitions (sub node.list [: 3 None]) uri :defs defs)))))
+                      (collect-definitions (sub node.list [: 3 None]) uri
+                                           :defs defs :symbols symbols)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -587,10 +607,11 @@
                   (= name name-node.value)
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
+                  (_add-symbol symbols name lsp.SymbolKind.Class loc)
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs))))
+                  (collect-definitions body uri :defs defs :symbols symbols))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
@@ -601,14 +622,16 @@
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
               (do (= name (. (sub node 1) value))
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
-                  (.append (.setdefault defs name []) loc))))
+                  (.append (.setdefault defs name []) loc)
+                  (_add-symbol symbols name lsp.SymbolKind.Variable loc))))
 
       (in form (, "for" "async-for"))
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
               (do (= name (. (sub node 1) value))
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)))
-          (collect-definitions (sub node.list [: 1 None]) uri :defs defs))
+          (collect-definitions (sub node.list [: 1 None]) uri
+                               :defs defs :symbols symbols))
 
       (in form (, "import" "from"))
       (do (for child in (sub node.list [: 1 None])
@@ -625,7 +648,7 @@
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs))))
+            uri :defs defs :symbols symbols))))
 
   (return defs))
 
@@ -993,13 +1016,7 @@
 (deco (server.feature lsp.WORKSPACE_SYMBOL)
 (def workspace-symbol [ls params]
   (= query (.lower params.query))
-  (= results [])
-  (for [name locs] in (.items WORKSPACE-INDEX)
-    (if (in query (.lower name))
-        (for loc in locs
-          (.append results
-            (lsp.SymbolInformation
-              :name name
-              :kind lsp.SymbolKind.Variable
-              :location loc)))))
-  (return results)))
+  (return [symbol
+           for symbols in (.values WORKSPACE-SYMBOLS)
+           for symbol in symbols
+           if (in query (.lower symbol.name))])))
