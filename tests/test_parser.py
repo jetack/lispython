@@ -1,3 +1,6 @@
+import pytest
+
+from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import Paren, Symbol
 from lispy.core.parser import parse, tokenize
 
@@ -69,3 +72,33 @@ class TestCommaRemoval:
         token_strs = [t[0] for t in tokens]
         assert token_strs.count(",") == 1
 
+
+class TestBrackets:
+    """Unbalanced brackets get CPython's messages, never an IndexError or a
+    silently dropped form."""
+
+    @pytest.mark.parametrize(
+        ["src", "msg", "col"],
+        [
+            ("(a b))", "unmatched ')'", 6),
+            (")", "unmatched ')'", 1),
+            (
+                "(a b]",
+                "closing parenthesis ']' does not match opening parenthesis '('",
+                5,
+            ),
+            (
+                "(a [b c)",
+                "closing parenthesis ')' does not match opening parenthesis '['",
+                8,
+            ),
+            ("(a (b c)", "'(' was never closed", 1),
+            ("(a [b (c d)", "'[' was never closed", 4),
+            ('f"{)}"', "unmatched ')'", 4),
+        ],
+    )
+    def test_refused_like_python(self, src, msg, col):
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (1, col)

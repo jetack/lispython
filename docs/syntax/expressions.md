@@ -151,6 +151,26 @@ Python version
 ```python
 (2 * x for x in range(10) if x % 2 == 0)
 ```
+### Comprehension Unpacking
+Python 3.15+ ([PEP 798](https://peps.python.org/pep-0798/)). On an older Python
+these forms are a compile error naming the version they need.
+
+LisPy version
+```python
+[*L for L in lists]
+(*L for L in lists)
+{, *s for s in sets}
+{**d for d in dicts}
+[*L async-for L in lists]
+```
+Python version
+```python
+[*L for L in lists]
+(*L for L in lists)
+{*s for s in sets}
+{**d for d in dicts}
+[*L async for L in lists]
+```
 
 ## `await`
 LisPy version
@@ -198,6 +218,34 @@ Python version
 ```python
 name = "World"
 f"Hello, {2 * name}!"
+```
+Replacement fields follow Python's rules: `{{`/`}}` are literal braces,
+`!r`/`!s`/`!a` conversions, format specs with nested fields, and `{x=}`.
+LisPy version
+```python
+f"{{literal}} {x!r:>{width}} {x=}"
+```
+Python version
+```python
+f"{{literal}} {x!r:>{width}} {x=}"
+```
+
+## Template String Literals
+Python 3.14+ ([PEP 750](https://peps.python.org/pep-0750/)). The `t` prefix
+combines with `r` like `f` does (`rt"..."`, `Tr"..."`) and builds a
+`string.templatelib.Template`. Each interpolation's `expression` is the LisPy
+text inside the braces. On an older Python a t-string is a compile error naming
+the version it needs.
+
+LisPy version
+```python
+(= name "World")
+t"Hello, {(* 2 name)!r:>12}!"
+```
+Python version
+```python
+name = "World"
+t"Hello, {2 * name!r:>12}!"  # interpolations[0].expression == "(* 2 name)"
 ```
 
 ## Attribute

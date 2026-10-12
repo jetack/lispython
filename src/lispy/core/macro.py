@@ -3,29 +3,33 @@ import importlib
 from typing import Callable, Dict
 
 from lispy.core.compiler import def_args_parse, stmt_list_compile
+from lispy.core.compiler.literal import constant_compile, string_node_value
+from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
-_ast_literal_eval = __import__("ast").literal_eval
-
-
 def _unwrap_literal(node):
     if isinstance(node, Constant):
         try:
-            return _ast_literal_eval(node.value)
-        except (ValueError, SyntaxError):
+            return constant_compile(node).value
+        except LispyCompileError:
             return node
     elif isinstance(node, String):
         try:
-            return _ast_literal_eval(node.value)
-        except (ValueError, SyntaxError):
+            return string_node_value(node)
+        except LispyCompileError:
             return node
     return node
 
 
 def define_macro(sexp, scope, include_meta=True):
+    name = sexp[1] if len(sexp) > 1 else None
+    if isinstance(name, GluedHead):
+        raise name.misuse_error()
+    if type(name) is not Symbol:
+        raise LispyCompileError(f"(defmacro ...) expects a name, got {name}", sexp)
     transformed = defmacro_transform(sexp)
     eval(
         compile(
@@ -82,6 +86,10 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
     elif isinstance(sexp, Wrapper):
         sexp.value, expanded = macroexpand_1_and_check(
             sexp.value, scope, in_quasi=in_quasi, include_meta=include_meta
+        )
+    elif isinstance(sexp, GluedHead):
+        sexp.params, expanded = macroexpand_1_and_check(
+            sexp.params, scope, in_quasi=in_quasi, include_meta=include_meta
         )
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list

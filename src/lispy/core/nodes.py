@@ -43,6 +43,19 @@ class Node:
         return str(self) == other
 
 
+def contains_unquote(node):
+    """Whether an Unquote (or ~@) occurs anywhere in ``node``."""
+    if isinstance(node, Unquote):
+        return True
+    if isinstance(node, Node):
+        return any(
+            contains_unquote(v) for v in vars(node).values() if v is not node
+        )
+    if isinstance(node, list):
+        return any(contains_unquote(v) for v in node)
+    return False
+
+
 def data_to_generator_expression(data):
     if isinstance(data, bool) or data is None:
         return Constant(str(data))
@@ -251,9 +264,22 @@ class Wrapper(Node):
 
 
 class FStrExpr(Wrapper):
-    def __init__(self, value, **kwargs):
+    """A replacement field of an f/t-string.
+
+    ``expr_text`` is the expression's source text (Interpolation.str, and
+    the ``{expr=}`` echo, which is ``expr_text + debug``).  Built from a
+    quasiquote with an unquote inside, the text is that of the expanded
+    expression, padded as written: what the user would have typed.
+    """
+
+    def __init__(self, value, expr_text=None, expr_padding=("", ""), **kwargs):
         super().__init__(**kwargs)
-        self.value = value
+        self.value = data_to_generator_expression(value)
+        self.expr_text = (
+            expr_padding[0] + str(self.value) + expr_padding[1]
+            if expr_text is None
+            else expr_text
+        )
         self.classname = "FStrExpr"
 
     def __repr__(self):
@@ -261,6 +287,38 @@ class FStrExpr(Wrapper):
 
     def get_source(self, indent=0):
         return "(FStrExpr " + str(self.value) + ")"
+
+    def generator_expression(self, in_quasi=False):
+        """Rebuild with conversion, format spec and expression text, so an
+        f/t-string survives a quasiquote."""
+        position_info = self.position_info
+        format_spec = getattr(self, "format_spec", None)
+        debug = getattr(self, "debug", None)
+        text = self.expr_text
+        if in_quasi and contains_unquote(self.value):
+            # The text is only known once the unquote is expanded.
+            lead = text[: len(text) - len(text.lstrip())]
+            trail = text[len(text.rstrip()) :]
+            text_args = [
+                Keyword(Symbol("expr-padding")),
+                Paren(Symbol(","), String(repr(lead)), String(repr(trail))),
+            ]
+        else:
+            text_args = [Keyword(Symbol("expr-text")), String(repr(text))]
+        return Paren(
+            Symbol(self.classname, **position_info),
+            self.value.generator_expression(in_quasi),
+            Keyword(Symbol("conversion")),
+            Constant(str(getattr(self, "conversion", -1))),
+            Keyword(Symbol("format-spec")),
+            Constant("None")
+            if format_spec is None
+            else format_spec.generator_expression(in_quasi),
+            Keyword(Symbol("debug")),
+            Constant("None") if debug is None else String(repr(debug)),
+            *text_args,
+            **position_info
+        )
 
     @property
     def name(self):
@@ -313,7 +371,7 @@ class Keyword(Wrapper):
 
     def update_dict(self, key, value):
         self.__dict__[key] = value
-        return self.value.update_dict(value)
+        return self.value.update_dict(key, value)
 
 
 class Starred(Wrapper):
@@ -354,6 +412,52 @@ class DoubleStarred(Wrapper):
     def update_dict(self, key, value):
         self.__dict__[key] = value
         return self.value.update_dict(key, value)
+
+
+class GluedHead(Node):
+    """``name[params]`` written with no space: a generic def/class/type name.
+
+    The parser builds it only when ``[`` starts exactly where a bare symbol
+    ends (``f [T]`` stays two forms).  It is meaningful only as the name of
+    def, async-def, class and type; reading ``.name`` anywhere else is the
+    misuse, so it raises the compile error instead of returning a string.
+    """
+
+    def __init__(self, head, params, **kwargs):
+        super().__init__(**kwargs)
+        self.head = head
+        self.params = params
+        self.classname = "GluedHead"
+
+    def misuse_error(self):
+        from lispy.core.errors import LispyCompileError
+
+        text = str(self.head)
+        return LispyCompileError(
+            f"{text}[...] is only valid as a def/class/type name; "
+            f"use (sub {text} ...)",
+            self,
+        )
+
+    @property
+    def name(self):
+        raise self.misuse_error()
+
+    def generator_expression(self, in_quasi=False):
+        return Paren(
+            Symbol(self.classname, **self.position_info),
+            self.head.generator_expression(in_quasi),
+            self.params.generator_expression(in_quasi),
+            **self.position_info
+        )
+
+    def __repr__(self):
+        return "Glued(" + repr(self.head) + ", " + repr(self.params) + ")"
+
+    def get_source(self, indent=0):
+        return self.head.get_source(indent) + self.params.get_source(
+            indent + len(self.head.get_source())
+        )
 
 
 class Literal(Node):

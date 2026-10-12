@@ -2,8 +2,18 @@ import ast
 from collections import deque
 from functools import reduce
 
+from lispy.core.compiler import features
 from lispy.core.compiler.expr import def_args_parse, expr_compile
+from lispy.core.compiler.features import require
+from lispy.core.compiler.literal import (
+    SPECIAL_CONSTANTS,
+    name_compile,
+    number_parts,
+    number_pattern_expr,
+)
 from lispy.core.compiler.utils import *
+from lispy.core.errors import LispyCompileError
+from lispy.core.nodes import GluedHead, Paren
 from lispy.core.utils import *
 
 
@@ -72,41 +82,87 @@ def del_compile(sexp):
     )
 
 
-def parse_names(names):
+def import_name(sexp, form, dotted=True):
+    """The one check on every name an import form reads: a bare symbol
+    (dotted for a module path), as in Python, or a LispyCompileError at it."""
+    if isinstance(sexp, GluedHead):
+        raise sexp.misuse_error()
+    if type(sexp) is not Symbol or (not dotted and "." in sexp.value):
+        raise LispyCompileError(f"({form} ...) expects a name, got {sexp}", sexp)
+    return sexp
+
+
+def parse_names(names, form):
     rst = []
     q = deque([names] if names == "*" else names)
     while q:
         n = q.popleft()
-        if n == "as":
-            rst[-1].asname = str(q.popleft()).replace("-", "_")
+        if n == "as" and rst and q:
+            rst[-1].asname = import_name(q.popleft(), form, dotted=False).name
         else:
+            n = import_name(n, form)
             rst.append(ast.alias(name=n.name, **n.position_info))
     return rst
 
 
-def import_compile(sexp):
-    [_, *names] = sexp.list
-    return ast.Import(names=parse_names(names), **sexp.position_info)
+def lazy_kwargs(sexp, lazy):
+    if lazy:
+        require(str(sexp.op), sexp)
+        return {"is_lazy": 1}
+    return {"is_lazy": 0} if features.import_has_is_lazy() else {}
 
 
-def importfrom_compile(sexp):
-    [_, *args] = sexp.list
-    modules = args[::2]
+def import_compile(sexp, lazy=False):
+    [op, *names] = sexp.list
+    is_lazy = lazy_kwargs(sexp, lazy)
+    if not names:
+        raise LispyCompileError(f"({op} ...) needs at least one module name", sexp)
+    return ast.Import(
+        names=parse_names(names, str(op)), **is_lazy, **sexp.position_info
+    )
+
+
+def importfrom_compile(sexp, lazy=False):
+    [op, *args] = sexp.list
+    form = str(op)
+    is_lazy = lazy_kwargs(sexp, lazy)
+    if not args or len(args) % 2:
+        raise LispyCompileError(
+            f"({form} ...) takes module and [names] pairs", sexp
+        )
+    modules = [import_name(module, form) for module in args[::2]]
     namess = args[1::2]
+    for names in namess:
+        if names != "*" and not isinstance(names, Bracket):
+            raise LispyCompileError(
+                f"({form} ...) expects [names] or * after a module, got {names}",
+                names,
+            )
+    if lazy:
+        # CPython's own static checks on `lazy from`, with its messages.
+        for [module, names] in zip(modules, namess):
+            if names == "*":
+                raise LispyCompileError(
+                    "lazy from ... import * is not allowed", sexp
+                )
+            if str(module) == "__future__":
+                raise LispyCompileError(
+                    "lazy from __future__ import is not allowed", sexp
+                )
 
     def helper(module):
-        i = 0
+        # Leading dots are the relative level; "." alone has no module name.
         x = module.name
-        while x[i] == ".":
-            i += 1
-        return [x[i:], i, module.position_info]
+        level = len(x) - len(x.lstrip("."))
+        return [x[level:] or None, level, module.position_info]
 
     module_level = map(helper, modules)
     return [
         ast.ImportFrom(
             module=module,
-            names=parse_names(names),
+            names=parse_names(names, form),
             level=level,
+            **is_lazy,
             **merge_position_infos(module_pos_info, names.position_info)
         )
         for [[module, level, module_pos_info], names] in zip(module_level, namess)
@@ -278,13 +334,39 @@ def with_compile(sexp, async_p=False):
     )
 
 
+def signed_number_p(sexp):
+    return isinstance(sexp, Paren) and len(sexp) == 2 and str(sexp.op) in ("+", "-")
+
+
+def literal_pattern_expr(sexp):
+    """The expression of a literal pattern (MatchValue value or mapping key).
+
+    A signed number is the one Paren a literal pattern may be; numbers go
+    through number_pattern_expr, which builds ast.parse's shapes.
+    """
+    if signed_number_p(sexp):
+        [sign, number] = sexp.list
+        if (
+            not constant_p(number)
+            or str(number) in SPECIAL_CONSTANTS
+            or (number_parts(number.value) or [None] * 4)[2] is not None
+        ):
+            raise LispyCompileError(
+                "only a number literal can be signed in a match pattern", sexp
+            )
+        return number_pattern_expr(str(sign) + number.value, sexp)
+    if constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
+        return number_pattern_expr(sexp.value, sexp)
+    return expr_compile(sexp)
+
+
 def match_mapping_parse(lst):
     keys = lst[::2]
     patterns = lst[1::2]
     rst = {}
     if isinstance(keys[-1], DoubleStarred):
         rst["rest"] = keys.pop().value.name
-    rst["keys"] = list(map(expr_compile, keys))
+    rst["keys"] = list(map(literal_pattern_expr, keys))
     rst["patterns"] = list(map(pattern_parse, patterns))
     return rst
 
@@ -317,8 +399,8 @@ def pattern_parse(sexp):
             **sexp.position_info
         )
         if isinstance(sexp, Starred)
-        else ast.MatchValue(value=expr_compile(sexp), **sexp.position_info)
-        if not isinstance(sexp, Expression)
+        else ast.MatchValue(value=literal_pattern_expr(sexp), **sexp.position_info)
+        if not isinstance(sexp, Expression) or signed_number_p(sexp)
         else ast.MatchSequence(
             patterns=list(map(pattern_parse, sexp.list)), **sexp.position_info
         )
@@ -361,6 +443,106 @@ def match_compile(sexp):
     return ast.Match(subject=expr_compile(subject), cases=cases, **sexp.position_info)
 
 
+def type_params_parse(glued):
+    """The bracket of ``f[T ...]``, read with the def-argument markers.
+
+    ``T`` TypeVar, ``T ^bound`` (a tuple bound is a constraint list),
+    ``*Ts`` TypeVarTuple, ``**P`` ParamSpec; ``:T default`` (3.13) gives any
+    of them a default, after its bound.
+    """
+    require("type-params", glued)
+    q = deque(glued.params.list)
+    if not q:
+        raise LispyCompileError("Type parameter list cannot be empty", glued)
+    rst = []
+    while q:
+        param = q.popleft()
+        has_default = isinstance(param, Keyword)
+        target = param.value if has_default else param
+        last = target
+        # Class names, resolved only after the gates: 3.11's ast has none.
+        [kind, symbol] = (
+            ["TypeVarTuple", target.value]
+            if isinstance(target, Starred)
+            else ["ParamSpec", target.value]
+            if isinstance(target, DoubleStarred)
+            else ["TypeVar", target]
+        )
+        if type(symbol) is not Symbol or "." in symbol.value:
+            raise LispyCompileError(f"invalid type parameter {param}", param)
+        fields = {"name": symbol.name}
+        if q and isinstance(q[0], Annotation):
+            bound = q.popleft()
+            if kind != "TypeVar":
+                raise LispyCompileError(f"cannot use bound with {kind}", bound)
+            fields["bound"] = expr_compile(bound.value)
+            last = bound
+        if has_default:
+            require("type-param-default", param)
+            if not q:
+                raise LispyCompileError(
+                    f"type parameter {symbol.value} needs a default value", param
+                )
+            last = q.popleft()
+            fields["default_value"] = expr_compile(last)
+        # As in ast.parse, the node spans its name through any bound and default.
+        span = {
+            **target.position_info,
+            "end_lineno": last.end_lineno,
+            "end_col_offset": last.end_col_offset,
+        }
+        rst.append(getattr(ast, kind)(**fields, **span))
+    return rst
+
+
+def def_name_parse(name):
+    """Name of a def/class and, for ``name[T ...]``, its ``type_params`` keyword.
+
+    type_params is passed only when present, so 3.11's constructors never see it.
+    """
+    if isinstance(name, GluedHead):
+        if not plain_name_p(name.head):
+            raise LispyCompileError(
+                f"{name.head} is not a valid name for a generic definition", name
+            )
+        return [name.head.name, {"type_params": type_params_parse(name)}]
+    return [name.name, {}]
+
+
+def plain_name_p(sexp):
+    """A bare, undotted symbol: what Python accepts as a def/class/type name."""
+    return type(sexp) is Symbol and "." not in sexp.value
+
+
+def type_alias_p(sexp):
+    # `type` is a soft keyword, as in Python: only the statement
+    # (type NAME value) / (type NAME[T ...] value) -- two operands, the first a
+    # bare undotted symbol or a glued head -- is a type alias.  Every other shape
+    # (one or three operands, any expression position, a non-symbol first
+    # operand) is a call to the builtin type.  Code that rebinds `type` and calls
+    # it as a bare two-argument statement must write (= _ (type a b)).
+    if str(sexp.op) != "type" or len(sexp) != 3:
+        return False
+    name = sexp[1]
+    return plain_name_p(name.head if isinstance(name, GluedHead) else name)
+
+
+def type_alias_compile(sexp):
+    require("type-alias", sexp)
+    [_, name, value] = sexp.list
+    [head, type_params] = (
+        [name.head, type_params_parse(name)]
+        if isinstance(name, GluedHead)
+        else [name, []]
+    )
+    return ast.TypeAlias(
+        name=name_compile(head, ast.Store),
+        type_params=type_params,
+        value=expr_compile(value),
+        **sexp.position_info
+    )
+
+
 def deco_compile(sexp, decorator_list):
     [op, decorator, def_statement] = sexp.list
     new_deco_list = decorator.list if isinstance(decorator, Bracket) else [decorator]
@@ -375,12 +557,14 @@ def functiondef_p(sexp):
 
 def functiondef_compile(sexp, decorator_list, async_p=False):
     [op, fnname, args, *body] = sexp.list
+    [name, type_params] = def_name_parse(fnname)
     if body and isinstance(body[0], Annotation):
         [ann, *body] = body
     else:
         ann = None
     return (ast.AsyncFunctionDef if async_p else ast.FunctionDef)(
-        name=fnname.name,
+        name=name,
+        **type_params,
         args=def_args_parse(args),
         body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
         decorator_list=list(map(expr_compile, decorator_list))
@@ -430,9 +614,11 @@ def classdef_args_parse(args):
 
 def classdef_compile(sexp, decorator_list):
     [_, clsname, args, *body] = sexp.list
+    [name, type_params] = def_name_parse(clsname)
     [bases, keywords] = classdef_args_parse(args)
     return ast.ClassDef(
-        name=clsname.name,
+        name=name,
+        **type_params,
         bases=bases,
         keywords=keywords,
         body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
@@ -461,6 +647,10 @@ def stmt_compile(sexp, decorator_list=None):
         if str(sexp.op) == "import"
         else importfrom_compile(sexp)
         if str(sexp.op) == "from"
+        else import_compile(sexp, lazy=True)
+        if str(sexp.op) == "lazy-import"
+        else importfrom_compile(sexp, lazy=True)
+        if str(sexp.op) == "lazy-from"
         else if_stmt_compile(sexp)
         if if_p(sexp)
         else while_compile(sexp)
@@ -499,6 +689,8 @@ def stmt_compile(sexp, decorator_list=None):
         if str(sexp.op) == "async-for"
         else with_compile(sexp, async_p=True)
         if str(sexp.op) == "async-with"
+        else type_alias_compile(sexp)
+        if type_alias_p(sexp)
         else expr_wrapper(sexp)
     )
 

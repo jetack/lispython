@@ -2,6 +2,7 @@
 
 (import argparse)
 (import ast)
+(import copy)
 (import importlib)
 (import inspect)
 (import io)
@@ -24,6 +25,13 @@
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
+(from lispy.core.errors [LispyCompileError attach-source compile-errors
+                         format-compile-error])
+
+(def report-compile-error [err :filename None :source None]
+  "Print a LispyCompileError compiler-style (path:line:col, source, caret) to stderr."
+  (print (format-compile-error (attach-source err filename source))
+         :file sys.stderr))
 
 (def has-init-file [dir-path]
   (return (or (osp.exists (osp.join dir-path "__init__.py"))
@@ -55,8 +63,23 @@
           "__package__" (detect-package-name)
           "__macro_namespace" {}})
 
+(def _python-interpolations [st]
+  "Copy of st whose t-string interpolations unparse from their values.
+   The compiler sets Interpolation.str to the lispython text, which is what a
+   Template reports at runtime; ast.unparse writes str verbatim unless it is
+   None, and Python source needs the Python text."
+  (= interpolation (getattr ast "Interpolation" None))
+  (if (or (is interpolation None)
+          (not (any ((isinstance n interpolation) for n in (ast.walk st)))))
+      (return st))
+  (= st (copy.deepcopy st))
+  (for n in (ast.walk st)
+    (if (isinstance n interpolation)
+        (= n.str None)))
+  (return st))
+
 (def ast-to-python [st]
-  (return (str (ast.unparse st))))
+  (return (str (ast.unparse (_python-interpolations st)))))
 
 (def src-to-python-org [src :include-meta False :scope None]
   (if (is scope None)
@@ -139,15 +162,22 @@
 
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n")))
+  (with [(compile-errors file-path src)]
+    (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n"))))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
   (= [args more-args] (argparser.parse-known-args))
-  (if (and (>= (len more-args) 2) (== (sub more-args 0) "-c"))
-      (print (l2py-s (sub more-args 1) :include-meta args.include_meta :no-lispy args.no_lispy))
-      (do (= file (osp.join (os.getcwd) (sub more-args 0)))
-          (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy)))))
+  (try
+    (if (and (>= (len more-args) 2) (== (sub more-args 0) "-c"))
+        (do (= src (sub more-args 1))
+            (with [(compile-errors "<string>" src)]
+              (print (l2py-s src :include-meta args.include_meta :no-lispy args.no_lispy))))
+        (do (= file (osp.join (os.getcwd) (sub more-args 0)))
+            (print (l2py-f file :include-meta args.include_meta :no-lispy args.no_lispy))))
+    (except [LispyCompileError as e]
+      (report-compile-error e)
+      (sys.exit 1))))
 
 (def _make-open-handler [o c]
   (def handler [event]
@@ -335,9 +365,13 @@
                          :multiline True
                          :prompt-continuation "...   ")))
 
-(def eval-and-print [src :scope SCOPE :translate False]
-  (= parsed (parse src))
-  (= stl (macroexpand-then-compile parsed scope))
+(def eval-and-print [src :scope SCOPE :translate False :filename "<string>"]
+  ;; Compile every statement before running any, so compile-errors covers
+  ;; compiling only.
+  (with [(compile-errors filename src)]
+    (= stl (macroexpand-then-compile (parse src) scope))
+    (= codes [(compile (ast.Interactive :body [st]) filename "single")
+              for st in stl]))
   (if translate
       (do ;; (print "python translation")
         (-> (.join "\n" (list (map ast-to-python stl)))
@@ -346,9 +380,8 @@
         ;; (print "")
         ))
   ;; (print "result")
-  (for st stl
-    (eval (compile (ast.Interactive :body [st]) "" "single")
-          scope))
+  (for code codes
+    (eval code scope))
   ;; (print "\n")
   )
 
@@ -366,7 +399,7 @@
     (try
       (do
         (= src (session.prompt "repl> "))
-        (eval-and-print src scope translate))
+        (eval-and-print src scope translate :filename "<repl>"))
       (except [SystemExit]
         (print "SystemExit caught. Exiting REPL.")
         (break))
@@ -376,12 +409,14 @@
       (except [KeyboardInterrupt]
         (print "\nKeyboard Interrupt")
         (continue))
+      (except [LispyCompileError as e]
+        (report-compile-error e))
       (except [Exception as e]
         (print "An error occurred:\n====================================")
         (traceback.print_exc)
         (print "====================================")))))
 
-(def nrepl-eval [src scope]
+(def nrepl-eval [src scope :filename "<nrepl>"]
   "Evaluate LisPython source, capturing stdout/stderr and return value."
   (= result {"value" None "stdout" "" "error" None})
   (= stdout-capture (io.StringIO))
@@ -391,20 +426,21 @@
   (try
     (= sys.stdout stdout-capture)
     (= sys.stderr stderr-capture)
-    (= parsed (parse src))
-    (= stl (macroexpand-then-compile parsed scope))
+    ;; Compile every statement before running any (see eval-and-print).
+    (with [(compile-errors filename src)]
+      (= stl (macroexpand-then-compile (parse src) scope))
+      (= codes [(ife (isinstance st ast.Expr)
+                     (, eval (compile (ast.Expression :body st.value) filename "eval"))
+                     (, exec (compile (ast.Module :body [st] :type-ignores [])
+                                      filename "exec")))
+                for st in stl]))
     (= last-val None)
-    (for st stl
-      (if (isinstance st ast.Expr)
-          (= last-val
-             (eval (compile (ast.Expression :body st.value) "" "eval")
-                   scope))
-          (do
-            (exec (compile (ast.Module :body [st] :type-ignores []) "" "exec")
-                  scope)
-            (= last-val None))))
+    (for [run code] codes
+      (= last-val (run code scope)))
     (if (is-not last-val None)
         (= (sub result "value") (repr last-val)))
+    (except [LispyCompileError as e]
+      (= (sub result "error") (format-compile-error e)))
     (except [Exception as e]
       (= (sub result "error") (.rstrip (traceback.format-exc))))
     (finally
@@ -423,7 +459,7 @@
       (sys.path.insert 0 script-dir))
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (nrepl-eval src scope)))
+  (return (nrepl-eval src scope :filename file-path)))
 
 (def nrepl-macroexpand [src scope]
   "Macroexpand LisPython source and return the expanded s-expression."
@@ -695,6 +731,13 @@
       (srv.close))))
 
 (def run []
+  (try
+    (_run)
+    (except [LispyCompileError as e]
+      (report-compile-error e)
+      (sys.exit 1))))
+
+(def _run []
   (cond (< (len sys.argv) 2)
         (repl)
 

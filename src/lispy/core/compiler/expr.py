@@ -2,6 +2,8 @@ import ast
 from collections import deque
 from functools import reduce
 
+from lispy.core.compiler import features
+from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import *
 from lispy.core.compiler.utils import *
 from lispy.core.utils import *
@@ -201,10 +203,17 @@ def parse_comprehensions(generator_body):
     return rst
 
 
+def comprehension_elt_compile(elt):
+    """The element of a list/set/generator comprehension; ``*x`` is PEP 798."""
+    if starred_p(elt):
+        require("comprehension-unpacking", elt)
+    return expr_compile(elt)
+
+
 def gen_exp_compile(sexp):
     [elt, *generator_body] = sexp
     return ast.GeneratorExp(
-        elt=expr_compile(elt),
+        elt=comprehension_elt_compile(elt),
         generators=parse_comprehensions(generator_body),
         **sexp.position_info
     )
@@ -212,7 +221,8 @@ def gen_exp_compile(sexp):
 
 def def_args_parse(sexp):
     q = deque(sexp.list)
-    rst = ast.arguments(posonlyargs=[], **sexp.position_info)
+    # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
+    rst = ast.arguments(posonlyargs=[])
     args = []
     defaults = []
     kwonlyargs = []
@@ -291,33 +301,70 @@ def await_compile(sexp):
     return ast.Await(value=expr_compile(value), **sexp.position_info)
 
 
-def f_str_value_compile(sexp):
-    format_spec_dict = (
+def interpolated_values(sexp, field_compile):
+    """Values of an f/t-string node: literals alternate with fields (FStrExpr).
+
+    A ``{expr=}`` field echoes ``expr_text + debug`` at the end of the literal
+    before it, built here so a field expanded from a quasiquote echoes its
+    expanded text.  Empty literals are dropped, as in the AST CPython builds.
+    """
+    literals = [string_compile(v) for v in sexp.operands[0::2]]
+    fields = sexp.operands[1::2]
+    for [k, field] in enumerate(fields):
+        if getattr(field, "debug", None) is not None:
+            literals[k].value += field.expr_text + field.debug
+    values = []
+    for [k, literal] in enumerate(literals):
+        if literal.value:
+            values.append(literal)
+        if k < len(fields):
+            values.append(field_compile(fields[k]))
+    return values
+
+
+def format_spec_dict(sexp):
+    return (
         {}
         if sexp.format_spec is None
-        else {
-            "format_spec": ast.JoinedStr(
-                values=[ast.Constant(value=sexp.format_spec, **sexp.position_info)],
-                **sexp.position_info
-            )
-        }
+        else {"format_spec": f_string_compile(sexp.format_spec)}
     )
+
+
+def f_str_value_compile(sexp):
     return ast.FormattedValue(
         value=expr_compile(sexp.value),
         conversion=sexp.conversion,
-        **format_spec_dict,
+        **format_spec_dict(sexp),
         **sexp.position_info
     )
 
 
 def f_string_compile(sexp):
-    values = sexp.operands
-    compiled = []
-    for [i, v] in enumerate(values):
-        compiled.append(f_str_value_compile(v)) if i % 2 else compiled.append(
-            string_compile(v)
-        )
-    return ast.JoinedStr(values=compiled, **sexp.position_info)
+    return ast.JoinedStr(
+        values=interpolated_values(sexp, f_str_value_compile), **sexp.position_info
+    )
+
+
+def interpolation_compile(sexp):
+    text = sexp.expr_text
+    return ast.Interpolation(
+        value=expr_compile(sexp.value),
+        str=(
+            text
+            if features.interpolation_keeps_trailing_whitespace()
+            else text.rstrip()
+        ),
+        conversion=sexp.conversion,
+        **format_spec_dict(sexp),
+        **sexp.position_info
+    )
+
+
+def t_string_compile(sexp):
+    require("t-string", sexp)
+    return ast.TemplateStr(
+        values=interpolated_values(sexp, interpolation_compile), **sexp.position_info
+    )
 
 
 def paren_compiler(sexp, ctx):
@@ -354,6 +401,8 @@ def paren_compiler(sexp, ctx):
         if sexp.op == "await"
         else f_string_compile(sexp)
         if sexp.op == "f-string"
+        else t_string_compile(sexp)
+        if sexp.op == "t-string"
         else call_compile(sexp)
     )
 
@@ -375,7 +424,7 @@ def slice_compile(sexp):
 def list_comp_compile(sexp):
     [elt, *generator_body] = sexp
     return ast.ListComp(
-        elt=expr_compile(elt),
+        elt=comprehension_elt_compile(elt),
         generators=parse_comprehensions(generator_body),
         **sexp.position_info
     )
@@ -429,10 +478,21 @@ def dict_comp_compile(sexp):
     )
 
 
+def dict_unpack_comp_compile(sexp):
+    """``{**d for d in dicts}`` (PEP 798): a DictComp with no value."""
+    [unpacked, *generator_body] = sexp
+    require("comprehension-unpacking", unpacked)
+    return ast.DictComp(
+        key=expr_compile(unpacked.value),
+        generators=parse_comprehensions(generator_body),
+        **sexp.position_info
+    )
+
+
 def set_comp_compile(sexp):
     [elt, *generator_body] = sexp.operands
     return ast.SetComp(
-        elt=expr_compile(elt),
+        elt=comprehension_elt_compile(elt),
         generators=parse_comprehensions(generator_body),
         **sexp.position_info
     )
@@ -444,6 +504,9 @@ def brace_compiler(sexp):
         if len(sexp) < 1
         else (set_comp_compile if str(sexp.op) == "," else dict_comp_compile)(sexp)
         if len(sexp) > 2 and str(sexp[2]) in ["for", "async-for"]
+        else dict_unpack_comp_compile(sexp)
+        if doublestarred_p(sexp[0]) and len(sexp) > 1
+        and str(sexp[1]) in ["for", "async-for"]
         else set_compile(sexp)
         if str(sexp.op) == ","
         else dict_compile(sexp)
@@ -464,6 +527,8 @@ def metaindicator_compile(sexp):
 
 
 def expr_compile(sexp, ctx=ast.Load):
+    if isinstance(sexp, GluedHead):
+        raise sexp.misuse_error()
     return (
         paren_compiler(sexp, ctx)
         if paren_p(sexp)
