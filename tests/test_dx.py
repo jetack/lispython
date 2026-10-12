@@ -124,10 +124,23 @@ WORKSPACE_FILE = """\
 
 
 @pytest.fixture
-def workspace(tmp_path, monkeypatch):
+def ws_root(tmp_path, monkeypatch):
+    """The client's one workspace folder, tmp_path/ws; the rest of tmp_path
+    is outside the workspace."""
+    root = tmp_path / "ws"
+    root.mkdir()
+    folder = SimpleNamespace(uri=root.as_uri())
+    monkeypatch.setattr(server, "workspace_folders", lambda: [folder], raising=False)
+    # didOpen/didSave also publish diagnostics, which needs a client.
+    monkeypatch.setattr(server, "publish_diagnostics", lambda ls, uri: None)
     for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
         monkeypatch.setattr(server, name, {}, raising=False)
-    path = tmp_path / "config.lpy"
+    return root
+
+
+@pytest.fixture
+def workspace(ws_root):
+    path = ws_root / "config.lpy"
     path.write_text(WORKSPACE_FILE)
     uri = path.as_uri()
     server.index_file(uri)
@@ -187,15 +200,15 @@ def test_imports_and_loop_variables_stay_in_the_definition_index(workspace):
     assert not {"os", "pjoin", "line", "item"} & set(symbols_matching(""))
 
 
-def test_reindexing_a_file_replaces_its_symbols(workspace, tmp_path):
-    (tmp_path / "config.lpy").write_text("(def renamed [] 1)\n")
+def test_reindexing_a_file_replaces_its_symbols(workspace, ws_root):
+    (ws_root / "config.lpy").write_text("(def renamed [] 1)\n")
     server.index_file(workspace)
     assert set(symbols_matching("")) == {"renamed"}
     assert "load-config" not in server.WORKSPACE_INDEX
 
 
-def test_a_deleted_file_leaves_no_symbols(workspace, tmp_path):
-    (tmp_path / "config.lpy").unlink()
+def test_a_deleted_file_leaves_no_symbols(workspace, ws_root):
+    (ws_root / "config.lpy").unlink()
     server.index_file(workspace)
     assert symbols_matching("") == {}
     assert server.WORKSPACE_INDEX == {}
@@ -213,8 +226,8 @@ SCOPES_FILE = """\
 """
 
 
-def test_locals_inside_def_bodies_are_not_workspace_symbols(workspace, tmp_path):
-    path = tmp_path / "scopes.lpy"
+def test_locals_inside_def_bodies_are_not_workspace_symbols(workspace, ws_root):
+    path = ws_root / "scopes.lpy"
     path.write_text(SCOPES_FILE)
     server.index_file(path.as_uri())
     local_names = {"handler-local", "nested-local", "macro-local", "method-local"}
@@ -229,7 +242,9 @@ def test_locals_inside_def_bodies_are_not_workspace_symbols(workspace, tmp_path)
     assert symbols["method"] == kind.Function
 
 
-def test_required_packages_are_not_workspace_symbols(workspace, tmp_path, monkeypatch):
+def test_required_packages_are_not_workspace_symbols(
+    workspace, ws_root, tmp_path, monkeypatch
+):
     site = tmp_path / "site"
     (site / "dx_fake_package").mkdir(parents=True)
     (site / "dx_fake_package" / "__init__.py").write_text("")
@@ -237,7 +252,7 @@ def test_required_packages_are_not_workspace_symbols(workspace, tmp_path, monkey
         "(defmacro package-macro [x] x)\n"
     )
     monkeypatch.syspath_prepend(str(site))
-    user = tmp_path / "user.lpy"
+    user = ws_root / "user.lpy"
     user.write_text("(require dx_fake_package)\n(def user-fn [] 1)\n")
     server.index_file(user.as_uri())
     # go-to-definition can reach the package's macro ...
@@ -248,12 +263,11 @@ def test_required_packages_are_not_workspace_symbols(workspace, tmp_path, monkey
 
 
 def test_definition_publishes_symbols_only_for_workspace_files(
-    workspace, tmp_path, monkeypatch
+    workspace, ws_root, tmp_path, monkeypatch
 ):
-    ws = tmp_path / "ws"
+    ws = ws_root
     # A sibling whose name extends the workspace's: not inside it.
     site = tmp_path / "ws-site"
-    ws.mkdir()
     site.mkdir()
     (ws / "dx_ws_module.lpy").write_text("(def ws-helper [] 1)\n")
     (site / "dx_site_module.lpy").write_text("(def site-helper [] 1)\n")
@@ -286,6 +300,43 @@ def test_definition_publishes_symbols_only_for_workspace_files(
     symbols = symbols_matching("helper")
     assert "ws-helper" in symbols
     assert "site-helper" not in symbols
+
+
+def test_a_package_inside_the_workspace_keeps_its_symbols(
+    workspace, ws_root, monkeypatch
+):
+    # The user's own package, importable from the workspace (an editable
+    # install), required by another workspace file.
+    (ws_root / "dx_own_package").mkdir()
+    (ws_root / "dx_own_package" / "__init__.py").write_text("")
+    (ws_root / "dx_own_package" / "tools.lpy").write_text("(def own-tool [] 1)\n")
+    monkeypatch.syspath_prepend(str(ws_root))
+    server.index_workspace(server.workspace_folders())
+    assert "own-tool" in symbols_matching("")
+    # Saving the requiring file re-indexes the package through the require.
+    user = ws_root / "user.lpy"
+    user.write_text("(require dx_own_package)\n(def user-fn [] 1)\n")
+    server.did_save(None, did_params(user))
+    assert {"own-tool", "user-fn"} <= set(symbols_matching(""))
+
+
+def did_params(path):
+    return SimpleNamespace(text_document=SimpleNamespace(uri=path.as_uri()))
+
+
+def test_a_file_outside_the_workspace_publishes_no_symbols(workspace, tmp_path):
+    outside = tmp_path / "site-packages" / "dep.lpy"
+    outside.parent.mkdir()
+    outside.write_text("(def dep-fn [] 1)\n")
+    server.did_open(None, did_params(outside))
+    server.did_save(None, did_params(outside))
+    # Indexed for go-to-definition, absent from the symbol search.
+    assert "dep-fn" in server.WORKSPACE_INDEX
+    assert "dep-fn" not in symbols_matching("")
+
+
+def test_an_uninitialized_server_has_no_workspace_folders():
+    assert server.workspace_folders() == []
 
 
 def test_under_workspace_compares_path_components(tmp_path):

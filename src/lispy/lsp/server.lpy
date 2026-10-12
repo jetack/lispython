@@ -175,6 +175,17 @@
         (return True)))
   (return False))
 
+(def workspace-folders []
+  "The client's workspace folders, read from the pygls workspace itself.
+   It is the one record of them (pygls keeps it current through
+   didChangeWorkspaceFolders), so nothing here copies the list; before
+   initialize there is no workspace and so no folders."
+  (try
+    (return (list (.values server.workspace.folders)))
+    (except [RuntimeError]
+      ;; Not (return []): an empty bracket compiles to a bare return.
+      (return (list)))))
+
 (def index-required-modules [tree]
   "Find all (require module-name ...) forms in tree and index those packages."
   (for node in tree
@@ -186,12 +197,14 @@
         (do (= module-name (. (sub node 1) value))
             (index-installed-package module-name)))))
 
-(def index-file [uri :workspace-file True]
+(def index-file [uri]
   "Parse a .lpy file and add its definitions to the workspace index.
-   Removes old entries for this URI before re-indexing.  Only a workspace
-   file publishes workspace/symbol results: a dependency indexed so that
-   go-to-definition can reach it (an installed package) is not part of the
-   user's code and would flood the symbol search."
+   Removes old entries for this URI before re-indexing.  Only a file inside
+   a workspace folder publishes workspace/symbol results: a dependency
+   indexed so that go-to-definition can reach it is not the user's code and
+   would flood the symbol search.  Membership is decided here from the
+   file's path, never by the caller, so every route to index-file (startup
+   scan, didOpen/didSave, a require, go-to-definition) agrees about a file."
   ;; Remove old entries for this URI
   (= to-remove [])
   (for [name locs] in (.items WORKSPACE-INDEX)
@@ -212,6 +225,7 @@
       (= src (.decode (f.read) "utf-8")))
     (= tree (parse src :partial True))
     (= (sub FILE-TREES uri) tree)
+    (= workspace-file (under-workspace fpath (workspace-folders)))
     (= symbols (ife workspace-file [] None))
     (collect-definitions tree uri :defs WORKSPACE-INDEX :symbols symbols)
     (if workspace-file
@@ -269,7 +283,7 @@
         (if (and spec spec.submodule-search-locations)
             (for search-path in spec.submodule-search-locations
               (for fpath in (glob.glob (osp.join search-path "**" "*.lpy") :recursive True)
-                (index-file (path-to-uri fpath) :workspace-file False)))))
+                (index-file (path-to-uri fpath))))))
     (except [Exception]
       (pass))))
 
@@ -830,8 +844,7 @@
               (do (= target-uri (path-to-uri fpath))
                   ;; Make sure the target file is indexed
                   (if (not-in target-uri FILE-TREES)
-                      (index-file target-uri
-                                  :workspace-file (under-workspace fpath folders)))
+                      (index-file target-uri))
                   ;; Look up the name in the target file's definitions
                   (= target-tree (.get FILE-TREES target-uri))
                   (if target-tree
