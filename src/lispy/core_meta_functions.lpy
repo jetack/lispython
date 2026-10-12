@@ -33,7 +33,9 @@
             (getattr ~import-call
                      "__macro_namespace"
                      {}))
-         ~(conde (not macro-names)
+         ;; Absent (None) registers every macro under its qualified name; an
+         ;; empty [] is present and registers none, so never test truthiness.
+         ~(conde (is macro-names None)
                  `(for [k v] in (.items (.copy ___imported-macros))
                     (= (sub (.setdefault (globals) "__macro_namespace" {})
                             (+ ~(str module-name) "." k))
