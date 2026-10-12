@@ -1,27 +1,27 @@
 import ast
 
-from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
+import pytest
+
+from lispy.tools import parse, src_to_python_org
+from tests.utils import stmt_to_dump
 
 
 class TestStarredSubscript:
     """``t[*Ts]`` is Subscript(slice=Tuple([Starred])) on every supported CPython."""
 
-    @staticmethod
-    def compile_to_dump(src):
-        [stmt] = macroexpand_then_compile(parse(src), {"__macro_namespace": {}})
-        return ast.dump(stmt)
-
-    def test_load_matches_python(self):
-        expected = ast.dump(ast.parse("tuple[*Ts]").body[0])
-        assert self.compile_to_dump("(sub tuple *Ts)") == expected
-
-    def test_store_matches_python(self):
-        expected = ast.dump(ast.parse("x[*a] = 1").body[0])
-        assert self.compile_to_dump("(= (sub x *a) 1)") == expected
-
-    def test_mixed_tuple_slice_unchanged(self):
-        expected = ast.dump(ast.parse("x[*a, 1]").body[0])
-        assert self.compile_to_dump("(sub x (, *a 1))") == expected
+    @pytest.mark.parametrize(
+        "lpy, py",
+        [
+            ("(sub tuple *Ts)", "tuple[*Ts]"),
+            ("(= (sub x *a) 1)", "x[*a] = 1"),
+            ("(+= (sub x *a) 1)", "x[*a] += 1"),
+            ("(del (sub x *a))", "del x[*a]"),
+            ("(sub x *a *b)", "x[*a][*b]"),
+            ("(sub x (, *a 1))", "x[*a, 1]"),
+        ],
+    )
+    def test_matches_python(self, lpy, py):
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
 
 
 class TestUnaryOpMethods:
