@@ -15,6 +15,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [type-alias-p])
+(from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 
 (= logger (logging.getLogger __name__))
 
@@ -45,7 +46,7 @@
    "async-with" "```\n(async-with [ctx-expr as-name] body...)\n```\n\nAsync context manager — use inside `async-def`."
    "import"    "```\n(import module)\n(import module :as alias)\n```\n\nImport a module."
    "from"      "```\n(from module [names...])\n(from module [name :as alias ...])\n```\n\nImport specific names from a module."
-   "require"   "```\n(require module *)\n(require module [names...])\n```\n\nImport macros from a LisPython macro module at compile time."
+   "require"   "```\n(require module)\n(require module *)\n(require module [names...])\n```\n\nImport macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none."
    "="         "```\n(= target value)\n```\n\nAssignment statement."
    ":="        "```\n(:= target value)\n```\n\nWalrus operator (assignment expression)."
    "return"    "```\n(return value)\n```\n\nReturn a value from a function."
@@ -345,8 +346,20 @@
             (if (and (isinstance child Symbol) (== child.value name))
                 (return node))))
       (== form "require")
-      (do ;; (require module *) - imports all macros
-          (return node))))
+      (do ;; the compiler's own rule decides which names this form registers
+          (= [kind names] (require-selection (sub node.list [: 2 None])))
+          (cond
+            ;; (require module): macros are registered as module.name
+            (== kind REQUIRE-QUALIFIED)
+            (if (and (> (len node) 1)
+                     (.startswith name (+ (str (sub node 1)) ".")))
+                (return node))
+            ;; (require module *): every macro, names unknown without importing
+            (== kind REQUIRE-ALL)
+            (return node)
+            ;; (require module [a b]): exactly those; [] imports nothing
+            (in name names)
+            (return node)))))
   (return None))
 
 ;; ---------------------------------------------------------------------------
@@ -854,7 +867,14 @@
                   (= target-tree (.get FILE-TREES target-uri))
                   (if target-tree
                       (do (= target-defs (collect-definitions target-tree target-uri))
-                          (= result (.get target-defs name))
+                          ;; (require module) registers module.name; the target
+                  ;; file defines the bare name.
+                  (= prefix (+ (str (sub import-node 1)) "."))
+                  (= result (.get target-defs
+                                  (ife (and (== import-node.op.value "require")
+                                            (.startswith name prefix))
+                                       (sub name [: (len prefix) None])
+                                       name)))
                           (if result
                               (return result))))))))
 
