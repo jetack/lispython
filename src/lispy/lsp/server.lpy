@@ -13,7 +13,7 @@
 (from pygls.lsp.server [LanguageServer])
 
 (from lispy.core.nodes *)
-(from lispy.core.parser [parse])
+(from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [type-alias-p])
 
 (= logger (logging.getLogger __name__))
@@ -152,6 +152,8 @@
 (= WORKSPACE-INDEX {})
 ;; Cache of parsed trees per URI: {uri: tree}
 (= FILE-TREES {})
+;; workspace/symbol results per URI: {uri: [SymbolInformation, ...]}
+(= WORKSPACE-SYMBOLS {})
 
 (def uri-to-path [uri]
   "Convert a file:// URI to a filesystem path."
@@ -162,6 +164,27 @@
 (def path-to-uri [path]
   "Convert a filesystem path to a file:// URI."
   (return (.as-uri (pathlib.Path path))))
+
+(def under-workspace [path folders]
+  "True when path lies inside one of the workspace folders.  Real paths are
+   compared by components, not by string prefix, so /ws-other is not inside
+   /ws and a symlink counts where its target lives."
+  (= real (pathlib.Path (osp.realpath path)))
+  (for folder in folders
+    (if (.is-relative-to real (osp.realpath (uri-to-path folder.uri)))
+        (return True)))
+  (return False))
+
+(def workspace-folders []
+  "The client's workspace folders, read from the pygls workspace itself.
+   It is the one record of them (pygls keeps it current through
+   didChangeWorkspaceFolders), so nothing here copies the list; before
+   initialize there is no workspace and so no folders."
+  (try
+    (return (list (.values server.workspace.folders)))
+    (except [RuntimeError]
+      ;; Not (return []): an empty bracket compiles to a bare return.
+      (return (list)))))
 
 (def index-required-modules [tree]
   "Find all (require module-name ...) forms in tree and index those packages."
@@ -176,7 +199,12 @@
 
 (def index-file [uri]
   "Parse a .lpy file and add its definitions to the workspace index.
-   Removes old entries for this URI before re-indexing."
+   Removes old entries for this URI before re-indexing.  Only a file inside
+   a workspace folder publishes workspace/symbol results: a dependency
+   indexed so that go-to-definition can reach it is not the user's code and
+   would flood the symbol search.  Membership is decided here from the
+   file's path, never by the caller, so every route to index-file (startup
+   scan, didOpen/didSave, a require, go-to-definition) agrees about a file."
   ;; Remove old entries for this URI
   (= to-remove [])
   (for [name locs] in (.items WORKSPACE-INDEX)
@@ -186,6 +214,7 @@
         (.append to-remove name)))
   (for name in to-remove
     (del (sub WORKSPACE-INDEX name)))
+  (.pop WORKSPACE-SYMBOLS uri None)
 
   ;; Parse and collect definitions
   (= fpath (uri-to-path uri))
@@ -196,7 +225,11 @@
       (= src (.decode (f.read) "utf-8")))
     (= tree (parse src :partial True))
     (= (sub FILE-TREES uri) tree)
-    (collect-definitions tree uri :defs WORKSPACE-INDEX)
+    (= workspace-file (under-workspace fpath (workspace-folders)))
+    (= symbols (ife workspace-file [] None))
+    (collect-definitions tree uri :defs WORKSPACE-INDEX :symbols symbols)
+    (if workspace-file
+        (= (sub WORKSPACE-SYMBOLS uri) symbols))
     ;; Also eagerly index any packages this file requires so defmacros
     ;; from required modules are discoverable for go-to-definition.
     (index-required-modules tree)
@@ -428,6 +461,23 @@
         (return (.strip node.value "\"'"))
         (return (str node))))
 
+(= _DEFINITION-KINDS
+   {"def" lsp.SymbolKind.Function
+    "async-def" lsp.SymbolKind.Function
+    ;; SymbolKind has no macro kind, and Operator would misdescribe a named
+    ;; form, so a macro is a Function.
+    "defmacro" lsp.SymbolKind.Function
+    "class" lsp.SymbolKind.Class
+    ;; A (type NAME ...) alias; callers check type-alias-p first, since a
+    ;; call to the builtin type is not a definition.
+    "type" lsp.SymbolKind.Class
+    "=" lsp.SymbolKind.Variable})
+
+(def definition-kind [form]
+  "The SymbolKind of a definition form (def, async-def, defmacro, class, type, =),
+   or None.  Document symbols and workspace/symbol both report it."
+  (return (.get _DEFINITION-KINDS form)))
+
 (def walk-symbols [nodes]
   "Walk top-level parsed forms and produce DocumentSymbol entries."
   (= symbols [])
@@ -451,7 +501,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name name
-              :kind lsp.SymbolKind.Function
+              :kind (definition-kind form)
               :range rng
               :selection-range sel
               :children (or children None))))
@@ -468,7 +518,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name name
-              :kind lsp.SymbolKind.Class
+              :kind (definition-kind form)
               :range rng
               :selection-range sel
               :children (or children None))))
@@ -477,7 +527,7 @@
       (.append symbols
         (lsp.DocumentSymbol
           :name (symbol-name (sub node 1))
-          :kind lsp.SymbolKind.Class
+          :kind (definition-kind form)
           :range (node-range node)
           :selection-range (node-range (sub node 1))
           :detail "type alias"))
@@ -487,7 +537,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name (symbol-name (sub node 1))
-              :kind lsp.SymbolKind.Function
+              :kind (definition-kind form)
               :range (node-range node)
               :selection-range (node-range (sub node 1))
               :detail "macro")))
@@ -497,7 +547,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name (symbol-name (sub node 1))
-              :kind lsp.SymbolKind.Variable
+              :kind (definition-kind form)
               :range (node-range node)
               :selection-range (node-range (sub node 1)))))
 
@@ -558,8 +608,21 @@
 ;; Definition index
 ;; ---------------------------------------------------------------------------
 
-(def collect-definitions [nodes uri :defs None]
-  "Walk AST and collect all definition locations keyed by symbol name."
+(def _add-symbol [symbols name kind loc]
+  (if (is-not symbols None)
+      (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
+
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
+  "Walk AST and collect all definition locations keyed by symbol name.
+
+   defs feeds go-to-definition and completion, so it also holds the names
+   bound by import/from and for/async-for.  When symbols is a list, the same
+   pass appends an lsp.SymbolInformation for each declaration a user searches
+   for with workspace/symbol -- def, async-def, defmacro, class and = --
+   with the kind definition-kind gives it.  Imports and loop variables bind
+   names but declare nothing, so they get no symbol, and an = inside a def
+   body (in-function) is a local, so it gets none either; module and
+   class-body assignments do."
   (if (is defs None)
       (= defs {}))
 
@@ -578,8 +641,11 @@
                   (= name name-node.value)
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
+                  (_add-symbol symbols name (definition-kind form) loc)
                   (if (> (len node) 3)
-                      (collect-definitions (sub node.list [: 3 None]) uri :defs defs)))))
+                      (collect-definitions (sub node.list [: 3 None]) uri
+                                           :defs defs :symbols symbols
+                                           :in-function True)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -587,28 +653,35 @@
                   (= name name-node.value)
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
+                  (_add-symbol symbols name (definition-kind form) loc)
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs))))
+                  (collect-definitions body uri :defs defs :symbols symbols))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
-          (.append (.setdefault defs name-node.value [])
-                   (lsp.Location :uri uri :range (node-range name-node))))
+          (= loc (lsp.Location :uri uri :range (node-range name-node)))
+          (.append (.setdefault defs name-node.value []) loc)
+          (if (not in-function)
+              (_add-symbol symbols name-node.value (definition-kind form) loc)))
 
       (== form "=")
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
               (do (= name (. (sub node 1) value))
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
-                  (.append (.setdefault defs name []) loc))))
+                  (.append (.setdefault defs name []) loc)
+                  (if (not in-function)
+                      (_add-symbol symbols name (definition-kind form) loc)))))
 
       (in form (, "for" "async-for"))
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
               (do (= name (. (sub node 1) value))
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)))
-          (collect-definitions (sub node.list [: 1 None]) uri :defs defs))
+          (collect-definitions (sub node.list [: 1 None]) uri
+                               :defs defs :symbols symbols
+                               :in-function in-function))
 
       (in form (, "import" "from"))
       (do (for child in (sub node.list [: 1 None])
@@ -625,7 +698,7 @@
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs))))
+            uri :defs defs :symbols symbols :in-function in-function))))
 
   (return defs))
 
@@ -806,6 +879,104 @@
   (return None)))
 
 ;; ---------------------------------------------------------------------------
+;; Signature help
+;; ---------------------------------------------------------------------------
+
+(def find-enclosing-function [source line col]
+  "Name of the innermost call open at the cursor, or None.
+
+   line is 1-based and col a 0-based code-point column: the coordinates
+   tokenize() reports.  The scan runs over the lexer's own tokens, so
+   strings (prefixed, raw, triple-quoted, f/t-string fields), comments and
+   opening tokens such as *( or ^( are delimited exactly as the parser
+   delimits them.  An opening ending in ( contributes its head symbol (None
+   when the head is not a symbol, or when a ' or ` quotes the form as data;
+   an unquote ~( is code again); [ and { contribute None.  Never raises: a
+   buffer the lexer cannot read has no enclosing call."
+  (try
+    (= tokens (list (tokenize source)))
+    (except [Exception]
+      (return None)))
+  (= cursor (, line col))
+  (= stack [])
+  (for i in (range (len tokens))
+    (= [text tktype info _] (sub tokens i))
+    (if (> (, (sub info "end_lineno") (sub info "end_col_offset")) cursor)
+        (break))
+    (cond
+      (== tktype "opening")
+      (if (.endswith text "(")
+          (do (= head (ife (< (+ i 1) (len tokens)) (sub tokens (+ i 1)) None))
+              (= before (ife (> i 0) (sub tokens (- i 1)) None))
+              (= quoted (and before
+                             (== (sub before 1) "meta-indicator")
+                             (in (sub (sub before 0) -1) "'`")))
+              (.append stack (ife (and head (not quoted) (== (sub head 1) "symbol"))
+                                  (sub head 0)
+                                  None)))
+          (.append stack None))
+
+      (and (== tktype "closing") stack)
+      (.pop stack)))
+  (for name in (reversed stack)
+    (if (is-not name None)
+        (return name)))
+  (return None))
+
+(def cursor-of [doc pos]
+  "The LSP position pos as tokenize() coordinates: (1-based line, code-point column).
+   LSP counts character in the negotiated encoding (UTF-16 by default), which
+   differs from a str index after a non-BMP character; pygls' position codec
+   converts it.  A document without a codec (a test double) is taken as code
+   points."
+  (= codec (getattr doc "position_codec" None))
+  (if (is codec None)
+      (return (, (+ pos.line 1) pos.character)))
+  (= server-pos (.position-from-client-units
+                  codec doc.lines
+                  (lsp.Position :line pos.line :character pos.character)))
+  (return (, (+ server-pos.line 1) server-pos.character)))
+
+(deco (server.feature
+        lsp.TEXT_DOCUMENT_SIGNATURE_HELP
+        (lsp.SignatureHelpOptions :trigger-characters ["("]))
+(def signature-help [ls params]
+  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (= [line col] (cursor-of doc params.position))
+  (= func-name (find-enclosing-function doc.source line col))
+  (if (is func-name None)
+      (return None))
+
+  ;; 1. Special forms
+  (= doc-text (.get SPECIAL-FORM-DOCS func-name))
+  (if doc-text
+      (do (= m (re.search "```\\n(.+?)\\n```" doc-text re.DOTALL))
+          (= sig-text (ife m (.strip (.group m 1)) func-name))
+          (return (lsp.SignatureHelp
+            :signatures [(lsp.SignatureInformation
+                           :label sig-text
+                           :documentation (lsp.MarkupContent
+                             :kind lsp.MarkupKind.Markdown
+                             :value doc-text))]))))
+
+  ;; 2. Python builtins
+  (= builtin-name (.replace func-name "-" "_"))
+  (= bi (.get BUILTIN-INFO builtin-name))
+  (if bi
+      (do (= sig (.get bi "signature" func-name))
+          (= doc-str (.get bi "doc" ""))
+          (return (lsp.SignatureHelp
+            :signatures [(lsp.SignatureInformation
+                           :label sig
+                           :documentation (ife doc-str
+                                              (lsp.MarkupContent
+                                                :kind lsp.MarkupKind.Markdown
+                                                :value doc-str)
+                                              None))]))))
+
+  (return None)))
+
+;; ---------------------------------------------------------------------------
 ;; Completion
 ;; ---------------------------------------------------------------------------
 
@@ -896,3 +1067,11 @@
   (if (or (is target None) (not (isinstance target Symbol)))
       (return None))
   (return (collect-references tree target.value doc.uri))))
+
+(deco (server.feature lsp.WORKSPACE_SYMBOL)
+(def workspace-symbol [ls params]
+  (= query (.lower params.query))
+  (return [symbol
+           for symbols in (.values WORKSPACE-SYMBOLS)
+           for symbol in symbols
+           if (in query (.lower symbol.name))])))

@@ -3,6 +3,7 @@
 (import argparse)
 (import ast)
 (import copy)
+(import functools)
 (import importlib)
 (import inspect)
 (import io)
@@ -15,6 +16,7 @@
 (import sys)
 (import threading)
 (import traceback)
+(import types)
 
 (import subprocess)
 (import shutil)
@@ -498,6 +500,70 @@
     (except [Exception]
       (return None))))
 
+;; LisPython syntax offered by nREPL completion and reported as "keyword"
+;; (unless a macro of the same name is loaded).  _SPECIAL-FORMS is a
+;; different set: the forms the REPL indents as bodies.
+(= _COMPLETION-SYNTAX
+   [;; Definitions
+    "def" "defn" "defmacro" "async-def"
+    ;; Looping
+    "for" "async-for" "while"
+    ;; Flow
+    "return" "if" "ife" "when" "unless"
+    "cond" "conde" "else"
+    "break" "continue" "pass"
+    "match" "case" "do" "comment"
+    ;; Threading
+    "->" "->>" "as->"
+    ;; Functional
+    "fn" "lambda" "await"
+    "yield" "yield-from"
+    ;; Context
+    "with" "async-with" "deco"
+    ;; Error handling
+    "try" "except" "except*" "finally" "raise"
+    ;; Data
+    "del" "sub"
+    ;; Import / macro
+    "import" "from" "require"
+    "global" "nonlocal" "assert"
+    ;; Class
+    "class"
+    ;; Misc
+    "gensym" "pprint"])
+
+(def _completion-kind [obj]
+  "The nREPL completion kind of a value: class, function or variable."
+  (cond (isinstance obj type) (return "class")
+        (callable obj) (return "function")
+        True (return "variable")))
+
+(= _FUNCTION-DESCRIPTORS
+   ;; partialmethod is listed because, unlike other method wrappers, it is
+   ;; not callable itself.
+   (, staticmethod classmethod functools.partialmethod
+      types.FunctionType types.BuiltinFunctionType types.MethodType
+      types.MethodDescriptorType types.ClassMethodDescriptorType
+      types.WrapperDescriptorType types.MethodWrapperType))
+
+(def _attribute-kind [obj attr]
+  "The completion kind of obj.attr, found without running user code.
+
+   getattr would run a property, a descriptor or __getattr__ -- side effects
+   and exceptions in the middle of a completion -- so the attribute is read
+   with inspect.getattr_static and its raw object classified: functions,
+   methods, static/class methods and partialmethods are functions; a class
+   is a class; any other callable (an lru_cache wrapper) is a function; a
+   non-callable descriptor (property, cached_property, slots) yields a
+   value, so it is a variable, as is any other object.  An attribute only
+   __getattr__ knows about is a variable."
+  (try
+    (= raw (inspect.getattr-static obj attr))
+    (except [Exception]
+      (return "variable")))
+  (cond (isinstance raw _FUNCTION-DESCRIPTORS) (return "function")
+        True (return (_completion-kind raw))))
+
 (def nrepl-complete [prefix scope]
   "Return completions matching prefix, including dot-completion."
   (= has-dot (in "." prefix))
@@ -509,14 +575,18 @@
         (= attr-prefix (sub parts -1))
         (= obj (_resolve-obj obj-part scope))
         (if (is obj None)
-            (return {"op" "complete-result" "completions" []}))
+            (return {"op" "complete-result" "completions" [] "kinds" {}}))
         (= py-attr (.replace attr-prefix "-" "_"))
         (= matches [])
+        (= kinds {})
         (for attr in (dir obj)
           (if (.startswith attr py-attr)
-              (matches.append (+ obj-part "." (_unmangle attr)))))
+              (do (= full-name (+ obj-part "." (_unmangle attr)))
+                  (matches.append full-name)
+                  (= (sub kinds full-name) (_attribute-kind obj attr)))))
         (return {"op" "complete-result"
-                 "completions" (sorted matches)}))
+                 "completions" (sorted matches)
+                 "kinds" kinds}))
       (do
         ;; Prefix completion from scope, builtins, macros, keywords
         (= matches [])
@@ -538,37 +608,30 @@
           (if (.startswith k prefix)
               (matches.append k)))
         ;; LisPython special forms and syntax
-        (for k in [;; Definitions
-                   "def" "defn" "defmacro" "async-def"
-                   ;; Looping
-                   "for" "async-for" "while"
-                   ;; Flow
-                   "return" "if" "ife" "when" "unless"
-                   "cond" "conde" "else"
-                   "break" "continue" "pass"
-                   "match" "case" "do" "comment"
-                   ;; Threading
-                   "->" "->>" "as->"
-                   ;; Functional
-                   "fn" "lambda" "await"
-                   "yield" "yield-from"
-                   ;; Context
-                   "with" "async-with" "deco"
-                   ;; Error handling
-                   "try" "except" "except*" "finally" "raise"
-                   ;; Data
-                   "del" "sub"
-                   ;; Import / macro
-                   "import" "from" "require"
-                   "global" "nonlocal" "assert"
-                   ;; Class
-                   "class"
-                   ;; Misc
-                   "gensym" "pprint"]
+        (for k in _COMPLETION-SYNTAX
           (if (.startswith k prefix)
               (matches.append k)))
+        ;; Build kinds dict
+        (= kinds {})
+        (= builtins-dict (ife (isinstance __builtins__ dict)
+                              __builtins__
+                              (vars __builtins__)))
+        (for name in (set matches)
+          (= mangled (_mangle name))
+          (cond (in name macros)
+                (= (sub kinds name) "macro")
+                (or (in name _COMPLETION-SYNTAX) (in name keyword.kwlist))
+                (= (sub kinds name) "keyword")
+                ;; A scope binding shadows the builtin of the same name.
+                (in mangled scope)
+                (= (sub kinds name) (_completion-kind (sub scope mangled)))
+                (in mangled builtins-dict)
+                (= (sub kinds name) (_completion-kind (sub builtins-dict mangled)))
+                True
+                (= (sub kinds name) "variable")))
         (return {"op" "complete-result"
-                 "completions" (sorted (set matches))}))))
+                 "completions" (sorted (set matches))
+                 "kinds" kinds}))))
 
 (def nrepl-docs [symbol scope]
   "Return documentation for a symbol."
@@ -702,6 +765,34 @@
     (finally
       (conn.close))))
 
+(= NREPL-PORT-FILE ".nrepl-port")
+
+(def _write-port-file [port directory]
+  "Write port to directory/.nrepl-port for editor auto-discovery; return the
+   path, or None when the directory is unwritable.  The file is a
+   convenience, so failing to write it must not stop the server."
+  (= path (osp.join directory NREPL-PORT-FILE))
+  (try
+    (with [(open path "w") as f]
+      (f.write (str port)))
+    (except [OSError as err]
+      (print f"nREPL: could not write {path}: {err.strerror}" :file sys.stderr)
+      (return None)))
+  (return path))
+
+(def _remove-port-file [path port]
+  "Remove the port file at path if it still names port.  A second server
+   started in the same directory overwrites the file, and stopping the
+   first must not delete the second's."
+  (if (is path None)
+      (return))
+  (try
+    (with [(open path) as f]
+      (= current (.strip (f.read))))
+    (if (== current (str port))
+        (os.unlink path))
+    (except [OSError] (pass))))
+
 (def nrepl-server [:host "127.0.0.1" :port 0]
   (= cwd (os.getcwd))
   (if (not (in cwd sys.path))
@@ -718,6 +809,8 @@
   (print f"nREPL server started on {host}:{actual-port}")
   (sys.stdout.flush)
 
+  (= port-file (_write-port-file actual-port cwd))
+
   (try
     (while True
       (= [conn addr] (srv.accept))
@@ -728,7 +821,8 @@
     (except [KeyboardInterrupt]
       (print "\nnREPL server stopped."))
     (finally
-      (srv.close))))
+      (srv.close)
+      (_remove-port-file port-file actual-port))))
 
 (def run []
   (try
