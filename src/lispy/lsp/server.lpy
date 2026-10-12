@@ -176,9 +176,12 @@
         (do (= module-name (. (sub node 1) value))
             (index-installed-package module-name)))))
 
-(def index-file [uri]
+(def index-file [uri :workspace-file True]
   "Parse a .lpy file and add its definitions to the workspace index.
-   Removes old entries for this URI before re-indexing."
+   Removes old entries for this URI before re-indexing.  Only a workspace
+   file publishes workspace/symbol results: a dependency indexed so that
+   go-to-definition can reach it (an installed package) is not part of the
+   user's code and would flood the symbol search."
   ;; Remove old entries for this URI
   (= to-remove [])
   (for [name locs] in (.items WORKSPACE-INDEX)
@@ -199,9 +202,10 @@
       (= src (.decode (f.read) "utf-8")))
     (= tree (parse src :partial True))
     (= (sub FILE-TREES uri) tree)
-    (= symbols [])
+    (= symbols (ife workspace-file [] None))
     (collect-definitions tree uri :defs WORKSPACE-INDEX :symbols symbols)
-    (= (sub WORKSPACE-SYMBOLS uri) symbols)
+    (if workspace-file
+        (= (sub WORKSPACE-SYMBOLS uri) symbols))
     ;; Also eagerly index any packages this file requires so defmacros
     ;; from required modules are discoverable for go-to-definition.
     (index-required-modules tree)
@@ -255,7 +259,7 @@
         (if (and spec spec.submodule-search-locations)
             (for search-path in spec.submodule-search-locations
               (for fpath in (glob.glob (osp.join search-path "**" "*.lpy") :recursive True)
-                (index-file (path-to-uri fpath))))))
+                (index-file (path-to-uri fpath) :workspace-file False)))))
     (except [Exception]
       (pass))))
 

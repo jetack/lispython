@@ -173,6 +173,24 @@ def test_reindexing_a_file_replaces_its_symbols(workspace, tmp_path):
     assert "load-config" not in server.WORKSPACE_INDEX
 
 
+def test_required_packages_are_not_workspace_symbols(workspace, tmp_path, monkeypatch):
+    site = tmp_path / "site"
+    (site / "dx_fake_package").mkdir(parents=True)
+    (site / "dx_fake_package" / "__init__.py").write_text("")
+    (site / "dx_fake_package" / "macros.lpy").write_text(
+        "(defmacro package-macro [x] x)\n"
+    )
+    monkeypatch.syspath_prepend(str(site))
+    user = tmp_path / "user.lpy"
+    user.write_text("(require dx_fake_package)\n(def user-fn [] 1)\n")
+    server.index_file(user.as_uri())
+    # go-to-definition can reach the package's macro ...
+    assert "package-macro" in server.WORKSPACE_INDEX
+    # ... but the symbol search lists only the user's code.
+    assert "package-macro" not in symbols_matching("")
+    assert "user-fn" in symbols_matching("")
+
+
 @pytest.fixture
 def scope():
     scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}
