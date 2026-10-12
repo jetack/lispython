@@ -96,3 +96,49 @@ def test_partial_parse_does_not_leak_into_strict_parse(monkeypatch):
 def test_partial_parse_of_a_valid_t_string_is_complete():
     forms = parse('(print t"{x}")', partial=True)
     assert [str(f.op) for f in forms] == ["print"]
+
+
+ALIASES = (
+    "(type Alias int)\n"
+    "(type Pair[T] (tuple T T))\n"
+    "(def use [x] (type Inner x))\n"
+    "(type Pair2[T] (tuple T T)\n"  # mid-edit: unclosed
+)
+# Shapes that call the builtin `type`: one or three operands, a dotted or
+# non-symbol first operand.
+CALLS = '(type x)\n(type 1 2 3)\n(type a.b c)\n(type "s" c)\n(type)\n'
+
+
+def test_type_alias_document_symbols():
+    symbols = server.document_symbol(ls_with(ALIASES), position(0, 0))
+    assert [s.name for s in symbols] == ["Alias", "Pair", "use"]
+    assert [c.name for c in symbols[2].children] == ["Inner"]
+    # The selection covers the whole head, as it does for def and class.
+    assert symbols[1].selection_range.end.character == 13
+
+
+def test_type_alias_definition():
+    # The references come before the unclosed form, which ends the partial parse.
+    ls = ls_with(
+        "(type Alias int)\n(type Pair[T] (tuple T T))\n(= y Pair)\n(= z Alias)\n(fo"
+    )
+    [pair] = server.definition(ls, position(2, 5))
+    assert (pair.range.start.line, pair.range.start.character) == (1, 6)
+    [alias] = server.definition(ls, position(3, 5))
+    assert alias.range.start.line == 0
+
+
+def test_type_alias_hover_on_the_keyword():
+    hover = server.hover(ls_with("(type Alias int)"), position(0, 2))
+    assert "type alias" in hover.contents.value
+
+
+def test_type_call_keeps_the_builtin_hover():
+    hover = server.hover(ls_with("(type x)\n(type A int)"), position(0, 2))
+    assert "Python builtin" in hover.contents.value
+
+
+def test_type_call_is_not_a_definition():
+    ls = ls_with(CALLS)
+    assert server.document_symbol(ls, position(0, 0)) == []
+    assert server.collect_definitions(parse(CALLS), URI) == {}

@@ -14,6 +14,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
+(from lispy.core.compiler.stmt [type-alias-p])
 
 (= logger (logging.getLogger __name__))
 
@@ -472,6 +473,15 @@
               :selection-range sel
               :children (or children None))))
 
+      (and (== form "type") (type-alias-p node))
+      (.append symbols
+        (lsp.DocumentSymbol
+          :name (symbol-name (sub node 1))
+          :kind lsp.SymbolKind.Class
+          :range (node-range node)
+          :selection-range (node-range (sub node 1))
+          :detail "type alias"))
+
       (== form "defmacro")
       (do (if (< (len node) 2) (continue))
           (.append symbols
@@ -582,6 +592,11 @@
                                (sub node.list [: 2 None])))
                   (collect-definitions body uri :defs defs))))
 
+      (and (== form "type") (type-alias-p node))
+      (do (= name-node (def-name-symbol (sub node 1)))
+          (.append (.setdefault defs name-node.value [])
+                   (lsp.Location :uri uri :range (node-range name-node))))
+
       (== form "=")
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
               (do (= name (. (sub node 1) value))
@@ -670,6 +685,20 @@
       (return [])))
   (return (walk-symbols tree))))
 
+;; Not in SPECIAL-FORM-DOCS: `type` is also the builtin, so the alias doc applies
+;; only where type-alias-p (the compiler's own test) accepts the form.
+(= TYPE-ALIAS-DOC
+   "```\n(type Name value)\n(type Name[T] value)\n```\n\nDefine a type alias (Python 3.12+).")
+
+(def alias-keyword-p [nodes target]
+  "True when target is the `type` of a (type NAME value) alias statement."
+  (for node in nodes
+    (if (isinstance node Paren)
+        (if (or (and (is node.op target) (type-alias-p node))
+                (alias-keyword-p node.list target))
+            (return True))))
+  (return False))
+
 (deco (server.feature lsp.TEXT_DOCUMENT_HOVER)
 (def hover [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
@@ -685,6 +714,12 @@
   (if (isinstance target Symbol)
       (do
         (= name target.value)
+        (if (and (== name "type") (alias-keyword-p tree target))
+            (return (lsp.Hover
+              :contents (lsp.MarkupContent
+                :kind lsp.MarkupKind.Markdown
+                :value TYPE-ALIAS-DOC)
+              :range (node-range target))))
         ;; 1. LisPython special forms
         (= doc-text (.get SPECIAL-FORM-DOCS name))
         (if doc-text
