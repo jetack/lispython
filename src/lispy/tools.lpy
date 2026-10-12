@@ -3,6 +3,7 @@
 (import argparse)
 (import ast)
 (import copy)
+(import functools)
 (import importlib)
 (import inspect)
 (import io)
@@ -538,7 +539,9 @@
         True (return "variable")))
 
 (= _FUNCTION-DESCRIPTORS
-   (, staticmethod classmethod
+   ;; partialmethod is listed because, unlike other method wrappers, it is
+   ;; not callable itself.
+   (, staticmethod classmethod functools.partialmethod
       types.FunctionType types.BuiltinFunctionType types.MethodType
       types.MethodDescriptorType types.ClassMethodDescriptorType
       types.WrapperDescriptorType types.MethodWrapperType))
@@ -549,16 +552,16 @@
    getattr would run a property, a descriptor or __getattr__ -- side effects
    and exceptions in the middle of a completion -- so the attribute is read
    with inspect.getattr_static and its raw object classified: functions,
-   methods and static/class methods are functions; any other descriptor
-   (property, cached_property, slots) yields a value, so is a variable; a
-   plain object is classified like a scope value.  An attribute only
+   methods, static/class methods and partialmethods are functions; a class
+   is a class; any other callable (an lru_cache wrapper) is a function; a
+   non-callable descriptor (property, cached_property, slots) yields a
+   value, so it is a variable, as is any other object.  An attribute only
    __getattr__ knows about is a variable."
   (try
     (= raw (inspect.getattr-static obj attr))
     (except [Exception]
       (return "variable")))
   (cond (isinstance raw _FUNCTION-DESCRIPTORS) (return "function")
-        (hasattr (type raw) "__get__") (return "variable")
         True (return (_completion-kind raw))))
 
 (def nrepl-complete [prefix scope]

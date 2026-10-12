@@ -3,6 +3,7 @@ signatureHelp, workspace/symbol, nREPL completion kinds and .nrepl-port."""
 
 import functools
 import importlib
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -448,7 +449,25 @@ class Counted:
     def method(self):
         pass
 
+    @functools.lru_cache
+    def cached_method(self):
+        pass
+
+    def _scaled(self, factor):
+        pass
+
+    scaled = functools.partialmethod(_scaled, 2)
+
     Inner = int
+
+
+class Slotted:
+    __slots__ = ("slot",)
+
+
+@functools.lru_cache
+def cached_function():
+    pass
 
 
 def test_attribute_completion_runs_no_property_code(scope):
@@ -462,6 +481,8 @@ def test_attribute_completion_runs_no_property_code(scope):
             "static-helper",
             "class-helper",
             "method",
+            "cached-method",
+            "scaled",
             "Inner",
             "reads",
         ]
@@ -471,10 +492,23 @@ def test_attribute_completion_runs_no_property_code(scope):
         "static-helper": "function",
         "class-helper": "function",
         "method": "function",
+        "cached-method": "function",
+        "scaled": "function",
         "Inner": "class",
         "reads": "variable",
     }
     assert Counted.reads == 0
+
+
+def test_attribute_kinds_of_callable_and_slot_descriptors(scope):
+    module = types.ModuleType("dx_module")
+    module.cached_function = cached_function
+    scope["dx_module"] = module
+    scope["slotted"] = Slotted()
+    assert complete("dx-module.cached", scope) == {
+        "dx-module.cached-function": "function"
+    }
+    assert complete("slotted.sl", scope) == {"slotted.slot": "variable"}
 
 
 def test_attribute_kinds_of_builtin_types(scope):
