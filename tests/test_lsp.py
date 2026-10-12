@@ -210,3 +210,9 @@ class TestRequireSelection:
         text = server.SPECIAL_FORM_DOCS["require"]
         assert "(require module)" in text
         assert "[]" in text and "none" in text
+
+    @pytest.mark.parametrize(
+        "form", ["(require m foo)", "(require m [a] b)", '(require m "ab")', "(require m :as x)"]
+    )
+    def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
+        assert self._find(form + "\n(print 1)", "print") is None

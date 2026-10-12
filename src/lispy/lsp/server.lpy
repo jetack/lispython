@@ -347,7 +347,12 @@
                 (return node))))
       (== form "require")
       (do ;; the compiler's own rule decides which names this form registers
-          (= [kind names] (require-selection (sub node.list [: 2 None])))
+          ;; The buffer may be mid-edit: a require the compiler would
+          ;; reject binds nothing rather than raising.
+          (try
+            (= [kind names] (require-selection (sub node.list [: 2 None])))
+            (except [(, TypeError ValueError)]
+              (continue)))
           (cond
             ;; (require module): macros are registered as module.name
             (== kind REQUIRE-QUALIFIED)
