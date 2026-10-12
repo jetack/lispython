@@ -741,6 +741,34 @@
     (finally
       (conn.close))))
 
+(= NREPL-PORT-FILE ".nrepl-port")
+
+(def _write-port-file [port directory]
+  "Write port to directory/.nrepl-port for editor auto-discovery; return the
+   path, or None when the directory is unwritable.  The file is a
+   convenience, so failing to write it must not stop the server."
+  (= path (osp.join directory NREPL-PORT-FILE))
+  (try
+    (with [(open path "w") as f]
+      (f.write (str port)))
+    (except [OSError as err]
+      (print f"nREPL: could not write {path}: {err.strerror}" :file sys.stderr)
+      (return None)))
+  (return path))
+
+(def _remove-port-file [path port]
+  "Remove the port file at path if it still names port.  A second server
+   started in the same directory overwrites the file, and stopping the
+   first must not delete the second's."
+  (if (is path None)
+      (return))
+  (try
+    (with [(open path) as f]
+      (= current (.strip (f.read))))
+    (if (== current (str port))
+        (os.unlink path))
+    (except [OSError] (pass))))
+
 (def nrepl-server [:host "127.0.0.1" :port 0]
   (= cwd (os.getcwd))
   (if (not (in cwd sys.path))
@@ -757,10 +785,7 @@
   (print f"nREPL server started on {host}:{actual-port}")
   (sys.stdout.flush)
 
-  ;; Write port file for editor auto-discovery
-  (= port-file (osp.join (os.getcwd) ".nrepl-port"))
-  (with [(open port-file "w") as f]
-    (f.write (str actual-port)))
+  (= port-file (_write-port-file actual-port cwd))
 
   (try
     (while True
@@ -773,8 +798,7 @@
       (print "\nnREPL server stopped."))
     (finally
       (srv.close)
-      (try (os.unlink port-file)
-        (except [OSError] (pass))))))
+      (_remove-port-file port-file actual-port))))
 
 (def run []
   (try

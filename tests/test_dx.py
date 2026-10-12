@@ -232,3 +232,30 @@ def test_attribute_completion_survives_a_raising_property(scope):
         "gadget.build": "function",
     }
     assert complete("gadget.si", scope) == {"gadget.size": "variable"}
+
+
+def test_port_file_is_written_and_removed(tmp_path):
+    path = tools._write_port_file(7888, str(tmp_path))
+    assert (tmp_path / ".nrepl-port").read_text() == "7888"
+    tools._remove_port_file(path, 7888)
+    assert not (tmp_path / ".nrepl-port").exists()
+
+
+def test_unwritable_directory_gets_no_port_file(tmp_path, capsys):
+    assert tools._write_port_file(7888, str(tmp_path / "missing")) is None
+    assert ".nrepl-port" in capsys.readouterr().err
+    tools._remove_port_file(None, 7888)
+
+
+def test_port_file_of_another_server_is_left_alone(tmp_path):
+    path = tools._write_port_file(7888, str(tmp_path))
+    # A second server in the same directory took the file over.
+    tools._write_port_file(7999, str(tmp_path))
+    tools._remove_port_file(path, 7888)
+    assert (tmp_path / ".nrepl-port").read_text() == "7999"
+
+
+def test_removing_a_vanished_port_file_does_not_raise(tmp_path):
+    path = tools._write_port_file(7888, str(tmp_path))
+    (tmp_path / ".nrepl-port").unlink()
+    tools._remove_port_file(path, 7888)
