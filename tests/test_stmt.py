@@ -263,8 +263,6 @@ class TestEmptyLiteralOperands:
             ("(assert x [])", "assert x, []"),
             ("(assert x {})", "assert x, {}"),
             ("(= x [])", "x = []"),
-            ("(def f [:a [] *args :b {}] ...)", "def f(a=[], *args, b={}): ..."),
-            ("(def f [:a []] (return []))", "def f(a=[]):\n    return []"),
             ("(lambda [:a []] [])", "lambda a=[]: []"),
         ],
     )
@@ -274,3 +272,18 @@ class TestEmptyLiteralOperands:
     def test_return_takes_one_operand(self):
         with pytest.raises(LispyCompileError):
             stmt_to_dump("(return [] [])")
+
+    @pytest.mark.parametrize(
+        ("lispy", "python"),
+        [
+            ("(def f [:a [] *args :b {}] ...)", "def f(a=[], *args, b={}): ..."),
+            ("(def f [:a []] (return []))", "def f(a=[]):\n    return []"),
+        ],
+    )
+    def test_def_matches_ast_parse(self, lispy, python):
+        # Compared piecewise: the FunctionDef's own fields (type_params)
+        # differ by version in dumps.
+        [got] = macroexpand_then_compile(parse(lispy))
+        [want] = ast.parse(python).body
+        assert ast.dump(got.args) == ast.dump(want.args)
+        assert ast.dump(ast.Module(got.body, [])) == ast.dump(ast.Module(want.body, []))
