@@ -13,7 +13,7 @@
 (from pygls.lsp.server [LanguageServer])
 
 (from lispy.core.nodes *)
-(from lispy.core.parser [parse])
+(from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [type-alias-p])
 
 (= logger (logging.getLogger __name__))
@@ -809,80 +809,63 @@
 ;; Signature help
 ;; ---------------------------------------------------------------------------
 
-(def find-enclosing-function [source offset]
-  "Find the name of the function being called at offset.
-   Forward-scans from the start of the source, tracking a stack of
-   enclosing paren-head symbols.  Returns the innermost function name
-   at the cursor position, or None."
-  (= in-string False)
-  (= call-stack [])
-  (= i 0)
-  (= n (len source))
-  (while (and (< i n) (< i offset))
-    (= c (sub source i))
+(def find-enclosing-function [source line col]
+  "Name of the innermost call open at the cursor, or None.
+
+   line is 1-based and col a 0-based code-point column: the coordinates
+   tokenize() reports.  The scan runs over the lexer's own tokens, so
+   strings (prefixed, raw, triple-quoted, f/t-string fields), comments and
+   opening tokens such as *( or ^( are delimited exactly as the parser
+   delimits them.  An opening ending in ( contributes its head symbol (None
+   when the head is not a symbol); [ and { contribute None.  Never raises:
+   a buffer the lexer cannot read has no enclosing call."
+  (try
+    (= tokens (list (tokenize source)))
+    (except [Exception]
+      (return None)))
+  (= cursor (, line col))
+  (= stack [])
+  (for i in (range (len tokens))
+    (= [text tktype info _] (sub tokens i))
+    (if (> (, (sub info "end_lineno") (sub info "end_col_offset")) cursor)
+        (break))
     (cond
-      in-string
-      (do (if (== c "\\")
-              (+= i 1)
-              (if (== c "\"")
-                  (= in-string False)))
-          (+= i 1))
+      (== tktype "opening")
+      (if (.endswith text "(")
+          (do (= head (ife (< (+ i 1) (len tokens)) (sub tokens (+ i 1)) None))
+              (.append stack (ife (and head (== (sub head 1) "symbol"))
+                                  (sub head 0)
+                                  None)))
+          (.append stack None))
 
-      (== c "\"")
-      (do (= in-string True)
-          (+= i 1))
-
-      (== c ";")
-      (do (while (and (< i n) (!= (sub source i) "\n"))
-            (+= i 1)))
-
-      (== c "(")
-      (do (= j (+ i 1))
-          (while (and (< j n) (in (sub source j) " \t\n"))
-            (+= j 1))
-          (= name-start j)
-          (while (and (< j n) (not (in (sub source j) " \t\n()[]{}\"';,")))
-            (+= j 1))
-          (= func-name (sub source [: name-start j]))
-          (call-stack.append func-name)
-          (+= i 1))
-
-      (== c ")")
-      (do (if call-stack (call-stack.pop))
-          (+= i 1))
-
-      (in c "[{")
-      (do (call-stack.append None)
-          (+= i 1))
-
-      (in c "]}")
-      (do (if call-stack (call-stack.pop))
-          (+= i 1))
-
-      True
-      (+= i 1)))
-  ;; Return the innermost enclosing function call (skip brackets/braces)
-  (for name in (reversed call-stack)
-    (if name
+      (and (== tktype "closing") stack)
+      (.pop stack)))
+  (for name in (reversed stack)
+    (if (is-not name None)
         (return name)))
   (return None))
 
-(def offset-of [source line col]
-  "Convert 0-based line and col to a character offset in source."
-  (= offset 0)
-  (= lines (.split source "\n"))
-  (for i in (range (min line (len lines)))
-    (+= offset (+ (len (sub lines i)) 1)))
-  (return (+ offset col)))
+(def cursor-of [doc pos]
+  "The LSP position pos as tokenize() coordinates: (1-based line, code-point column).
+   LSP counts character in the negotiated encoding (UTF-16 by default), which
+   differs from a str index after a non-BMP character; pygls' position codec
+   converts it.  A document without a codec (a test double) is taken as code
+   points."
+  (= codec (getattr doc "position_codec" None))
+  (if (is codec None)
+      (return (, (+ pos.line 1) pos.character)))
+  (= server-pos (.position-from-client-units
+                  codec doc.lines
+                  (lsp.Position :line pos.line :character pos.character)))
+  (return (, (+ server-pos.line 1) server-pos.character)))
 
 (deco (server.feature
         lsp.TEXT_DOCUMENT_SIGNATURE_HELP
         (lsp.SignatureHelpOptions :trigger-characters ["("]))
 (def signature-help [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
-  (= pos params.position)
-  (= offset (offset-of doc.source pos.line pos.character))
-  (= func-name (find-enclosing-function doc.source offset))
+  (= [line col] (cursor-of doc params.position))
+  (= func-name (find-enclosing-function doc.source line col))
   (if (is func-name None)
       (return None))
 
