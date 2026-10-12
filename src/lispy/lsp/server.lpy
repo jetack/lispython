@@ -165,6 +165,16 @@
   "Convert a filesystem path to a file:// URI."
   (return (.as-uri (pathlib.Path path))))
 
+(def under-workspace [path folders]
+  "True when path lies inside one of the workspace folders.  Real paths are
+   compared by components, not by string prefix, so /ws-other is not inside
+   /ws and a symlink counts where its target lives."
+  (= real (pathlib.Path (osp.realpath path)))
+  (for folder in folders
+    (if (.is-relative-to real (osp.realpath (uri-to-path folder.uri)))
+        (return True)))
+  (return False))
+
 (def index-required-modules [tree]
   "Find all (require module-name ...) forms in tree and index those packages."
   (for node in tree
@@ -820,7 +830,8 @@
               (do (= target-uri (path-to-uri fpath))
                   ;; Make sure the target file is indexed
                   (if (not-in target-uri FILE-TREES)
-                      (index-file target-uri))
+                      (index-file target-uri
+                                  :workspace-file (under-workspace fpath folders)))
                   ;; Look up the name in the target file's definitions
                   (= target-tree (.get FILE-TREES target-uri))
                   (if target-tree

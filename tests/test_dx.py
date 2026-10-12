@@ -247,6 +247,54 @@ def test_required_packages_are_not_workspace_symbols(workspace, tmp_path, monkey
     assert "user-fn" in symbols_matching("")
 
 
+def test_definition_publishes_symbols_only_for_workspace_files(
+    workspace, tmp_path, monkeypatch
+):
+    ws = tmp_path / "ws"
+    # A sibling whose name extends the workspace's: not inside it.
+    site = tmp_path / "ws-site"
+    ws.mkdir()
+    site.mkdir()
+    (ws / "dx_ws_module.lpy").write_text("(def ws-helper [] 1)\n")
+    (site / "dx_site_module.lpy").write_text("(def site-helper [] 1)\n")
+    monkeypatch.syspath_prepend(str(site))
+    folder = SimpleNamespace(uri=ws.as_uri())
+
+    def go_to(module, name):
+        # A name brought in by (require ...) is resolved through the module
+        # file, which definition indexes on first use.
+        main = ws / "main.lpy"
+        document = SimpleNamespace(
+            source=f"(require {module})\n({name})\n", uri=main.as_uri()
+        )
+        ls = SimpleNamespace(
+            workspace=SimpleNamespace(
+                get_text_document=lambda uri: document, folders={folder.uri: folder}
+            )
+        )
+        params = SimpleNamespace(
+            text_document=SimpleNamespace(uri=main.as_uri()),
+            position=SimpleNamespace(line=1, character=2),
+        )
+        [location] = server.definition(ls, params)
+        return location.uri
+
+    assert go_to("dx_ws_module", "ws-helper") == (ws / "dx_ws_module.lpy").as_uri()
+    assert (
+        go_to("dx_site_module", "site-helper") == (site / "dx_site_module.lpy").as_uri()
+    )
+    symbols = symbols_matching("helper")
+    assert "ws-helper" in symbols
+    assert "site-helper" not in symbols
+
+
+def test_under_workspace_compares_path_components(tmp_path):
+    folder = SimpleNamespace(uri=(tmp_path / "ws").as_uri())
+    assert server.under_workspace(str(tmp_path / "ws" / "a.lpy"), [folder])
+    assert not server.under_workspace(str(tmp_path / "ws-site" / "a.lpy"), [folder])
+    assert not server.under_workspace(str(tmp_path / "ws" / "a.lpy"), [])
+
+
 @pytest.fixture
 def scope():
     scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}
