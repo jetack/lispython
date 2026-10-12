@@ -243,6 +243,23 @@ def test_locals_inside_def_bodies_are_not_workspace_symbols(workspace, ws_root):
     assert symbols["method"] == kind.Function
 
 
+def test_type_aliases_are_workspace_symbols(workspace, ws_root):
+    path = ws_root / "aliases.lpy"
+    path.write_text(
+        "(type Alias int)\n(type Pair[T] (tuple T T))\n"
+        "(def use [x] (type Inner x) (type x))\n(type y)\n"
+    )
+    server.index_file(path.as_uri())
+    symbols = symbols_matching("")
+    kind = server.lsp.SymbolKind
+    assert symbols["Alias"] == kind.Class
+    assert symbols["Pair"] == kind.Class
+    # A local alias is not searchable, and a call to the builtin type is
+    # not a definition.
+    assert "Inner" not in symbols
+    assert "x" not in symbols and "y" not in symbols
+
+
 def test_required_packages_are_not_workspace_symbols(
     workspace, ws_root, tmp_path, monkeypatch
 ):

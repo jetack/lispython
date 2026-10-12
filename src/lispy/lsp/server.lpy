@@ -468,10 +468,13 @@
     ;; form, so a macro is a Function.
     "defmacro" lsp.SymbolKind.Function
     "class" lsp.SymbolKind.Class
+    ;; A (type NAME ...) alias; callers check type-alias-p first, since a
+    ;; call to the builtin type is not a definition.
+    "type" lsp.SymbolKind.Class
     "=" lsp.SymbolKind.Variable})
 
 (def definition-kind [form]
-  "The SymbolKind of a definition form (def, async-def, defmacro, class, =),
+  "The SymbolKind of a definition form (def, async-def, defmacro, class, type, =),
    or None.  Document symbols and workspace/symbol both report it."
   (return (.get _DEFINITION-KINDS form)))
 
@@ -524,7 +527,7 @@
       (.append symbols
         (lsp.DocumentSymbol
           :name (symbol-name (sub node 1))
-          :kind lsp.SymbolKind.Class
+          :kind (definition-kind form)
           :range (node-range node)
           :selection-range (node-range (sub node 1))
           :detail "type alias"))
@@ -658,8 +661,10 @@
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
-          (.append (.setdefault defs name-node.value [])
-                   (lsp.Location :uri uri :range (node-range name-node))))
+          (= loc (lsp.Location :uri uri :range (node-range name-node)))
+          (.append (.setdefault defs name-node.value []) loc)
+          (if (not in-function)
+              (_add-symbol symbols name-node.value (definition-kind form) loc)))
 
       (== form "=")
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
