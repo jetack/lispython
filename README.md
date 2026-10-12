@@ -64,7 +64,8 @@ LisPython ships with a language server (`lpy-lsp`) that speaks LSP over stdio. I
 - Diagnostics (parse / compile errors)
 - Completions (special forms, builtins, file/workspace symbols)
 - Hover documentation for special forms and builtins
-- Document symbols
+- Signature help for special forms and builtins
+- Document symbols and workspace symbol search
 - Go-to-definition, including across `.lpy` files in the workspace
 
 ## nREPL Server
@@ -75,11 +76,13 @@ lpy --nrepl         # start on a random port
 lpy --nrepl 7888    # start on a specific port
 ```
 
+While running, the server writes its port to `.nrepl-port` in the working directory for editor auto-discovery.
+
 The server accepts newline-delimited JSON over TCP and supports:
 - `eval` — evaluate LisPython code, return value/stdout/error
 - `load-file` — load a `.lpy` file into the session
 - `macroexpand` — expand macros and return the result
-- `complete` — prefix and dot-completion from the live scope
+- `complete` — prefix and dot-completion from the live scope, with a `kinds` map (class/function/variable/macro/keyword)
 - `docs` — signature and docstring for a symbol
 - `annotate` — type tag (function/class/module/macro)
 
