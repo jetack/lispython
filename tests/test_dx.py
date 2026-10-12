@@ -145,6 +145,21 @@ def test_workspace_symbol_reports_each_definition_with_its_kind(workspace):
     }
 
 
+def test_document_and_workspace_symbols_agree_on_kinds(workspace):
+    document = SimpleNamespace(source=WORKSPACE_FILE, uri=workspace)
+    params = SimpleNamespace(text_document=SimpleNamespace(uri=workspace))
+    document_kinds = {
+        s.name: s.kind
+        for s in server.document_symbol(ls_with(document), params)
+        if s.kind != server.lsp.SymbolKind.Module
+    }
+    workspace_kinds = symbols_matching("")
+    assert document_kinds == {
+        name: kind for name, kind in workspace_kinds.items() if name in document_kinds
+    }
+    assert set(document_kinds) == set(workspace_kinds) - {"describe"}
+
+
 def test_workspace_symbol_matches_a_case_insensitive_substring(workspace):
     assert set(symbols_matching("CONFIG")) == {
         "load-config",

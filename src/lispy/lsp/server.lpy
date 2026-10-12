@@ -437,6 +437,20 @@
         (return (.strip node.value "\"'"))
         (return (str node))))
 
+(= _DEFINITION-KINDS
+   {"def" lsp.SymbolKind.Function
+    "async-def" lsp.SymbolKind.Function
+    ;; SymbolKind has no macro kind, and Operator would misdescribe a named
+    ;; form, so a macro is a Function.
+    "defmacro" lsp.SymbolKind.Function
+    "class" lsp.SymbolKind.Class
+    "=" lsp.SymbolKind.Variable})
+
+(def definition-kind [form]
+  "The SymbolKind of a definition form (def, async-def, defmacro, class, =),
+   or None.  Document symbols and workspace/symbol both report it."
+  (return (.get _DEFINITION-KINDS form)))
+
 (def walk-symbols [nodes]
   "Walk top-level parsed forms and produce DocumentSymbol entries."
   (= symbols [])
@@ -460,7 +474,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name name
-              :kind lsp.SymbolKind.Function
+              :kind (definition-kind form)
               :range rng
               :selection-range sel
               :children (or children None))))
@@ -477,7 +491,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name name
-              :kind lsp.SymbolKind.Class
+              :kind (definition-kind form)
               :range rng
               :selection-range sel
               :children (or children None))))
@@ -496,7 +510,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name (symbol-name (sub node 1))
-              :kind lsp.SymbolKind.Function
+              :kind (definition-kind form)
               :range (node-range node)
               :selection-range (node-range (sub node 1))
               :detail "macro")))
@@ -506,7 +520,7 @@
           (.append symbols
             (lsp.DocumentSymbol
               :name (symbol-name (sub node 1))
-              :kind lsp.SymbolKind.Variable
+              :kind (definition-kind form)
               :range (node-range node)
               :selection-range (node-range (sub node 1)))))
 
@@ -577,13 +591,11 @@
    defs feeds go-to-definition and completion, so it also holds the names
    bound by import/from and for/async-for.  When symbols is a list, the same
    pass appends an lsp.SymbolInformation for each declaration a user searches
-   for with workspace/symbol -- def, async-def, defmacro, class and = -- so
-   the kind of a definition is decided only here.  Imports and loop
-   variables bind names but declare nothing, so they get no symbol, and an
-   = inside a def body (in-function) is a local, so it gets none either;
-   module and class-body assignments do.  A macro
-   is reported as Function, as document symbols report it: SymbolKind has
-   no macro kind, and Operator would misdescribe a named form."
+   for with workspace/symbol -- def, async-def, defmacro, class and = --
+   with the kind definition-kind gives it.  Imports and loop variables bind
+   names but declare nothing, so they get no symbol, and an = inside a def
+   body (in-function) is a local, so it gets none either; module and
+   class-body assignments do."
   (if (is defs None)
       (= defs {}))
 
@@ -602,7 +614,7 @@
                   (= name name-node.value)
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
-                  (_add-symbol symbols name lsp.SymbolKind.Function loc)
+                  (_add-symbol symbols name (definition-kind form) loc)
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
                                            :defs defs :symbols symbols
@@ -614,7 +626,7 @@
                   (= name name-node.value)
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
-                  (_add-symbol symbols name lsp.SymbolKind.Class loc)
+                  (_add-symbol symbols name (definition-kind form) loc)
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
@@ -631,7 +643,7 @@
                   (= loc (lsp.Location :uri uri :range (node-range (sub node 1))))
                   (.append (.setdefault defs name []) loc)
                   (if (not in-function)
-                      (_add-symbol symbols name lsp.SymbolKind.Variable loc)))))
+                      (_add-symbol symbols name (definition-kind form) loc)))))
 
       (in form (, "for" "async-for"))
       (do (if (and (>= (len node) 2) (isinstance (sub node 1) Symbol))
