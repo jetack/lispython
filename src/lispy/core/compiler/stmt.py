@@ -364,7 +364,7 @@ def match_mapping_parse(lst):
     keys = lst[::2]
     patterns = lst[1::2]
     rst = {}
-    if isinstance(keys[-1], DoubleStarred):
+    if keys and isinstance(keys[-1], DoubleStarred):
         rst["rest"] = keys.pop().value.name
     rst["keys"] = list(map(literal_pattern_expr, keys))
     rst["patterns"] = list(map(pattern_parse, patterns))
@@ -580,7 +580,7 @@ def return_p(sexp):
 
 
 def return_compile(sexp):
-    # An empty [] () {} node is falsy (Expression.__len__): test presence by length.
+    # An empty [] or {} node is falsy (Expression.__len__): test presence by length.
     if len(sexp) > 2:
         raise LispyCompileError("(return ...) takes at most one value", sexp)
     value = expr_compile(sexp[1]) if len(sexp) > 1 else None

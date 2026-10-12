@@ -246,7 +246,7 @@ class TestImportNames:
 
 
 class TestEmptyLiteralOperands:
-    """An empty [] () {} is an Expression of length 0, hence falsy: every form
+    """An empty [] or {} is an Expression of length 0, hence falsy: every form
     with an optional operand must test presence by length, not truthiness."""
 
     @pytest.mark.parametrize(
@@ -287,3 +287,8 @@ class TestEmptyLiteralOperands:
         [want] = ast.parse(python).body
         assert ast.dump(got.args) == ast.dump(want.args)
         assert ast.dump(ast.Module(got.body, [])) == ast.dump(ast.Module(want.body, []))
+
+    def test_empty_mapping_pattern(self):
+        assert stmt_to_dump("(match x (case {} ...))") == ast.dump(
+            ast.parse("match x:\n    case {}: ...")
+        )
