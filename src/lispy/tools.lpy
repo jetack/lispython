@@ -619,10 +619,11 @@
                 (= (sub kinds name) "macro")
                 (or (in name _COMPLETION-SYNTAX) (in name keyword.kwlist))
                 (= (sub kinds name) "keyword")
-                (in mangled builtins-dict)
-                (= (sub kinds name) (_completion-kind (sub builtins-dict mangled)))
+                ;; A scope binding shadows the builtin of the same name.
                 (in mangled scope)
                 (= (sub kinds name) (_completion-kind (sub scope mangled)))
+                (in mangled builtins-dict)
+                (= (sub kinds name) (_completion-kind (sub builtins-dict mangled)))
                 True
                 (= (sub kinds name) "variable")))
         (return {"op" "complete-result"

@@ -300,6 +300,11 @@ def test_syntax_without_its_macros_is_a_keyword(prefix, name):
     assert complete(prefix, {"__macro_namespace": {}})[name] == "keyword"
 
 
+def test_a_scope_binding_shadows_a_builtin(scope):
+    assert tools.nrepl_eval("(= list 3)", scope)["error"] is None
+    assert complete("lis", scope)["list"] == "variable"
+
+
 class Gadget:
     size = 3
 
