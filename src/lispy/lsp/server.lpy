@@ -685,6 +685,8 @@
       (return [])))
   (return (walk-symbols tree))))
 
+;; Not in SPECIAL-FORM-DOCS: `type` is also the builtin, so the alias doc applies
+;; only where type-alias-p (the compiler's own test) accepts the form.
 (= TYPE-ALIAS-DOC
    "```\n(type Name value)\n(type Name[T] value)\n```\n\nDefine a type alias (Python 3.12+).")
 
