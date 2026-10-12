@@ -1,6 +1,8 @@
 import os.path as osp
+import sys
+import types
 
-from lispy.tools import l2py_s
+from lispy.tools import l2py_s, macroexpand_then_compile, parse
 
 
 class TestMetaFunctionsSync:
@@ -24,3 +26,33 @@ class TestMetaFunctionsSync:
             "core/meta_functions.py is out of sync with core_meta_functions.lpy. "
             "Run `lpy src/lispy/core_meta_functions.lpy` to regenerate."
         )
+
+
+class TestRequireMacroList:
+    """(require mod) registers all macros; the list selects, and [] selects none."""
+
+    @staticmethod
+    def _registered(monkeypatch, require_form):
+        mod = types.ModuleType("require_list_fake")
+        # setattr: a literal `mod.__macro_namespace` is name-mangled in a class body.
+        setattr(mod, "__macro_namespace", {"a": lambda: 1, "b": lambda: 2})
+        monkeypatch.setitem(sys.modules, "require_list_fake", mod)
+        scope = {"__macro_namespace": {}}
+        list(macroexpand_then_compile(parse(require_form), scope))
+        return set(scope["__macro_namespace"])
+
+    def test_absent_list_registers_all(self, monkeypatch):
+        got = self._registered(monkeypatch, "(require require_list_fake)")
+        assert got == {"require_list_fake.a", "require_list_fake.b"}
+
+    def test_empty_list_registers_none(self, monkeypatch):
+        got = self._registered(monkeypatch, "(require require_list_fake [])")
+        assert got == set()
+
+    def test_named_list_registers_those(self, monkeypatch):
+        got = self._registered(monkeypatch, "(require require_list_fake [a])")
+        assert got == {"a"}
+
+    def test_star_registers_all_unqualified(self, monkeypatch):
+        got = self._registered(monkeypatch, "(require require_list_fake *)")
+        assert got == {"a", "b"}

@@ -79,7 +79,7 @@ def require_transform(sexp):
                 Symbol("v"),
             ),
         )
-        if not macro_names
+        if macro_names is None
         else Paren(
             Symbol(".update"),
             Paren(
