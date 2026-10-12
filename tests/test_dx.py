@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 from pygls.workspace import TextDocument
 
+import lispy.tools as tools
+
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
 
@@ -169,3 +171,64 @@ def test_reindexing_a_file_replaces_its_symbols(workspace, tmp_path):
     server.index_file(workspace)
     assert set(symbols_matching("")) == {"renamed"}
     assert "load-config" not in server.WORKSPACE_INDEX
+
+
+@pytest.fixture
+def scope():
+    scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}
+    result = tools.nrepl_eval(
+        "(require lispy.macros *)\n"
+        "(import os)\n"
+        "(= my-var 1)\n"
+        "(def my-fn [] 1)\n"
+        "(class MyClass [] (pass))",
+        scope,
+    )
+    assert result["error"] is None
+    return scope
+
+
+def complete(prefix, scope):
+    result = tools.nrepl_complete(prefix, scope)
+    assert set(result["kinds"]) == set(result["completions"])
+    return result["kinds"]
+
+
+@pytest.mark.parametrize(
+    ["prefix", "name", "kind"],
+    [
+        ["in", "int", "class"],
+        ["le", "len", "function"],
+        ["con", "cond", "macro"],
+        ["de", "def", "keyword"],
+        ["whi", "while", "keyword"],
+        ["my", "my-var", "variable"],
+        ["my", "my-fn", "function"],
+        ["My", "MyClass", "class"],
+        ["os.pa", "os.path", "variable"],
+        ["os.pa", "os.pathsep", "variable"],
+        ["os.ge", "os.getcwd", "function"],
+    ],
+)
+def test_completion_kinds(scope, prefix, name, kind):
+    assert complete(prefix, scope)[name] == kind
+
+
+class Gadget:
+    size = 3
+
+    @property
+    def broken(self):
+        raise RuntimeError("property failed")
+
+    def build(self):
+        pass
+
+
+def test_attribute_completion_survives_a_raising_property(scope):
+    scope["gadget"] = Gadget()
+    assert complete("gadget.b", scope) == {
+        "gadget.broken": "variable",
+        "gadget.build": "function",
+    }
+    assert complete("gadget.si", scope) == {"gadget.size": "variable"}

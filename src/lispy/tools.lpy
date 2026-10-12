@@ -498,6 +498,21 @@
     (except [Exception]
       (return None))))
 
+(def _completion-kind [obj]
+  "The nREPL completion kind of a value: class, function or variable."
+  (cond (isinstance obj type) (return "class")
+        (callable obj) (return "function")
+        True (return "variable")))
+
+(def _attribute-kind [obj attr]
+  "The completion kind of obj.attr.  Reading the attribute runs a property
+   or __getattr__, which may raise anything; one bad attribute must not fail
+   the whole completion, so any error reads as a variable."
+  (try
+    (return (_completion-kind (getattr obj attr)))
+    (except [Exception]
+      (return "variable"))))
+
 (def nrepl-complete [prefix scope]
   "Return completions matching prefix, including dot-completion."
   (= has-dot (in "." prefix))
@@ -517,13 +532,7 @@
           (if (.startswith attr py-attr)
               (do (= full-name (+ obj-part "." (_unmangle attr)))
                   (matches.append full-name)
-                  (= attr-obj (getattr obj attr None))
-                  (cond (isinstance attr-obj type)
-                        (= (sub kinds full-name) "class")
-                        (callable attr-obj)
-                        (= (sub kinds full-name) "function")
-                        True
-                        (= (sub kinds full-name) "variable")))))
+                  (= (sub kinds full-name) (_attribute-kind obj attr)))))
         (return {"op" "complete-result"
                  "completions" (sorted matches)
                  "kinds" kinds}))
@@ -591,21 +600,9 @@
                 (in name keyword.kwlist)
                 (= (sub kinds name) "keyword")
                 (in mangled builtins-dict)
-                (do (= obj (sub builtins-dict mangled))
-                    (cond (isinstance obj type)
-                          (= (sub kinds name) "class")
-                          (callable obj)
-                          (= (sub kinds name) "function")
-                          True
-                          (= (sub kinds name) "variable")))
+                (= (sub kinds name) (_completion-kind (sub builtins-dict mangled)))
                 (in mangled scope)
-                (do (= obj (sub scope mangled))
-                    (cond (isinstance obj type)
-                          (= (sub kinds name) "class")
-                          (callable obj)
-                          (= (sub kinds name) "function")
-                          True
-                          (= (sub kinds name) "variable")))
+                (= (sub kinds name) (_completion-kind (sub scope mangled)))
                 True
                 (= (sub kinds name) "variable")))
         (return {"op" "complete-result"
