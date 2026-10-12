@@ -861,8 +861,9 @@
    strings (prefixed, raw, triple-quoted, f/t-string fields), comments and
    opening tokens such as *( or ^( are delimited exactly as the parser
    delimits them.  An opening ending in ( contributes its head symbol (None
-   when the head is not a symbol); [ and { contribute None.  Never raises:
-   a buffer the lexer cannot read has no enclosing call."
+   when the head is not a symbol, or when a ' or ` quotes the form as data;
+   an unquote ~( is code again); [ and { contribute None.  Never raises: a
+   buffer the lexer cannot read has no enclosing call."
   (try
     (= tokens (list (tokenize source)))
     (except [Exception]
@@ -877,7 +878,11 @@
       (== tktype "opening")
       (if (.endswith text "(")
           (do (= head (ife (< (+ i 1) (len tokens)) (sub tokens (+ i 1)) None))
-              (.append stack (ife (and head (== (sub head 1) "symbol"))
+              (= before (ife (> i 0) (sub tokens (- i 1)) None))
+              (= quoted (and before
+                             (== (sub before 1) "meta-indicator")
+                             (in (sub (sub before 0) -1) "'`")))
+              (.append stack (ife (and head (not quoted) (== (sub head 1) "symbol"))
                                   (sub head 0)
                                   None)))
           (.append stack None))
