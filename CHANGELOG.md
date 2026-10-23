@@ -4,6 +4,22 @@ All notable changes to lispython are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `as->` expands to an expression (a tuple of `:=` assignments indexed with
+  `-1`), so it works in expression position such as a `return` value or a
+  call argument instead of emitting an invalid `do(...)` call.
+
+### Changed
+
+- A statement form (`do`, `=`, `if`, `return`, ...) in expression position is
+  now a compile error instead of emitting an invalid call such as `do(...)`.
+  A Python function named `do`, `deco`, `async_def`, etc. can no longer be
+  called with lispython call syntax in expression position; they were already
+  unreachable as statements.
+
 ## [0.5.0]
 
 ### Added

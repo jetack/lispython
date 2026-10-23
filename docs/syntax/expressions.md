@@ -57,6 +57,9 @@ Python version
 (name := value)
 ```
 
+## Statements are not expressions
+Statement forms (`do`, `=`, `+=`, `if`, `return`, `def`, ...) cannot appear inside an expression; the compiler reports an error. Use `(:= name value)` instead of `=`, `(ife test then else)` instead of `if`, and a tuple `(sub (, a b c) -1)` to sequence expressions.
+
 ## `lambda`
 LisPy version
 ```python

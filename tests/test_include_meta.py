@@ -16,7 +16,7 @@ def test_include_meta_flag_true():
 
 
 def test_include_meta_nested():
-    src = "(list (defmacro m [x] x) 1)"
+    src = "(if True (do (defmacro m [x] x) (print 1)))"
     out_false = l2py_s(src, include_meta=False)
     # Nested defmacro should not appear when include_meta is False
     assert "defmacro" not in out_false and "def m" not in out_false and "__macro_namespace" not in out_false

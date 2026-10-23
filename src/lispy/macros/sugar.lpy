@@ -28,16 +28,23 @@
           (return `(->> ~f ~@rest)))
       (return `(-> (~f ~x) ~@rest))))
 
+;; A tuple of walrus assignments indexed with -1 is a single expression, so
+;; as-> works in any expression position (return value, call argument, lambda
+;; body, nested) and evaluates each form once, left to right. It stays in the
+;; caller's scope, so await/yield inside forms and class-body names keep their
+;; meaning, unlike nested lambdas. The gensym binding leaks into the enclosing
+;; scope (a unique name; a class attribute at class scope). CPython refuses
+;; walrus in a comprehension's iterable and in a comprehension inside a class
+;; body: that is a loud compile error, bind the value first.
 (defmacro as-> [expr name *forms]
   (if (== 0 (len forms))
       (return expr))
   (= sym (gensym (str name)))
-  (= stmts [])
-  (stmts.append `(= ~sym ~expr))
-  (for f in forms
-    (stmts.append `(= ~sym ~(replace-symbol f name sym))))
-  (stmts.append sym)
-  (return `(do ~@stmts)))
+  (= steps [`(:= ~sym ~expr)])
+  (for f in (sub forms (slice None -1))
+    (steps.append `(:= ~sym ~(replace-symbol f name sym))))
+  (steps.append (replace-symbol (sub forms -1) name sym))
+  (return `(sub (, ~@steps) -1)))
 
 (defmacro fn [*body]
   (return `(lambda ~@body)))
