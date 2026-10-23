@@ -34,8 +34,8 @@
 ;; caller's scope, so await/yield inside forms and class-body names keep their
 ;; meaning, unlike nested lambdas. The gensym binding leaks into the enclosing
 ;; scope (a unique name; a class attribute at class scope). CPython refuses
-;; walrus in a comprehension's iterable and in a comprehension inside a class
-;; body: that is a loud compile error, bind the value first.
+;; := in some positions (e.g. a comprehension's iterable, annotations,
+;; type-alias values); there it is a loud compile error, so bind the value first.
 (defmacro as-> [expr name *forms]
   (if (== 0 (len forms))
       (return expr))

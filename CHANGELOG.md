@@ -19,6 +19,9 @@ follows [Semantic Versioning](https://semver.org/).
   A Python function named `do`, `deco`, `async_def`, etc. can no longer be
   called with lispython call syntax in expression position; they were already
   unreachable as statements.
+- A Python hard keyword in call position (e.g. `(not a b)`, which used to
+  compile to `not (a, b)`, silently false, or `(else ...)`) is now a compile
+  error.
 
 ## [0.5.0]
 

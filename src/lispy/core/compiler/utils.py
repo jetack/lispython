@@ -64,5 +64,9 @@ STATEMENT_HEADS = frozenset(
 STATEMENT_HINTS = {
     "=": "use (:= name value)",
     "if": "use (ife test then else)",
-    "do": "to sequence expressions, use a tuple (sub (, a b c) -1)",
+    "do": (
+        "statement blocks, including what defmacro, require and statement macros "
+        "such as when expand to, cannot be values; "
+        "to sequence expressions use (sub (, a b c) -1)"
+    ),
 }

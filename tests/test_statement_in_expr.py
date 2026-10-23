@@ -22,7 +22,9 @@ def compile_error(src):
         (
             "(def f [] (return (do (= a 1) a)))",
             "(do ...) is a statement and cannot be used as an expression; "
-            "to sequence expressions, use a tuple (sub (, a b c) -1)",
+            "statement blocks, including what defmacro, require and statement macros "
+            "such as when expand to, cannot be values; "
+            "to sequence expressions use (sub (, a b c) -1)",
             (1, 19),
         ),
         (
@@ -74,5 +76,6 @@ def test_statement_heads_match_stmt_compile():
     dispatched = set(
         re.findall(r'str\(sexp\.op\) == "([^"]+)"', inspect.getsource(stmt_module))
     )
+    assert {"do", "=", "return", "def", "if"} <= dispatched
     assert dispatched <= STATEMENT_HEADS | {"match", "type"}
     assert set(augassignop_dict) <= STATEMENT_HEADS
