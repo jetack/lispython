@@ -1,4 +1,5 @@
 import ast
+import keyword
 from collections import deque
 from functools import reduce
 
@@ -6,6 +7,7 @@ from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import *
 from lispy.core.compiler.utils import *
+from lispy.core.errors import LispyCompileError
 from lispy.core.utils import *
 
 
@@ -99,6 +101,19 @@ def call_args_parse(given):
 
 def call_compile(sexp):
     [op, *operands] = sexp.list
+    if isinstance(op, Symbol):
+        head = str(op)
+        if head in STATEMENT_HEADS:
+            hint = STATEMENT_HINTS.get(head)
+            raise LispyCompileError(
+                f"({head} ...) is a statement and cannot be used as an expression"
+                + (f"; {hint}" if hint else ""),
+                sexp,
+            )
+        if keyword.iskeyword(op.name):
+            raise LispyCompileError(
+                f"{head} is a Python keyword and cannot be called", sexp
+            )
     op = expr_compile(op)
     [args, keywords] = call_args_parse(operands)
     return ast.Call(func=op, args=args, keywords=keywords, **sexp.position_info)

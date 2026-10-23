@@ -1,3 +1,6 @@
+import pytest
+
+from lispy.core.errors import LispyCompileError
 from lispy.tools import l2py_s
 
 
@@ -21,8 +24,17 @@ def test_include_meta_nested():
     # Nested defmacro should not appear when include_meta is False
     assert "defmacro" not in out_false and "def m" not in out_false and "__macro_namespace" not in out_false
 
+    # With include_meta True the macro definition is a statement in expression position
+    with pytest.raises(LispyCompileError, match="defmacro"):
+        l2py_s(src, include_meta=True)
+
+
+def test_include_meta_nested_in_statement():
+    src = "(if True (do (defmacro m [x] x) (print 1)))"
+    out_false = l2py_s(src, include_meta=False)
+    assert "defmacro" not in out_false and "def m" not in out_false and "__macro_namespace" not in out_false
+
     out_true = l2py_s(src, include_meta=True)
-    # With include_meta True the macro definition/import should be present
     assert "def" in out_true or "__macro_namespace" in out_true
 
 

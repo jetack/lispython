@@ -2,6 +2,7 @@ import ast
 from collections import deque
 
 from lispy.core.nodes import *
+from lispy.core.utils import augassignop_dict
 
 
 def paren_p(sexp):
@@ -43,3 +44,29 @@ def merge_position_infos(*position_infos):
         "end_lineno": max(map(lambda x: x["end_lineno"], position_infos)),
         "end_col_offset": max(map(lambda x: x["end_col_offset"], position_infos)),
     }
+
+
+# Heads that only compile as statements (what stmt_compile dispatches).
+# `match` and `type` are deliberately absent: they are Python soft keywords
+# and stay callable in expressions.  A pin test keeps this in sync with
+# stmt_compile.
+STATEMENT_HEADS = frozenset(
+    {
+        "do", "=", "del", "pass", "import", "from", "lazy-import", "lazy-from",
+        "if", "while", "for", "break", "continue", "raise", "assert", "try",
+        "with", "deco", "def", "return", "global", "nonlocal", "class",
+        "async-def", "async-for", "async-with",
+    }
+    | augassignop_dict.keys()
+)
+
+# Where a statement head has an expression-position equivalent, say so.
+STATEMENT_HINTS = {
+    "=": "use (:= name value)",
+    "if": "use (ife test then else)",
+    "do": (
+        "statement blocks, including what defmacro, require and statement macros "
+        "such as when expand to, cannot be values; "
+        "to sequence expressions use (sub (, a b c) -1)"
+    ),
+}

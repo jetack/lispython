@@ -39,7 +39,7 @@
    "while"     "```\n(while condition body...)\n```\n\nWhile loop."
    "for"       "```\n(for target iterable body...)\n```\n\nFor loop. `target` is bound to each element of `iterable`."
    "async-for" "```\n(async-for target iterable body...)\n```\n\nAsync for loop — use inside `async-def`."
-   "do"        "```\n(do body...)\n```\n\nExecute a sequence of statements (block). Used where a single expression is expected but multiple statements are needed."
+   "do"        "```\n(do body...)\n```\n\nA statement block grouping several statements where one statement is expected (e.g. an `if` branch); not an expression."
    "match"     "```\n(match subject case...)\n```\n\nStructural pattern matching (Python 3.10+)."
    "try"       "```\n(try body except-clauses... [finally-clause])\n```\n\nTry/except/finally statement."
    "with"      "```\n(with [ctx-expr as-name] body...)\n```\n\nContext manager statement."
