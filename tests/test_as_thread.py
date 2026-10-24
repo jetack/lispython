@@ -120,7 +120,10 @@ class TestAsThreadRenamesOnlyReferences:
         )
 
     def test_quote_call_is_an_ordinary_call(self):
-        assert self.compile("(as-> 1 x (quote x))") == "((__x_0 := 1), quote(__x_0))[-1]"
+        assert (
+            self.compile("(as-> 1 x (quote x))")
+            == "((__x_0 := 1), quote(__x_0))[-1]"
+        )
 
     def test_shadowing_lambda_body_kept(self):
         assert (

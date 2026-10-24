@@ -72,6 +72,8 @@ This expands to a single expression, a tuple of walrus assignments indexed with 
 
 Because it is an expression, `as->` works anywhere: as a return value, a call argument, a lambda body, or nested. CPython refuses `:=` in some positions (e.g. a comprehension's iterable, annotations, type-alias values); there it is a loud compile error, so bind the value first.
 
+The name is replaced only where it is read as a variable, not in keyword-argument names, quoted data, or the body of a `fn`/`lambda` that rebinds it.
+
 Useful when the threaded value doesn't always go in the first or last position.
 
 ## gensym
