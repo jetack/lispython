@@ -12,9 +12,10 @@ follows [Semantic Versioning](https://semver.org/).
   `-1`), so it works in expression position such as a `return` value or a
   call argument instead of emitting an invalid `do(...)` call.
 - `as->` renames only references to the threading name: a keyword-argument
-  name (`(f :x x)` was `f(__x_0=__x_0)`, now `f(x=__x_0)`) and a
-  `fn`/`lambda` whose params bind the same name are left alone, and `~x`
-  inside a quasiquote now gets the threaded value.
+  name (`(f :x x)` was `f(__x_0=__x_0)`, now `f(x=__x_0)`) and the params
+  and body of a `fn`/`lambda` that binds the same name are left alone (its
+  defaults are still renamed), and `~x` inside a quasiquote now gets the
+  threaded value.
 
 ### Changed
 
