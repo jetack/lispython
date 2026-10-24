@@ -3,6 +3,7 @@ from lispy.core.nodes import (
     Bracket,
     DoubleStarred,
     Expression,
+    FStrExpr,
     Keyword,
     Paren,
     QuasiQuote,
@@ -40,6 +41,8 @@ def replace_symbol(node, old, new):
     form is data, and inside a quasiquote only ``~``/``~@`` is evaluated; a
     ``lambda``/``fn`` whose params bind the same name shadows it in its body,
     while its defaults and annotations are evaluated in the enclosing scope.
+    A dotted head (``x.real``) is renamed too, and so are the nested fields of
+    an f-string replacement's format spec (``f"{1:{x}}"``).
     Mutates ``node`` in place and returns it (or ``new`` for a bare match).
     """
     return _replace_symbol(node, old.value, new, False)
@@ -50,7 +53,13 @@ _LAMBDA_HEADS = ("lambda", "fn")
 
 def _replace_symbol(node, name, new, in_quasi):
     if isinstance(node, Symbol):
-        return new if not in_quasi and node.value == name else node
+        if in_quasi:
+            return node
+        if node.value == name:
+            return new
+        if node.value.startswith(name + "."):
+            return Symbol(new.value + node.value[len(name) :], **node.position_info)
+        return node
     if isinstance(node, Keyword):
         return node
     if isinstance(node, QuasiQuote):
@@ -78,6 +87,9 @@ def _replace_symbol(node, name, new, in_quasi):
             node.list = [_replace_symbol(child, name, new, in_quasi) for child in lst]
     elif isinstance(node, Wrapper):
         node.value = _replace_symbol(node.value, name, new, in_quasi)
+        spec = getattr(node, "format_spec", None)
+        if isinstance(node, FStrExpr) and spec is not None:
+            node.format_spec = _replace_symbol(spec, name, new, in_quasi)
     return node
 
 
