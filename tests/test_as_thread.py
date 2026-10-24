@@ -93,3 +93,71 @@ class TestAsThreadInExpressionPosition:
         )
         assert scope["log"] == ["a", "b", "c"]
         assert scope["y"] == 3
+
+
+class TestAsThreadRenamesOnlyReferences:
+    """as-> renames the threading name only where it is read as a variable."""
+
+    def setup_method(self):
+        reset_gensym_counter()
+
+    def compile(self, src):
+        return src_to_python_org(PREAMBLE + src)
+
+    def test_keyword_arg_name_kept(self):
+        assert self.compile("(as-> 1 x (f :x x))") == "((__x_0 := 1), f(x=__x_0))[-1]"
+
+    def test_quote_kept(self):
+        assert (
+            self.compile("(as-> 1 x (f 'x x))")
+            == "((__x_0 := 1), f(Symbol('x'), __x_0))[-1]"
+        )
+
+    def test_quasiquote_renames_only_unquote(self):
+        assert (
+            self.compile("(as-> 1 x (f `(x ~x) x))")
+            == "((__x_0 := 1), f(Paren(Symbol('x'), __x_0), __x_0))[-1]"
+        )
+
+    def test_quote_call_is_an_ordinary_call(self):
+        assert self.compile("(as-> 1 x (quote x))") == "((__x_0 := 1), quote(__x_0))[-1]"
+
+    def test_shadowing_lambda_body_kept(self):
+        assert (
+            self.compile("(as-> 1 x (f (lambda [x] x) x))")
+            == "((__x_0 := 1), f(lambda x: x, __x_0))[-1]"
+        )
+
+    def test_shadowing_fn_body_kept(self):
+        cases = {
+            "[x]": "lambda x: x",
+            "[*x]": "lambda *x: x",
+            "[**x]": "lambda **x: x",
+            "[:x 1]": "lambda x=1: x",
+            "[y * :x 1]": "lambda y, *, x=1: x",
+        }
+        for params, lam in cases.items():
+            reset_gensym_counter()
+            assert (
+                self.compile(f"(as-> 1 x (f (fn {params} x) x))")
+                == f"((__x_0 := 1), f({lam}, __x_0))[-1]"
+            )
+
+    def test_shadowing_param_default_renamed(self):
+        assert (
+            self.compile("(as-> 1 x (f (fn [:x x] x)))")
+            == "((__x_0 := 1), f(lambda x=__x_0: x))[-1]"
+        )
+
+    def test_non_shadowing_fn_default_and_body_renamed(self):
+        assert (
+            self.compile("(as-> 1 x (f (fn [y :z x] (+ x y)) x))")
+            == "((__x_0 := 1), f(lambda y, z=__x_0: __x_0 + y, __x_0))[-1]"
+        )
+
+    def test_runtime_keyword_arg(self):
+        assert run("(= out (as-> 5 x (dict :x x)))")["out"] == {"x": 5}
+
+    def test_runtime_shadowing_fn(self):
+        scope = run("(= out (as-> 5 x (list (map (fn [x] (* x 10)) [1 x]))))")
+        assert scope["out"] == [10, 50]
