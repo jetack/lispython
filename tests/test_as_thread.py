@@ -164,3 +164,49 @@ class TestAsThreadRenamesOnlyReferences:
     def test_runtime_shadowing_fn(self):
         scope = run("(= out (as-> 5 x (list (map (fn [x] (* x 10)) [1 x]))))")
         assert scope["out"] == [10, 50]
+
+
+class TestAsThreadDottedAndFormatSpec:
+    def setup_method(self):
+        reset_gensym_counter()
+
+    def compile(self, src):
+        return src_to_python_org(PREAMBLE + src)
+
+    def test_dotted_symbol_renamed(self):
+        src = "(= x 100.5)\n(= out (as-> 3 x (+ x.real 1)))"
+        assert "((__x_0 := 3), __x_0.real + 1)[-1]" in self.compile(src)
+        assert run(src)["out"] == 4
+
+    def test_multi_segment_dotted_symbol_renamed(self):
+        src = "(= x 100.5)\n(= out (as-> 3 x (+ x.real.real 1)))"
+        assert "__x_0.real.real + 1" in self.compile(src)
+        assert run(src)["out"] == 4
+
+    def test_prefix_sharing_symbols_not_renamed(self):
+        src = "(= xs 5)\n(= x_y 6)\n(= out (as-> 1 x (+ x 1)))"
+        assert (
+            self.compile("(as-> 1 x (f xs.foo x_y.z x.real))")
+            == "((__x_0 := 1), f(xs.foo, x_y.z, __x_0.real))[-1]"
+        )
+        assert run(src)["out"] == 2
+
+    def test_method_symbol_not_matched(self):
+        assert (
+            self.compile('(as-> "a" s (.upper s))')
+            == "((__s_0 := 'a'), __s_0.upper())[-1]"
+        )
+
+    def test_fstring_format_spec_renamed(self):
+        src = "(= x 9)\n(= out (as-> 5 x f\"{1:{x}}\"))"
+        assert "{1:{__x_0}}" in self.compile(src)
+        assert run(src)["out"] == "    1"
+
+    def test_fstring_format_spec_dotted_renamed(self):
+        src = "(= x 9)\n(= out (as-> 5 x f\"{1:{x.real}}\"))"
+        assert "{1:{__x_0.real}}" in self.compile(src)
+        assert run(src)["out"] == "    1"
+
+    def test_quoted_dotted_symbol_not_renamed(self):
+        out = self.compile("(as-> 1 x (f 'x.real x.real))")
+        assert out == "((__x_0 := 1), f(Symbol('x.real'), __x_0.real))[-1]"

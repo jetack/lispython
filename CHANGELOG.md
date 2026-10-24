@@ -16,6 +16,8 @@ follows [Semantic Versioning](https://semver.org/).
   and body of a `fn`/`lambda` that binds the same name are left alone (its
   defaults are still renamed), and `~x` inside a quasiquote now gets the
   threaded value.
+- `as->` also renames a dotted reference (`x.real` becomes `__x_0.real`) and
+  a reference inside an f-string format spec (`f"{1:{x}}"`).
 
 ### Changed
 
