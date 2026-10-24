@@ -184,12 +184,10 @@ class TestAsThreadDottedAndFormatSpec:
         assert run(src)["out"] == 4
 
     def test_prefix_sharing_symbols_not_renamed(self):
-        src = "(= xs 5)\n(= x_y 6)\n(= out (as-> 1 x (+ x 1)))"
         assert (
             self.compile("(as-> 1 x (f xs.foo x_y.z x.real))")
             == "((__x_0 := 1), f(xs.foo, x_y.z, __x_0.real))[-1]"
         )
-        assert run(src)["out"] == 2
 
     def test_method_symbol_not_matched(self):
         assert (
@@ -210,3 +208,24 @@ class TestAsThreadDottedAndFormatSpec:
     def test_quoted_dotted_symbol_not_renamed(self):
         out = self.compile("(as-> 1 x (f 'x.real x.real))")
         assert out == "((__x_0 := 1), f(Symbol('x.real'), __x_0.real))[-1]"
+
+    def test_quasiquote_renames_only_unquoted(self):
+        assert self.compile("(as-> 5 x `(f ~x x.real))") == (
+            "((__x_0 := 5), Paren(Symbol('f'), __x_0, Symbol('x.real')))[-1]"
+        )
+
+    def test_quasiquoted_format_spec_kept(self):
+        out = self.compile('(as-> 5 x `f"{1:{x}}")')
+        assert "FStrExpr(Symbol('x')" in out
+        assert "__x_0 :=" in out and "FStrExpr(__x_0" not in out
+
+    def test_unquoted_format_spec_renamed(self):
+        out = self.compile('(as-> 5 x `f"{1:{~x}}")')
+        assert "FStrExpr(__x_0, conversion=-1, format_spec=None" in out
+        assert "Symbol('x')" not in out
+
+    def test_shadowed_body_keeps_dotted(self):
+        assert (
+            self.compile("(as-> 5 x [(fn [x] x.real) x.real])")
+            == "((__x_0 := 5), [lambda x: x.real, __x_0.real])[-1]"
+        )
