@@ -216,6 +216,11 @@ class TestDanglingQuote:
             ("`(a ~@b)", "QuasiQuote(Paren(Sym(a), UnquoteSplice(Sym(b))))"),
             ("(f *'a)", "Paren(Sym(f), Star(Quote(Sym(a))))"),
             ("(f ^*Ts)", "Paren(Sym(f), Ann(Star(Sym(Ts))))"),
+            # ~ with no form after it is the symbol ~, as before a space.
+            ("(f ~)", "Paren(Sym(f), Sym(~))"),
+            ("(f ~;c\n a)", "Paren(Sym(f), Sym(~), Sym(a))"),
+            ("(f ~,a)", "Paren(Sym(f), Sym(~), Sym(a))"),
+            ("~;c", "Sym(~)"),
         ],
     )
     def test_quotes_with_a_form_still_parse(self, src, parsed):

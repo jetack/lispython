@@ -41,11 +41,11 @@ _COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
 _WRAPPER = "(?:\\^|\\*{1,2})?"
 _OPENING = "[\\(\\{\\[]"
 _META_CHARS = "(?:'|`|~@|~)"
-_META_INDICATOR = _META_CHARS + "(?!\\s|$)"
 # What can follow a form but never start one: it ends a number or a symbol
-# (so a comment needs no space before it: a;c is the symbol a), and a quote
-# followed by it quotes nothing.
+# (so a comment needs no space before it: a;c is the symbol a), a quote
+# followed by it quotes nothing, and ~ followed by it is the symbol ~.
 _FORM_END = "\\s\\)\\}\\],;"
+_META_INDICATOR = _META_CHARS + f"(?![{_FORM_END}]|$)"
 # What ends a symbol token.
 _SYMBOL_STOP = _FORM_END + '\\"\\['
 _TOKEN_PATTERNS = [
