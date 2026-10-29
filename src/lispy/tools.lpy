@@ -2,13 +2,16 @@
 
 (import argparse)
 (import ast)
+(import collections.abc)
 (import copy)
 (import functools)
 (import importlib)
 (import inspect)
 (import io)
+(import itertools)
 (import json)
 (import keyword)
+(import linecache)
 (import os)
 (import os.path as osp)
 (import runpy)
@@ -418,8 +421,107 @@
         (traceback.print_exc)
         (print "====================================")))))
 
-(def nrepl-eval [src scope :filename "<nrepl>"]
-  "Evaluate LisPython source, capturing stdout/stderr and return value."
+(= _NREPL-EVAL-IDS (itertools.count 1))  ; names "<nrepl-N>" for file-less evals
+(= _NREPL-LINECACHE-LOCK (threading.Lock))  ; clients are served on threads
+
+(def _nrepl-buffer-position [value name limit]
+  "value as a 1-based buffer line or column; ValueError unless an int from 1
+  to limit.  The bound matters: the source is padded with a character per
+  line and column before it is parsed."
+  (if (or (not (isinstance value int)) (isinstance value bool)
+          (< value 1) (> value limit))
+      (raise (ValueError (+ name " must be an integer from 1 to " (str limit)
+                            ", got " (repr value)))))
+  (return value))
+
+(class _NreplBufferLines [collections.abc.Sequence]
+  "linecache's lines for a file the nREPL has evaluated regions of: the lines
+  each eval sent, keyed by line number, over the lines known before the first
+  of them (the file on disk, or a load-file's text).
+
+  ⚠️ Never a list with a slot per buffer line: linecache keeps the entry for
+  the whole session (mtime None), and every file-less eval adds a new name,
+  so a padded list would pin up to NREPL-MAX-POSITION-LINE slots per request.
+  This holds only the code the client sent.  linecache and traceback use
+  only len() and an index; an in-range line nothing supplied reads as a bare
+  newline (a blank line), and only a read past the end gives '' (linecache's unknown line)."
+  (def __init__ [self base]
+    (= self._base base)
+    (= self._overlay {})  ; 0-based index -> (leading spaces, text)
+    (= self._len (len base)))
+
+  (def overlay [self start lines indent]
+    "Show lines from 0-based index start on, the first after indent spaces
+    (the eval's column, so traceback carets line up)."
+    (for [i text] (enumerate lines)
+      (= (sub self._overlay (+ start i)) (, (ife (== i 0) indent 0) text)))
+    (= self._len (max self._len (+ start (len lines)))))
+
+  (def __len__ [self]
+    (return self._len))
+
+  (def __getitem__ [self index]
+    (if (isinstance index slice)
+        (return [(sub self i) for i in (range *(index.indices self._len))]))
+    (if (< index 0)
+        (+= index self._len))
+    (if (or (< index 0) (>= index self._len))
+        (raise (IndexError "line index out of range")))
+    (= entry (self._overlay.get index))
+    (if (is-not entry None)
+        (return (+ (* " " (sub entry 0)) (sub entry 1))))
+    (return (ife (< index (len self._base)) (sub self._base index) "\n"))))
+
+(def _nrepl-register-source [filename src line column whole-file]
+  "Make linecache show src at its buffer position in filename, so a
+  traceback prints the user's source lines.
+
+  mtime None keeps the entry through linecache.checkcache.  An eval of a
+  region overlays its lines onto what is known of that file
+  (_NreplBufferLines): separate requests evaluate separate definitions of
+  one buffer, and a traceback through several of them must show every line.
+  whole-file (load-file) replaces the entry with the file's lines, dropping
+  regions evaluated earlier."
+  (= lines [(+ l "\n") for l in (.split src "\n")])
+  (if (.endswith src "\n")
+      (lines.pop))
+  (with [_NREPL-LINECACHE-LOCK]
+    (if whole-file
+        (= (sub linecache.cache filename) (, (len src) None lines filename))
+        (do (= known (linecache.getlines filename))
+            (if (not (isinstance known _NreplBufferLines))
+                (do (= known (_NreplBufferLines known))
+                    (= (sub linecache.cache filename)
+                       (, 0 None known filename))))
+            (known.overlay (- line 1) lines (- column 1))))))
+
+(def _nrepl-format-exception [e]
+  "The traceback of e without nrepl-eval's own frame: it starts at the
+  user's code (or at the compiler, for a crash while compiling)."
+  (= tb e.__traceback__)
+  (while (and (is-not tb None) (is tb.tb_frame.f_code nrepl-eval.__code__))
+    (= tb tb.tb_next))
+  (return (.rstrip (.join "" (traceback.format-exception (type e) e tb)))))
+
+(def nrepl-eval [src scope :filename None :line 1 :column 1 :whole-file False]
+  "Evaluate LisPython source, capturing stdout/stderr and return value.
+
+  filename, line and column say where src sits in the editor's buffer (the
+  1-based position of its first character, nREPL's file/line/column eval
+  fields); without a filename the source gets a fresh <nrepl-N> name.  The
+  source is padded to that position before parsing, so compile errors,
+  tracebacks and linecache all use buffer lines and columns.  whole-file
+  marks src as the entire file (load-file), so it starts at line 1, column
+  1.  Raises ValueError for an invalid filename, line or column; every other
+  failure is the result's error."
+  (_nrepl-buffer-position line "line" NREPL-MAX-POSITION-LINE)
+  (_nrepl-buffer-position column "column" NREPL-MAX-POSITION-COLUMN)
+  (if (and whole-file (!= (, line column) (, 1 1)))
+      (raise (ValueError "a whole file starts at line 1, column 1")))
+  (if (is filename None)
+      (= filename (+ "<nrepl-" (str (next _NREPL-EVAL-IDS)) ">")))
+  (if (not (isinstance filename str))
+      (raise (ValueError (+ "file must be a string, got " (repr filename)))))
   (= result {"value" None "stdout" "" "error" None})
   (= stdout-capture (io.StringIO))
   (= stderr-capture (io.StringIO))
@@ -428,9 +530,11 @@
   (try
     (= sys.stdout stdout-capture)
     (= sys.stderr stderr-capture)
+    (= padded (+ (* "\n" (- line 1)) (* " " (- column 1)) src))
+    (_nrepl-register-source filename src line column whole-file)
     ;; Compile every statement before running any (see eval-and-print).
-    (with [(compile-errors filename src)]
-      (= stl (macroexpand-then-compile (parse src) scope))
+    (with [(compile-errors filename padded)]
+      (= stl (macroexpand-then-compile (parse padded) scope))
       (= codes [(ife (isinstance st ast.Expr)
                      (, eval (compile (ast.Expression :body st.value) filename "eval"))
                      (, exec (compile (ast.Module :body [st] :type-ignores [])
@@ -448,7 +552,7 @@
     (except [SystemExit as e]
       (= (sub result "error") (+ "SystemExit: " (str e.code))))
     (except [Exception as e]
-      (= (sub result "error") (.rstrip (traceback.format-exc))))
+      (= (sub result "error") (_nrepl-format-exception e)))
     (finally
       (= sys.stdout old-stdout)
       (= sys.stderr old-stderr)))
@@ -459,13 +563,14 @@
   (return result))
 
 (def nrepl-load-file [file-path scope]
-  "Load a .lpy file into the REPL scope."
+  "Load a .lpy file into the REPL scope; its traceback lines come from this
+  text, replacing any regions evaluated from the file earlier."
   (= script-dir (osp.dirname (osp.abspath file-path)))
   (if (not (in script-dir sys.path))
       (sys.path.insert 0 script-dir))
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (nrepl-eval src scope :filename file-path)))
+  (return (nrepl-eval src scope :filename file-path :whole-file True)))
 
 (def nrepl-macroexpand [src scope]
   "Macroexpand LisPython source and return the expanded s-expression."
@@ -733,7 +838,14 @@
   or when a handler fails; the caller turns that into an error reply."
   (= op (.get msg "op" "eval"))
   (cond (== op "eval")
-        (do (= result (nrepl-eval (sub msg "code") scope))
+        ;; file/line/column: where code sits in the client's buffer; a missing
+        ;; or null field takes nrepl-eval's default.
+        (do (= line (.get msg "line"))
+            (= column (.get msg "column"))
+            (= result (nrepl-eval (sub msg "code") scope
+                                  :filename (.get msg "file")
+                                  :line (ife (is line None) 1 line)
+                                  :column (ife (is column None) 1 column)))
             (= (sub result "op") "eval-result")
             (return result))
 
@@ -759,6 +871,10 @@
   (raise (_NreplUnknownOp (+ "unknown op: " (str op)))))
 
 (= NREPL-MAX-LINE (* 4 1024 1024))  ; bytes; longest request line a client may send
+;; Largest eval line/column a client may send: nrepl-eval pads the source to
+;; that position, so an unbounded one makes the server allocate without limit.
+(= NREPL-MAX-POSITION-LINE 1_000_000)
+(= NREPL-MAX-POSITION-COLUMN 100_000)
 
 (def _nrepl-handle-client [conn addr scope]
   ;; Buffer bytes and decode only whole lines: a multi-byte UTF-8 character can

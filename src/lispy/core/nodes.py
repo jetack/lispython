@@ -56,6 +56,84 @@ def contains_unquote(node):
     return False
 
 
+_POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
+
+
+def with_missing_positions(node, position_info):
+    """A copy of ``node`` in which every node with no position (lineno 0)
+    takes this one.
+
+    A macro builds its expansion at run time from quasiquote templates, so
+    those nodes carry the Node default (lineno 0) and the Python code compiled
+    from them would report line 0. The expander passes the macro call's
+    position, so tracebacks and compile errors point at the call. A node that
+    has a position (an unquoted argument the user wrote) keeps its own.
+    Descends every Node attribute, so f-string fields and their format specs,
+    wrappers, quotes and glued heads are covered alike; the copy memo keeps
+    nodes shared between places in the expansion shared in the copy.
+
+    The tree is copied, not filled in place, because the macro may still own
+    its nodes (a template held in a global and returned on every call):
+    filling them in place would pin the first call's position on every later
+    call, and mixing such stale nodes with fresh ones can make a start line
+    exceed its end line, which compile() rejects. Nodes are plain attribute
+    bags compared by name, never by identity (gensym returns a Symbol with a
+    unique name); the id memo keeps sharing within the one expansion.
+
+    ⚠️ Copy and fill are one iterative pass over an explicit stack, never
+    copy.deepcopy or recursion: deepcopy spends several Python frames per
+    nesting level, so a deeply nested macro call hit RecursionError far
+    sooner than the same code without the macro. Nodes and plain lists,
+    tuples and deques are copied; every other value (str, int, None) is
+    shared.
+    """
+    memo = {}  # id(original) -> its copy
+    root = [node]
+    # (container, key): the slot still holding an original, to be replaced by
+    # its copy. A tuple's slot also gets a finisher, popped once every slot
+    # pushed after it (its items' whole subtrees) has been copied.
+    stack = [(root, 0)]
+    while stack:
+        item = stack.pop()
+        if len(item) == 3:
+            container, key, items = item
+            copied = tuple(items)
+            memo[id(container[key])] = copied
+            container[key] = copied
+            continue
+        container, key = item
+        value = container[key]
+        if id(value) in memo:
+            container[key] = memo[id(value)]
+            continue
+        if isinstance(value, Node):
+            copied = value.__class__.__new__(value.__class__)
+            attrs = copied.__dict__
+            attrs.update(value.__dict__)
+            if not value.lineno:
+                # Set the node's own attributes: Wrapper.update_dict delegates
+                # to the wrapped value, which may already have a position.
+                for position_key in _POSITION_KEYS:
+                    attrs[position_key] = position_info[position_key]
+            stack.extend((attrs, k) for k in attrs)
+        elif type(value) is list:
+            copied = list(value)
+            stack.extend((copied, i) for i in range(len(copied)))
+        elif type(value) is deque:
+            copied = deque(value, value.maxlen)
+            stack.extend((copied, i) for i in range(len(copied)))
+        elif type(value) is tuple:
+            items = list(value)
+            stack.append((container, key, items))
+            stack.extend((items, i) for i in range(len(items)))
+            continue
+        else:
+            continue
+        memo[id(value)] = copied
+        container[key] = copied
+    return root[0]
+
+
 def data_to_generator_expression(data):
     if isinstance(data, bool) or data is None:
         return Constant(str(data))
