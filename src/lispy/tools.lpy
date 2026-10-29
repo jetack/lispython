@@ -443,6 +443,10 @@
         (= (sub result "value") (repr last-val)))
     (except [LispyCompileError as e]
       (= (sub result "error") (format-compile-error e)))
+    ;; SystemExit is a BaseException, so (exit) in client code would otherwise
+    ;; escape and kill the connection; report it like any other eval error.
+    (except [SystemExit as e]
+      (= (sub result "error") (+ "SystemExit: " (str e.code))))
     (except [Exception as e]
       (= (sub result "error") (.rstrip (traceback.format-exc))))
     (finally
@@ -703,65 +707,95 @@
       (return {"op" "annotate-result"
                "annotation" "unknown"}))))
 
-(def _nrepl-reply [conn msg result]
-  "Send result back, echoing the request id if present."
+(def _nrepl-encode [msg result]
+  "Encode result as one wire line, echoing the request id if present. Raises
+  when result is not JSON-serialisable."
   (= req-id (.get msg "id"))
   (if req-id
       (= (sub result "id") req-id))
-  (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+  (return (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+(def _nrepl-reply [conn msg result]
+  "Send result back, echoing the request id if present."
+  (conn.sendall (_nrepl-encode msg result)))
+
+(def _nrepl-error-reply [conn msg error]
+  "Reply {op: error} for a failed request. The one home of the error shape;
+  msg is {} when no request could be parsed, so the reply carries no id."
+  (_nrepl-reply conn msg {"op" "error" "error" error}))
+
+(class _NreplUnknownOp [Exception]
+  "Raised by _nrepl-dispatch; its message is the reply text as is."
+  (pass))
+
+(def _nrepl-dispatch [msg scope]
+  "Run one parsed request and return its result dict. Raises on an unknown op
+  or when a handler fails; the caller turns that into an error reply."
+  (= op (.get msg "op" "eval"))
+  (cond (== op "eval")
+        (do (= result (nrepl-eval (sub msg "code") scope))
+            (= (sub result "op") "eval-result")
+            (return result))
+
+        (== op "load-file")
+        (do (= result (nrepl-load-file (sub msg "path") scope))
+            (= (sub result "op") "load-file-result")
+            (return result))
+
+        (== op "macroexpand")
+        (return (nrepl-macroexpand (sub msg "code") scope))
+
+        (== op "complete")
+        (return (nrepl-complete (sub msg "prefix") scope))
+
+        (== op "docs")
+        (return (nrepl-docs (sub msg "symbol") scope))
+
+        (== op "annotate")
+        (return (nrepl-annotate (sub msg "symbol") scope))
+
+        (== op "ping")
+        (return {"op" "pong"}))
+  (raise (_NreplUnknownOp (+ "unknown op: " (str op)))))
 
 (def _nrepl-handle-client [conn addr scope]
-  (= buf "")
+  ;; Buffer bytes and decode only whole lines: a multi-byte UTF-8 character can
+  ;; straddle two recv reads, and decoding each read on its own would raise.
+  (= buf b"")
   (try
     (while True
-      (= data (.decode (conn.recv 4096) "utf-8"))
+      (= data (conn.recv 4096))
       (if (not data)
           (break))
       (+= buf data)
       ;; Process complete JSON messages (newline-delimited)
-      (while (in "\n" buf)
-        (= [line buf] (.split buf "\n" 1))
-        (= line (.strip line))
-        (if (not line)
+      (while (in b"\n" buf)
+        (= [line buf] (.split buf b"\n" 1))
+        (if (not (.strip line))
             (continue))
         (try
-          (= msg (json.loads line))
-          (= op (.get msg "op" "eval"))
-          (cond (== op "eval")
-                (do (= src (sub msg "code"))
-                    (= result (nrepl-eval src scope))
-                    (= (sub result "op") "eval-result")
-                    (_nrepl-reply conn msg result))
-
-                (== op "load-file")
-                (do (= result (nrepl-load-file (sub msg "path") scope))
-                    (= (sub result "op") "load-file-result")
-                    (_nrepl-reply conn msg result))
-
-                (== op "macroexpand")
-                (do (= result (nrepl-macroexpand (sub msg "code") scope))
-                    (_nrepl-reply conn msg result))
-
-                (== op "complete")
-                (do (= result (nrepl-complete (sub msg "prefix") scope))
-                    (_nrepl-reply conn msg result))
-
-                (== op "docs")
-                (do (= result (nrepl-docs (sub msg "symbol") scope))
-                    (_nrepl-reply conn msg result))
-
-                (== op "annotate")
-                (do (= result (nrepl-annotate (sub msg "symbol") scope))
-                    (_nrepl-reply conn msg result))
-
-                (== op "ping")
-                (_nrepl-reply conn msg {"op" "pong"}))
-          (except [json.JSONDecodeError as e]
-            (conn.sendall
-              (.encode (+ (json.dumps {"op" "error" "error" (str e)}) "\n")
-                       "utf-8"))))))
-    (except [ConnectionResetError] None)
-    (except [BrokenPipeError] None)
+          (= msg (json.loads (.decode line "utf-8")))
+          (except [(, ValueError RecursionError) as e]
+            ;; invalid UTF-8, invalid JSON or JSON nested too deeply to parse:
+            ;; no id to echo
+            (_nrepl-error-reply conn {} (str e))
+            (continue)))
+        (if (not (isinstance msg dict))
+            (do (_nrepl-error-reply conn {} "request must be a JSON object")
+                (continue)))
+        (try
+          ;; Encode inside the boundary so an unserialisable result becomes an
+          ;; error reply; only the socket send below may end the connection.
+          (= reply (_nrepl-encode msg (_nrepl-dispatch msg scope)))
+          (except [Exception as e]
+            (_nrepl-error-reply
+              conn msg
+              (ife (isinstance e _NreplUnknownOp)
+                  (str e)
+                  (+ (. (type e) __name__) ": " (str e))))
+            (continue)))
+        (conn.sendall reply)))
+    (except [OSError] None)
     (finally
       (conn.close))))
 

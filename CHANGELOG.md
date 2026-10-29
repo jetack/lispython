@@ -8,6 +8,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The nREPL server buffers bytes and decodes each complete line, so a
+  multi-byte UTF-8 character split across two socket reads no longer drops
+  the connection. An unknown op, a malformed request or a failing handler
+  (such as `eval` without `code`) now gets an `error` reply echoing the
+  request id, and the connection keeps serving; a line that is not valid
+  UTF-8 or JSON (or JSON that is not an object, or is nested too deeply to
+  parse) gets an id-less `error` reply. A result that cannot be
+  serialised is an `error` reply too, `(exit)` in an eval is reported as a
+  `SystemExit` eval error, and any socket error ends the connection quietly.
 - `as->` expands to an expression (a tuple of `:=` assignments indexed with
   `-1`), so it works in expression position such as a `return` value or a
   call argument instead of emitting an invalid `do(...)` call.
