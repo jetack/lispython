@@ -35,19 +35,23 @@ def assign_p(sexp):
 
 
 def assign_compile(sexp):
-    body = sexp.operands
-    if isinstance(body[1], Annotation):
-        [target, annotation, *value] = body
+    [[target], body] = form_parts(sexp, ("target",))
+    if not body:
+        raise form_error(sexp, "is missing its value")
+    if isinstance(body[0], Annotation):
+        [annotation, *value] = body
+        if len(value) > 1:
+            raise form_error(sexp, "takes one value after an annotation")
         value_dict = {"value": expr_compile(value[0])} if value else {}
         return ast.AnnAssign(
             target=expr_compile(target, ctx=ast.Store),
             annotation=expr_compile(annotation),
-            simple=isinstance(target, Symbol) and (not "." in str(target)),
+            simple=int(plain_name_p(target)),
             **value_dict,
             **sexp.position_info
         )
     else:
-        [*targets, value] = body
+        [*targets, value] = [target, *body]
         return ast.Assign(
             targets=list(map(lambda x: expr_compile(x, ctx=ast.Store), targets)),
             value=expr_compile(value),
@@ -60,8 +64,9 @@ def augassign_p(sexp):
 
 
 def augassign_compile(sexp):
-    [op, target, *args] = sexp.list
-    op = augassignop_dict[str(op)]
+    [[target, value], rest] = form_parts(sexp, ("target", "value"))
+    args = [value, *rest]
+    op = augassignop_dict[str(sexp.op)]
     value = reduce(
         lambda x, y: ast.BinOp(x, op(), y, **sexp.position_info),
         map(expr_compile, args),
@@ -76,6 +81,8 @@ def augassign_compile(sexp):
 
 def del_compile(sexp):
     [op, *args] = sexp.list
+    if not args:
+        raise form_error(sexp, "needs at least one target")
     return ast.Delete(
         targets=list(map(lambda x: expr_compile(x, ast.Del), args)),
         **sexp.position_info
@@ -174,51 +181,101 @@ def if_p(sexp):
 
 
 def if_stmt_compile(sexp):
-    [_, test, then, *orelse] = sexp.list
+    [[test, then], orelse] = form_parts(sexp, ("test", "then"))
     return ast.If(
         test=expr_compile(test),
         body=stmt_list_compile([then]),
-        orelse=stmt_list_compile([*orelse]),
+        orelse=stmt_list_compile(orelse),
         **sexp.position_info
     )
 
 
-LOOP_USAGE = {
+# How every statement form and clause is written: the one home of their arity,
+# quoted by form_error in each refusal. Literal [ ] are lispython brackets.
+FORM_USAGE = {
+    "if": "(if test then else...)",
     "while": "(while test body...)",
     "for": "(for target in iterable body...)",
     "async-for": "(async-for target in iterable body...)",
+    "def": "(def name [args] body...)",
+    "async-def": "(async-def name [args] body...)",
+    "class": "(class name [bases] body...)",
+    "with": "(with [context as target ...] body...), each as target optional",
+    "async-with": (
+        "(async-with [context as target ...] body...), each as target optional"
+    ),
+    "try": "(try body... (except ...)... (else ...) (finally ...))",
+    "except": (
+        "(except [type ... as name] body...) or (except body...), as name optional"
+    ),
+    "except*": "(except* [type ... as name] body...), as name optional",
+    "else": "(else body...)",
+    "finally": "(finally body...)",
+    "match": "(match subject (case ...)...)",
+    "case": "(case pattern as name if guard body...), as name and if guard optional",
+    "deco": "(deco decorator definition) or (deco [decorator ...] definition)",
+    "raise": "(raise), (raise exception) or (raise exception from cause)",
+    "assert": "(assert test) or (assert test message)",
+    "=": (
+        "(= target... value) or (= target ^annotation value), "
+        "value optional after an annotation"
+    ),
+    **{op: f"({op} target value...)" for op in augassignop_dict},
+    "del": "(del target...)",
+    "global": "(global name...)",
+    "nonlocal": "(nonlocal name...)",
 }
+
+
+def form_error(sexp, problem, form=None):
+    """The one shape of a malformed-statement error: the problem, then usage.
+
+    Positioned at ``sexp``; ``form`` (default: ``sexp``'s own head) names the
+    statement whose usage is quoted, so an error at a clause or operand can
+    still quote the enclosing form.
+    """
+    form = str(sexp.op) if form is None else form
+    return LispyCompileError(f"({form} ...) {problem}: {FORM_USAGE[form]}", sexp)
+
+
+def form_parts(sexp, header, form=None):
+    """``[parts, rest]``: the header operands of ``sexp`` in order, then the rest.
+
+    ``header`` names the required operands; an entry ``(word, name)`` lets an
+    optional ``word`` precede that operand (for's ``in``). A missing one is
+    "is missing its {name}", at the form.
+    """
+    q = deque(sexp.operands)
+    parts = []
+    for entry in header:
+        [word, name] = entry if isinstance(entry, tuple) else [None, entry]
+        if word is not None and len(q) and q[0] == word:
+            q.popleft()
+        if not q:
+            raise form_error(sexp, f"is missing its {name}", form)
+        parts.append(q.popleft())
+    return [parts, list(q)]
+
+
+def clause_p(sexp, heads):
+    """A Paren whose head is one of ``heads``; an empty () is no clause."""
+    return isinstance(sexp, Paren) and len(sexp) > 0 and str(sexp.op) in heads
 
 
 def loop_parse(sexp, header):
     """Split a while/for form into its header operands, body and else body.
 
     ``header`` names the operands before the body, in order: ``("test",)``
-    for while, ``("target", "iterable")`` for for, whose optional ``in``
-    before the iterable is skipped. A trailing ``(else ...)`` holds the else
-    body. The one check of a loop's arity: a missing header operand or an
-    empty body (Python has no bodiless loop) is a LispyCompileError at the
-    form, never an IndexError or an AST compile() rejects later.
+    for while, ``("target", ("in", "iterable"))`` for for, whose optional
+    ``in`` before the iterable is skipped. A trailing ``(else ...)`` holds the
+    else body. Python has no bodiless loop, so an empty body is refused.
     """
-    form = str(sexp.op)
-    usage = LOOP_USAGE[form]
-    q = deque(sexp.operands)
-    parts = []
-    for name in header:
-        if name == "iterable" and len(q) and q[0] == "in":
-            q.popleft()
-        if not q:
-            raise LispyCompileError(
-                f"({form} ...) is missing its {name}: {usage}", sexp
-            )
-        parts.append(q.popleft())
-    body = list(q)
+    [parts, body] = form_parts(sexp, header)
     orelse = []
-    lastx = body[-1] if body else None
-    if isinstance(lastx, Paren) and len(lastx) and lastx.op == "else":
+    if len(body) and clause_p(body[-1], ("else",)):
         orelse = body.pop().operands
     if not body:
-        raise LispyCompileError(f"({form} ...) needs a body: {usage}", sexp)
+        raise form_error(sexp, "needs a body")
     return parts, body, orelse
 
 
@@ -241,7 +298,9 @@ def for_p(sexp):
 
 
 def for_compile(sexp, async_p=False):
-    [[target, iterable], then, orelse] = loop_parse(sexp, ("target", "iterable"))
+    [[target, iterable], then, orelse] = loop_parse(
+        sexp, ("target", ("in", "iterable"))
+    )
     return (ast.AsyncFor if async_p else ast.For)(
         target=expr_compile(target, ast.Store),
         iter=expr_compile(iterable),
@@ -256,104 +315,176 @@ def deco_p(sexp):
 
 
 def raise_compile(sexp):
+    # Python's three shapes; a bare (raise) re-raises the active exception.
     body = sexp.operands
-    assert len(body) == 1 or (len(body) == 3 and body[1] == "from")
-    kwargs = {"exc": expr_compile(body[0])}
-    if len(body) > 1:
-        kwargs["cause"] = expr_compile(body[-1])
+    if len(body) == 2 and body[1] == "from":
+        raise form_error(sexp, "is missing its cause")
+    if len(body) not in (0, 1, 3) or (len(body) == 3 and body[1] != "from"):
+        raise form_error(sexp, "takes an exception and an optional from cause")
+    kwargs = {"exc": expr_compile(body[0])} if len(body) else {}
+    if len(body) == 3:
+        kwargs["cause"] = expr_compile(body[2])
     return ast.Raise(**kwargs, **sexp.position_info)
 
 
 def assert_compile(sexp):
-    kwargs = {"test": expr_compile(sexp[1])}
-    if len(sexp) > 2:
-        kwargs["msg"] = expr_compile(sexp[2])
+    [[test], rest] = form_parts(sexp, ("test",))
+    if len(rest) > 1:
+        raise form_error(sexp, "takes a test and at most one message")
+    kwargs = {"test": expr_compile(test)}
+    if len(rest):
+        kwargs["msg"] = expr_compile(rest[0])
     return ast.Assert(**kwargs, **sexp.position_info)
 
 
-def parse_exception_bracket(bracket):
+def except_types_parse(bracket, form):
+    """``[types, name]`` of an except clause's ``[type ... as name]``.
+
+    ``as`` may only come second to last, after at least one type, and be
+    followed by a plain name; anything else is refused at the ``as``.
+    """
     lst = bracket.list
-    name = (
-        str([lst.pop(), lst.pop()][0]).replace("-", "_")
-        if len(lst) > 2 and lst[-2] == "as"
-        else None
-    )
-    type = (
-        ast.Tuple(
-            elts=list(map(expr_compile, lst)), ctx=ast.Load(), **bracket.position_info
-        )
-        if len(lst) > 1
-        else expr_compile(lst[0])
-    )
-    return [type, name]
+    for [i, x] in enumerate(lst):
+        if x != "as":
+            continue
+        if i == 0:
+            raise form_error(x, "has as without a type before it", form)
+        if i == len(lst) - 1:
+            raise form_error(x, "has as without a name after it", form)
+        if i != len(lst) - 2 or not plain_name_p(lst[-1]):
+            raise form_error(x, "expects one name after as", form)
+        return [lst[:i], lst[-1].name]
+    if not len(lst):
+        raise form_error(bracket, "has an empty [types] bracket", form)
+    return [lst, None]
 
 
 def parse_except(handler):
-    body = handler.operands
-    if isinstance(body[0], Bracket):
-        body = deque(handler.operands)
-        [type, name] = parse_exception_bracket(body.popleft())
-    else:
-        [type, name] = [None, None]
-    kwargs = {"body": stmt_list_compile(body)}
-    if type:
-        kwargs["type"] = type
-    if name:
-        kwargs["name"] = name
-    return ast.ExceptHandler(**kwargs, **handler.position_info)
+    """One except/except* clause: an optional [type ... as name], then a body."""
+    form = str(handler.op)
+    body = deque(handler.operands)
+    kwargs = {}
+    if len(body) and isinstance(body[0], Bracket):
+        bracket = body.popleft()
+        [types, name] = except_types_parse(bracket, form)
+        kwargs["type"] = (
+            ast.Tuple(
+                elts=list(map(expr_compile, types)),
+                ctx=ast.Load(),
+                **bracket.position_info
+            )
+            if len(types) > 1
+            else expr_compile(types[0])
+        )
+        if name is not None:
+            kwargs["name"] = name
+    elif form == "except*":
+        raise form_error(handler, "needs a [types] bracket")
+    if not body:
+        raise form_error(handler, "needs a body")
+    return ast.ExceptHandler(
+        body=stmt_list_compile(body), **kwargs, **handler.position_info
+    )
+
+
+TRY_CLAUSES = ("except", "except*", "else", "finally")
+
+
+def try_parse(sexp):
+    """``[body, handlers, orelse, finalbody, star]`` of a try form.
+
+    The one check of try's layout, as Python's grammar has it: a body, then
+    except clauses or except* clauses (never both, a bare except last), an
+    optional else (only after an except), an optional finally, and at least
+    one except or a finally. A form out of that order is refused where it
+    stands, never left in the body to compile as a call to a keyword.
+    """
+    operands = sexp.operands
+    n = 0
+    while n < len(operands) and not clause_p(operands[n], TRY_CLAUSES):
+        n += 1
+    body = operands[:n]
+    if not body:
+        raise form_error(sexp, "needs a body")
+    [handlers, orelse, finalbody] = [[], [], None]
+    [previous, star, bare] = [None, False, False]
+    for clause in operands[n:]:
+        if not clause_p(clause, TRY_CLAUSES):
+            raise form_error(clause, f"has {clause} after its clauses", "try")
+        kind = str(clause.op)
+        if kind in ("except", "except*"):
+            if previous in ("else", "finally"):
+                raise form_error(clause, f"has {kind} after {previous}", "try")
+            if previous is not None and previous != kind:
+                raise form_error(clause, "cannot mix except and except*", "try")
+            if bare:
+                raise form_error(clause, "has an except after a bare except", "try")
+            star = kind == "except*"
+            bare = not (len(clause) > 1 and isinstance(clause[1], Bracket))
+            handlers.append(parse_except(clause))
+        else:
+            if previous == kind:
+                raise form_error(clause, f"has more than one {kind}", "try")
+            if previous == "finally":
+                raise form_error(clause, f"has {kind} after finally", "try")
+            if kind == "else" and not handlers:
+                raise form_error(clause, "has an else without an except", "try")
+            if not len(clause.operands):
+                raise form_error(clause, "needs a body")
+            if kind == "else":
+                orelse = clause.operands
+            else:
+                finalbody = clause.operands
+        previous = kind
+    if not handlers and finalbody is None:
+        raise form_error(sexp, "needs an except or a finally clause")
+    return [body, handlers, orelse, finalbody or [], star]
 
 
 def try_compile(sexp):
-    body = sexp.operands
-    # finally
-    finalbody = (
-        body.pop().operands
-        if isinstance(body[-1], Paren) and body[-1].op == "finally"
-        else []
-    )
-    # else
-    orelse = (
-        body.pop().operands
-        if isinstance(body[-1], Paren) and body[-1].op == "else"
-        else []
-    )
-    # excepts
-    handlers = deque()
-    while isinstance(body[-1], Paren) and body[-1].op == "except":
-        handlers.appendleft(body.pop())
-    handlers = list(map(parse_except, handlers))
-    # except*s
-    starhandlers = deque()
-    while isinstance(body[-1], Paren) and body[-1].op == "except*":
-        starhandlers.appendleft(body.pop())
-    starhandlers = list(map(parse_except, starhandlers))
-    assert not starhandlers or not handlers
-    return (ast.Try if not starhandlers else ast.TryStar)(
+    [body, handlers, orelse, finalbody, star] = try_parse(sexp)
+    return (ast.TryStar if star else ast.Try)(
         body=stmt_list_compile(body),
-        handlers=handlers or starhandlers,
+        handlers=handlers,
         orelse=stmt_list_compile(orelse),
         finalbody=stmt_list_compile(finalbody),
         **sexp.position_info
     )
 
 
-def with_items_parse(sexp):
+def with_items_parse(sexp, form):
+    """The withitems of ``[context as target ...]``, ``as target`` optional."""
     rst = []
+    targeted = True
     q = deque(sexp.list)
     while q:
         elt = q.popleft()
-        if str(elt) == "as":
+        if elt == "as":
+            if targeted:
+                raise form_error(elt, "has as without a context before it", form)
+            if not q:
+                raise form_error(elt, "has as without a target after it", form)
             rst[-1].optional_vars = expr_compile(q.popleft(), ctx=ast.Store)
+            targeted = True
         else:
             rst.append(ast.withitem(context_expr=expr_compile(elt)))
+            targeted = False
     return rst
 
 
 def with_compile(sexp, async_p=False):
-    [bracket_sexp, *body] = sexp.operands
-    items = with_items_parse(bracket_sexp)
+    form = str(sexp.op)
+    [[items], body] = form_parts(sexp, ("items",))
+    if not isinstance(items, Bracket) or not len(items):
+        raise form_error(
+            items, f"expects a non-empty [context ...], got {items}", form
+        )
+    if not body:
+        raise form_error(sexp, "needs a body")
     return (ast.AsyncWith if async_p else ast.With)(
-        items=items, body=stmt_list_compile(body), **sexp.position_info
+        items=with_items_parse(items, form),
+        body=stmt_list_compile(body),
+        **sexp.position_info
     )
 
 
@@ -443,25 +574,39 @@ def pattern_parse(sexp):
 
 
 def case_parse(case):
-    [pattern_expr, *body] = case.operands
+    """``(case pattern [as name] [if guard] body...)``; the case is checked
+    in match_compile, the parts here, each refusal at the case."""
+    [[pattern_expr], body] = form_parts(case, ("pattern",))
     pattern = pattern_parse(pattern_expr)
-    if body[0] == "as":
+    if len(body) and body[0] == "as":
+        if len(body) < 2:
+            raise form_error(case, "has as without a name after it")
+        if not plain_name_p(body[1]):
+            raise form_error(body[1], f"expects a name after as, got {body[1]}", "case")
         pattern = ast.MatchAs(
             pattern=pattern,
             name=body[1].name.replace("-", "_"),
             **merge_position_infos(pattern_expr.position_info, body[1].position_info)
         )
         body = body[2:]
-    if body[0] == "if":
+    guard_dict = {}
+    if len(body) and body[0] == "if":
+        if len(body) < 2:
+            raise form_error(case, "has if without a guard after it")
         guard_dict = {"guard": expr_compile(body[1])}
         body = body[2:]
-    else:
-        guard_dict = {}
+    if not body:
+        raise form_error(case, "needs a body")
     return ast.match_case(pattern=pattern, **guard_dict, body=stmt_list_compile(body))
 
 
 def match_compile(sexp):
-    [subject, *cases] = sexp.operands
+    [[subject], cases] = form_parts(sexp, ("subject",))
+    if not cases:
+        raise form_error(sexp, "needs at least one case")
+    for case in cases:
+        if not clause_p(case, ("case",)):
+            raise form_error(case, f"expects (case ...) clauses, got {case}", "match")
     cases = list(map(case_parse, cases))
     return ast.Match(subject=expr_compile(subject), cases=cases, **sexp.position_info)
 
@@ -566,8 +711,22 @@ def type_alias_compile(sexp):
     )
 
 
+DECORATABLE = ("def", "async-def", "class", "deco")
+
+
 def deco_compile(sexp, decorator_list):
-    [op, decorator, def_statement] = sexp.list
+    [[decorator, def_statement], rest] = form_parts(
+        sexp, ("decorator", "definition")
+    )
+    if rest:
+        raise form_error(sexp, "takes one decorator and one definition")
+    if not clause_p(def_statement, DECORATABLE):
+        # Compiling anything else would drop the decorator without a word.
+        raise form_error(
+            def_statement,
+            f"expects a def, async-def, class or deco form, got {def_statement}",
+            "deco",
+        )
     new_deco_list = decorator.list if isinstance(decorator, Bracket) else [decorator]
     return stmt_compile(
         def_statement, (decorator_list if decorator_list else []) + new_deco_list
@@ -578,8 +737,19 @@ def functiondef_p(sexp):
     return str(sexp.op) == "def"
 
 
+def definition_parts(sexp, header):
+    """``[name, bracket, body]`` of a def/async-def/class: the bracket (args
+    or bases) is required, an empty body compiles to pass."""
+    [[name, bracket], body] = form_parts(sexp, ("name", header))
+    if not isinstance(bracket, Bracket):
+        raise form_error(
+            bracket, f"expects [{header}] after its name, got {bracket}", str(sexp.op)
+        )
+    return [name, bracket, body]
+
+
 def functiondef_compile(sexp, decorator_list, async_p=False):
-    [op, fnname, args, *body] = sexp.list
+    [fnname, args, body] = definition_parts(sexp, "args")
     [name, type_params] = def_name_parse(fnname)
     if body and isinstance(body[0], Annotation):
         [ann, *body] = body
@@ -610,14 +780,25 @@ def return_compile(sexp):
     return ast.Return(value=value, **sexp.position_info)
 
 
+def scope_names(sexp):
+    """The names of a global/nonlocal form: at least one, each a plain name."""
+    names = sexp.operands
+    if not names:
+        raise form_error(sexp, "needs at least one name")
+    for name in names:
+        if isinstance(name, GluedHead):
+            raise name.misuse_error()
+        if not plain_name_p(name):
+            raise form_error(name, f"expects a name, got {name}", str(sexp.op))
+    return [name.name for name in names]
+
+
 def global_compile(sexp):
-    [_, *args] = sexp.list
-    return ast.Global(names=list(map(lambda x: x.name, args)), **sexp.position_info)
+    return ast.Global(names=scope_names(sexp), **sexp.position_info)
 
 
 def nonlocal_compile(sexp):
-    [_, *args] = sexp.list
-    return ast.Nonlocal(names=list(map(lambda x: x.name, args)), **sexp.position_info)
+    return ast.Nonlocal(names=scope_names(sexp), **sexp.position_info)
 
 
 def classdef_p(sexp):
@@ -639,7 +820,7 @@ def classdef_args_parse(args):
 
 
 def classdef_compile(sexp, decorator_list):
-    [_, clsname, args, *body] = sexp.list
+    [clsname, args, body] = definition_parts(sexp, "bases")
     [name, type_params] = def_name_parse(clsname)
     [bases, keywords] = classdef_args_parse(args)
     return ast.ClassDef(

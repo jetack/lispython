@@ -335,3 +335,180 @@ class TestLoopArity:
     )
     def test_well_formed_loops_compile(self, lispy, python):
         assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))
+
+
+class TestFormArity:
+    """A malformed statement form is a LispyCompileError naming the problem
+    and the form's usage, never an IndexError, AssertionError or an AST that
+    compile() rejects; it is positioned at the part at fault (``at``: the
+    form, a clause or an operand)."""
+
+    @pytest.mark.parametrize(
+        ("form", "msg", "at"),
+        [
+            ("(if)", "(if ...) is missing its test", None),
+            ("(if x)", "(if ...) is missing its then", None),
+            ("(def)", "(def ...) is missing its name", None),
+            ("(def f)", "(def ...) is missing its args", None),
+            ("(async-def f)", "(async-def ...) is missing its args", None),
+            ("(def f x 1)", "(def ...) expects [args] after its name, got x", "x"),
+            ("(class)", "(class ...) is missing its name", None),
+            ("(class C)", "(class ...) is missing its bases", None),
+            ("(class C x)", "(class ...) expects [bases] after its name", "x"),
+            ("(with)", "(with ...) is missing its items", None),
+            ("(with [a])", "(with ...) needs a body", None),
+            ("(async-with [a])", "(async-with ...) needs a body", None),
+            ("(with x 1)", "(with ...) expects a non-empty [context ...]", "x"),
+            ("(with [] 1)", "(with ...) expects a non-empty [context ...]", "[]"),
+            ("(with [as b] 1)", "(with ...) has as without a context", "as"),
+            ("(with [a as] 1)", "(with ...) has as without a target", "as"),
+            ("(try)", "(try ...) needs a body", None),
+            ("(try (except))", "(try ...) needs a body", None),
+            ("(try (f))", "(try ...) needs an except or a finally clause", None),
+            ("(try (f) (except [E]))", "(except ...) needs a body", "(except [E])"),
+            ("(try (f) (finally))", "(finally ...) needs a body", "(finally)"),
+            (
+                "(try (f) (except [E] 1) (else))",
+                "(else ...) needs a body",
+                "(else)",
+            ),
+            (
+                "(try (f) (except* [E] 1) (except [E] 2))",
+                "(try ...) cannot mix except and except*",
+                "(except [E] 2)",
+            ),
+            (
+                "(try (f) (except [E] 2) (except* [E] 1))",
+                "(try ...) cannot mix except and except*",
+                "(except* [E] 1)",
+            ),
+            (
+                "(try (f) (except 1) (except [E] 2))",
+                "(try ...) has an except after a bare except",
+                "(except [E] 2)",
+            ),
+            ("(try (f) (except* 1))", "(except* ...) needs a [types]", "(except* 1)"),
+            ("(try (f) (except [] 1))", "(except ...) has an empty [types]", "[]"),
+            ("(try (f) (except [as e] 1))", "(except ...) has as without a type", "as"),
+            ("(try (f) (except [E as] 1))", "(except ...) has as without a name", "as"),
+            ("(try (f) (except [E as e f] 1))", "(except ...) expects one name", "as"),
+            (
+                "(try (f) (else 1))",
+                "(try ...) has an else without an except",
+                "(else 1)",
+            ),
+            (
+                "(try (f) (finally 1) (except [E] 1))",
+                "(try ...) has except after finally",
+                "(except [E] 1)",
+            ),
+            (
+                "(try (f) (except [E] 1) (else 2) (except [F] 3))",
+                "(try ...) has except after else",
+                "(except [F] 3)",
+            ),
+            (
+                "(try (f) (except [E] 1) (finally 2) (else 3))",
+                "(try ...) has else after finally",
+                "(else 3)",
+            ),
+            (
+                "(try (f) (finally 1) (finally 2))",
+                "(try ...) has more than one finally",
+                "(finally 2)",
+            ),
+            (
+                "(try (f) (except [E] 1) (g))",
+                "(try ...) has (g) after its clauses",
+                "(g)",
+            ),
+            ("(match)", "(match ...) is missing its subject", None),
+            ("(match x)", "(match ...) needs at least one case", None),
+            ("(match x (case))", "(case ...) is missing its pattern", "(case)"),
+            ("(match x (case 1))", "(case ...) needs a body", "(case 1)"),
+            ("(match x (case 1 as))", "(case ...) has as without a", "(case 1 as)"),
+            ("(match x (case 1 as (f) 1))", "(case ...) expects a name", "(f)"),
+            ("(match x (case 1 if))", "(case ...) has if without a", "(case 1 if)"),
+            ("(match x (foo 1))", "(match ...) expects (case ...) clauses", "(foo 1)"),
+            ("(deco)", "(deco ...) is missing its decorator", None),
+            ("(deco d)", "(deco ...) is missing its definition", None),
+            ("(deco d (f))", "(deco ...) expects a def, async-def, class or", "(f)"),
+            (
+                "(deco d (def f [] 1) 2)",
+                "(deco ...) takes one decorator and one definition",
+                None,
+            ),
+            ("(raise a b)", "(raise ...) takes an exception and an optional", None),
+            ("(raise a from)", "(raise ...) is missing its cause", None),
+            ("(raise a from b c)", "(raise ...) takes an exception and an", None),
+            ("(assert)", "(assert ...) is missing its test", None),
+            ("(assert a b c)", "(assert ...) takes a test and at most one", None),
+            ("(=)", "(= ...) is missing its target", None),
+            ("(= x)", "(= ...) is missing its value", None),
+            ("(= x ^int 1 2)", "(= ...) takes one value after an annotation", None),
+            ("(+=)", "(+= ...) is missing its target", None),
+            ("(+= x)", "(+= ...) is missing its value", None),
+            ("(//= x)", "(//= ...) is missing its value", None),
+            ("(del)", "(del ...) needs at least one target", None),
+            ("(global)", "(global ...) needs at least one name", None),
+            ("(nonlocal)", "(nonlocal ...) needs at least one name", None),
+            ("(global a.b)", "(global ...) expects a name, got a.b", "a.b"),
+            ("(nonlocal (f))", "(nonlocal ...) expects a name, got (f)", "(f)"),
+        ],
+    )
+    def test_refused_where_it_is_malformed(self, form, msg, at):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg.startswith(msg)
+        assert ": (" in info.value.msg[len(msg) :]
+        at = form if at is None else at
+        col = 3 + form.index(at)
+        assert (info.value.lineno, info.value.offset) == (2, col)
+        assert (info.value.end_lineno, info.value.end_offset) == (2, col + len(at))
+
+    @pytest.mark.parametrize(
+        ("lispy", "python"),
+        [
+            ("(raise)", "raise"),
+            ("(raise e)", "raise e"),
+            ("(raise e from c)", "raise e from c"),
+            ('(assert a "m")', 'assert a, "m"'),
+            ("(if x (f))", "if x:\n    f()"),
+            ("(if x (f) (g) (h))", "if x:\n    f()\nelse:\n    g()\n    h()"),
+            (
+                "(try (f) (except* [E as e] (g)) (else (h)) (finally (k)))",
+                "try:\n    f()\nexcept* E as e:\n    g()\n"
+                "else:\n    h()\nfinally:\n    k()",
+            ),
+            (
+                "(try (f) (except [A B as e] (g)) (except (h)))",
+                "try:\n    f()\nexcept (A, B) as e:\n    g()\nexcept:\n    h()",
+            ),
+            ("(try (f) (finally (g)))", "try:\n    f()\nfinally:\n    g()"),
+            (
+                "(match x (case [a] as b if (> b 1) (f)) (case _ (g)))",
+                "match x:\n    case [a] as b if b > 1:\n        f()\n"
+                "    case _:\n        g()",
+            ),
+            ("(with [a as b c] (f))", "with a as b, c:\n    f()"),
+            ("(= x ^int)", "x: int"),
+            ("(= x ^int 1)", "x: int = 1"),
+            ("(= a b 1)", "a = b = 1"),
+            ("(+= x 1 2)", "x += 1 + 2"),
+            ("(del a b)", "del a, b"),
+            ("(global a b)", "global a, b"),
+        ],
+    )
+    def test_well_formed_forms_compile(self, lispy, python):
+        assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))
+
+    def test_deco_stacks(self):
+        # Compared piecewise: FunctionDef dumps differ by version (type_params).
+        [got] = macroexpand_then_compile(
+            parse("(deco [a b] (deco c (def f [] (g))))")
+        )
+        [want] = ast.parse("@a\n@b\n@c\ndef f():\n    g()").body
+        assert ast.dump(ast.Module(got.decorator_list, [])) == ast.dump(
+            ast.Module(want.decorator_list, [])
+        )
+        assert ast.dump(ast.Module(got.body, [])) == ast.dump(ast.Module(want.body, []))
