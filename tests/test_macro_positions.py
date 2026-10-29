@@ -4,10 +4,12 @@ Without one they would carry the Node default (line 0), so a traceback or a
 compile error in macro-generated code would point nowhere."""
 
 import ast
+from collections import deque
 
 import pytest
 
 from lispy.core.macro import macroexpand_then_compile
+from lispy.core.nodes import Paren, Symbol, with_missing_positions
 from lispy.core.parser import parse
 
 
@@ -113,3 +115,38 @@ def test_shared_node_beside_fresh_ones_keeps_a_valid_range(scope):
         stl = compile_at_line(line, "(shared-attr)", scope)
         [attr] = [n for n in nodes(stl) if isinstance(n, ast.Attribute)]
         assert (attr.lineno, attr.end_lineno) == (line, line)
+
+
+# Filling positions copies the expansion. The copy must not spend Python frames
+# per nesting level: a macro call nests as deeply as the same code without one
+# (about 245 levels at the default recursion limit), where copy.deepcopy gave
+# up near 160 with a raw RecursionError.
+DEEP = 230
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(when c " + "(f " * DEEP + "1" + ")" * DEEP + ")",
+        "(-> x " + " ".join(f"f{i}" for i in range(DEEP)) + ")",
+    ],
+    ids=["nested-argument", "long-thread"],
+)
+def test_deeply_nested_macro_call_compiles(src, scope):
+    compile_at_line(3, src, scope)
+
+
+def test_position_fill_copies_and_keeps_sharing():
+    shared = Symbol("x")
+    placed = Symbol("y", lineno=7, col_offset=1, end_lineno=7, end_col_offset=2)
+    tree = Paren(Symbol("f"), shared, shared, placed)
+    tree.extra = (shared, deque([shared]))
+    position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
+    copy = with_missing_positions(tree, position)
+    assert copy is not tree and shared.lineno == 0 and tree.lineno == 0
+    [head, first, second, kept] = copy.list
+    assert first is second is copy.extra[0] is copy.extra[1][0]
+    assert first is not shared
+    assert type(copy.extra) is tuple and type(copy.extra[1]) is deque
+    assert [n.position_info for n in (copy, head, first)] == [position] * 3
+    assert kept.position_info == placed.position_info and kept is not placed

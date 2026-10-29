@@ -1,4 +1,3 @@
-import copy
 from collections import deque
 
 
@@ -73,32 +72,66 @@ def with_missing_positions(node, position_info):
     wrappers, quotes and glued heads are covered alike; ``seen`` guards nodes
     shared between places in the expansion.
 
-    The tree is deep-copied first because the macro may still own its nodes
-    (a template held in a global and returned on every call): filling them in
-    place would pin the first call's position on every later call, and mixing
-    such stale nodes with fresh ones can make a start line exceed its end line,
-    which compile() rejects. Nodes are plain attribute bags compared by name,
-    never by identity (gensym returns a Symbol with a unique name), and
-    deepcopy's memo keeps sharing within the one expansion.
+    The tree is copied, not filled in place, because the macro may still own
+    its nodes (a template held in a global and returned on every call):
+    filling them in place would pin the first call's position on every later
+    call, and mixing such stale nodes with fresh ones can make a start line
+    exceed its end line, which compile() rejects. Nodes are plain attribute
+    bags compared by name, never by identity (gensym returns a Symbol with a
+    unique name); the id memo keeps sharing within the one expansion.
+
+    ⚠️ Copy and fill are one iterative pass over an explicit stack, never
+    copy.deepcopy or recursion: deepcopy spends several Python frames per
+    nesting level, so a deeply nested macro call hit RecursionError far
+    sooner than the same code without the macro. Nodes and plain lists,
+    tuples and deques are copied; every other value (str, int, None) is
+    shared.
     """
-    node = copy.deepcopy(node)
-    seen = set()
-    stack = [node]
+    memo = {}  # id(original) -> its copy
+    root = [node]
+    # (container, key): the slot still holding an original, to be replaced by
+    # its copy. A tuple's slot also gets a finisher, popped once every slot
+    # pushed after it (its items' whole subtrees) has been copied.
+    stack = [(root, 0)]
     while stack:
-        current = stack.pop()
-        if isinstance(current, list):
-            stack.extend(current)
+        item = stack.pop()
+        if len(item) == 3:
+            container, key, items = item
+            copied = tuple(items)
+            memo[id(container[key])] = copied
+            container[key] = copied
             continue
-        if not isinstance(current, Node) or id(current) in seen:
+        container, key = item
+        value = container[key]
+        if id(value) in memo:
+            container[key] = memo[id(value)]
             continue
-        seen.add(id(current))
-        if not current.lineno:
-            # Set the node's own attributes: Wrapper.update_dict delegates to
-            # the wrapped value, which may already have a position.
-            for key in _POSITION_KEYS:
-                current.__dict__[key] = position_info[key]
-        stack.extend(vars(current).values())
-    return node
+        if isinstance(value, Node):
+            copied = value.__class__.__new__(value.__class__)
+            attrs = copied.__dict__
+            attrs.update(value.__dict__)
+            if not value.lineno:
+                # Set the node's own attributes: Wrapper.update_dict delegates
+                # to the wrapped value, which may already have a position.
+                for position_key in _POSITION_KEYS:
+                    attrs[position_key] = position_info[position_key]
+            stack.extend((attrs, k) for k in attrs)
+        elif type(value) is list:
+            copied = list(value)
+            stack.extend((copied, i) for i in range(len(copied)))
+        elif type(value) is deque:
+            copied = deque(value, value.maxlen)
+            stack.extend((copied, i) for i in range(len(copied)))
+        elif type(value) is tuple:
+            items = list(value)
+            stack.append((container, key, items))
+            stack.extend((items, i) for i in range(len(items)))
+            continue
+        else:
+            continue
+        memo[id(value)] = copied
+        container[key] = copied
+    return root[0]
 
 
 def data_to_generator_expression(data):
