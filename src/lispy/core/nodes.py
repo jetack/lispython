@@ -80,9 +80,11 @@ def macro_expansion_nodes(expansion, call):
     ``_data_node``, the one home of that conversion (shared with
     ``data_to_generator_expression``). Only those form slots are converted,
     never other attributes (lineno is an int, an f-string's conversion is an
-    int). Any other value (a dict, a set, an object), or a list or tuple
-    that contains itself, is a LispyCompileError at the call naming the
-    macro.
+    int). A value no literal spells (nan, a complex with a signed zero part)
+    becomes a Constant carrying it exactly (``_exact_constant``). Any other
+    value (a dict, a set, an object), or a form, list or tuple that contains
+    itself (also one a quasiquote unquoted, which the constructor leaves in
+    place), is a LispyCompileError at the call naming the macro.
 
     A macro builds its expansion at run time from quasiquote templates, so
     those nodes (and the converted data) carry the Node default (lineno 0)
@@ -117,9 +119,24 @@ def macro_expansion_nodes(expansion, call):
     made = []
     # id(Bracket made from a list or tuple) -> that list or tuple.
     sources = {}
-    # ids of the lists and tuples whose items are being converted: the path
-    # from the root, so meeting one again is a self-reference, not sharing.
+    # ids of the containers being copied (nodes, lists, deques) and of the
+    # data lists and tuples being converted: the path from the root. Meeting
+    # one again is a self-reference, not sharing, and wiring its copy in
+    # would make the copy a cycle that later passes recurse through forever.
+    # One set serves both, as the ids of live objects are distinct.
     active = set()
+
+    def self_reference(value):
+        return LispyCompileError(
+            f"macro {call.op} returned a self-referencing "
+            f"{type(value).__name__} in its expansion",
+            call,
+        )
+
+    def enter(value):
+        # Popped once every slot pushed after it (the subtree) is copied.
+        active.add(id(value))
+        stack.append((None, id(value)))
 
     def node_of(data):
         node = _data_node(data)
@@ -140,9 +157,11 @@ def macro_expansion_nodes(expansion, call):
     root = [node_of(expansion)]
     # (container, key): the slot still holding an original, to be replaced by
     # its copy. A tuple's slot also gets a finisher, popped once every slot
-    # pushed after it (its items' whole subtrees) has been copied, and a
-    # Bracket made from data an exit marker (None, id of its list), popped
-    # once its items are converted.
+    # pushed after it (its items' whole subtrees) has been copied, and every
+    # copied container (and the data a Bracket is made from) an exit marker
+    # (None, its id), popped once its subtree is copied. A tuple needs none:
+    # it memoizes only after its items, and any cycle through it also runs
+    # through a node or list, which memoizes before its children.
     stack = [(root, 0)]
     while stack:
         item = stack.pop()
@@ -158,6 +177,8 @@ def macro_expansion_nodes(expansion, call):
         container, key = item
         value = container[key]
         if id(value) in memo:
+            if id(value) in active:
+                raise self_reference(value)
             container[key] = memo[id(value)]
             continue
         if isinstance(value, Node):
@@ -169,24 +190,23 @@ def macro_expansion_nodes(expansion, call):
                 # to the wrapped value, which may already have a position.
                 for position_key in _POSITION_KEYS:
                     attrs[position_key] = position_info[position_key]
+            enter(value)
             source = sources.get(id(value))
             if source is not None:
                 if id(source) in active:
-                    raise LispyCompileError(
-                        f"macro {call.op} returned a self-referencing "
-                        f"{type(source).__name__} in its expansion",
-                        call,
-                    )
-                active.add(id(source))
-                stack.append((None, id(source)))
+                    raise self_reference(source)
+                enter(source)
             for k in _child_form_keys(value):
                 attrs[k] = node_of(attrs[k])
             keys = list(attrs)
             if isinstance(value, Expression) and type(value.list) is list:
                 elements = value.list
                 if id(elements) in memo:
+                    if id(elements) in active:
+                        raise self_reference(elements)
                     attrs["list"] = memo[id(elements)]
                 else:
+                    enter(elements)
                     # Fresh nodes from data have no position; they are pushed
                     # below and filled like any template-built node.
                     # A Bracket made from a list still holds raw items; they
@@ -200,9 +220,11 @@ def macro_expansion_nodes(expansion, call):
             stack.extend((attrs, k) for k in keys)
         elif type(value) is list:
             copied = list(value)
+            enter(value)
             stack.extend((copied, i) for i in range(len(copied)))
         elif type(value) is deque:
             copied = deque(value, value.maxlen)
+            enter(value)
             stack.extend((copied, i) for i in range(len(copied)))
         elif type(value) is tuple:
             items = list(value)
@@ -259,13 +281,24 @@ def _same_float(a, b):
     )
 
 
+def _exact_constant(value):
+    """A Constant compiling to ``value`` itself, for a value no literal spells.
+
+    ⚠️ Not a call such as ``(float "nan")`` or ``(complex 0.0 -0.0)``: a user
+    binding of ``float``/``complex`` would shadow it, and in a match pattern
+    a call is a class pattern. The text is for display only;
+    ``constant_compile`` and ``number_pattern_expr`` read ``exact``.
+    """
+    return Constant(repr(value), exact=value)
+
+
 def _float_node(value):
     if _isfinite(value):
         return Constant(repr(value))
     if _isinf(value):
         # The literal overflows to inf, as in CPython source.
         return Constant("1e999" if value > 0 else "-1e999")
-    return Paren(Symbol("float"), String('"nan"'))
+    return _exact_constant(value)
 
 
 def _complex_node(value):
@@ -280,7 +313,7 @@ def _complex_node(value):
     ):
         return Constant(text)
     # A signed zero or non-finite part has no literal (-0j is -(0j)).
-    return Paren(Symbol("complex"), _float_node(value.real), _float_node(value.imag))
+    return _exact_constant(value)
 
 
 def _data_node(data):
@@ -322,7 +355,9 @@ def _child_form_keys(node):
 def data_to_generator_expression(data):
     """``data`` as a node tree compiling to the same value, nested lists and
     tuples included; a node is returned as is, and a value with no lispython
-    form is left in place (``macro_expansion_nodes`` reports it).
+    form (a dict, a set, a list that contains itself) is returned unconverted
+    and left in place, so ``macro_expansion_nodes`` reports it at the macro
+    call (a quasiquote's Expression constructor comes here first).
 
     The one home of the data-to-node conversion, through ``_data_node``.
     Iterative, so a deeply nested list does not hit RecursionError.
@@ -339,9 +374,7 @@ def data_to_generator_expression(data):
             active.discard(items)
             continue
         if id(items) in active:
-            raise ValueError(
-                f"a self-referencing {type(items).__name__} has no lispython form"
-            )
+            return data
         active.add(id(items))
         pending.append((None, id(items)))
         bracket.list = [_data_node(item) for item in items]
@@ -782,6 +815,21 @@ class Constant(Literal):
         super().__init__(**kwargs)
         self.value = value
         self.classname = "Constant"
+
+    def generator_expression(self, in_quasi=False):
+        """Rebuild from the text, and keep an exact value (``_exact_constant``)
+        exact: the Constant itself compiles to that value, so the rebuilt
+        code names no ``float``/``complex`` a user may have rebound."""
+        if "exact" not in self.__dict__:
+            return super().generator_expression(in_quasi)
+        position_info = self.position_info
+        return Paren(
+            Symbol(self.classname, **position_info),
+            self.operands_generate(in_quasi),
+            Keyword(Symbol("exact")),
+            self,
+            **position_info
+        )
 
     def __repr__(self):
         return "Const(" + repr(self.value) + ")"

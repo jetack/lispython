@@ -4,6 +4,7 @@ Without one they would carry the Node default (line 0), so a traceback or a
 compile error in macro-generated code would point nowhere."""
 
 import ast
+import signal
 from collections import deque
 
 import pytest
@@ -242,37 +243,103 @@ def test_unrepresentable_data_is_refused_at_the_call(make, type_name, scope):
         assert (info.value.end_lineno, info.value.end_offset) == (3, 5 + len(name))
 
 
-# A list that contains itself has no finite form. Without the check the
-# conversion grows without bound (run a regression of it under a memory cap).
+SELF_REFERENCE_BUDGET = 2.0  # seconds; a passing test takes milliseconds
+
+
+@pytest.fixture
+def time_bound():
+    """Fail the test once it runs past SELF_REFERENCE_BUDGET.
+
+    A self-referencing form has no finite copy: without the checks the
+    conversion grows memory without bound (about 120 MB/s), fast enough to
+    exhaust the machine before any memory error. The timer stops it first.
+    Where setitimer is missing the test is skipped, never run unguarded.
+    """
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("needs signal.setitimer to bound a runaway self-reference")
+
+    def expire(signum, frame):
+        pytest.fail(f"ran past its {SELF_REFERENCE_BUDGET} s budget")
+
+    old_handler = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, SELF_REFERENCE_BUDGET)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
+# A form, list or tuple that contains itself has no finite form. Every test
+# of one takes the time_bound fixture.
 SELF_REFERENCING = {
-    "ret-self": "(defmacro ret-self [] (= x [1]) (x.append x) (return x))",
-    "put-self": "(defmacro put-self [] (= x [1]) (x.append x)"
-    " (= e `(f)) (e.list.append x) (return e))",
-    "ret-self-tuple": "(defmacro ret-self-tuple [] (= x [1]) (= t (, x))"
-    " (x.append t) (return t))",
+    "ret-self": ("(defmacro ret-self [] (= x [1]) (x.append x) (return x))", "list"),
+    "put-self": (
+        "(defmacro put-self [] (= x [1]) (x.append x)"
+        " (= e `(f)) (e.list.append x) (return e))",
+        "list",
+    ),
+    "ret-self-tuple": (
+        "(defmacro ret-self-tuple [] (= x [1]) (= t (, x)) (x.append t) (return t))",
+        "tuple",
+    ),
+    "splice-self": (
+        "(defmacro splice-self [] (= x [1]) (x.append x) (return `(f ~x)))",
+        "list",
+    ),
+    "ret-self-paren": (
+        "(defmacro ret-self-paren [] (= e `(f)) (e.list.append e) (return e))",
+        "Paren",
+    ),
+    "ret-self-starred": (
+        "(defmacro ret-self-starred [] (= x [1]) (= s `*~x) (x.append s)"
+        " (return `(f ~s)))",
+        "Starred",
+    ),
+    "ret-self-via-tuple": (
+        "(defmacro ret-self-via-tuple [] (= e `(f))"
+        ' (setattr e "extra" (, e)) (return e))',
+        "Paren",
+    ),
 }
 
 
+@pytest.mark.usefixtures("time_bound")
 @pytest.mark.parametrize("name", sorted(SELF_REFERENCING))
-def test_self_referencing_data_is_refused_at_the_call(name, scope):
-    define(SELF_REFERENCING[name], scope)
+def test_self_reference_is_refused_at_the_call(name, scope):
+    [src, kind] = SELF_REFERENCING[name]
+    define(src, scope)
     with pytest.raises(LispyCompileError) as info:
         compile_at_line(3, f"  ({name})", scope)
-    kind = "tuple" if name.endswith("tuple") else "list"
     assert info.value.msg == (
         f"macro {name} returned a self-referencing {kind} in its expansion"
     )
     assert (info.value.lineno, info.value.offset) == (3, 3)
 
 
-def test_self_referencing_data_is_refused_by_the_constructor(scope):
+@pytest.mark.usefixtures("time_bound")
+def test_self_referencing_data_is_left_for_the_expander():
+    # The quasiquote constructor converts what ~x unquotes; a list with no
+    # finite form stays raw, so the expander refuses it at the macro call.
     x = [1]
     x.append(x)
-    with pytest.raises(ValueError, match="self-referencing list"):
-        data_to_generator_expression(x)
-    define("(defmacro splice-self [] (= x [1]) (x.append x) (return `(f ~x)))", scope)
-    with pytest.raises(ValueError, match="self-referencing list"):
-        compile_at_line(3, "(splice-self)", scope)
+    assert data_to_generator_expression(x) is x
+    outer = [2, x]
+    assert data_to_generator_expression(outer) is outer
+    assert Paren(Symbol("f"), x).list[1] is x
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_self_referencing_node_attribute_is_refused():
+    call = call_at({"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9})
+    tree = Paren(Symbol("f"))
+    tree.extra = deque([tree])
+    with pytest.raises(LispyCompileError, match="self-referencing Paren"):
+        macro_expansion_nodes(tree, call)
+    tree.extra = [Symbol("g")]
+    tree.extra.append(tree.extra)
+    with pytest.raises(LispyCompileError, match="self-referencing list"):
+        macro_expansion_nodes(tree, call)
 
 
 def test_shared_data_is_not_a_self_reference(scope):

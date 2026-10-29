@@ -5,7 +5,7 @@ import pytest
 
 from lispy.core.compiler.expr import expr_compile
 from lispy.core.compiler.literal import string_compile
-from lispy.core.nodes import String, Symbol, data_to_generator_expression
+from lispy.core.nodes import Constant, String, Symbol, data_to_generator_expression
 from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 PREAMBLE = "(require lispy.macros *)\n"
@@ -234,3 +234,57 @@ class TestScalarDataRoundTrip:
         [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
         [arg] = call.args
         assert same_value(eval(compile(ast.Expression(arg), "<arg>", "eval")), value)
+
+
+# No literal spells these; each must compile to its very value, never to a
+# call of float/complex, which a user binding would shadow.
+INEXACT_DEFS = PREAMBLE + """
+(import math)
+(defmacro ret-nan [] (return math.nan))
+(defmacro ret-signed-cx [] (return (complex 0.0 -0.0)))
+"""
+
+
+def define_inexact():
+    scope = {}
+    stl = macroexpand_then_compile(parse(INEXACT_DEFS), scope)
+    exec(compile(ast.Module(stl, []), "<defs>", "exec"), scope)
+    return scope
+
+
+class TestInexactScalarData:
+    def test_compiles_to_the_value_with_float_and_complex_rebound(self):
+        scope = define_inexact()
+        src = "(= float int)\n(= complex int)\n(= got [(ret-nan) (ret-signed-cx)])"
+        stl = macroexpand_then_compile(parse(src), scope)
+        assert [type(e) for e in stl[-1].value.elts] == [ast.Constant] * 2
+        exec(compile(ast.Module(stl, []), "<use>", "exec"), scope)
+        [nan, signed] = scope["got"]
+        assert same_value(nan, NAN) and same_value(signed, complex(0.0, -0.0))
+
+    def test_is_a_value_pattern_in_a_match_case(self):
+        scope = define_inexact()
+        src = "(match v (case (ret-signed-cx) (= hit True)) (case _ (= hit False)))"
+        [match] = macroexpand_then_compile(parse(src), scope)
+        pattern = match.cases[0].pattern
+        assert type(pattern) is ast.MatchValue
+        assert same_value(pattern.value.value, complex(0.0, -0.0))
+        module = ast.fix_missing_locations(ast.Module([match], []))
+        scope["v"] = 0j
+        exec(compile(module, "<match>", "exec"), scope)
+        assert scope["hit"] is True
+
+    @pytest.mark.parametrize(
+        "value", [NAN, complex(0.0, -0.0), complex(INF, NAN)], ids=repr
+    )
+    def test_quasiquote_rebuild_keeps_the_value(self, value):
+        # A quoted Constant is rebuilt at run time; the rebuild must keep the
+        # value exact without naming float or complex.
+        rebuilt = data_to_generator_expression(value).generator_expression()
+        tree = ast.fix_missing_locations(ast.Expression(expr_compile(rebuilt)))
+        assert {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} == {
+            "Constant"
+        }
+        scope = {"Constant": Constant, "float": int, "complex": int}
+        made = eval(compile(tree, "<rebuild>", "eval"), scope)
+        assert same_value(compiled_value(made), value)

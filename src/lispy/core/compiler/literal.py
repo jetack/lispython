@@ -61,7 +61,12 @@ def constant_compile(constant):
     """A Constant node in an expression, with the value Python computes.
 
     ``-1+2j`` is ``(-1) + 2j``: the sign binds to the real part, as in Python.
+    A Constant made from macro data with no literal spelling (nan, a complex
+    with a signed zero part) carries the value as ``exact``; its text is
+    display only.
     """
+    if "exact" in vars(constant):
+        return ast.Constant(value=constant.exact, **constant.position_info)
     text = constant.value
     if text in SPECIAL_CONSTANTS:
         return ast.Constant(
@@ -88,8 +93,12 @@ def number_pattern_expr(text, sexp):
 
     ``-1`` is UnaryOp(USub, 1) on every version and ``+1`` UnaryOp(UAdd, 1)
     from 3.15; ``-1+2j`` is BinOp(UnaryOp(USub, 1), Add, 2j).  Python's
-    complex-literal rules apply: a real part, then an imaginary one.
+    complex-literal rules apply: a real part, then an imaginary one.  A
+    Constant carrying an ``exact`` value (see ``constant_compile``) is that
+    value, which CPython accepts as a MatchValue.
     """
+    if "exact" in vars(sexp):
+        return ast.Constant(value=sexp.exact, **sexp.position_info)
     parts = number_parts(text)
     if parts is None:
         # CPython's own message for a malformed number ("leading zeros ...").
