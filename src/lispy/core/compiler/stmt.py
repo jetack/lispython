@@ -3,7 +3,11 @@ from collections import deque
 from functools import reduce
 
 from lispy.core.compiler import features
-from lispy.core.compiler.expr import def_args_parse, expr_compile
+from lispy.core.compiler.expr import (
+    def_args_parse,
+    expr_compile,
+    refuse_empty_form,
+)
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
@@ -623,6 +627,7 @@ def match_class_parse(lst):
 
 
 def pattern_parse(sexp):
+    refuse_empty_form(sexp)
     return (
         ast.MatchAs(**sexp.position_info)
         if str(sexp) == "_"

@@ -522,6 +522,10 @@ class TestFormArity:
             ("(if () 1)", "() is an empty form", "()"),
             ("(f ())", "() is an empty form", "()"),
             ("(try () (except 1))", "() is an empty form", "()"),
+            ("(match x (case () 1))", "() is an empty form", "()"),
+            ("(match x (case [()] 1))", "() is an empty form", "()"),
+            ("(match x (case (| () 1) 2))", "() is an empty form", "()"),
+            ("(match x (case {1 ()} 2))", "() is an empty form", "()"),
         ],
     )
     def test_bad_target_name_or_empty_form_refused_at_itself(self, form, msg, at):

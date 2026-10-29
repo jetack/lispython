@@ -196,8 +196,13 @@ def string_compile(string):
 
 
 def reserved_name_p(name):
-    """A Python hard keyword (if, as, from, ...): never a name or attribute,
-    whatever form it appears in. ``name`` is the mangled Python name."""
+    """A Python hard keyword (if, as, from, ...), which is no name.
+
+    ``name`` is the mangled Python name. name_compile refuses it as a symbol
+    or any part of a dotted symbol, and plain_name_p (def, class, global,
+    nonlocal, case-as and except-as names) rejects it; other name slots
+    (attribute forms, keyword arguments, def parameters) do not consult it.
+    """
     return keyword.iskeyword(name)
 
 

@@ -101,12 +101,6 @@ follows [Semantic Versioning](https://semver.org/).
   name (`(def [] [] 1)`, `(class 1 [])`).
 - An empty `()` is a compile error at it ("use (,) for an empty tuple")
   instead of an `IndexError`, wherever it appears.
-- A Python hard keyword used as a name or attribute (`(raise from)`,
-  `(= a.if 1)`, `(def if [] 1)`, `(case 1 as as ...)`) is a compile error
-  instead of compiling to invalid Python.
-- `~` with nothing after it (`(f ~)`, `~;c`) is the symbol `~`, as before a
-  space, instead of an unquote that swallowed the next form or gave
-  "unmatched ')'".
 - A quote, quasiquote or unquote-splice with no form right after it
   (`(f ' a)`, `(f *' a)`, `(f ~@ a)`, `(f ')`, `',a`) is a compile error at
   the quote instead of a symbol `'`, `f(*', a)`, an unquote of `@` or
@@ -132,6 +126,14 @@ follows [Semantic Versioning](https://semver.org/).
   which compiled `as y` into the body) is refused: `as` comes before `if`.
 - A `;` ends a symbol or number, so a comment needs no space before it:
   `a;c` was the symbol `a;c`, now `a` followed by a comment.
+- A Python hard keyword as a symbol name, or as a part of a dotted symbol,
+  is a compile error: `(raise from)`, `(= o.if 1)` (which compiled to an
+  attribute named `if`), and a keyword as a def, class, global, nonlocal,
+  `case ... as` or `except [... as]` name (`(def if [] 1)`,
+  `(case 1 as as ...)`).
+- `~` directly before a closing bracket, a comma, `;` or the end of input
+  (`(f ~)`, `(f ~,a)`, `~;c`) is the symbol `~`, as before a space, instead
+  of an unquote that took the next form or gave "unmatched ')'".
 
 ## [0.5.0]
 
