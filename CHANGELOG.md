@@ -54,21 +54,27 @@ follows [Semantic Versioning](https://semver.org/).
 - `as->` also renames a dotted reference (`x.real` becomes `__x_0.real`) and
   a reference inside an f-string format spec (`f"{1:{x}}"`).
 - Threading a literal into a call (`(-> 1 (f))`, `(->> 1 (f 2))`,
-  `(-> "a" (f))`) compiles to `f(1)`, `f(2, 1)` and `f('a')` instead of
-  failing with an `AttributeError`. A macro may put Python values (numbers,
-  strings, bytes, `True`/`False`/`None`, lists) anywhere in the forms it
-  returns; they become literals at the macro call's position.
-- A string or bytes value a macro returns, a quoted string and a quoted
-  symbol keep their exact value: a backslash, line ending, control or other
-  non-printable character is escaped instead of being re-read as an escape
-  (`(-> "a\\b" (f))` was `f('a\x08')`, `'a\b` was `Symbol('a\x08')`).
+  `(-> "a" (f))`, `(-> ... (f))`) compiles to `f(1)`, `f(2, 1)`, `f('a')`
+  and `f(...)` instead of failing with an `AttributeError`, and
+  `(-> None (f))`, which compiled to `f()`, now gives `f(None)`. A macro may
+  put Python values (`None`, booleans, numbers, `...`, str, bytes, and
+  lists and tuples of them, nested to any depth) anywhere in the forms it
+  returns; each compiles to the same value (including `inf`, `nan`, `-0.0`
+  and ints of any size) at the macro call's position. Any other value (a
+  dict, a set, an object) is a compile error at the call naming the macro
+  and the value's type.
+- A str a macro returns keeps its backslashes literally: `"a\\b"` was
+  compiled as `"a\b"` (backspace), and a quote, line ending or control
+  character is kept as written. The same holds for quoted strings and
+  quoted symbols (`'a\b` was `Symbol('a\x08')`); bytes are supported.
 - A `for` or `while` with no target, iterable or test, or with no body
   before its `(else ...)` (`(for x in)`, `(for [x [1]] (print x))`,
   `(while x)`), is a compile error at the loop instead of an `IndexError`
   or a loop with an empty body that Python rejects.
 - `^` followed by stars before a bracket or a quote (`^*(`, `^**[`, `^*'`,
-  `^**~`) is a compile error at the prefix instead of a `KeyError`;
-  `^*Ts` and `^**P` are unchanged.
+  `^**~`, also with a space after the quote) or alone (`^*`, `^**`) is a
+  compile error at the prefix instead of a `KeyError`, an `AttributeError`
+  or a call such as `f(*', a)`; `^*Ts` and `^**P` are unchanged.
 
 ### Changed
 
