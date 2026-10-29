@@ -83,3 +83,33 @@ def test_threaded_symbol_keeps_its_own_position(scope):
     [call] = calls_to(stl, "f")
     assert call.lineno == 3
     assert (call.func.lineno, call.func.col_offset) == (4, 4)
+
+
+def define(src, scope):
+    stl = macroexpand_then_compile(parse(src), scope)
+    exec(compile(ast.Module(body=stl, type_ignores=[]), "<defs>", "exec"), scope)
+
+
+def compile_at_line(line, src, scope):
+    stl = macroexpand_then_compile(parse("\n" * (line - 1) + src), scope)
+    compile(ast.Module(body=stl, type_ignores=[]), "<test>", "exec")
+    return stl
+
+
+def test_shared_template_takes_each_call_position(scope):
+    # The macro returns one template object on every call; the first call
+    # must not pin its position on the later ones.
+    define("(= T `(sub [] 1))\n(defmacro shared-template [] (return T))", scope)
+    for line in (10, 50):
+        stl = compile_at_line(line, "(shared-template)", scope)
+        assert [n.lineno for n in nodes(stl) if isinstance(n, ast.Subscript)] == [line]
+
+
+def test_shared_node_beside_fresh_ones_keeps_a_valid_range(scope):
+    # A fresh attribute form ending in a shared symbol: a stale symbol line
+    # would end the attribute before it starts, which compile() rejects.
+    define("(= A `y)\n(defmacro shared-attr [] (return `(. x ~A)))", scope)
+    for line in (10, 50):
+        stl = compile_at_line(line, "(shared-attr)", scope)
+        [attr] = [n for n in nodes(stl) if isinstance(n, ast.Attribute)]
+        assert (attr.lineno, attr.end_lineno) == (line, line)

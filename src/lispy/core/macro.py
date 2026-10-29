@@ -7,6 +7,7 @@ from lispy.core.compiler.literal import constant_compile, string_node_value
 from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
+from lispy.core.nodes import with_missing_positions
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
@@ -104,7 +105,7 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
                 sexp = data_to_generator_expression(sexp)
             # Template-built nodes have no position; give them the call's, so
             # tracebacks and compile errors point at the macro call, not line 0.
-            fill_missing_positions(sexp, call_position)
+            sexp = with_missing_positions(sexp, call_position)
             expanded = True
         else:
             expanded_list, expanded_feedbacks = zip(

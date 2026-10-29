@@ -1,3 +1,4 @@
+import copy
 from collections import deque
 
 
@@ -59,8 +60,9 @@ def contains_unquote(node):
 _POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
 
 
-def fill_missing_positions(node, position_info):
-    """Give every node in ``node`` that has no position (lineno 0) this one.
+def with_missing_positions(node, position_info):
+    """A copy of ``node`` in which every node with no position (lineno 0)
+    takes this one.
 
     A macro builds its expansion at run time from quasiquote templates, so
     those nodes carry the Node default (lineno 0) and the Python code compiled
@@ -70,7 +72,16 @@ def fill_missing_positions(node, position_info):
     Descends every Node attribute, so f-string fields and their format specs,
     wrappers, quotes and glued heads are covered alike; ``seen`` guards nodes
     shared between places in the expansion.
+
+    The tree is deep-copied first because the macro may still own its nodes
+    (a template held in a global and returned on every call): filling them in
+    place would pin the first call's position on every later call, and mixing
+    such stale nodes with fresh ones can make a start line exceed its end line,
+    which compile() rejects. Nodes are plain attribute bags compared by name,
+    never by identity (gensym returns a Symbol with a unique name), and
+    deepcopy's memo keeps sharing within the one expansion.
     """
+    node = copy.deepcopy(node)
     seen = set()
     stack = [node]
     while stack:
