@@ -151,6 +151,15 @@ def test_overlong_line_replies_without_id_and_keeps_serving(monkeypatch):
     assert replies[1] == {"op": "pong", "id": 4}
 
 
+def test_line_that_never_ends_is_rejected_before_its_newline_arrives(monkeypatch):
+    monkeypatch.setattr(tools, "NREPL_MAX_LINE", 100)
+    # No newline ever comes: the error must be sent once while the buffer would
+    # otherwise still be growing, and the discarded tail must not add replies.
+    replies = serve([b"x" * 60] * 10)
+    assert [r["op"] for r in replies] == ["error"]
+    assert "id" not in replies[0]
+
+
 def test_overlong_complete_line_in_one_read_replies_once(monkeypatch):
     monkeypatch.setattr(tools, "NREPL_MAX_LINE", 100)
     replies = serve([b"x" * 500 + b"\n" + line(op="ping", id=5)])
