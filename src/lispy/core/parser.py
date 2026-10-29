@@ -32,13 +32,21 @@ _FLOATS = [
 _SCIENTIFIC = [x + "[eE][\\-\\+]?\\d+(?:_\\d+)*" for x in _FLOATS + [_INT]]
 _NUMBER = "|".join(_SCIENTIFIC + _FLOATS + [_INT])
 _COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
+# The wrapper an opening or a meta-indicator may carry: one of ^, *, **
+# (wrapper_dict). ^ followed by stars has no meaning there; it is the
+# "bad-prefix" token, which _parse refuses, and must match before "symbol",
+# which would otherwise swallow ^*( whole and report an unbalanced paren.
+_WRAPPER = "(?:\\^|\\*{1,2})?"
+_OPENING = "[\\(\\{\\[]"
+_META_INDICATOR = "(?:'|`|~@|~)(?!\\s|$)"
 _TOKEN_PATTERNS = [
-    ["\\^?\\*{0,2}[\\(\\{\\[]", "opening"],
+    [_WRAPPER + _OPENING, "opening"],
     ["[\\)\\}\\]]", "closing"],
     # Only the opening of a string (prefix and quote): scan_interpolated, the
     # one scanner of string bodies, finds where it ends.
     ["\\w*(?:\"\"\"|'''|\")", "string"],
-    ["\\^?\\*{0,2}(?:'|`|~@|~)(?!\\s|$)", "meta-indicator"],
+    [_WRAPPER + _META_INDICATOR, "meta-indicator"],
+    [f"\\^\\*+(?:{_OPENING}|{_META_INDICATOR})", "bad-prefix"],
     [";[^\\n]*", "comment"],
     [
         "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")(?=\\s|$|\\)|\\}|\\]|,)",
@@ -293,6 +301,12 @@ def _parse(src, rst):
                     lineno=lineno, col_offset=col_offset + len(wrapper)
                 )
             )
+        elif tktype == "bad-prefix":
+            [prefix, indicator] = _split_bad_prefix(t)
+            raise LispyCompileError(
+                f"{prefix} prefix has no meaning before {indicator!r}",
+                Symbol(t, **position_info),
+            )
         elif tktype == "meta-indicator":
             wrapper = (
                 "**"
@@ -337,6 +351,12 @@ def _parse(src, rst):
             (stack[-1] if stack else rst).append(e)
     _check_all_closed(stack)
     return rst
+
+
+def _split_bad_prefix(token):
+    """A bad-prefix token as [prefix, opening or meta-indicator]."""
+    end = len(token) - len(token.lstrip("^*"))
+    return [token[:end], token[end:]]
 
 
 special_literals = ("True", "False", "None", "...")
