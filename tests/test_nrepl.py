@@ -5,6 +5,8 @@ chunks, so where a read boundary falls is deterministic."""
 
 import json
 
+import pytest
+
 from lispy import tools
 
 
@@ -130,22 +132,33 @@ def test_non_object_json_replies_without_id():
     assert replies[1] == {"op": "pong", "id": 3}
 
 
-def test_recv_connection_reset_ends_quietly():
-    class Resetting(FakeConn):
-        def recv(self, n):
-            raise ConnectionResetError
+def test_deeply_nested_json_replies_without_id_and_keeps_serving():
+    replies = serve([b"[" * 200000 + b"\n" + line(op="ping", id=9)])
+    assert replies[0]["op"] == "error"
+    assert "id" not in replies[0]
+    assert replies[1] == {"op": "pong", "id": 9}
 
-    conn = Resetting([])
+
+@pytest.mark.parametrize(
+    "error", [ConnectionResetError, ConnectionAbortedError, TimeoutError]
+)
+def test_recv_socket_error_ends_quietly(error):
+    class Failing(FakeConn):
+        def recv(self, n):
+            raise error
+
+    conn = Failing([])
     tools._nrepl_handle_client(conn, ("127.0.0.1", 0), {})
     assert conn.closed
 
 
-def test_sendall_broken_pipe_ends_quietly():
-    class Broken(FakeConn):
+@pytest.mark.parametrize("error", [BrokenPipeError, OSError])
+def test_sendall_socket_error_ends_quietly(error):
+    class Failing(FakeConn):
         def sendall(self, data):
-            raise BrokenPipeError
+            raise error
 
-    conn = Broken([line(op="ping", id=1) + line(op="ping", id=2)])
+    conn = Failing([line(op="ping", id=1) + line(op="ping", id=2)])
     tools._nrepl_handle_client(conn, ("127.0.0.1", 0), {})
     assert conn.closed
     assert conn.sent == []

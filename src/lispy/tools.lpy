@@ -775,8 +775,9 @@
             (continue))
         (try
           (= msg (json.loads (.decode line "utf-8")))
-          (except [ValueError as e]
-            ;; invalid UTF-8 or invalid JSON: no id to echo
+          (except [(, ValueError RecursionError) as e]
+            ;; invalid UTF-8, invalid JSON or JSON nested too deeply to parse:
+            ;; no id to echo
             (_nrepl-error-reply conn {} (str e))
             (continue)))
         (if (not (isinstance msg dict))
