@@ -13,7 +13,10 @@ from lispy.core.macro import macroexpand_then_compile
 from lispy.core.nodes import (
     Bracket,
     Constant,
+    GluedHead,
+    Keyword,
     Paren,
+    Quote,
     String,
     Symbol,
     data_to_generator_expression,
@@ -237,3 +240,86 @@ def test_unrepresentable_data_is_refused_at_the_call(make, type_name, scope):
         )
         assert (info.value.lineno, info.value.offset) == (3, 3)
         assert (info.value.end_lineno, info.value.end_offset) == (3, 5 + len(name))
+
+
+# A list that contains itself has no finite form. Without the check the
+# conversion grows without bound (run a regression of it under a memory cap).
+SELF_REFERENCING = {
+    "ret-self": "(defmacro ret-self [] (= x [1]) (x.append x) (return x))",
+    "put-self": "(defmacro put-self [] (= x [1]) (x.append x)"
+    " (= e `(f)) (e.list.append x) (return e))",
+    "ret-self-tuple": "(defmacro ret-self-tuple [] (= x [1]) (= t (, x))"
+    " (x.append t) (return t))",
+}
+
+
+@pytest.mark.parametrize("name", sorted(SELF_REFERENCING))
+def test_self_referencing_data_is_refused_at_the_call(name, scope):
+    define(SELF_REFERENCING[name], scope)
+    with pytest.raises(LispyCompileError) as info:
+        compile_at_line(3, f"  ({name})", scope)
+    kind = "tuple" if name.endswith("tuple") else "list"
+    assert info.value.msg == (
+        f"macro {name} returned a self-referencing {kind} in its expansion"
+    )
+    assert (info.value.lineno, info.value.offset) == (3, 3)
+
+
+def test_self_referencing_data_is_refused_by_the_constructor(scope):
+    x = [1]
+    x.append(x)
+    with pytest.raises(ValueError, match="self-referencing list"):
+        data_to_generator_expression(x)
+    define("(defmacro splice-self [] (= x [1]) (x.append x) (return `(f ~x)))", scope)
+    with pytest.raises(ValueError, match="self-referencing list"):
+        compile_at_line(3, "(splice-self)", scope)
+
+
+def test_shared_data_is_not_a_self_reference(scope):
+    x = [1]
+    assert str(data_to_generator_expression([x, [x]])) == "[[1] [[1]]]"
+    define("(defmacro shared-data [] (= x [1]) (return [x x]))", scope)
+    [stmt] = compile_at_line(3, "(shared-data)", scope)
+    assert ast.unparse(stmt) == "[[1], [1]]"
+
+
+@pytest.mark.parametrize(
+    ("macro", "python"),
+    [
+        ("(= y 5) (return `(list *~y))", "list(*5)"),
+        ("(= y [1 2]) (return `(f **~y))", "f(**[1, 2])"),
+        ('(= y "int") (return `(= a ^~y 1))', "a: 'int' = 1"),
+    ],
+)
+def test_data_in_a_wrapper_is_converted(macro, python, scope):
+    define(f"(defmacro wrapped [] {macro})", scope)
+    stl = compile_at_line(3, "(wrapped)", scope)
+    assert ast.unparse(ast.Module(stl, [])) == python
+    assert [n.lineno for n in nodes(stl)] == [3] * len(nodes(stl))
+
+
+def test_unrepresentable_data_in_a_wrapper_is_refused(scope):
+    define("(defmacro wrapped-dict [] (= y (dict)) (return `(list *~y)))", scope)
+    with pytest.raises(LispyCompileError) as info:
+        compile_at_line(3, "(wrapped-dict)", scope)
+    assert info.value.msg.startswith("macro wrapped-dict returned a dict")
+    assert info.value.lineno == 3
+
+
+def test_data_in_every_child_form_slot_is_converted():
+    position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
+    quote = Quote(None)
+    quote.value = 5
+    glued = GluedHead(Symbol("f"), None)
+    glued.params = ["T"]
+    keyword = Keyword(None)
+    keyword.value = [1]
+    tree = Paren(Symbol("g"), quote, glued, keyword)
+    copy = macro_expansion_nodes(tree, call_at(position))
+    [_, copied_quote, copied_glued, copied_keyword] = copy.list
+    assert type(copied_quote.value) is Constant
+    assert type(copied_glued.params) is Bracket
+    assert type(copied_glued.params.list[0]) is String
+    assert type(copied_keyword.value) is Bracket
+    assert copied_keyword.value.list[0].position_info == position
+    assert quote.value == 5 and glued.params == ["T"]

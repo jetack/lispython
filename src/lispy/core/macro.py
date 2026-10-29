@@ -99,7 +99,7 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         elif str(op) == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
-            expansion =scope["__macro_namespace"][str(op)](
+            expansion = scope["__macro_namespace"][str(op)](
                 *[_unwrap_literal(o) for o in operands]
             )
             # Python data anywhere in the expansion becomes nodes, and

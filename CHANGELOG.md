@@ -58,11 +58,13 @@ follows [Semantic Versioning](https://semver.org/).
   and `f(...)` instead of failing with an `AttributeError`, and
   `(-> None (f))`, which compiled to `f()`, now gives `f(None)`. A macro may
   put Python values (`None`, booleans, numbers, `...`, str, bytes, and
-  lists and tuples of them, nested to any depth) anywhere in the forms it
-  returns; each compiles to the same value (including `inf`, `nan`, `-0.0`
-  and ints of any size) at the macro call's position. Any other value (a
-  dict, a set, an object) is a compile error at the call naming the macro
-  and the value's type.
+  lists and tuples of them) anywhere in the forms it returns, including
+  inside `*`, `**`, `^` and quote forms (`` `(list *~y) ``); each compiles
+  to the same value (including `inf`, `nan`, `-0.0` and ints of any size)
+  at the macro call's position. Converting nested lists does not recurse,
+  so deep nesting does not hit `RecursionError` there. Any other value (a
+  dict, a set, an object) or a list that contains itself is a compile error
+  at the call naming the macro.
 - A str a macro returns keeps its backslashes literally: `"a\\b"` was
   compiled as `"a\b"` (backspace), and a quote, line ending or control
   character is kept as written. The same holds for quoted strings and

@@ -71,16 +71,18 @@ def macro_expansion_nodes(expansion, call):
 
     The expansion contract: a macro may put Python data (None, bool, int,
     float, complex, Ellipsis, str, bytes, and lists and tuples of them)
-    anywhere in its expansion's Expression lists, and as the expansion
-    itself. The expander gets literal arguments as Python values
-    (``_unwrap_literal`` in ``macro.py``), and a macro that splices one in
-    with ``(f.list.insert 1 x)`` bypasses the Expression constructor, so the
-    conversion happens here, one level at a time through ``_data_node``, the
-    one home of that conversion (shared with ``data_to_generator_expression``).
-    Only an Expression's ``list`` elements (and the top-level value) are
-    converted, never other attributes (lineno is an int, an f-string's
-    conversion is an int). Any other value (a dict, a set, an object) is a
-    LispyCompileError at the call naming the macro and the value's type.
+    anywhere in its expansion's forms: an Expression's list, the single
+    child form of a wrapper, quote or glued head (``_child_form_keys``), and
+    the expansion itself. The expander gets literal arguments as Python
+    values (``_unwrap_literal`` in ``macro.py``), and a macro that splices one
+    in with ``(f.list.insert 1 x)`` or ``*~y`` bypasses the node constructors,
+    so the conversion happens here, one level at a time through
+    ``_data_node``, the one home of that conversion (shared with
+    ``data_to_generator_expression``). Only those form slots are converted,
+    never other attributes (lineno is an int, an f-string's conversion is an
+    int). Any other value (a dict, a set, an object), or a list or tuple
+    that contains itself, is a LispyCompileError at the call naming the
+    macro.
 
     A macro builds its expansion at run time from quasiquote templates, so
     those nodes (and the converted data) carry the Node default (lineno 0)
@@ -107,31 +109,46 @@ def macro_expansion_nodes(expansion, call):
     tuples and deques are copied; every other value (str, int, None) is
     shared.
     """
+    from lispy.core.errors import LispyCompileError
+
     position_info = call.position_info
+    # Nodes made from data are replaced by their copies like any original;
+    # holding them keeps their ids from being reused while the memo is live.
+    made = []
+    # id(Bracket made from a list or tuple) -> that list or tuple.
+    sources = {}
+    # ids of the lists and tuples whose items are being converted: the path
+    # from the root, so meeting one again is a self-reference, not sharing.
+    active = set()
 
     def node_of(data):
         node = _data_node(data)
-        if not isinstance(node, Node):
-            from lispy.core.errors import LispyCompileError
-
+        if node is data:
+            if isinstance(node, Node):
+                return node
             raise LispyCompileError(
                 f"macro {call.op} returned a {type(data).__name__} in its "
                 f"expansion, which has no lispython form",
                 call,
             )
+        made.append(node)
+        if isinstance(data, (list, tuple)):
+            sources[id(node)] = data
         return node
 
     memo = {}  # id(original) -> its copy
     root = [node_of(expansion)]
-    # Nodes made from data are replaced by their copies like any original;
-    # holding them keeps their ids from being reused while the memo is live.
-    made = [root[0]]
     # (container, key): the slot still holding an original, to be replaced by
     # its copy. A tuple's slot also gets a finisher, popped once every slot
-    # pushed after it (its items' whole subtrees) has been copied.
+    # pushed after it (its items' whole subtrees) has been copied, and a
+    # Bracket made from data an exit marker (None, id of its list), popped
+    # once its items are converted.
     stack = [(root, 0)]
     while stack:
         item = stack.pop()
+        if item[0] is None:
+            active.discard(item[1])
+            continue
         if len(item) == 3:
             container, key, items = item
             copied = tuple(items)
@@ -152,6 +169,18 @@ def macro_expansion_nodes(expansion, call):
                 # to the wrapped value, which may already have a position.
                 for position_key in _POSITION_KEYS:
                     attrs[position_key] = position_info[position_key]
+            source = sources.get(id(value))
+            if source is not None:
+                if id(source) in active:
+                    raise LispyCompileError(
+                        f"macro {call.op} returned a self-referencing "
+                        f"{type(source).__name__} in its expansion",
+                        call,
+                    )
+                active.add(id(source))
+                stack.append((None, id(source)))
+            for k in _child_form_keys(value):
+                attrs[k] = node_of(attrs[k])
             keys = list(attrs)
             if isinstance(value, Expression) and type(value.list) is list:
                 elements = value.list
@@ -165,7 +194,6 @@ def macro_expansion_nodes(expansion, call):
                     # recursion.
                     converted = [node_of(e) for e in elements]
                     memo[id(elements)] = converted
-                    made.extend(converted)
                     attrs["list"] = converted
                     stack.extend((converted, i) for i in range(len(converted)))
                 keys.remove("list")
@@ -281,6 +309,16 @@ def _data_node(data):
     return data
 
 
+def _child_form_keys(node):
+    """Attributes of ``node`` that hold one child form, which a macro may set
+    to Python data like any element of an Expression's list."""
+    if isinstance(node, (Wrapper, MetaIndicator)):
+        return ("value",)
+    if isinstance(node, GluedHead):
+        return ("head", "params")
+    return ()
+
+
 def data_to_generator_expression(data):
     """``data`` as a node tree compiling to the same value, nested lists and
     tuples included; a node is returned as is, and a value with no lispython
@@ -290,13 +328,25 @@ def data_to_generator_expression(data):
     Iterative, so a deeply nested list does not hit RecursionError.
     """
     root = _data_node(data)
-    pending = [root] if isinstance(data, (list, tuple)) else []
+    # (Bracket, the list or tuple it is made from); (None, id) leaves that
+    # list, so ``active`` is the path from the root and meeting a list on it
+    # again is a self-reference (sharing a list in two places is fine).
+    pending = [(root, data)] if isinstance(data, (list, tuple)) else []
+    active = set()
     while pending:
-        bracket = pending.pop()
-        items = bracket.list
+        [bracket, items] = pending.pop()
+        if bracket is None:
+            active.discard(items)
+            continue
+        if id(items) in active:
+            raise ValueError(
+                f"a self-referencing {type(items).__name__} has no lispython form"
+            )
+        active.add(id(items))
+        pending.append((None, id(items)))
         bracket.list = [_data_node(item) for item in items]
         pending.extend(
-            node
+            (node, item)
             for item, node in zip(items, bracket.list)
             if isinstance(item, (list, tuple))
         )
