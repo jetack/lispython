@@ -93,8 +93,20 @@ follows [Semantic Versioning](https://semver.org/).
   (except after else or finally, except mixed with except*, a form after
   the clauses) is reported at that clause instead of as "except is a Python
   keyword".
-- A `;` ends a symbol or number, so a comment needs no space before it:
-  `a;c` was the symbol `a;c`, now `a` followed by a comment.
+- An assignment, augmented assignment, `del`, `for` or `with ... as` target
+  that Python cannot bind (`(= 1 2)`, `(= (f) 1)`, `(+= [] 1)`, `(del *a)`)
+  is a compile error at the target with CPython's message ("cannot assign to
+  literal"), and so is an annotation anywhere but right after a single
+  target (`(= ^int 1)`, `(= a b ^int 1)`) or a def/class name that is not a
+  name (`(def [] [] 1)`, `(class 1 [])`).
+- An empty `()` is a compile error at it ("use (,) for an empty tuple")
+  instead of an `IndexError`, wherever it appears.
+- A Python hard keyword used as a name or attribute (`(raise from)`,
+  `(= a.if 1)`, `(def if [] 1)`, `(case 1 as as ...)`) is a compile error
+  instead of compiling to invalid Python.
+- `~` with nothing after it (`(f ~)`, `~;c`) is the symbol `~`, as before a
+  space, instead of an unquote that swallowed the next form or gave
+  "unmatched ')'".
 - A quote, quasiquote or unquote-splice with no form right after it
   (`(f ' a)`, `(f *' a)`, `(f ~@ a)`, `(f ')`, `',a`) is a compile error at
   the quote instead of a symbol `'`, `f(*', a)`, an unquote of `@` or
@@ -116,7 +128,10 @@ follows [Semantic Versioning](https://semver.org/).
   `(assert a b c)` (the third operand was ignored); a form other than
   `(case ...)` inside `match` (it was read as a case); and def arguments or
   class bases written as anything but a `[...]` bracket (`(def f (x) ...)`
-  compiled).
+  compiled). A `case` with `as` after its guard (`(case 1 if g as y ...)`,
+  which compiled `as y` into the body) is refused: `as` comes before `if`.
+- A `;` ends a symbol or number, so a comment needs no space before it:
+  `a;c` was the symbol `a;c`, now `a` followed by a comment.
 
 ## [0.5.0]
 
