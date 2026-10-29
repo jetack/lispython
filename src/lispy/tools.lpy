@@ -443,8 +443,8 @@
   the whole session (mtime None), and every file-less eval adds a new name,
   so a padded list would pin up to NREPL-MAX-POSITION-LINE slots per request.
   This holds only the code the client sent.  linecache and traceback use
-  only len() and an index; a line nothing supplied reads as '', linecache's
-  unknown line."
+  only len() and an index; an in-range line nothing supplied reads as a bare
+  newline (a blank line), and only a read past the end gives '' (linecache's unknown line)."
   (def __init__ [self base]
     (= self._base base)
     (= self._overlay {})  ; 0-based index -> (leading spaces, text)

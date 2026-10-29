@@ -31,7 +31,6 @@ follows [Semantic Versioning](https://semver.org/).
   instead of line 0; arguments written by the user keep their own positions.
 - nREPL eval tracebacks no longer include the server's own `nrepl-eval`
   frame.
-
 - The nREPL server buffers bytes and decodes each complete line, so a
   multi-byte UTF-8 character split across two socket reads no longer drops
   the connection. An unknown op, a malformed request or a failing handler
