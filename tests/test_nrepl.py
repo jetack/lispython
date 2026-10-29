@@ -3,10 +3,12 @@
 The handler is driven with a fake connection whose recv returns fixed byte
 chunks, so where a read boundary falls is deterministic."""
 
+import gc
 import json
 import linecache
 import re
 import sys
+import tracemalloc
 
 import pytest
 
@@ -303,6 +305,56 @@ def test_load_file_traceback_and_replaces_earlier_evals(isolated, tmp_path):
     assert frame(path, 3, "<module>", "(update [1 2])") in error
     assert frame(path, 2, "update", "(return (sub xs [0])))") in error
     assert linecache.getlines(str(path)) == path.read_text().splitlines(True)
+
+
+def test_region_eval_overlays_the_file_on_disk(isolated, tmp_path):
+    path = tmp_path / "prog.lpy"
+    path.write_text("(= a 1)\n(= b 2)\n(= c 3)\n")
+    assert dispatch(isolated, code="(= b 20)", file=str(path), line=2)["error"] is None
+    assert linecache.getlines(str(path))[:] == ["(= a 1)\n", "(= b 20)\n", "(= c 3)\n"]
+
+
+def test_whole_file_eval_must_start_the_file(isolated):
+    with pytest.raises(ValueError, match="line 1, column 1"):
+        tools.nrepl_eval("(= a 1)", isolated, filename="f.lpy", line=2, whole_file=True)
+
+
+# linecache keeps an eval's entry for the whole session and every file-less
+# eval adds one, so an entry must hold the code sent, not a slot per buffer
+# line: a padded list at the line cap pinned about 8 MB per request.
+MAX_LINE = tools.NREPL_MAX_POSITION_LINE
+
+
+def test_eval_at_the_line_cap_retains_only_its_own_code(isolated, tmp_path):
+    path = str(tmp_path / "unsaved.lpy")
+    gc.collect()
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        reply = dispatch(isolated, code="(= z 1)", file=path, line=MAX_LINE, column=3)
+        gc.collect()
+        retained = tracemalloc.get_traced_memory()[0] - before
+    finally:
+        tracemalloc.stop()
+    assert reply["error"] is None
+    assert retained < 256 * 1024
+    assert len(linecache.getlines(path)) == MAX_LINE
+    assert linecache.getline(path, MAX_LINE) == "  (= z 1)\n"
+    assert linecache.getline(path, 1) == ""
+    assert linecache.getline(path, MAX_LINE - 1) == ""
+    assert linecache.getline(path, MAX_LINE + 1) == ""
+
+
+def test_traceback_at_the_line_cap_shows_every_region(isolated, tmp_path):
+    path = str(tmp_path / "unsaved.lpy")
+    update_line = MAX_LINE - 1
+    assert dispatch(isolated, code=UPDATE, file=path, line=update_line)["error"] is None
+    assert dispatch(isolated, code=SOLUTION, file=path, line=3)["error"] is None
+    error = dispatch(isolated, code="(solution [1 2])", file=path, line=1)["error"]
+    assert_clean_traceback(error)
+    assert frame(path, 1, "<module>", "(solution [1 2])") in error
+    assert frame(path, 4, "solution", "(return (update xs)))") in error
+    assert frame(path, MAX_LINE, "update", "(return (sub xs [0])))") in error
 
 
 LIMITS = {
