@@ -169,7 +169,14 @@ def test_overlong_complete_line_in_one_read_replies_once(monkeypatch):
 def test_line_at_the_cap_is_served(monkeypatch):
     ping = line(op="ping", id=6)
     monkeypatch.setattr(tools, "NREPL_MAX_LINE", len(ping) - 1)
-    assert serve([ping[:5], ping[5:]]) == [{"op": "pong", "id": 6}]
+    assert serve([ping[:-1], ping[-1:]]) == [{"op": "pong", "id": 6}]
+
+
+def test_overlong_valid_json_line_is_rejected_for_its_length(monkeypatch):
+    monkeypatch.setattr(tools, "NREPL_MAX_LINE", 100)
+    replies = serve([line(op="ping", id=1, pad="x" * 200) + line(op="ping", id=2)])
+    assert [r["op"] for r in replies] == ["error", "pong"]
+    assert replies[0]["error"] == "request line too long"
 
 
 @pytest.mark.parametrize(

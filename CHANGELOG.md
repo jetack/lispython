@@ -17,6 +17,9 @@ follows [Semantic Versioning](https://semver.org/).
   parse) gets an id-less `error` reply. A result that cannot be
   serialised is an `error` reply too, `(exit)` in an eval is reported as a
   `SystemExit` eval error, and any socket error ends the connection quietly.
+  A request line over 4 MiB gets one id-less `error` reply and is dropped up
+  to its next newline, so a client that never sends a newline cannot grow the
+  server's memory; the connection keeps serving.
 - `as->` expands to an expression (a tuple of `:=` assignments indexed with
   `-1`), so it works in expression position such as a `return` value or a
   call argument instead of emitting an invalid `do(...)` call.
