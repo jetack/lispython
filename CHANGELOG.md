@@ -13,6 +13,8 @@ follows [Semantic Versioning](https://semver.org/).
   compile errors then name that file with buffer line numbers and print the
   source line, including for definitions evaluated in earlier requests and
   for `load-file`.
+- `(raise)` compiles to a bare `raise`, re-raising the exception being
+  handled.
 
 ### Changed
 
@@ -79,6 +81,24 @@ follows [Semantic Versioning](https://semver.org/).
   `^**~`, also with a space after the quote) or alone (`^*`, `^**`) is a
   compile error at the prefix instead of a `KeyError`, an `AttributeError`
   or a call such as `f(*', a)`; `^*Ts` and `^**P` are unchanged.
+- Every malformed statement form is a compile error naming the problem and
+  the form's usage, at the form, clause or operand at fault, instead of a
+  `ValueError`, `IndexError`, `AssertionError`, `TypeError` or an AST that
+  Python rejects: `if`, `def`, `class`, `with`, `try` and its clauses,
+  `match` and `case`, `deco`, `raise`, `assert`, `=`, augmented assignment,
+  `del`, `global` and `nonlocal` with missing parts (`(if x)`, `(def f)`,
+  `(with [a])`, `(try (f))`, `(match x (case 1))`, `(= x)`, `(global)`, ...),
+  extra parts (`(raise a b)`, `(= x ^int 1 2)`) or a dangling `as`
+  (`(with [a as] ...)`, `(except [E as] ...)`). A `try` clause out of order
+  (except after else or finally, except mixed with except*, a form after
+  the clauses) is reported at that clause instead of as "except is a Python
+  keyword".
+- A `;` ends a symbol or number, so a comment needs no space before it:
+  `a;c` was the symbol `a;c`, now `a` followed by a comment.
+- A quote, quasiquote or unquote-splice with no form right after it
+  (`(f ' a)`, `(f *' a)`, `(f ~@ a)`, `(f ')`, `',a`) is a compile error at
+  the quote instead of a symbol `'`, `f(*', a)`, an unquote of `@` or
+  "unmatched ')'". `~` alone is still the invert operator.
 
 ### Changed
 
@@ -90,6 +110,13 @@ follows [Semantic Versioning](https://semver.org/).
 - A Python hard keyword in call position (e.g. `(not a b)`, which used to
   compile to `not (a, b)`, silently false, or `(else ...)`) is now a compile
   error.
+- Statement forms that compiled while dropping part of what was written are
+  now compile errors: `(deco d (f))`, whose definition is not a `def`,
+  `async-def`, `class` or `deco` (the decorator was silently dropped);
+  `(assert a b c)` (the third operand was ignored); a form other than
+  `(case ...)` inside `match` (it was read as a case); and def arguments or
+  class bases written as anything but a `[...]` bracket (`(def f (x) ...)`
+  compiled).
 
 ## [0.5.0]
 

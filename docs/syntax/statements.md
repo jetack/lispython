@@ -365,11 +365,13 @@ match x:
 ## `raise`
 LisPy version
 ```python
+(raise)
 (raise Exception)
 (raise Exception from ValueError)
 ```
 Python version
 ```python
+raise
 raise Exception
 raise Exception from ValueError
 ```
