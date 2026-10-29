@@ -758,19 +758,32 @@
         (return {"op" "pong"}))
   (raise (_NreplUnknownOp (+ "unknown op: " (str op)))))
 
+(= NREPL-MAX-LINE (* 4 1024 1024))  ; bytes; longest request line a client may send
+
 (def _nrepl-handle-client [conn addr scope]
   ;; Buffer bytes and decode only whole lines: a multi-byte UTF-8 character can
   ;; straddle two recv reads, and decoding each read on its own would raise.
+  ;; A line over NREPL-MAX-LINE gets one error reply and is dropped up to its
+  ;; newline (discarding), so a client that never sends one cannot grow buf.
   (= buf b"")
+  (= discarding False)
   (try
     (while True
       (= data (conn.recv 4096))
       (if (not data)
           (break))
+      (if discarding
+          (do (if (not (in b"\n" data))
+                  (continue))
+              (= [dropped data] (.split data b"\n" 1))
+              (= discarding False)))
       (+= buf data)
       ;; Process complete JSON messages (newline-delimited)
       (while (in b"\n" buf)
         (= [line buf] (.split buf b"\n" 1))
+        (if (> (len line) NREPL-MAX-LINE)
+            (do (_nrepl-error-reply conn {} "request line too long")
+                (continue)))
         (if (not (.strip line))
             (continue))
         (try
@@ -794,7 +807,11 @@
                   (str e)
                   (+ (. (type e) __name__) ": " (str e))))
             (continue)))
-        (conn.sendall reply)))
+        (conn.sendall reply))
+      (if (> (len buf) NREPL-MAX-LINE)
+          (do (_nrepl-error-reply conn {} "request line too long")
+              (= buf b"")
+              (= discarding True))))
     (except [OSError] None)
     (finally
       (conn.close))))

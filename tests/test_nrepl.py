@@ -139,6 +139,30 @@ def test_deeply_nested_json_replies_without_id_and_keeps_serving():
     assert replies[1] == {"op": "pong", "id": 9}
 
 
+def test_overlong_line_replies_without_id_and_keeps_serving(monkeypatch):
+    monkeypatch.setattr(tools, "NREPL_MAX_LINE", 100)
+    # The oversized line spans several reads and ends mid-chunk; the line after
+    # its newline is still served, and only one error is sent for the line.
+    replies = serve(
+        [b"x" * 60, b"x" * 60, b"x" * 60, b"x\n" + line(op="ping", id=4)]
+    )
+    assert [r["op"] for r in replies] == ["error", "pong"]
+    assert "id" not in replies[0]
+    assert replies[1] == {"op": "pong", "id": 4}
+
+
+def test_overlong_complete_line_in_one_read_replies_once(monkeypatch):
+    monkeypatch.setattr(tools, "NREPL_MAX_LINE", 100)
+    replies = serve([b"x" * 500 + b"\n" + line(op="ping", id=5)])
+    assert [r["op"] for r in replies] == ["error", "pong"]
+
+
+def test_line_at_the_cap_is_served(monkeypatch):
+    ping = line(op="ping", id=6)
+    monkeypatch.setattr(tools, "NREPL_MAX_LINE", len(ping) - 1)
+    assert serve([ping[:5], ping[5:]]) == [{"op": "pong", "id": 6}]
+
+
 @pytest.mark.parametrize(
     "error", [ConnectionResetError, ConnectionAbortedError, TimeoutError]
 )
