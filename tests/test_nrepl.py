@@ -89,3 +89,63 @@ def test_connection_closes_when_recv_returns_empty():
     tools._nrepl_handle_client(conn, ("127.0.0.1", 0), {})
     assert conn.closed
     assert conn.sent == []
+
+
+def test_exit_in_eval_is_an_eval_error_and_keeps_serving():
+    replies = serve([line(op="eval", id=1, code="(exit)") + line(op="ping", id=2)])
+    assert replies[0]["op"] == "eval-result"
+    assert replies[0]["id"] == 1
+    assert "SystemExit" in replies[0]["error"]
+    assert replies[1] == {"op": "pong", "id": 2}
+
+
+def test_unserialisable_result_replies_with_error_and_keeps_serving(monkeypatch):
+    monkeypatch.setattr(tools, "nrepl_complete", lambda prefix, scope: {"x": object()})
+    replies = serve([line(op="complete", id=1, prefix="a") + line(op="ping", id=2)])
+    assert replies[0]["op"] == "error"
+    assert replies[0]["id"] == 1
+    assert "not JSON serializable" in replies[0]["error"]
+    assert replies[1] == {"op": "pong", "id": 2}
+
+
+def test_crlf_terminated_lines_are_served():
+    replies = serve([b'{"op": "ping", "id": 1}\r\n{"op": "ping", "id": 2}\r\n'])
+    assert [r["id"] for r in replies] == [1, 2]
+
+
+def test_blank_lines_get_no_reply():
+    assert serve([b"\n  \n\r\n\t\n"]) == []
+
+
+def test_partial_trailing_line_at_eof_gets_no_reply():
+    assert serve([line(op="ping", id=1) + b'{"op": "ping", "id": 2}']) == [
+        {"op": "pong", "id": 1}
+    ]
+
+
+def test_non_object_json_replies_without_id():
+    replies = serve([b"[1]\n" + line(op="ping", id=3)])
+    assert replies[0]["op"] == "error"
+    assert "id" not in replies[0]
+    assert replies[1] == {"op": "pong", "id": 3}
+
+
+def test_recv_connection_reset_ends_quietly():
+    class Resetting(FakeConn):
+        def recv(self, n):
+            raise ConnectionResetError
+
+    conn = Resetting([])
+    tools._nrepl_handle_client(conn, ("127.0.0.1", 0), {})
+    assert conn.closed
+
+
+def test_sendall_broken_pipe_ends_quietly():
+    class Broken(FakeConn):
+        def sendall(self, data):
+            raise BrokenPipeError
+
+    conn = Broken([line(op="ping", id=1) + line(op="ping", id=2)])
+    tools._nrepl_handle_client(conn, ("127.0.0.1", 0), {})
+    assert conn.closed
+    assert conn.sent == []

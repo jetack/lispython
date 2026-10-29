@@ -443,6 +443,10 @@
         (= (sub result "value") (repr last-val)))
     (except [LispyCompileError as e]
       (= (sub result "error") (format-compile-error e)))
+    ;; SystemExit is a BaseException, so (exit) in client code would otherwise
+    ;; escape and kill the connection; report it like any other eval error.
+    (except [SystemExit as e]
+      (= (sub result "error") (+ "SystemExit: " (str e.code))))
     (except [Exception as e]
       (= (sub result "error") (.rstrip (traceback.format-exc))))
     (finally
@@ -703,12 +707,17 @@
       (return {"op" "annotate-result"
                "annotation" "unknown"}))))
 
-(def _nrepl-reply [conn msg result]
-  "Send result back, echoing the request id if present."
+(def _nrepl-encode [msg result]
+  "Encode result as one wire line, echoing the request id if present. Raises
+  when result is not JSON-serialisable."
   (= req-id (.get msg "id"))
   (if req-id
       (= (sub result "id") req-id))
-  (conn.sendall (.encode (+ (json.dumps result) "\n") "utf-8")))
+  (return (.encode (+ (json.dumps result) "\n") "utf-8")))
+
+(def _nrepl-reply [conn msg result]
+  "Send result back, echoing the request id if present."
+  (conn.sendall (_nrepl-encode msg result)))
 
 (def _nrepl-error-reply [conn msg error]
   "Reply {op: error} for a failed request. The one home of the error shape;
@@ -774,7 +783,9 @@
             (do (_nrepl-error-reply conn {} "request must be a JSON object")
                 (continue)))
         (try
-          (= result (_nrepl-dispatch msg scope))
+          ;; Encode inside the boundary so an unserialisable result becomes an
+          ;; error reply; only the socket send below may end the connection.
+          (= reply (_nrepl-encode msg (_nrepl-dispatch msg scope)))
           (except [Exception as e]
             (_nrepl-error-reply
               conn msg
@@ -782,9 +793,8 @@
                   (str e)
                   (+ (. (type e) __name__) ": " (str e))))
             (continue)))
-        (_nrepl-reply conn msg result)))
-    (except [ConnectionResetError] None)
-    (except [BrokenPipeError] None)
+        (conn.sendall reply)))
+    (except [OSError] None)
     (finally
       (conn.close))))
 
