@@ -1,4 +1,9 @@
+from ast import literal_eval as _literal_eval
 from collections import deque
+from math import copysign as _copysign
+from math import isfinite as _isfinite
+from math import isinf as _isinf
+from math import isnan as _isnan
 
 
 def multiline_p(s):
@@ -59,20 +64,23 @@ def contains_unquote(node):
 _POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
 
 
-def macro_expansion_nodes(expansion, position_info):
+def macro_expansion_nodes(expansion, call):
     """A macro's return value as a node tree: a copy of ``expansion`` with
     Python data turned into nodes and every positionless node placed at the
-    macro call.
+    macro call ``call`` (the Paren that invoked the macro).
 
-    The expansion contract: a macro may put Python data (int, str, bool,
-    None, list, tuple) anywhere in its expansion's Expression lists, and as
-    the expansion itself. The expander gets literal arguments as Python
-    values (``_unwrap_literal`` in ``macro.py``), and a macro that splices
-    one in with ``(f.list.insert 1 x)`` bypasses the Expression constructor,
-    so the conversion happens here, through ``data_to_generator_expression``,
-    the one home of that conversion. Only an Expression's ``list`` elements
-    (and the top-level value) are converted, never other attributes (lineno
-    is an int, an f-string's conversion is an int).
+    The expansion contract: a macro may put Python data (None, bool, int,
+    float, complex, Ellipsis, str, bytes, and lists and tuples of them)
+    anywhere in its expansion's Expression lists, and as the expansion
+    itself. The expander gets literal arguments as Python values
+    (``_unwrap_literal`` in ``macro.py``), and a macro that splices one in
+    with ``(f.list.insert 1 x)`` bypasses the Expression constructor, so the
+    conversion happens here, one level at a time through ``_data_node``, the
+    one home of that conversion (shared with ``data_to_generator_expression``).
+    Only an Expression's ``list`` elements (and the top-level value) are
+    converted, never other attributes (lineno is an int, an f-string's
+    conversion is an int). Any other value (a dict, a set, an object) is a
+    LispyCompileError at the call naming the macro and the value's type.
 
     A macro builds its expansion at run time from quasiquote templates, so
     those nodes (and the converted data) carry the Node default (lineno 0)
@@ -99,8 +107,22 @@ def macro_expansion_nodes(expansion, position_info):
     tuples and deques are copied; every other value (str, int, None) is
     shared.
     """
+    position_info = call.position_info
+
+    def node_of(data):
+        node = _data_node(data)
+        if not isinstance(node, Node):
+            from lispy.core.errors import LispyCompileError
+
+            raise LispyCompileError(
+                f"macro {call.op} returned a {type(data).__name__} in its "
+                f"expansion, which has no lispython form",
+                call,
+            )
+        return node
+
     memo = {}  # id(original) -> its copy
-    root = [data_to_generator_expression(expansion)]
+    root = [node_of(expansion)]
     # Nodes made from data are replaced by their copies like any original;
     # holding them keeps their ids from being reused while the memo is live.
     made = [root[0]]
@@ -138,7 +160,10 @@ def macro_expansion_nodes(expansion, position_info):
                 else:
                     # Fresh nodes from data have no position; they are pushed
                     # below and filled like any template-built node.
-                    converted = [data_to_generator_expression(e) for e in elements]
+                    # A Bracket made from a list still holds raw items; they
+                    # are converted when the pass reaches it, never by
+                    # recursion.
+                    converted = [node_of(e) for e in elements]
                     memo[id(elements)] = converted
                     made.extend(converted)
                     attrs["list"] = converted
@@ -199,19 +224,83 @@ def string_literal_source(value):
     return '"' + "".join(map(_escaped, value)) + '"'
 
 
-def data_to_generator_expression(data):
-    if isinstance(data, bool) or data is None:
-        return Constant(str(data))
-    elif isinstance(data, (int, float, complex)):
-        return Constant(str(data))
-    elif isinstance(data, (str, bytes)):
+def _same_float(a, b):
+    # == misses the sign of zero and calls nan unequal to itself.
+    return _copysign(1.0, a) == _copysign(1.0, b) and (
+        a == b or (_isnan(a) and _isnan(b))
+    )
+
+
+def _float_node(value):
+    if _isfinite(value):
+        return Constant(repr(value))
+    if _isinf(value):
+        # The literal overflows to inf, as in CPython source.
+        return Constant("1e999" if value > 0 else "-1e999")
+    return Paren(Symbol("float"), String('"nan"'))
+
+
+def _complex_node(value):
+    text = repr(value)
+    try:
+        parsed = _literal_eval(text)
+    except (SyntaxError, ValueError):
+        parsed = None
+    if isinstance(parsed, complex) and all(
+        _same_float(a, b)
+        for a, b in [(parsed.real, value.real), (parsed.imag, value.imag)]
+    ):
+        return Constant(text)
+    # A signed zero or non-finite part has no literal (-0j is -(0j)).
+    return Paren(Symbol("complex"), _float_node(value.real), _float_node(value.imag))
+
+
+def _data_node(data):
+    """One level of Python data as a node, or ``data`` itself when it is a
+    node or has no lispython form.
+
+    A list or tuple becomes a Bracket whose list still holds the raw items:
+    the caller's walk converts them, so nested data never costs a Python
+    frame per level (``data_to_generator_expression``, ``macro_expansion_nodes``).
+    """
+    if isinstance(data, bool) or data is None or data is ...:
+        return Constant("..." if data is ... else str(data))
+    if isinstance(data, int):
+        # hex has no digit limit; str() refuses ints over 4300 digits.
+        return Constant(str(data) if data.bit_length() < 4000 else hex(data))
+    if isinstance(data, float):
+        return _float_node(data)
+    if isinstance(data, complex):
+        return _complex_node(data)
+    if isinstance(data, (str, bytes)):
         return String(string_literal_source(data))
-    elif isinstance(data, list):
-        return Bracket(*data)
-    elif isinstance(data, tuple):
-        return Bracket(*data)
-    else:
-        return data
+    if isinstance(data, (list, tuple)):
+        bracket = Bracket()
+        bracket.list = list(data)
+        return bracket
+    return data
+
+
+def data_to_generator_expression(data):
+    """``data`` as a node tree compiling to the same value, nested lists and
+    tuples included; a node is returned as is, and a value with no lispython
+    form is left in place (``macro_expansion_nodes`` reports it).
+
+    The one home of the data-to-node conversion, through ``_data_node``.
+    Iterative, so a deeply nested list does not hit RecursionError.
+    """
+    root = _data_node(data)
+    pending = [root] if isinstance(data, (list, tuple)) else []
+    while pending:
+        bracket = pending.pop()
+        items = bracket.list
+        bracket.list = [_data_node(item) for item in items]
+        pending.extend(
+            node
+            for item, node in zip(items, bracket.list)
+            if isinstance(item, (list, tuple))
+        )
+    return root
 
 
 class Expression(Node):

@@ -8,9 +8,22 @@ from collections import deque
 
 import pytest
 
+from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand_then_compile
-from lispy.core.nodes import Constant, Paren, String, Symbol, macro_expansion_nodes
+from lispy.core.nodes import (
+    Bracket,
+    Constant,
+    Paren,
+    String,
+    Symbol,
+    data_to_generator_expression,
+    macro_expansion_nodes,
+)
 from lispy.core.parser import parse
+
+
+def call_at(position):
+    return Paren(Symbol("m"), **position)
 
 
 @pytest.fixture(scope="module")
@@ -142,7 +155,7 @@ def test_position_fill_copies_and_keeps_sharing():
     tree = Paren(Symbol("f"), shared, shared, placed)
     tree.extra = (shared, deque([shared]))
     position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
-    copy = macro_expansion_nodes(tree, position)
+    copy = macro_expansion_nodes(tree, call_at(position))
     assert copy is not tree and shared.lineno == 0 and tree.lineno == 0
     [head, first, second, kept] = copy.list
     assert first is second is copy.extra[0] is copy.extra[1][0]
@@ -158,7 +171,7 @@ def test_data_in_an_expression_list_becomes_a_positioned_node():
     tree = Paren(Symbol("f"), inner)
     tree.list.append(1)
     position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
-    copy = macro_expansion_nodes(tree, position)
+    copy = macro_expansion_nodes(tree, call_at(position))
     assert tree.list[2] == 1 and inner.list[1] == "s"
     [_, copied_inner, one] = copy.list
     assert type(one) is Constant and one.value == "1"
@@ -168,5 +181,59 @@ def test_data_in_an_expression_list_becomes_a_positioned_node():
 
 def test_a_data_expansion_becomes_a_positioned_node():
     position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
-    node = macro_expansion_nodes(7, position)
+    node = macro_expansion_nodes(7, call_at(position))
     assert type(node) is Constant and node.position_info == position
+
+
+def nested_list(depth):
+    data = [1]
+    for _ in range(depth):
+        data = [data]
+    return data
+
+
+def bracket_depth(node):
+    depth = 0
+    while isinstance(node, Bracket):
+        [node] = node.list
+        depth += 1
+    assert type(node) is Constant and node.value == "1"
+    return depth
+
+
+DATA_DEPTH = 5000  # far past the recursion limit
+
+
+def test_deeply_nested_data_converts_without_recursion():
+    position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
+    tree = Paren(Symbol("f"))
+    tree.list.append(nested_list(DATA_DEPTH))
+    copy = macro_expansion_nodes(tree, call_at(position))
+    assert bracket_depth(copy.list[1]) == DATA_DEPTH + 1
+    assert copy.list[1].position_info == position
+    assert bracket_depth(data_to_generator_expression(nested_list(DATA_DEPTH))) == (
+        DATA_DEPTH + 1
+    )
+    assert bracket_depth(Paren(nested_list(DATA_DEPTH)).list[0]) == DATA_DEPTH + 1
+
+
+@pytest.mark.parametrize(
+    ("make", "type_name"),
+    [("(dict)", "dict"), ("(set [1])", "set"), ("(object)", "object")],
+)
+def test_unrepresentable_data_is_refused_at_the_call(make, type_name, scope):
+    define(
+        f"(defmacro put-raw-{type_name} [] (= e `(f)) (e.list.append {make})"
+        " (return e))\n"
+        f"(defmacro ret-raw-{type_name} [] (return {make}))",
+        scope,
+    )
+    for name in (f"put-raw-{type_name}", f"ret-raw-{type_name}"):
+        with pytest.raises(LispyCompileError) as info:
+            compile_at_line(3, f"  ({name})", scope)
+        assert info.value.msg == (
+            f"macro {name} returned a {type_name} in its expansion, "
+            "which has no lispython form"
+        )
+        assert (info.value.lineno, info.value.offset) == (3, 3)
+        assert (info.value.end_lineno, info.value.end_offset) == (3, 5 + len(name))

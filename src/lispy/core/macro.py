@@ -99,14 +99,13 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         elif str(op) == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
-            call_position = sexp.position_info
-            expansion = scope["__macro_namespace"][str(op)](
+            expansion =scope["__macro_namespace"][str(op)](
                 *[_unwrap_literal(o) for o in operands]
             )
             # Python data anywhere in the expansion becomes nodes, and
             # template-built nodes take the call's position, so tracebacks and
             # compile errors point at the macro call, not line 0.
-            sexp = macro_expansion_nodes(expansion, call_position)
+            sexp = macro_expansion_nodes(expansion, sexp)
             expanded = True
         else:
             expanded_list, expanded_feedbacks = zip(

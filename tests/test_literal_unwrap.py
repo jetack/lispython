@@ -1,7 +1,9 @@
 import ast
+import math
 
 import pytest
 
+from lispy.core.compiler.expr import expr_compile
 from lispy.core.compiler.literal import string_compile
 from lispy.core.nodes import String, Symbol, data_to_generator_expression
 from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
@@ -164,3 +166,71 @@ class TestDataRoundTrip:
     )
     def test_end_to_end(self, src, expected):
         assert src_to_python_org(PREAMBLE + src) == expected
+
+
+INF = float("inf")
+NAN = float("nan")
+TRICKY_SCALARS = [
+    None,
+    True,
+    False,
+    ...,
+    0,
+    -5,
+    10**5000,
+    -(10**5000),
+    1.5,
+    -0.0,
+    5e-324,
+    1e308,
+    INF,
+    -INF,
+    NAN,
+    1 + 2j,
+    -1j,
+    complex(0.0, -0.0),
+    complex(-0.0, 0.0),
+    complex(-0.0, -0.0),
+    complex(INF, NAN),
+    complex(1.0, -INF),
+]
+
+
+def same_value(a, b):
+    """Equal in type and value, telling -0.0 from 0.0 and nan from all else."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, complex):
+        return same_value(a.real, b.real) and same_value(a.imag, b.imag)
+    if isinstance(a, float):
+        return repr(a) == repr(b) and math.copysign(1, a) == math.copysign(1, b)
+    return a == b
+
+
+def compiled_value(node):
+    expr = ast.Expression(expr_compile(node))
+    return eval(compile(ast.fix_missing_locations(expr), "<data>", "eval"), {})
+
+
+class TestScalarDataRoundTrip:
+    """Every scalar a macro may return compiles to that very value."""
+
+    @pytest.mark.parametrize(
+        "value",
+        TRICKY_SCALARS,
+        # repr refuses ints over 4300 digits.
+        ids=lambda v: f"int-{v.bit_length()}-bits" if type(v) is int else repr(v),
+    )
+    def test_scalar_compiles_to_the_same_value(self, value):
+        node = data_to_generator_expression(value)
+        assert same_value(compiled_value(node), value)
+
+    @pytest.mark.parametrize(
+        ("src", "value"),
+        [("(-> ... (f))", ...), ("(-> 1e400 (f))", INF), ("(-> None (f))", None)],
+    )
+    def test_threaded_scalar(self, src, value):
+        stl = macroexpand_then_compile(parse(PREAMBLE + src))
+        [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
+        [arg] = call.args
+        assert same_value(eval(compile(ast.Expression(arg), "<arg>", "eval")), value)
