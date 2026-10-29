@@ -2,6 +2,8 @@ import ast
 
 import pytest
 
+from lispy.core.compiler.literal import string_compile
+from lispy.core.nodes import String, Symbol, data_to_generator_expression
 from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 PREAMBLE = "(require lispy.macros *)\n"
@@ -112,3 +114,53 @@ class TestRawValueInExpansion:
         [arg] = call.args
         assert (arg.lineno, arg.col_offset) == (3, 2)
         assert (arg.end_lineno, arg.end_col_offset) == (3, 12)
+
+
+TRICKY_STRINGS = [
+    "",
+    "a\\b",
+    "\\",
+    'q"q',
+    "'",
+    "x\ny",
+    "\r",
+    "\r\n",
+    "\t",
+    "\x00",
+    "\x1b[0m",
+    "\x7f",
+    "\x85",
+    " ",
+    "é한😀",
+    "\ud800",
+    "{x}",
+    '"""',
+]
+TRICKY_BYTES = [b"", b"x", b"\\", b'"', b"\n\r\t", b"\x00\xff", b"\x7f", b"\x80"]
+
+
+class TestDataRoundTrip:
+    """Python data a macro returns compiles to exactly that value."""
+
+    @pytest.mark.parametrize("value", TRICKY_STRINGS + TRICKY_BYTES, ids=ascii)
+    def test_data_compiles_to_the_same_value(self, value):
+        node = data_to_generator_expression(value)
+        compiled = string_compile(node)
+        assert type(compiled.value) is type(value) and compiled.value == value
+
+    @pytest.mark.parametrize("value", TRICKY_STRINGS, ids=ascii)
+    def test_quoted_string_and_symbol_keep_their_text(self, value):
+        # A quoted String/Symbol is rebuilt from its token text at run time.
+        for node in (String(value), Symbol(value)):
+            assert string_compile(node.operands_generate(False)).value == value
+
+    @pytest.mark.parametrize(
+        ("src", "expected"),
+        [
+            ('(-> "a\\\\b" (f))', "f('a\\\\b')"),
+            ('(-> b"x" (f))', "f(b'x')"),
+            ("(= s 'a\\b)", "s = Symbol('a\\\\b')"),
+        ],
+    )
+    def test_end_to_end(self, src, expected):
+        assert src_to_python_org(PREAMBLE + src) == expected

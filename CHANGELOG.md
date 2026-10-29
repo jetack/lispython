@@ -56,8 +56,12 @@ follows [Semantic Versioning](https://semver.org/).
 - Threading a literal into a call (`(-> 1 (f))`, `(->> 1 (f 2))`,
   `(-> "a" (f))`) compiles to `f(1)`, `f(2, 1)` and `f('a')` instead of
   failing with an `AttributeError`. A macro may put Python values (numbers,
-  strings, `True`/`False`/`None`, lists) anywhere in the forms it returns;
-  they become literals at the macro call's position.
+  strings, bytes, `True`/`False`/`None`, lists) anywhere in the forms it
+  returns; they become literals at the macro call's position.
+- A string or bytes value a macro returns, a quoted string and a quoted
+  symbol keep their exact value: a backslash, line ending, control or other
+  non-printable character is escaped instead of being re-read as an escape
+  (`(-> "a\\b" (f))` was `f('a\x08')`, `'a\b` was `Symbol('a\x08')`).
 - A `for` or `while` with no target, iterable or test, or with no body
   before its `(else ...)` (`(for x in)`, `(for [x [1]] (print x))`,
   `(while x)`), is a compile error at the loop instead of an `IndexError`

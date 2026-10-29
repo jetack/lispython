@@ -163,13 +163,49 @@ def macro_expansion_nodes(expansion, position_info):
     return root[0]
 
 
+_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _escaped(ch):
+    if ch in _ESCAPES:
+        return _ESCAPES[ch]
+    if ch.isprintable():
+        return ch
+    code = ord(ch)
+    return (
+        f"\\x{code:02x}"
+        if code < 0x100
+        else f"\\u{code:04x}"
+        if code < 0x10000
+        else f"\\U{code:08x}"
+    )
+
+
+def string_literal_source(value):
+    """A double-quoted lispython literal whose value is exactly ``value``.
+
+    The one home of quoting a str or bytes as source text: macro data,
+    quoted symbols and strings all come here. Lispython has no single-quoted
+    strings, so ``repr`` will not do. Every character the string scanner or
+    evaluation would change is escaped: backslash and the quote, line endings
+    (a raw \\r would be normalised to \\n, as CPython does to source), and
+    anything not printable (control characters, lone surrogates); printable
+    non-ASCII stays literal. Bytes get a ``b`` prefix and every byte outside
+    printable ASCII as ``\\xNN``.
+    """
+    if isinstance(value, bytes):
+        body = "".join(_escaped(chr(b)) if b < 0x80 else f"\\x{b:02x}" for b in value)
+        return 'b"' + body + '"'
+    return '"' + "".join(map(_escaped, value)) + '"'
+
+
 def data_to_generator_expression(data):
     if isinstance(data, bool) or data is None:
         return Constant(str(data))
     elif isinstance(data, (int, float, complex)):
         return Constant(str(data))
-    elif isinstance(data, str):
-        return String('"' + data + '"')
+    elif isinstance(data, (str, bytes)):
+        return String(string_literal_source(data))
     elif isinstance(data, list):
         return Bracket(*data)
     elif isinstance(data, tuple):
@@ -569,7 +605,7 @@ class GluedHead(Node):
 
 class Literal(Node):
     def operands_generate(self, in_quasi):
-        return String('"' + self.value + '"', **self.position_info)
+        return String(string_literal_source(self.value), **self.position_info)
 
 
 class Symbol(Literal):
@@ -594,12 +630,6 @@ class String(Literal):
         super().__init__(**kwargs)
         self.value = value
         self.classname = "String"
-
-    def operands_generate(self, in_quasi):
-        return String(
-            '"' + self.value.replace("\\", "\\\\").replace('"', '\\"') + '"',
-            **self.position_info
-        )
 
     def __repr__(self):
         return "Str(" + repr(self.value) + ")"
