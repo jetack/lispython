@@ -119,13 +119,27 @@ class TestWrapperPrefix:
             ("^**~a", "^**", "~"),
             ("^*~@a", "^*", "~@"),
             ("^*`a", "^*", "`"),
+            # A space after the quote does not make it a symbol.
+            ("^*' a", "^*", "'"),
+            ("^**` a", "^**", "`"),
+            ("^*~ a", "^*", "~"),
+            ("^**~@ a", "^**", "~@"),
+            # ^ and stars alone: nothing to annotate or unpack.
+            ("^*", "^*", ""),
+            ("^**", "^**", ""),
+            ("^* a", "^*", ""),
+            ("^*,a", "^*", ""),
         ],
     )
     def test_refused_at_the_prefix(self, form, prefix, indicator):
         src = "(g)\n  (f " + form + ")"
         with pytest.raises(LispyCompileError) as info:
             parse(src)
-        assert info.value.msg == f"{prefix} prefix has no meaning before {indicator!r}"
+        assert info.value.msg == (
+            f"{prefix} prefix has no meaning before {indicator!r}"
+            if indicator
+            else f"{prefix} has no meaning on its own"
+        )
         assert (info.value.lineno, info.value.offset) == (2, 6)
         token_end = 6 + len(prefix) + len(indicator)
         assert (info.value.end_lineno, info.value.end_offset) == (2, token_end)
