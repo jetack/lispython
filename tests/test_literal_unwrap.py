@@ -1,4 +1,8 @@
-from lispy.tools import src_to_python_org
+import ast
+
+import pytest
+
+from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 PREAMBLE = "(require lispy.macros *)\n"
 
@@ -71,3 +75,40 @@ class TestLiteralUnwrapInMacro:
 """
         result = src_to_python_org(src)
         assert "a + b + (a + b)" in result
+
+
+class TestRawValueInExpansion:
+    """A literal argument reaches the macro as a Python value; a macro that
+    puts it straight into an Expression's list (bypassing the constructor)
+    still compiles, because the expander converts data anywhere in the
+    expansion."""
+
+    @pytest.mark.parametrize(
+        ("src", "expected"),
+        [
+            ("(-> 1 (f))", "f(1)"),
+            ("(->> 1 (f 2))", "f(2, 1)"),
+            ('(-> "a" (f))', "f('a')"),
+            ("(-> 1 (f) (g 2))", "g(f(1), 2)"),
+        ],
+    )
+    def test_threaded_literal_into_paren(self, src, expected):
+        assert src_to_python_org(PREAMBLE + src) == expected
+
+    def test_raw_value_inserted_into_nested_paren(self):
+        src = PREAMBLE + """
+(defmacro put-in [x]
+  (= inner `(g))
+  (inner.list.insert 1 x)
+  (return `(f ~inner)))
+
+(put-in 5)
+"""
+        assert src_to_python_org(src) == "f(g(5))"
+
+    def test_converted_value_takes_the_macro_call_position(self):
+        stl = macroexpand_then_compile(parse(PREAMBLE + "\n  (-> 1 (f))"))
+        [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
+        [arg] = call.args
+        assert (arg.lineno, arg.col_offset) == (3, 2)
+        assert (arg.end_lineno, arg.end_col_offset) == (3, 12)

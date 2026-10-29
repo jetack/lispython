@@ -59,18 +59,30 @@ def contains_unquote(node):
 _POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
 
 
-def with_missing_positions(node, position_info):
-    """A copy of ``node`` in which every node with no position (lineno 0)
-    takes this one.
+def macro_expansion_nodes(expansion, position_info):
+    """A macro's return value as a node tree: a copy of ``expansion`` with
+    Python data turned into nodes and every positionless node placed at the
+    macro call.
+
+    The expansion contract: a macro may put Python data (int, str, bool,
+    None, list, tuple) anywhere in its expansion's Expression lists, and as
+    the expansion itself. The expander gets literal arguments as Python
+    values (``_unwrap_literal`` in ``macro.py``), and a macro that splices
+    one in with ``(f.list.insert 1 x)`` bypasses the Expression constructor,
+    so the conversion happens here, through ``data_to_generator_expression``,
+    the one home of that conversion. Only an Expression's ``list`` elements
+    (and the top-level value) are converted, never other attributes (lineno
+    is an int, an f-string's conversion is an int).
 
     A macro builds its expansion at run time from quasiquote templates, so
-    those nodes carry the Node default (lineno 0) and the Python code compiled
-    from them would report line 0. The expander passes the macro call's
-    position, so tracebacks and compile errors point at the call. A node that
-    has a position (an unquoted argument the user wrote) keeps its own.
-    Descends every Node attribute, so f-string fields and their format specs,
-    wrappers, quotes and glued heads are covered alike; the copy memo keeps
-    nodes shared between places in the expansion shared in the copy.
+    those nodes (and the converted data) carry the Node default (lineno 0)
+    and the Python code compiled from them would report line 0. The expander
+    passes the macro call's position, so tracebacks and compile errors point
+    at the call. A node that has a position (an unquoted argument the user
+    wrote) keeps its own. Descends every Node attribute, so f-string fields
+    and their format specs, wrappers, quotes and glued heads are covered
+    alike; the copy memo keeps nodes shared between places in the expansion
+    shared in the copy.
 
     The tree is copied, not filled in place, because the macro may still own
     its nodes (a template held in a global and returned on every call):
@@ -80,15 +92,18 @@ def with_missing_positions(node, position_info):
     bags compared by name, never by identity (gensym returns a Symbol with a
     unique name); the id memo keeps sharing within the one expansion.
 
-    ⚠️ Copy and fill are one iterative pass over an explicit stack, never
-    copy.deepcopy or recursion: deepcopy spends several Python frames per
-    nesting level, so a deeply nested macro call hit RecursionError far
+    ⚠️ Convert, copy and fill are one iterative pass over an explicit stack,
+    never copy.deepcopy or recursion: deepcopy spends several Python frames
+    per nesting level, so a deeply nested macro call hit RecursionError far
     sooner than the same code without the macro. Nodes and plain lists,
     tuples and deques are copied; every other value (str, int, None) is
     shared.
     """
     memo = {}  # id(original) -> its copy
-    root = [node]
+    root = [data_to_generator_expression(expansion)]
+    # Nodes made from data are replaced by their copies like any original;
+    # holding them keeps their ids from being reused while the memo is live.
+    made = [root[0]]
     # (container, key): the slot still holding an original, to be replaced by
     # its copy. A tuple's slot also gets a finisher, popped once every slot
     # pushed after it (its items' whole subtrees) has been copied.
@@ -115,7 +130,21 @@ def with_missing_positions(node, position_info):
                 # to the wrapped value, which may already have a position.
                 for position_key in _POSITION_KEYS:
                     attrs[position_key] = position_info[position_key]
-            stack.extend((attrs, k) for k in attrs)
+            keys = list(attrs)
+            if isinstance(value, Expression) and type(value.list) is list:
+                elements = value.list
+                if id(elements) in memo:
+                    attrs["list"] = memo[id(elements)]
+                else:
+                    # Fresh nodes from data have no position; they are pushed
+                    # below and filled like any template-built node.
+                    converted = [data_to_generator_expression(e) for e in elements]
+                    memo[id(elements)] = converted
+                    made.extend(converted)
+                    attrs["list"] = converted
+                    stack.extend((converted, i) for i in range(len(converted)))
+                keys.remove("list")
+            stack.extend((attrs, k) for k in keys)
         elif type(value) is list:
             copied = list(value)
             stack.extend((copied, i) for i in range(len(copied)))

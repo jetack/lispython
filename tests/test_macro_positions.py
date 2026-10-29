@@ -9,7 +9,7 @@ from collections import deque
 import pytest
 
 from lispy.core.macro import macroexpand_then_compile
-from lispy.core.nodes import Paren, Symbol, with_missing_positions
+from lispy.core.nodes import Constant, Paren, String, Symbol, macro_expansion_nodes
 from lispy.core.parser import parse
 
 
@@ -142,7 +142,7 @@ def test_position_fill_copies_and_keeps_sharing():
     tree = Paren(Symbol("f"), shared, shared, placed)
     tree.extra = (shared, deque([shared]))
     position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
-    copy = with_missing_positions(tree, position)
+    copy = macro_expansion_nodes(tree, position)
     assert copy is not tree and shared.lineno == 0 and tree.lineno == 0
     [head, first, second, kept] = copy.list
     assert first is second is copy.extra[0] is copy.extra[1][0]
@@ -150,3 +150,23 @@ def test_position_fill_copies_and_keeps_sharing():
     assert type(copy.extra) is tuple and type(copy.extra[1]) is deque
     assert [n.position_info for n in (copy, head, first)] == [position] * 3
     assert kept.position_info == placed.position_info and kept is not placed
+
+
+def test_data_in_an_expression_list_becomes_a_positioned_node():
+    inner = Paren(Symbol("g"))
+    inner.list.append("s")
+    tree = Paren(Symbol("f"), inner)
+    tree.list.append(1)
+    position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
+    copy = macro_expansion_nodes(tree, position)
+    assert tree.list[2] == 1 and inner.list[1] == "s"
+    [_, copied_inner, one] = copy.list
+    assert type(one) is Constant and one.value == "1"
+    assert type(copied_inner.list[1]) is String
+    assert one.position_info == copied_inner.list[1].position_info == position
+
+
+def test_a_data_expansion_becomes_a_positioned_node():
+    position = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
+    node = macro_expansion_nodes(7, position)
+    assert type(node) is Constant and node.position_info == position
