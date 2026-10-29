@@ -329,6 +329,48 @@ def test_self_referencing_data_is_left_for_the_expander():
     assert Paren(Symbol("f"), x).list[1] is x
 
 
+POSITION = {"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9}
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_slot_reaching_the_node_own_list_is_sharing():
+    p = Paren(Symbol("f"), Symbol("a"))
+    p.orig = p.list
+    copy = macro_expansion_nodes(p, call_at(POSITION))
+    assert copy.orig is copy.list and copy.list is not p.list
+    p = Paren(Symbol("f"), Symbol("a"))
+    q = Paren()
+    q.list = p.list
+    p.extra = q
+    copy = macro_expansion_nodes(p, call_at(POSITION))
+    assert copy.extra.list is copy.list and copy.list is not p.list
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_cycle_through_a_shared_list_is_refused():
+    p = Paren(Symbol("f"))
+    q = Paren()
+    q.list = p.list
+    p.list.append(q)
+    with pytest.raises(LispyCompileError, match="self-referencing list"):
+        macro_expansion_nodes(p, call_at(POSITION))
+
+
+class FormList(list):
+    pass
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_list_subclass_form_slot_is_walked():
+    p = Paren(Symbol("f"))
+    p.list = FormList([Symbol("f"), 1])
+    copy = macro_expansion_nodes(p, call_at(POSITION))
+    assert type(copy.list) is list and type(copy.list[1]) is Constant
+    p.list.append(p)
+    with pytest.raises(LispyCompileError, match="self-referencing Paren"):
+        macro_expansion_nodes(p, call_at(POSITION))
+
+
 @pytest.mark.usefixtures("time_bound")
 def test_self_referencing_node_attribute_is_refused():
     call = call_at({"lineno": 3, "col_offset": 0, "end_lineno": 3, "end_col_offset": 9})

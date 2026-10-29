@@ -80,8 +80,8 @@ def macro_expansion_nodes(expansion, call):
     ``_data_node``, the one home of that conversion (shared with
     ``data_to_generator_expression``). Only those form slots are converted,
     never other attributes (lineno is an int, an f-string's conversion is an
-    int). A value no literal spells (nan, a complex with a signed zero part)
-    becomes a Constant carrying it exactly (``_exact_constant``). Any other
+    int). A value no literal spells (nan, a complex with a signed zero, inf
+    or nan part) becomes a Constant carrying it exactly (``_exact_constant``). Any other
     value (a dict, a set, an object), or a form, list or tuple that contains
     itself (also one a quasiquote unquoted, which the constructor leaves in
     place), is a LispyCompileError at the call naming the macro.
@@ -191,15 +191,21 @@ def macro_expansion_nodes(expansion, call):
                 for position_key in _POSITION_KEYS:
                     attrs[position_key] = position_info[position_key]
             enter(value)
+            for k in _child_form_keys(value):
+                attrs[k] = node_of(attrs[k])
+            # A list subclass in a form slot is walked like a list (else a
+            # cycle through it escapes the checks); its copy is a plain list.
+            walked = isinstance(value, Expression) and isinstance(value.list, list)
+            # ⚠️ The other slots go below the list's exit marker, so they are
+            # copied once the list has left the path: a sibling slot reaching
+            # the node's own list (p.orig = p.list) is sharing, not a cycle.
+            stack.extend((attrs, k) for k in attrs if not (walked and k == "list"))
             source = sources.get(id(value))
             if source is not None:
                 if id(source) in active:
                     raise self_reference(source)
                 enter(source)
-            for k in _child_form_keys(value):
-                attrs[k] = node_of(attrs[k])
-            keys = list(attrs)
-            if isinstance(value, Expression) and type(value.list) is list:
+            if walked:
                 elements = value.list
                 if id(elements) in memo:
                     if id(elements) in active:
@@ -216,8 +222,6 @@ def macro_expansion_nodes(expansion, call):
                     memo[id(elements)] = converted
                     attrs["list"] = converted
                     stack.extend((converted, i) for i in range(len(converted)))
-                keys.remove("list")
-            stack.extend((attrs, k) for k in keys)
         elif type(value) is list:
             copied = list(value)
             enter(value)
@@ -281,24 +285,37 @@ def _same_float(a, b):
     )
 
 
-def _exact_constant(value):
-    """A Constant compiling to ``value`` itself, for a value no literal spells.
+def _float_source(value):
+    if _isfinite(value):
+        return repr(value)
+    if _isinf(value):
+        # The literal overflows to inf, as in CPython source.
+        return "1e999" if value > 0 else "-1e999"
+    return '(float "nan")'
 
-    ⚠️ Not a call such as ``(float "nan")`` or ``(complex 0.0 -0.0)``: a user
-    binding of ``float``/``complex`` would shadow it, and in a match pattern
-    a call is a class pattern. The text is for display only;
-    ``constant_compile`` and ``number_pattern_expr`` read ``exact``.
+
+def _exact_constant(value):
+    """A Constant compiling to ``value`` itself, for a value no literal spells
+    (nan, a complex with a signed zero, inf or nan part).
+
+    ⚠️ It compiles from ``exact``, never from a call such as ``(float "nan")``:
+    a user binding of ``float``/``complex`` would shadow the call, and in a
+    match pattern a call is a class pattern. The text is that call, for
+    display only (macroexpand output); it reads back as the same value where
+    the builtins are not rebound. ``constant_compile`` and
+    ``number_pattern_expr`` read ``exact``.
     """
-    return Constant(repr(value), exact=value)
+    if isinstance(value, complex):
+        text = f"(complex {_float_source(value.real)} {_float_source(value.imag)})"
+    else:
+        text = _float_source(value)
+    return Constant(text, exact=value)
 
 
 def _float_node(value):
-    if _isfinite(value):
-        return Constant(repr(value))
-    if _isinf(value):
-        # The literal overflows to inf, as in CPython source.
-        return Constant("1e999" if value > 0 else "-1e999")
-    return _exact_constant(value)
+    if _isnan(value):
+        return _exact_constant(value)
+    return Constant(_float_source(value))
 
 
 def _complex_node(value):

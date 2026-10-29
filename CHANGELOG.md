@@ -61,12 +61,12 @@ follows [Semantic Versioning](https://semver.org/).
   lists and tuples of them) anywhere in the forms it returns, including
   inside `*`, `**`, `^` and quote forms (`` `(list *~y) ``); each compiles
   to the same value (including `inf`, `nan`, `-0.0`, complex numbers with a
-  signed zero part and ints of any size) at the macro call's position, even
-  where `float` or `complex` is rebound or inside a match pattern.
-  Converting nested lists does not recurse, so deep nesting does not hit
-  `RecursionError` there. Any other value (a
-  dict, a set, an object), or a form or list that contains itself (also
-  one unquoted with `~`), is a compile error at the call naming the macro.
+  signed zero, `inf` or `nan` part and ints of any size) at the macro
+  call's position, even where `float` or `complex` is rebound or inside a
+  match pattern. Converting nested lists does not recurse, so deep nesting
+  does not hit `RecursionError` there. Any other value (a dict, a set, an
+  object), or a form or list that contains itself (also one unquoted with
+  `~`), is a compile error at the call naming the macro.
 - A str a macro returns keeps its backslashes literally: `"a\\b"` was
   compiled as `"a\b"` (backspace), and a quote, line ending or control
   character is kept as written. The same holds for quoted strings and

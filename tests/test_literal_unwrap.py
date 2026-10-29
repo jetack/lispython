@@ -5,6 +5,7 @@ import pytest
 
 from lispy.core.compiler.expr import expr_compile
 from lispy.core.compiler.literal import string_compile
+from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import Constant, String, Symbol, data_to_generator_expression
 from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
@@ -245,6 +246,15 @@ INEXACT_DEFS = PREAMBLE + """
 """
 
 
+INEXACT = [
+    NAN,
+    complex(0.0, -0.0),
+    complex(-0.0, 1.0),
+    complex(INF, NAN),
+    complex(1.0, -INF),
+]
+
+
 def define_inexact():
     scope = {}
     stl = macroexpand_then_compile(parse(INEXACT_DEFS), scope)
@@ -274,9 +284,27 @@ class TestInexactScalarData:
         exec(compile(module, "<match>", "exec"), scope)
         assert scope["hit"] is True
 
-    @pytest.mark.parametrize(
-        "value", [NAN, complex(0.0, -0.0), complex(INF, NAN)], ids=repr
-    )
+    def test_signed_in_a_match_case_is_refused(self):
+        scope = define_inexact()
+        defs = "(defmacro neg-nan [] (return `(- ~math.nan)))"
+        stl = macroexpand_then_compile(parse(defs), scope)
+        exec(compile(ast.Module(stl, []), "<defs>", "exec"), scope)
+        src = "(match v (case (neg-nan) (= hit True)))"
+        with pytest.raises(LispyCompileError) as info:
+            macroexpand_then_compile(parse(src), scope)
+        assert info.value.msg == (
+            "only a number literal can be signed in a match pattern"
+        )
+
+    @pytest.mark.parametrize("value", INEXACT, ids=repr)
+    def test_display_text_reads_back_as_the_value(self, value):
+        # macroexpand output shows this text; read back where float and
+        # complex are not rebound, it is the same value.
+        text = str(data_to_generator_expression(value))
+        [form] = parse(text)
+        assert same_value(compiled_value(form), value), text
+
+    @pytest.mark.parametrize("value", INEXACT, ids=repr)
     def test_quasiquote_rebuild_keeps_the_value(self, value):
         # A quoted Constant is rebuilt at run time; the rebuild must keep the
         # value exact without naming float or complex.
