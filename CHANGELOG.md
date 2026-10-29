@@ -53,6 +53,30 @@ follows [Semantic Versioning](https://semver.org/).
   threaded value.
 - `as->` also renames a dotted reference (`x.real` becomes `__x_0.real`) and
   a reference inside an f-string format spec (`f"{1:{x}}"`).
+- Threading a literal into a call (`(-> 1 (f))`, `(->> 1 (f 2))`,
+  `(-> "a" (f))`, `(-> ... (f))`) compiles to `f(1)`, `f(2, 1)`, `f('a')`
+  and `f(...)` instead of failing with an `AttributeError`, and
+  `(-> None (f))`, which compiled to `f()`, now gives `f(None)`. A macro may
+  put Python values (`None`, booleans, numbers, `...`, str, bytes, and
+  lists and tuples of them) anywhere in the forms it returns, including
+  inside `*`, `**`, `^` and quote forms (`` `(list *~y) ``); each compiles
+  to the same value (including `inf`, `nan`, `-0.0` and ints of any size)
+  at the macro call's position. Converting nested lists does not recurse,
+  so deep nesting does not hit `RecursionError` there. Any other value (a
+  dict, a set, an object) or a list that contains itself is a compile error
+  at the call naming the macro.
+- A str a macro returns keeps its backslashes literally: `"a\\b"` was
+  compiled as `"a\b"` (backspace), and a quote, line ending or control
+  character is kept as written. The same holds for quoted strings and
+  quoted symbols (`'a\b` was `Symbol('a\x08')`); bytes are supported.
+- A `for` or `while` with no target, iterable or test, or with no body
+  before its `(else ...)` (`(for x in)`, `(for [x [1]] (print x))`,
+  `(while x)`), is a compile error at the loop instead of an `IndexError`
+  or a loop with an empty body that Python rejects.
+- `^` followed by stars before a bracket or a quote (`^*(`, `^**[`, `^*'`,
+  `^**~`, also with a space after the quote) or alone (`^*`, `^**`) is a
+  compile error at the prefix instead of a `KeyError`, an `AttributeError`
+  or a call such as `f(*', a)`; `^*Ts` and `^**P` are unchanged.
 
 ### Changed
 

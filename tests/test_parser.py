@@ -102,3 +102,61 @@ class TestBrackets:
             parse(src)
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == (1, col)
+
+
+class TestWrapperPrefix:
+    """An opening or meta-indicator takes one of ^, *, ** as its wrapper; ^
+    followed by stars there has no meaning and is refused at the prefix,
+    never a KeyError or a symbol that swallows the opening."""
+
+    @pytest.mark.parametrize(
+        ["form", "prefix", "indicator"],
+        [
+            ("^*(a)", "^*", "("),
+            ("^**[a]", "^**", "["),
+            ("^*{a}", "^*", "{"),
+            ("^*'a", "^*", "'"),
+            ("^**~a", "^**", "~"),
+            ("^*~@a", "^*", "~@"),
+            ("^*`a", "^*", "`"),
+            # A space after the quote does not make it a symbol.
+            ("^*' a", "^*", "'"),
+            ("^**` a", "^**", "`"),
+            ("^*~ a", "^*", "~"),
+            ("^**~@ a", "^**", "~@"),
+            # ^ and stars alone: nothing to annotate or unpack.
+            ("^*", "^*", ""),
+            ("^**", "^**", ""),
+            ("^* a", "^*", ""),
+            ("^*,a", "^*", ""),
+        ],
+    )
+    def test_refused_at_the_prefix(self, form, prefix, indicator):
+        src = "(g)\n  (f " + form + ")"
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == (
+            f"{prefix} prefix has no meaning before {indicator!r}"
+            if indicator
+            else f"{prefix} has no meaning on its own"
+        )
+        assert (info.value.lineno, info.value.offset) == (2, 6)
+        token_end = 6 + len(prefix) + len(indicator)
+        assert (info.value.end_lineno, info.value.end_offset) == (2, token_end)
+        assert [str(f) for f in parse(src, partial=True)] == ["(g)"]
+
+    @pytest.mark.parametrize(
+        ["src", "parsed"],
+        [
+            ("(f ^*Ts)", "Paren(Sym(f), Ann(Star(Sym(Ts))))"),
+            ("(f ^**P)", "Paren(Sym(f), Ann(DStar(Sym(P))))"),
+            ("(f ^(a))", "Paren(Sym(f), Ann(Paren(Sym(a))))"),
+            ("(f *(a))", "Paren(Sym(f), Star(Paren(Sym(a))))"),
+            ("(f **{a})", "Paren(Sym(f), DStar(Brace(Sym(a))))"),
+            ("(f *'a)", "Paren(Sym(f), Star(Quote(Sym(a))))"),
+            ("(f ^~a)", "Paren(Sym(f), Ann(Unquote(Sym(a))))"),
+        ],
+    )
+    def test_single_wrappers_still_parse(self, src, parsed):
+        [form] = parse(src)
+        assert repr(form) == parsed

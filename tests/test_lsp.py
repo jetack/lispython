@@ -24,6 +24,7 @@ BUFFERS = {
     "unterminated f-string": COMPLETE + '(print f"{foo',
     "mismatched bracket": COMPLETE + "(foo]",
     "t-string on an old Python": COMPLETE + '(print t"{(foo)}")',
+    "meaningless wrapper prefix": COMPLETE + "(foo ^*(a))",
 }
 
 
@@ -90,6 +91,12 @@ def test_partial_parse_does_not_leak_into_strict_parse(monkeypatch):
     parse(BUFFERS["t-string on an old Python"], partial=True)
     with pytest.raises(Exception):
         parse('(print t"x")')
+
+
+def test_refused_prefix_form_still_closes_in_the_call_scan():
+    # ^*( is a bad-prefix token, not an opening; its ) must close it, not g.
+    source = "(g ^*(f) x)"
+    assert server.find_enclosing_function(source, 1, source.index("x")) == "g"
 
 
 @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings: 3.14+")

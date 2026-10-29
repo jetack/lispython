@@ -7,7 +7,7 @@ from lispy.core.compiler.literal import constant_compile, string_node_value
 from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
-from lispy.core.nodes import with_missing_positions
+from lispy.core.nodes import macro_expansion_nodes
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
@@ -99,13 +99,13 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         elif str(op) == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
-            call_position = sexp.position_info
-            sexp = scope["__macro_namespace"][str(op)](*[_unwrap_literal(o) for o in operands])
-            if not isinstance(sexp, Node):
-                sexp = data_to_generator_expression(sexp)
-            # Template-built nodes have no position; give them the call's, so
-            # tracebacks and compile errors point at the macro call, not line 0.
-            sexp = with_missing_positions(sexp, call_position)
+            expansion = scope["__macro_namespace"][str(op)](
+                *[_unwrap_literal(o) for o in operands]
+            )
+            # Python data anywhere in the expansion becomes nodes, and
+            # template-built nodes take the call's position, so tracebacks and
+            # compile errors point at the macro call, not line 0.
+            sexp = macro_expansion_nodes(expansion, sexp)
             expanded = True
         else:
             expanded_list, expanded_feedbacks = zip(

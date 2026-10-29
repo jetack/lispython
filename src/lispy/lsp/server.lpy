@@ -941,6 +941,10 @@
                                   None)))
           (.append stack None))
 
+      ;; ^*( is refused by the parser but still opens a form its ) closes.
+      (and (== tktype "bad-prefix") (in (sub text -1) "([{"))
+      (.append stack None)
+
       (and (== tktype "closing") stack)
       (.pop stack)))
   (for name in (reversed stack)

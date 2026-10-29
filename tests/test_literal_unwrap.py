@@ -1,4 +1,12 @@
-from lispy.tools import src_to_python_org
+import ast
+import math
+
+import pytest
+
+from lispy.core.compiler.expr import expr_compile
+from lispy.core.compiler.literal import string_compile
+from lispy.core.nodes import String, Symbol, data_to_generator_expression
+from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 PREAMBLE = "(require lispy.macros *)\n"
 
@@ -71,3 +79,158 @@ class TestLiteralUnwrapInMacro:
 """
         result = src_to_python_org(src)
         assert "a + b + (a + b)" in result
+
+
+class TestRawValueInExpansion:
+    """A literal argument reaches the macro as a Python value; a macro that
+    puts it straight into an Expression's list (bypassing the constructor)
+    still compiles, because the expander converts data anywhere in the
+    expansion."""
+
+    @pytest.mark.parametrize(
+        ("src", "expected"),
+        [
+            ("(-> 1 (f))", "f(1)"),
+            ("(->> 1 (f 2))", "f(2, 1)"),
+            ('(-> "a" (f))', "f('a')"),
+            ("(-> 1 (f) (g 2))", "g(f(1), 2)"),
+        ],
+    )
+    def test_threaded_literal_into_paren(self, src, expected):
+        assert src_to_python_org(PREAMBLE + src) == expected
+
+    def test_raw_value_inserted_into_nested_paren(self):
+        src = PREAMBLE + """
+(defmacro put-in [x]
+  (= inner `(g))
+  (inner.list.insert 1 x)
+  (return `(f ~inner)))
+
+(put-in 5)
+"""
+        assert src_to_python_org(src) == "f(g(5))"
+
+    def test_converted_value_takes_the_macro_call_position(self):
+        stl = macroexpand_then_compile(parse(PREAMBLE + "\n  (-> 1 (f))"))
+        [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
+        [arg] = call.args
+        assert (arg.lineno, arg.col_offset) == (3, 2)
+        assert (arg.end_lineno, arg.end_col_offset) == (3, 12)
+
+
+TRICKY_STRINGS = [
+    "",
+    "a\\b",
+    "\\",
+    'q"q',
+    "'",
+    "x\ny",
+    "\r",
+    "\r\n",
+    "\t",
+    "\x00",
+    "\x1b[0m",
+    "\x7f",
+    "\x85",
+    " ",
+    "é한😀",
+    "\ud800",
+    "{x}",
+    '"""',
+]
+TRICKY_BYTES = [b"", b"x", b"\\", b'"', b"\n\r\t", b"\x00\xff", b"\x7f", b"\x80"]
+
+
+class TestDataRoundTrip:
+    """Python data a macro returns compiles to exactly that value."""
+
+    @pytest.mark.parametrize("value", TRICKY_STRINGS + TRICKY_BYTES, ids=ascii)
+    def test_data_compiles_to_the_same_value(self, value):
+        node = data_to_generator_expression(value)
+        compiled = string_compile(node)
+        assert type(compiled.value) is type(value) and compiled.value == value
+
+    @pytest.mark.parametrize("value", TRICKY_STRINGS, ids=ascii)
+    def test_quoted_string_and_symbol_keep_their_text(self, value):
+        # A quoted String/Symbol is rebuilt from its token text at run time.
+        for node in (String(value), Symbol(value)):
+            assert string_compile(node.operands_generate(False)).value == value
+
+    @pytest.mark.parametrize(
+        ("src", "expected"),
+        [
+            ('(-> "a\\\\b" (f))', "f('a\\\\b')"),
+            ('(-> b"x" (f))', "f(b'x')"),
+            ("(= s 'a\\b)", "s = Symbol('a\\\\b')"),
+        ],
+    )
+    def test_end_to_end(self, src, expected):
+        assert src_to_python_org(PREAMBLE + src) == expected
+
+
+INF = float("inf")
+NAN = float("nan")
+TRICKY_SCALARS = [
+    None,
+    True,
+    False,
+    ...,
+    0,
+    -5,
+    10**5000,
+    -(10**5000),
+    1.5,
+    -0.0,
+    5e-324,
+    1e308,
+    INF,
+    -INF,
+    NAN,
+    1 + 2j,
+    -1j,
+    complex(0.0, -0.0),
+    complex(-0.0, 0.0),
+    complex(-0.0, -0.0),
+    complex(INF, NAN),
+    complex(1.0, -INF),
+]
+
+
+def same_value(a, b):
+    """Equal in type and value, telling -0.0 from 0.0 and nan from all else."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, complex):
+        return same_value(a.real, b.real) and same_value(a.imag, b.imag)
+    if isinstance(a, float):
+        return repr(a) == repr(b) and math.copysign(1, a) == math.copysign(1, b)
+    return a == b
+
+
+def compiled_value(node):
+    expr = ast.Expression(expr_compile(node))
+    return eval(compile(ast.fix_missing_locations(expr), "<data>", "eval"), {})
+
+
+class TestScalarDataRoundTrip:
+    """Every scalar a macro may return compiles to that very value."""
+
+    @pytest.mark.parametrize(
+        "value",
+        TRICKY_SCALARS,
+        # repr refuses ints over 4300 digits.
+        ids=lambda v: f"int-{v.bit_length()}-bits" if type(v) is int else repr(v),
+    )
+    def test_scalar_compiles_to_the_same_value(self, value):
+        node = data_to_generator_expression(value)
+        assert same_value(compiled_value(node), value)
+
+    @pytest.mark.parametrize(
+        ("src", "value"),
+        [("(-> ... (f))", ...), ("(-> 1e400 (f))", INF), ("(-> None (f))", None)],
+    )
+    def test_threaded_scalar(self, src, value):
+        stl = macroexpand_then_compile(parse(PREAMBLE + src))
+        [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
+        [arg] = call.args
+        assert same_value(eval(compile(ast.Expression(arg), "<arg>", "eval")), value)

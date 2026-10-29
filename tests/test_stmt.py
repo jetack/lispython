@@ -292,3 +292,46 @@ class TestEmptyLiteralOperands:
         assert stmt_to_dump("(match x (case {} ...))") == ast.dump(
             ast.parse("match x:\n    case {}: ...")
         )
+
+
+class TestLoopArity:
+    """A loop with no target/iterable/test or no body is a LispyCompileError
+    at the loop form, not an IndexError or an AST compile() rejects."""
+
+    @pytest.mark.parametrize(
+        ("loop", "msg"),
+        [
+            ("(for [x [1]] (print x))", "(for ...) needs a body"),
+            ("(for x in xs (else 1))", "(for ...) needs a body"),
+            ("(for x in xs)", "(for ...) needs a body"),
+            ("(for x in)", "(for ...) is missing its iterable"),
+            ("(for x)", "(for ...) is missing its iterable"),
+            ("(for)", "(for ...) is missing its target"),
+            ("(while x)", "(while ...) needs a body"),
+            ("(while x (else 1))", "(while ...) needs a body"),
+            ("(while)", "(while ...) is missing its test"),
+            ("(async-for x in xs)", "(async-for ...) needs a body"),
+        ],
+    )
+    def test_refused_at_the_loop(self, loop, msg):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + loop + ")")
+        assert info.value.msg.startswith(msg + ": ")
+        assert (info.value.lineno, info.value.offset) == (2, 3)
+        assert (info.value.end_lineno, info.value.end_offset) == (2, 3 + len(loop))
+
+    @pytest.mark.parametrize(
+        ("lispy", "python"),
+        [
+            ("(for x in xs (f x))", "for x in xs:\n    f(x)"),
+            ("(for x xs (f x) (g))", "for x in xs:\n    f(x)\n    g()"),
+            (
+                "(for x in xs (f x) (else (g)))",
+                "for x in xs:\n    f(x)\nelse:\n    g()",
+            ),
+            ("(while x (f))", "while x:\n    f()"),
+            ("(while x (f) (else (g)))", "while x:\n    f()\nelse:\n    g()"),
+        ],
+    )
+    def test_well_formed_loops_compile(self, lispy, python):
+        assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))

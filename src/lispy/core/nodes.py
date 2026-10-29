@@ -1,4 +1,9 @@
+from ast import literal_eval as _literal_eval
 from collections import deque
+from math import copysign as _copysign
+from math import isfinite as _isfinite
+from math import isinf as _isinf
+from math import isnan as _isnan
 
 
 def multiline_p(s):
@@ -59,18 +64,35 @@ def contains_unquote(node):
 _POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
 
 
-def with_missing_positions(node, position_info):
-    """A copy of ``node`` in which every node with no position (lineno 0)
-    takes this one.
+def macro_expansion_nodes(expansion, call):
+    """A macro's return value as a node tree: a copy of ``expansion`` with
+    Python data turned into nodes and every positionless node placed at the
+    macro call ``call`` (the Paren that invoked the macro).
+
+    The expansion contract: a macro may put Python data (None, bool, int,
+    float, complex, Ellipsis, str, bytes, and lists and tuples of them)
+    anywhere in its expansion's forms: an Expression's list, the single
+    child form of a wrapper, quote or glued head (``_child_form_keys``), and
+    the expansion itself. The expander gets literal arguments as Python
+    values (``_unwrap_literal`` in ``macro.py``), and a macro that splices one
+    in with ``(f.list.insert 1 x)`` or ``*~y`` bypasses the node constructors,
+    so the conversion happens here, one level at a time through
+    ``_data_node``, the one home of that conversion (shared with
+    ``data_to_generator_expression``). Only those form slots are converted,
+    never other attributes (lineno is an int, an f-string's conversion is an
+    int). Any other value (a dict, a set, an object), or a list or tuple
+    that contains itself, is a LispyCompileError at the call naming the
+    macro.
 
     A macro builds its expansion at run time from quasiquote templates, so
-    those nodes carry the Node default (lineno 0) and the Python code compiled
-    from them would report line 0. The expander passes the macro call's
-    position, so tracebacks and compile errors point at the call. A node that
-    has a position (an unquoted argument the user wrote) keeps its own.
-    Descends every Node attribute, so f-string fields and their format specs,
-    wrappers, quotes and glued heads are covered alike; the copy memo keeps
-    nodes shared between places in the expansion shared in the copy.
+    those nodes (and the converted data) carry the Node default (lineno 0)
+    and the Python code compiled from them would report line 0. The expander
+    passes the macro call's position, so tracebacks and compile errors point
+    at the call. A node that has a position (an unquoted argument the user
+    wrote) keeps its own. Descends every Node attribute, so f-string fields
+    and their format specs, wrappers, quotes and glued heads are covered
+    alike; the copy memo keeps nodes shared between places in the expansion
+    shared in the copy.
 
     The tree is copied, not filled in place, because the macro may still own
     its nodes (a template held in a global and returned on every call):
@@ -80,21 +102,53 @@ def with_missing_positions(node, position_info):
     bags compared by name, never by identity (gensym returns a Symbol with a
     unique name); the id memo keeps sharing within the one expansion.
 
-    ⚠️ Copy and fill are one iterative pass over an explicit stack, never
-    copy.deepcopy or recursion: deepcopy spends several Python frames per
-    nesting level, so a deeply nested macro call hit RecursionError far
+    ⚠️ Convert, copy and fill are one iterative pass over an explicit stack,
+    never copy.deepcopy or recursion: deepcopy spends several Python frames
+    per nesting level, so a deeply nested macro call hit RecursionError far
     sooner than the same code without the macro. Nodes and plain lists,
     tuples and deques are copied; every other value (str, int, None) is
     shared.
     """
+    from lispy.core.errors import LispyCompileError
+
+    position_info = call.position_info
+    # Nodes made from data are replaced by their copies like any original;
+    # holding them keeps their ids from being reused while the memo is live.
+    made = []
+    # id(Bracket made from a list or tuple) -> that list or tuple.
+    sources = {}
+    # ids of the lists and tuples whose items are being converted: the path
+    # from the root, so meeting one again is a self-reference, not sharing.
+    active = set()
+
+    def node_of(data):
+        node = _data_node(data)
+        if node is data:
+            if isinstance(node, Node):
+                return node
+            raise LispyCompileError(
+                f"macro {call.op} returned a {type(data).__name__} in its "
+                f"expansion, which has no lispython form",
+                call,
+            )
+        made.append(node)
+        if isinstance(data, (list, tuple)):
+            sources[id(node)] = data
+        return node
+
     memo = {}  # id(original) -> its copy
-    root = [node]
+    root = [node_of(expansion)]
     # (container, key): the slot still holding an original, to be replaced by
     # its copy. A tuple's slot also gets a finisher, popped once every slot
-    # pushed after it (its items' whole subtrees) has been copied.
+    # pushed after it (its items' whole subtrees) has been copied, and a
+    # Bracket made from data an exit marker (None, id of its list), popped
+    # once its items are converted.
     stack = [(root, 0)]
     while stack:
         item = stack.pop()
+        if item[0] is None:
+            active.discard(item[1])
+            continue
         if len(item) == 3:
             container, key, items = item
             copied = tuple(items)
@@ -115,7 +169,35 @@ def with_missing_positions(node, position_info):
                 # to the wrapped value, which may already have a position.
                 for position_key in _POSITION_KEYS:
                     attrs[position_key] = position_info[position_key]
-            stack.extend((attrs, k) for k in attrs)
+            source = sources.get(id(value))
+            if source is not None:
+                if id(source) in active:
+                    raise LispyCompileError(
+                        f"macro {call.op} returned a self-referencing "
+                        f"{type(source).__name__} in its expansion",
+                        call,
+                    )
+                active.add(id(source))
+                stack.append((None, id(source)))
+            for k in _child_form_keys(value):
+                attrs[k] = node_of(attrs[k])
+            keys = list(attrs)
+            if isinstance(value, Expression) and type(value.list) is list:
+                elements = value.list
+                if id(elements) in memo:
+                    attrs["list"] = memo[id(elements)]
+                else:
+                    # Fresh nodes from data have no position; they are pushed
+                    # below and filled like any template-built node.
+                    # A Bracket made from a list still holds raw items; they
+                    # are converted when the pass reaches it, never by
+                    # recursion.
+                    converted = [node_of(e) for e in elements]
+                    memo[id(elements)] = converted
+                    attrs["list"] = converted
+                    stack.extend((converted, i) for i in range(len(converted)))
+                keys.remove("list")
+            stack.extend((attrs, k) for k in keys)
         elif type(value) is list:
             copied = list(value)
             stack.extend((copied, i) for i in range(len(copied)))
@@ -134,19 +216,141 @@ def with_missing_positions(node, position_info):
     return root[0]
 
 
+_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _escaped(ch):
+    if ch in _ESCAPES:
+        return _ESCAPES[ch]
+    if ch.isprintable():
+        return ch
+    code = ord(ch)
+    return (
+        f"\\x{code:02x}"
+        if code < 0x100
+        else f"\\u{code:04x}"
+        if code < 0x10000
+        else f"\\U{code:08x}"
+    )
+
+
+def string_literal_source(value):
+    """A double-quoted lispython literal whose value is exactly ``value``.
+
+    The one home of quoting a str or bytes as source text: macro data,
+    quoted symbols and strings all come here. Lispython has no single-quoted
+    strings, so ``repr`` will not do. Every character the string scanner or
+    evaluation would change is escaped: backslash and the quote, line endings
+    (a raw \\r would be normalised to \\n, as CPython does to source), and
+    anything not printable (control characters, lone surrogates); printable
+    non-ASCII stays literal. Bytes get a ``b`` prefix and every byte outside
+    printable ASCII as ``\\xNN``.
+    """
+    if isinstance(value, bytes):
+        body = "".join(_escaped(chr(b)) if b < 0x80 else f"\\x{b:02x}" for b in value)
+        return 'b"' + body + '"'
+    return '"' + "".join(map(_escaped, value)) + '"'
+
+
+def _same_float(a, b):
+    # == misses the sign of zero and calls nan unequal to itself.
+    return _copysign(1.0, a) == _copysign(1.0, b) and (
+        a == b or (_isnan(a) and _isnan(b))
+    )
+
+
+def _float_node(value):
+    if _isfinite(value):
+        return Constant(repr(value))
+    if _isinf(value):
+        # The literal overflows to inf, as in CPython source.
+        return Constant("1e999" if value > 0 else "-1e999")
+    return Paren(Symbol("float"), String('"nan"'))
+
+
+def _complex_node(value):
+    text = repr(value)
+    try:
+        parsed = _literal_eval(text)
+    except (SyntaxError, ValueError):
+        parsed = None
+    if isinstance(parsed, complex) and all(
+        _same_float(a, b)
+        for a, b in [(parsed.real, value.real), (parsed.imag, value.imag)]
+    ):
+        return Constant(text)
+    # A signed zero or non-finite part has no literal (-0j is -(0j)).
+    return Paren(Symbol("complex"), _float_node(value.real), _float_node(value.imag))
+
+
+def _data_node(data):
+    """One level of Python data as a node, or ``data`` itself when it is a
+    node or has no lispython form.
+
+    A list or tuple becomes a Bracket whose list still holds the raw items:
+    the caller's walk converts them, so nested data never costs a Python
+    frame per level (``data_to_generator_expression``, ``macro_expansion_nodes``).
+    """
+    if isinstance(data, bool) or data is None or data is ...:
+        return Constant("..." if data is ... else str(data))
+    if isinstance(data, int):
+        # hex has no digit limit; str() refuses ints over 4300 digits.
+        return Constant(str(data) if data.bit_length() < 4000 else hex(data))
+    if isinstance(data, float):
+        return _float_node(data)
+    if isinstance(data, complex):
+        return _complex_node(data)
+    if isinstance(data, (str, bytes)):
+        return String(string_literal_source(data))
+    if isinstance(data, (list, tuple)):
+        bracket = Bracket()
+        bracket.list = list(data)
+        return bracket
+    return data
+
+
+def _child_form_keys(node):
+    """Attributes of ``node`` that hold one child form, which a macro may set
+    to Python data like any element of an Expression's list."""
+    if isinstance(node, (Wrapper, MetaIndicator)):
+        return ("value",)
+    if isinstance(node, GluedHead):
+        return ("head", "params")
+    return ()
+
+
 def data_to_generator_expression(data):
-    if isinstance(data, bool) or data is None:
-        return Constant(str(data))
-    elif isinstance(data, (int, float, complex)):
-        return Constant(str(data))
-    elif isinstance(data, str):
-        return String('"' + data + '"')
-    elif isinstance(data, list):
-        return Bracket(*data)
-    elif isinstance(data, tuple):
-        return Bracket(*data)
-    else:
-        return data
+    """``data`` as a node tree compiling to the same value, nested lists and
+    tuples included; a node is returned as is, and a value with no lispython
+    form is left in place (``macro_expansion_nodes`` reports it).
+
+    The one home of the data-to-node conversion, through ``_data_node``.
+    Iterative, so a deeply nested list does not hit RecursionError.
+    """
+    root = _data_node(data)
+    # (Bracket, the list or tuple it is made from); (None, id) leaves that
+    # list, so ``active`` is the path from the root and meeting a list on it
+    # again is a self-reference (sharing a list in two places is fine).
+    pending = [(root, data)] if isinstance(data, (list, tuple)) else []
+    active = set()
+    while pending:
+        [bracket, items] = pending.pop()
+        if bracket is None:
+            active.discard(items)
+            continue
+        if id(items) in active:
+            raise ValueError(
+                f"a self-referencing {type(items).__name__} has no lispython form"
+            )
+        active.add(id(items))
+        pending.append((None, id(items)))
+        bracket.list = [_data_node(item) for item in items]
+        pending.extend(
+            (node, item)
+            for item, node in zip(items, bracket.list)
+            if isinstance(item, (list, tuple))
+        )
+    return root
 
 
 class Expression(Node):
@@ -540,7 +744,7 @@ class GluedHead(Node):
 
 class Literal(Node):
     def operands_generate(self, in_quasi):
-        return String('"' + self.value + '"', **self.position_info)
+        return String(string_literal_source(self.value), **self.position_info)
 
 
 class Symbol(Literal):
@@ -565,12 +769,6 @@ class String(Literal):
         super().__init__(**kwargs)
         self.value = value
         self.classname = "String"
-
-    def operands_generate(self, in_quasi):
-        return String(
-            '"' + self.value.replace("\\", "\\\\").replace('"', '\\"') + '"',
-            **self.position_info
-        )
 
     def __repr__(self):
         return "Str(" + repr(self.value) + ")"
