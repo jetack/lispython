@@ -470,7 +470,7 @@
     (= entry (self._overlay.get index))
     (if (is-not entry None)
         (return (+ (* " " (sub entry 0)) (sub entry 1))))
-    (return (ife (< index (len self._base)) (sub self._base index) ""))))
+    (return (ife (< index (len self._base)) (sub self._base index) "\n"))))
 
 (def _nrepl-register-source [filename src line column whole-file]
   "Make linecache show src at its buffer position in filename, so a

@@ -69,8 +69,8 @@ def with_missing_positions(node, position_info):
     position, so tracebacks and compile errors point at the call. A node that
     has a position (an unquoted argument the user wrote) keeps its own.
     Descends every Node attribute, so f-string fields and their format specs,
-    wrappers, quotes and glued heads are covered alike; ``seen`` guards nodes
-    shared between places in the expansion.
+    wrappers, quotes and glued heads are covered alike; the copy memo keeps
+    nodes shared between places in the expansion shared in the copy.
 
     The tree is copied, not filled in place, because the macro may still own
     its nodes (a template held in a global and returned on every call):

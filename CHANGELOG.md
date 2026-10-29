@@ -12,11 +12,17 @@ follows [Semantic Versioning](https://semver.org/).
   (where the code sits in the editor's buffer, 1-based). Tracebacks and
   compile errors then name that file with buffer line numbers and print the
   source line, including for definitions evaluated in earlier requests and
-  for `load-file`. An eval without `file` is named `<nrepl-N>` (a new N per
-  eval) instead of `<nrepl>`. An invalid `line` or `column` (not an integer
-  from 1 to `NREPL-MAX-POSITION-LINE`, 1,000,000, or
-  `NREPL-MAX-POSITION-COLUMN`, 100,000) gets an `error` reply with the
-  request id.
+  for `load-file`.
+
+### Changed
+
+- An nREPL eval without `file` is named `<nrepl-N>` (a new N per eval)
+  instead of `<nrepl>`, which can break a client that matches `<nrepl>` in
+  error text.
+- An invalid `line` or `column` (not an integer from 1 to
+  `NREPL-MAX-POSITION-LINE`, 1,000,000, or `NREPL-MAX-POSITION-COLUMN`,
+  100,000) gets an `error` reply with the request id instead of being
+  accepted.
 
 ### Fixed
 

@@ -340,8 +340,8 @@ def test_eval_at_the_line_cap_retains_only_its_own_code(isolated, tmp_path):
     assert retained < 256 * 1024
     assert len(linecache.getlines(path)) == MAX_LINE
     assert linecache.getline(path, MAX_LINE) == "  (= z 1)\n"
-    assert linecache.getline(path, 1) == ""
-    assert linecache.getline(path, MAX_LINE - 1) == ""
+    assert linecache.getline(path, 1) == "\n"
+    assert linecache.getline(path, MAX_LINE - 1) == "\n"
     assert linecache.getline(path, MAX_LINE + 1) == ""
 
 
