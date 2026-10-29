@@ -423,10 +423,14 @@
 (= _NREPL-EVAL-IDS (itertools.count 1))  ; names "<nrepl-N>" for file-less evals
 (= _NREPL-LINECACHE-LOCK (threading.Lock))  ; clients are served on threads
 
-(def _nrepl-buffer-position [value name]
-  "value as a 1-based buffer line or column; ValueError unless an int >= 1."
-  (if (or (not (isinstance value int)) (isinstance value bool) (< value 1))
-      (raise (ValueError (+ name " must be an integer >= 1, got " (repr value)))))
+(def _nrepl-buffer-position [value name limit]
+  "value as a 1-based buffer line or column; ValueError unless an int from 1
+  to limit.  The bound matters: the source is padded with a character per
+  line and column, and linecache holds a slot per line."
+  (if (or (not (isinstance value int)) (isinstance value bool)
+          (< value 1) (> value limit))
+      (raise (ValueError (+ name " must be an integer from 1 to " (str limit)
+                            ", got " (repr value)))))
   (return value))
 
 (def _nrepl-register-source [filename padded line whole-file]
@@ -474,8 +478,8 @@
   marks src as the entire file (load-file).  Raises ValueError for an
   invalid filename, line or column; every other failure is the result's
   error."
-  (_nrepl-buffer-position line "line")
-  (_nrepl-buffer-position column "column")
+  (_nrepl-buffer-position line "line" NREPL-MAX-POSITION-LINE)
+  (_nrepl-buffer-position column "column" NREPL-MAX-POSITION-COLUMN)
   (if (is filename None)
       (= filename (+ "<nrepl-" (str (next _NREPL-EVAL-IDS)) ">")))
   (if (not (isinstance filename str))
@@ -829,6 +833,10 @@
   (raise (_NreplUnknownOp (+ "unknown op: " (str op)))))
 
 (= NREPL-MAX-LINE (* 4 1024 1024))  ; bytes; longest request line a client may send
+;; Largest eval line/column a client may send: nrepl-eval pads the source to
+;; that position, so an unbounded one makes the server allocate without limit.
+(= NREPL-MAX-POSITION-LINE 1_000_000)
+(= NREPL-MAX-POSITION-COLUMN 100_000)
 
 (def _nrepl-handle-client [conn addr scope]
   ;; Buffer bytes and decode only whole lines: a multi-byte UTF-8 character can

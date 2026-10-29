@@ -305,21 +305,53 @@ def test_load_file_traceback_and_replaces_earlier_evals(isolated, tmp_path):
     assert linecache.getlines(str(path)) == path.read_text().splitlines(True)
 
 
+LIMITS = {
+    "line": tools.NREPL_MAX_POSITION_LINE,
+    "column": tools.NREPL_MAX_POSITION_COLUMN,
+}
+
+
 @pytest.mark.parametrize(
     ["field", "value"],
-    [["line", 0], ["line", "x"], ["line", True], ["column", 0], ["column", 1.0]],
+    [
+        ["line", 0],
+        ["line", "x"],
+        ["line", True],
+        ["column", 0],
+        ["column", 1.0],
+        # Past the cap: the source would be padded to this position, so a
+        # huge one would make the server allocate without bound.
+        ["line", tools.NREPL_MAX_POSITION_LINE + 1],
+        ["line", 10**9],
+        ["column", tools.NREPL_MAX_POSITION_COLUMN + 1],
+        ["column", 10**9],
+    ],
 )
 def test_invalid_position_replies_with_error_and_keeps_serving(field, value):
     request = line(op="eval", id=9, code="1", **{field: value})
     replies = serve([request + line(op="ping", id=10)])
+    limit = LIMITS[field]
     assert replies == [
         {
             "op": "error",
-            "error": f"ValueError: {field} must be an integer >= 1, got {value!r}",
+            "error": f"ValueError: {field} must be an integer from 1 to {limit}, "
+            f"got {value!r}",
             "id": 9,
         },
         {"op": "pong", "id": 10},
     ]
+
+
+def test_position_at_the_caps_is_evaluated():
+    request = line(
+        op="eval",
+        id=11,
+        code="(+ 1 2)",
+        line=tools.NREPL_MAX_POSITION_LINE,
+        column=tools.NREPL_MAX_POSITION_COLUMN,
+    )
+    [reply] = serve([request])
+    assert (reply["id"], reply["value"], reply["error"]) == (11, "3", None)
 
 
 def test_null_position_fields_take_the_defaults():

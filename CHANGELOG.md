@@ -14,7 +14,9 @@ follows [Semantic Versioning](https://semver.org/).
   source line, including for definitions evaluated in earlier requests and
   for `load-file`. An eval without `file` is named `<nrepl-N>` (a new N per
   eval) instead of `<nrepl>`. An invalid `line` or `column` (not an integer
-  of at least 1) gets an `error` reply with the request id.
+  from 1 to `NREPL-MAX-POSITION-LINE`, 1,000,000, or
+  `NREPL-MAX-POSITION-COLUMN`, 100,000) gets an `error` reply with the
+  request id.
 
 ### Fixed
 
