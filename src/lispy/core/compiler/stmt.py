@@ -10,15 +10,92 @@ from lispy.core.compiler.literal import (
     name_compile,
     number_parts,
     number_pattern_expr,
+    reserved_name_p,
 )
 from lispy.core.compiler.utils import *
 from lispy.core.errors import LispyCompileError
-from lispy.core.nodes import GluedHead, Paren
+from lispy.core.nodes import GluedHead, Node, Paren
 from lispy.core.utils import *
 
 
 def expr_wrapper(sexp):
     return ast.Expr(value=expr_compile(sexp), **sexp.position_info)
+
+
+# CPython's words for what cannot be a target ("cannot assign to literal").
+TARGET_DESCRIPTIONS = {
+    "Call": "function call",
+    "Constant": "literal",
+    "Compare": "comparison",
+    "Lambda": "lambda",
+    "IfExp": "conditional expression",
+    "NamedExpr": "named expression",
+    "Dict": "dict literal",
+    "Set": "set display",
+    "JoinedStr": "f-string expression",
+    "ListComp": "list comprehension",
+    "SetComp": "set comprehension",
+    "DictComp": "dict comprehension",
+    "GeneratorExp": "generator expression",
+    "Await": "await expression",
+    "Yield": "yield expression",
+    "YieldFrom": "yield expression",
+    "Tuple": "tuple",
+    "List": "list",
+    "Starred": "starred",
+}
+
+
+def target_error(node, kind):
+    desc = TARGET_DESCRIPTIONS.get(type(node).__name__, "expression")
+    msg = (
+        f"cannot delete {desc}"
+        if kind == "delete"
+        else f"'{desc}' is an illegal expression for augmented assignment"
+        if kind == "augassign"
+        else f"only single target (not {desc}) can be annotated"
+        if kind == "annotate" and desc in ("tuple", "list")
+        else "illegal target for annotation"
+        if kind == "annotate"
+        else "starred assignment target must be in a list or tuple"
+        if desc == "starred"
+        else f"cannot assign to {desc}"
+    )
+    position = {k: getattr(node, k) for k in Node().position_info}
+    return LispyCompileError(msg, Node(**position))
+
+
+def check_target(node, kind, top=True):
+    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+        return
+    if kind in ("assign", "delete") and isinstance(node, (ast.Tuple, ast.List)):
+        for elt in node.elts:
+            check_target(elt, kind, top=False)
+        starred = [elt for elt in node.elts if isinstance(elt, ast.Starred)]
+        if len(starred) > 1:
+            raise LispyCompileError(
+                "multiple starred expressions in assignment",
+                Node(**{k: getattr(starred[1], k) for k in Node().position_info}),
+            )
+        return
+    if kind == "assign" and isinstance(node, ast.Starred) and not top:
+        check_target(node.value, kind, top=False)
+        return
+    raise target_error(node, kind)
+
+
+def target_compile(sexp, kind):
+    """The one home of what may be bound or deleted, as CPython has it.
+
+    ``kind`` is "assign" (=, for, with-as: names, attributes, subscripts and
+    tuples/lists of them, one starred each), "annotate" and "augassign" (a
+    single name, attribute or subscript) or "delete" (no starred). A bad
+    target is refused at itself, with CPython's message, instead of an AST
+    that compile() rejects.
+    """
+    node = expr_compile(sexp, ast.Del if kind == "delete" else ast.Store)
+    check_target(node, kind)
+    return node
 
 
 def do_p(sexp):
@@ -38,13 +115,18 @@ def assign_compile(sexp):
     [[target], body] = form_parts(sexp, ("target",))
     if not body:
         raise form_error(sexp, "is missing its value")
+    for [i, x] in enumerate(sexp.operands):
+        if isinstance(x, Annotation) and i != 1:
+            raise form_error(
+                x, "takes an annotation only right after one target", "="
+            )
     if isinstance(body[0], Annotation):
         [annotation, *value] = body
         if len(value) > 1:
             raise form_error(sexp, "takes one value after an annotation")
         value_dict = {"value": expr_compile(value[0])} if value else {}
         return ast.AnnAssign(
-            target=expr_compile(target, ctx=ast.Store),
+            target=target_compile(target, "annotate"),
             annotation=expr_compile(annotation),
             simple=int(plain_name_p(target)),
             **value_dict,
@@ -53,7 +135,7 @@ def assign_compile(sexp):
     else:
         [*targets, value] = [target, *body]
         return ast.Assign(
-            targets=list(map(lambda x: expr_compile(x, ctx=ast.Store), targets)),
+            targets=[target_compile(x, "assign") for x in targets],
             value=expr_compile(value),
             **sexp.position_info
         )
@@ -72,7 +154,7 @@ def augassign_compile(sexp):
         map(expr_compile, args),
     )
     return ast.AugAssign(
-        target=expr_compile(target, ast.Store),
+        target=target_compile(target, "augassign"),
         op=op(),
         value=value,
         **sexp.position_info
@@ -84,7 +166,7 @@ def del_compile(sexp):
     if not args:
         raise form_error(sexp, "needs at least one target")
     return ast.Delete(
-        targets=list(map(lambda x: expr_compile(x, ast.Del), args)),
+        targets=[target_compile(x, "delete") for x in args],
         **sexp.position_info
     )
 
@@ -302,7 +384,7 @@ def for_compile(sexp, async_p=False):
         sexp, ("target", ("in", "iterable"))
     )
     return (ast.AsyncFor if async_p else ast.For)(
-        target=expr_compile(target, ast.Store),
+        target=target_compile(target, "assign"),
         iter=expr_compile(iterable),
         body=stmt_list_compile(then),
         orelse=stmt_list_compile(orelse),
@@ -420,8 +502,8 @@ def try_parse(sexp):
             if bare:
                 raise form_error(clause, "has an except after a bare except", "try")
             star = kind == "except*"
-            bare = not (len(clause) > 1 and isinstance(clause[1], Bracket))
             handlers.append(parse_except(clause))
+            bare = handlers[-1].type is None
         else:
             if previous == kind:
                 raise form_error(clause, f"has more than one {kind}", "try")
@@ -464,7 +546,7 @@ def with_items_parse(sexp, form):
                 raise form_error(elt, "has as without a context before it", form)
             if not q:
                 raise form_error(elt, "has as without a target after it", form)
-            rst[-1].optional_vars = expr_compile(q.popleft(), ctx=ast.Store)
+            rst[-1].optional_vars = target_compile(q.popleft(), "assign")
             targeted = True
         else:
             rst.append(ast.withitem(context_expr=expr_compile(elt)))
@@ -595,6 +677,10 @@ def case_parse(case):
             raise form_error(case, "has if without a guard after it")
         guard_dict = {"guard": expr_compile(body[1])}
         body = body[2:]
+        if len(body) and body[0] == "as":
+            raise form_error(
+                body[0], "has as after its guard; as name comes before if", "case"
+            )
     if not body:
         raise form_error(case, "needs a body")
     return ast.match_case(pattern=pattern, **guard_dict, body=stmt_list_compile(body))
@@ -663,7 +749,7 @@ def type_params_parse(glued):
     return rst
 
 
-def def_name_parse(name):
+def def_name_parse(name, form):
     """Name of a def/class and, for ``name[T ...]``, its ``type_params`` keyword.
 
     type_params is passed only when present, so 3.11's constructors never see it.
@@ -674,12 +760,19 @@ def def_name_parse(name):
                 f"{name.head} is not a valid name for a generic definition", name
             )
         return [name.head.name, {"type_params": type_params_parse(name)}]
+    if not plain_name_p(name):
+        raise form_error(name, f"expects a name, got {name}", form)
     return [name.name, {}]
 
 
 def plain_name_p(sexp):
-    """A bare, undotted symbol: what Python accepts as a def/class/type name."""
-    return type(sexp) is Symbol and "." not in sexp.value
+    """A bare, undotted symbol that is no hard keyword: what Python accepts
+    as a def/class/type name."""
+    return (
+        type(sexp) is Symbol
+        and "." not in sexp.value
+        and not reserved_name_p(sexp.name)
+    )
 
 
 def type_alias_p(sexp):
@@ -750,7 +843,7 @@ def definition_parts(sexp, header):
 
 def functiondef_compile(sexp, decorator_list, async_p=False):
     [fnname, args, body] = definition_parts(sexp, "args")
-    [name, type_params] = def_name_parse(fnname)
+    [name, type_params] = def_name_parse(fnname, str(sexp.op))
     if body and isinstance(body[0], Annotation):
         [ann, *body] = body
     else:
@@ -821,7 +914,7 @@ def classdef_args_parse(args):
 
 def classdef_compile(sexp, decorator_list):
     [clsname, args, body] = definition_parts(sexp, "bases")
-    [name, type_params] = def_name_parse(clsname)
+    [name, type_params] = def_name_parse(clsname, str(sexp.op))
     [bases, keywords] = classdef_args_parse(args)
     return ast.ClassDef(
         name=name,
@@ -839,7 +932,7 @@ def classdef_compile(sexp, decorator_list):
 def stmt_compile(sexp, decorator_list=None):
     return (
         expr_wrapper(sexp)
-        if not paren_p(sexp)
+        if not paren_p(sexp) or not len(sexp)
         else do_compile(sexp)
         if do_p(sexp)
         else assign_compile(sexp)

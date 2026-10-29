@@ -32,7 +32,7 @@ SNIPPET = """
 [x for x in xs if x]
 {k v for [k v] in items}
 (match p
-  (case [1 *rest] :if rest ...)
+  (case [1 *rest] if rest ...)
   (case {"a" 1 **kw} ...)
   (case (Point :x 0) ...))
 (try (pass) (except [ValueError as e] (pass)) (finally (pass)))

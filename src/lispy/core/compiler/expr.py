@@ -391,6 +391,11 @@ def t_string_compile(sexp):
 
 
 def paren_compiler(sexp, ctx):
+    # The one place an empty () is compiled, as a statement or an expression.
+    if not len(sexp):
+        raise LispyCompileError(
+            "() is an empty form; use (,) for an empty tuple", sexp
+        )
     return (
         tuple_compile(sexp, ctx)
         if tuple_p(sexp)

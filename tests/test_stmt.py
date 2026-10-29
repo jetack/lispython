@@ -337,6 +337,18 @@ class TestLoopArity:
         assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))
 
 
+def assert_at(err, form, at):
+    """``err`` spans ``at`` (``text@n``: its n-th occurrence) in ``form``,
+    written on line 2 at column 3."""
+    [text, _, nth] = (form if at is None else at).partition("@")
+    index = -1
+    for _ in range(int(nth or 1)):
+        index = form.index(text, index + 1)
+    col = 3 + index
+    assert (err.lineno, err.offset) == (2, col)
+    assert (err.end_lineno, err.end_offset) == (2, col + len(text))
+
+
 class TestFormArity:
     """A malformed statement form is a LispyCompileError naming the problem
     and the form's usage, never an IndexError, AssertionError or an AST that
@@ -454,6 +466,22 @@ class TestFormArity:
             ("(nonlocal)", "(nonlocal ...) needs at least one name", None),
             ("(global a.b)", "(global ...) expects a name, got a.b", "a.b"),
             ("(nonlocal (f))", "(nonlocal ...) expects a name, got (f)", "(f)"),
+            ("(global if)", "(global ...) expects a name, got if", "if"),
+            ("(def f (x) 1)", "(def ...) expects [args] after its name", "(x)"),
+            ("(class C (B))", "(class ...) expects [bases] after its name", "(B)"),
+            ("(def [] [] 1)", "(def ...) expects a name, got []", "[]"),
+            ("(def if [] 1)", "(def ...) expects a name, got if", "if"),
+            ("(class 1 [])", "(class ...) expects a name, got 1", "1"),
+            ("(= ^int 1)", "(= ...) takes an annotation only right after", "^int"),
+            ("(= a b ^int 1)", "(= ...) takes an annotation only right after", "^int"),
+            ("(= x ^int ^str)", "(= ...) takes an annotation only right after", "^str"),
+            (
+                "(match x (case 1 if g as y 3))",
+                "(case ...) has as after its guard",
+                "as@2",
+            ),
+            ("(match x (case 1 as as 2))", "(case ...) expects a name", "as@3"),
+            ("(try (f) (except [E as as] 1))", "(except ...) expects one name", "as"),
         ],
     )
     def test_refused_where_it_is_malformed(self, form, msg, at):
@@ -461,10 +489,46 @@ class TestFormArity:
             stmt_to_dump("(do\n  " + form + ")")
         assert info.value.msg.startswith(msg)
         assert ": (" in info.value.msg[len(msg) :]
-        at = form if at is None else at
-        col = 3 + form.index(at)
-        assert (info.value.lineno, info.value.offset) == (2, col)
-        assert (info.value.end_lineno, info.value.end_offset) == (2, col + len(at))
+        assert_at(info.value, form, at)
+
+    @pytest.mark.parametrize(
+        ("form", "msg", "at"),
+        [
+            ("(= 1 2)", "cannot assign to literal", "1"),
+            ("(= (f) 1)", "cannot assign to function call", "(f)"),
+            ("(= (+ a b) 1)", "cannot assign to expression", "(+ a b)"),
+            ("(= a (f) 1)", "cannot assign to function call", "(f)"),
+            ("(= *a 1)", "starred assignment target must be in a list or tuple", "*a"),
+            ("(= [*a *b] 1)", "multiple starred expressions in assignment", "*b"),
+            ("(= [a 1] 2)", "cannot assign to literal", "1"),
+            (
+                "(= (, a b) ^int 1)",
+                "only single target (not tuple) can be annotated",
+                "(, a b)",
+            ),
+            ("(= (f) ^int 1)", "illegal target for annotation", "(f)"),
+            ("(+= 1 2)", "'literal' is an illegal expression for augmented", "1"),
+            ("(+= [] 1)", "'list' is an illegal expression for augmented", "[]"),
+            ("(del 1)", "cannot delete literal", "1"),
+            ("(del *a)", "cannot delete starred", "*a"),
+            ("(for 1 in xs 2)", "cannot assign to literal", "1"),
+            ("(with [a as 1] 2)", "cannot assign to literal", "1"),
+            ("(raise from)", "from is a Python keyword and cannot be used as", "from"),
+            ("(assert as)", "as is a Python keyword and cannot be used as", "as@2"),
+            ("(= a.if 1)", "if is a Python keyword and cannot be used as", "a.if"),
+            ("(match x (case 1 if if 2))", "if is a Python keyword", "if@2"),
+            ("()", "() is an empty form; use (,) for an empty tuple", "()"),
+            ("(if x ())", "() is an empty form", "()"),
+            ("(if () 1)", "() is an empty form", "()"),
+            ("(f ())", "() is an empty form", "()"),
+            ("(try () (except 1))", "() is an empty form", "()"),
+        ],
+    )
+    def test_bad_target_name_or_empty_form_refused_at_itself(self, form, msg, at):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg.startswith(msg)
+        assert_at(info.value, form, at)
 
     @pytest.mark.parametrize(
         ("lispy", "python"),
@@ -497,6 +561,13 @@ class TestFormArity:
             ("(+= x 1 2)", "x += 1 + 2"),
             ("(del a b)", "del a, b"),
             ("(global a b)", "global a, b"),
+            ("(= x (,))", "x = ()"),
+            ("(= (, a *b) 1)", "a, *b = 1"),
+            ("(= [a (. b c) (sub d 0)] 1)", "[a, b.c, d[0]] = 1"),
+            ("(del (, a b))", "del (a, b)"),
+            ("(for (, a b) in xs (f))", "for a, b in xs:\n    f()"),
+            ("(with [a as (, b c)] (f))", "with a as (b, c):\n    f()"),
+            ("(+= (. a b) 1)", "a.b += 1"),
         ],
     )
     def test_well_formed_forms_compile(self, lispy, python):
