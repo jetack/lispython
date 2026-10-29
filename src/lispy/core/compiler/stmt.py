@@ -183,18 +183,51 @@ def if_stmt_compile(sexp):
     )
 
 
+LOOP_USAGE = {
+    "while": "(while test body...)",
+    "for": "(for target in iterable body...)",
+    "async-for": "(async-for target in iterable body...)",
+}
+
+
+def loop_parse(sexp, header):
+    """Split a while/for form into its header operands, body and else body.
+
+    ``header`` names the operands before the body, in order: ``("test",)``
+    for while, ``("target", "iterable")`` for for, whose optional ``in``
+    before the iterable is skipped. A trailing ``(else ...)`` holds the else
+    body. The one check of a loop's arity: a missing header operand or an
+    empty body (Python has no bodiless loop) is a LispyCompileError at the
+    form, never an IndexError or an AST compile() rejects later.
+    """
+    form = str(sexp.op)
+    usage = LOOP_USAGE[form]
+    q = deque(sexp.operands)
+    parts = []
+    for name in header:
+        if name == "iterable" and len(q) and q[0] == "in":
+            q.popleft()
+        if not q:
+            raise LispyCompileError(
+                f"({form} ...) is missing its {name}: {usage}", sexp
+            )
+        parts.append(q.popleft())
+    body = list(q)
+    orelse = []
+    lastx = body[-1] if body else None
+    if isinstance(lastx, Paren) and len(lastx) and lastx.op == "else":
+        orelse = body.pop().operands
+    if not body:
+        raise LispyCompileError(f"({form} ...) needs a body: {usage}", sexp)
+    return parts, body, orelse
+
+
 def while_p(sexp):
     return str(sexp.op) == "while"
 
 
 def while_compile(sexp):
-    [_, test, *body] = sexp.list
-    lastx = body[-1]
-    [then, orelse] = (
-        [body[:-1], lastx.operands]
-        if isinstance(lastx, Paren) and lastx.op == "else"
-        else [body, []]
-    )
+    [[test], then, orelse] = loop_parse(sexp, ("test",))
     return ast.While(
         test=expr_compile(test),
         body=stmt_list_compile(then),
@@ -208,17 +241,7 @@ def for_p(sexp):
 
 
 def for_compile(sexp, async_p=False):
-    body = deque(sexp.operands)
-    target = body.popleft()
-    if body[0] == "in":
-        body.popleft()
-    iterable = body.popleft()
-    lastx = body[-1]
-    [then, orelse] = (
-        [list(body)[:-1], lastx.operands]
-        if isinstance(lastx, Paren) and lastx.op == "else"
-        else [body, []]
-    )
+    [[target, iterable], then, orelse] = loop_parse(sexp, ("target", "iterable"))
     return (ast.AsyncFor if async_p else ast.For)(
         target=expr_compile(target, ast.Store),
         iter=expr_compile(iterable),
