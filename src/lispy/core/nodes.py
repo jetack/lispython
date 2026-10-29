@@ -56,6 +56,40 @@ def contains_unquote(node):
     return False
 
 
+_POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
+
+
+def fill_missing_positions(node, position_info):
+    """Give every node in ``node`` that has no position (lineno 0) this one.
+
+    A macro builds its expansion at run time from quasiquote templates, so
+    those nodes carry the Node default (lineno 0) and the Python code compiled
+    from them would report line 0. The expander passes the macro call's
+    position, so tracebacks and compile errors point at the call. A node that
+    has a position (an unquoted argument the user wrote) keeps its own.
+    Descends every Node attribute, so f-string fields and their format specs,
+    wrappers, quotes and glued heads are covered alike; ``seen`` guards nodes
+    shared between places in the expansion.
+    """
+    seen = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, list):
+            stack.extend(current)
+            continue
+        if not isinstance(current, Node) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if not current.lineno:
+            # Set the node's own attributes: Wrapper.update_dict delegates to
+            # the wrapped value, which may already have a position.
+            for key in _POSITION_KEYS:
+                current.__dict__[key] = position_info[key]
+        stack.extend(vars(current).values())
+    return node
+
+
 def data_to_generator_expression(data):
     if isinstance(data, bool) or data is None:
         return Constant(str(data))

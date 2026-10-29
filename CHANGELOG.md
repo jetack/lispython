@@ -6,7 +6,23 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The nREPL `eval` op reads the standard `file`, `line` and `column` fields
+  (where the code sits in the editor's buffer, 1-based). Tracebacks and
+  compile errors then name that file with buffer line numbers and print the
+  source line, including for definitions evaluated in earlier requests and
+  for `load-file`. An eval without `file` is named `<nrepl-N>` (a new N per
+  eval) instead of `<nrepl>`. An invalid `line` or `column` (not an integer
+  of at least 1) gets an `error` reply with the request id.
+
 ### Fixed
+
+- Code a macro builds (from a quasiquote template) takes the position of the
+  macro call, so a traceback or compile error in it points at that call
+  instead of line 0; arguments written by the user keep their own positions.
+- nREPL eval tracebacks no longer include the server's own `nrepl-eval`
+  frame.
 
 - The nREPL server buffers bytes and decodes each complete line, so a
   multi-byte UTF-8 character split across two socket reads no longer drops

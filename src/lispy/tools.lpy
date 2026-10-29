@@ -7,8 +7,10 @@
 (import importlib)
 (import inspect)
 (import io)
+(import itertools)
 (import json)
 (import keyword)
+(import linecache)
 (import os)
 (import os.path as osp)
 (import runpy)
@@ -418,8 +420,66 @@
         (traceback.print_exc)
         (print "====================================")))))
 
-(def nrepl-eval [src scope :filename "<nrepl>"]
-  "Evaluate LisPython source, capturing stdout/stderr and return value."
+(= _NREPL-EVAL-IDS (itertools.count 1))  ; names "<nrepl-N>" for file-less evals
+(= _NREPL-LINECACHE-LOCK (threading.Lock))  ; clients are served on threads
+
+(def _nrepl-buffer-position [value name]
+  "value as a 1-based buffer line or column; ValueError unless an int >= 1."
+  (if (or (not (isinstance value int)) (isinstance value bool) (< value 1))
+      (raise (ValueError (+ name " must be an integer >= 1, got " (repr value)))))
+  (return value))
+
+(def _nrepl-register-source [filename padded line whole-file]
+  "Make linecache show padded (source padded to its buffer position) for
+  filename, so a traceback prints the user's source lines.
+
+  mtime None keeps the entry through linecache.checkcache.  An eval of a
+  region overlays its lines onto what is known of that file (the cached
+  entry, else the file on disk): separate requests evaluate separate
+  definitions of one buffer, and a traceback through several of them must
+  show every line.  whole-file (load-file) replaces the entry, dropping lines
+  a shorter file no longer has."
+  (= lines [(+ l "\n") for l in (.split padded "\n")])
+  (if (.endswith padded "\n")
+      (lines.pop))
+  (with [_NREPL-LINECACHE-LOCK]
+    (if whole-file
+        (= merged lines)
+        (do (= start (- line 1))
+            (= region (sub lines [: start None]))
+            (= end (+ start (len region)))
+            (= merged (list (linecache.getlines filename)))
+            (while (< (len merged) end)
+              (merged.append "\n"))
+            (= (sub merged [: start end]) region)))
+    (= (sub linecache.cache filename)
+       (, (sum (map len merged)) None merged filename))))
+
+(def _nrepl-format-exception [e]
+  "The traceback of e without nrepl-eval's own frame: it starts at the
+  user's code (or at the compiler, for a crash while compiling)."
+  (= tb e.__traceback__)
+  (while (and (is-not tb None) (is tb.tb_frame.f_code nrepl-eval.__code__))
+    (= tb tb.tb_next))
+  (return (.rstrip (.join "" (traceback.format-exception (type e) e tb)))))
+
+(def nrepl-eval [src scope :filename None :line 1 :column 1 :whole-file False]
+  "Evaluate LisPython source, capturing stdout/stderr and return value.
+
+  filename, line and column say where src sits in the editor's buffer (the
+  1-based position of its first character, nREPL's file/line/column eval
+  fields); without a filename the source gets a fresh <nrepl-N> name.  The
+  source is padded to that position before parsing, so compile errors,
+  tracebacks and linecache all use buffer lines and columns.  whole-file
+  marks src as the entire file (load-file).  Raises ValueError for an
+  invalid filename, line or column; every other failure is the result's
+  error."
+  (_nrepl-buffer-position line "line")
+  (_nrepl-buffer-position column "column")
+  (if (is filename None)
+      (= filename (+ "<nrepl-" (str (next _NREPL-EVAL-IDS)) ">")))
+  (if (not (isinstance filename str))
+      (raise (ValueError (+ "file must be a string, got " (repr filename)))))
   (= result {"value" None "stdout" "" "error" None})
   (= stdout-capture (io.StringIO))
   (= stderr-capture (io.StringIO))
@@ -428,9 +488,11 @@
   (try
     (= sys.stdout stdout-capture)
     (= sys.stderr stderr-capture)
+    (= padded (+ (* "\n" (- line 1)) (* " " (- column 1)) src))
+    (_nrepl-register-source filename padded line whole-file)
     ;; Compile every statement before running any (see eval-and-print).
-    (with [(compile-errors filename src)]
-      (= stl (macroexpand-then-compile (parse src) scope))
+    (with [(compile-errors filename padded)]
+      (= stl (macroexpand-then-compile (parse padded) scope))
       (= codes [(ife (isinstance st ast.Expr)
                      (, eval (compile (ast.Expression :body st.value) filename "eval"))
                      (, exec (compile (ast.Module :body [st] :type-ignores [])
@@ -448,7 +510,7 @@
     (except [SystemExit as e]
       (= (sub result "error") (+ "SystemExit: " (str e.code))))
     (except [Exception as e]
-      (= (sub result "error") (.rstrip (traceback.format-exc))))
+      (= (sub result "error") (_nrepl-format-exception e)))
     (finally
       (= sys.stdout old-stdout)
       (= sys.stderr old-stderr)))
@@ -459,13 +521,14 @@
   (return result))
 
 (def nrepl-load-file [file-path scope]
-  "Load a .lpy file into the REPL scope."
+  "Load a .lpy file into the REPL scope; its traceback lines come from this
+  text, replacing any regions evaluated from the file earlier."
   (= script-dir (osp.dirname (osp.abspath file-path)))
   (if (not (in script-dir sys.path))
       (sys.path.insert 0 script-dir))
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (nrepl-eval src scope :filename file-path)))
+  (return (nrepl-eval src scope :filename file-path :whole-file True)))
 
 (def nrepl-macroexpand [src scope]
   "Macroexpand LisPython source and return the expanded s-expression."
@@ -733,7 +796,14 @@
   or when a handler fails; the caller turns that into an error reply."
   (= op (.get msg "op" "eval"))
   (cond (== op "eval")
-        (do (= result (nrepl-eval (sub msg "code") scope))
+        ;; file/line/column: where code sits in the client's buffer; a missing
+        ;; or null field takes nrepl-eval's default.
+        (do (= line (.get msg "line"))
+            (= column (.get msg "column"))
+            (= result (nrepl-eval (sub msg "code") scope
+                                  :filename (.get msg "file")
+                                  :line (ife (is line None) 1 line)
+                                  :column (ife (is column None) 1 column)))
             (= (sub result "op") "eval-result")
             (return result))
 

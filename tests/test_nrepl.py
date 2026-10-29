@@ -4,6 +4,9 @@ The handler is driven with a fake connection whose recv returns fixed byte
 chunks, so where a read boundary falls is deterministic."""
 
 import json
+import linecache
+import re
+import sys
 
 import pytest
 
@@ -202,3 +205,124 @@ def test_sendall_socket_error_ends_quietly(error):
     tools._nrepl_handle_client(conn, ("127.0.0.1", 0), {})
     assert conn.closed
     assert conn.sent == []
+
+
+# --- eval errors point at the client's buffer --------------------------------
+#
+# An eval request carries the buffer's file and the line/column of the code's
+# first character; tracebacks and compile errors must name those, show the
+# source line, and leave out the server's own frames.
+
+
+@pytest.fixture(autouse=True)
+def isolated_linecache(monkeypatch):
+    """Every eval registers its source in linecache; drop it after the test."""
+    monkeypatch.setattr(linecache, "cache", dict(linecache.cache))
+
+
+@pytest.fixture
+def isolated(monkeypatch):
+    """A fresh scope; sys.path changes (load-file) end with the test."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}
+    tools.nrepl_eval("(require lispy.macros *)", scope)
+    return scope
+
+
+def dispatch(scope, **msg):
+    return tools._nrepl_dispatch({"op": "eval", **msg}, scope)
+
+
+UPDATE = "(def update [xs]\n  (return (sub xs [0])))"
+SOLUTION = "(def solution [xs]\n  (return (update xs)))"
+
+
+def assert_clean_traceback(error):
+    assert error.startswith("Traceback (most recent call last):")
+    assert "tools.lpy" not in error
+    assert "line 0," not in error
+    assert error.endswith(
+        "TypeError: list indices must be integers or slices, not list"
+    )
+
+
+def frame(path, lineno, name, source):
+    return f'File "{path}", line {lineno}, in {name}\n    {source}\n'
+
+
+def test_eval_traceback_names_buffer_file_lines_and_source(isolated, tmp_path):
+    path = str(tmp_path / "unsaved.lpy")  # never written: an unsaved buffer
+    code = f"{UPDATE}\n{SOLUTION}\n(-> [1 2] solution print)"
+    error = dispatch(isolated, code=code, file=path, line=90)["error"]
+    assert_clean_traceback(error)
+    assert frame(path, 94, "<module>", "(-> [1 2] solution print)") in error
+    assert frame(path, 93, "solution", "(return (update xs)))") in error
+    assert frame(path, 91, "update", "(return (sub xs [0])))") in error
+
+
+def test_separate_evals_of_one_file_all_show_their_source(isolated, tmp_path):
+    path = str(tmp_path / "unsaved.lpy")
+    assert dispatch(isolated, code=UPDATE, file=path, line=90)["error"] is None
+    assert dispatch(isolated, code=SOLUTION, file=path, line=140)["error"] is None
+    error = dispatch(isolated, code="(solution [1 2])", file=path, line=200)["error"]
+    assert_clean_traceback(error)
+    assert frame(path, 200, "<module>", "(solution [1 2])") in error
+    assert frame(path, 141, "solution", "(return (update xs)))") in error
+    assert frame(path, 91, "update", "(return (sub xs [0])))") in error
+
+
+def test_evals_without_file_get_distinct_names_and_show_source(isolated):
+    assert dispatch(isolated, code=UPDATE)["error"] is None
+    error = dispatch(isolated, code="(update [1 2])")["error"]
+    assert_clean_traceback(error)
+    frames = re.findall(r'File "(<nrepl-\d+>)", line (\d+), in \S+\n    (.*)', error)
+    [[module_file, *module_frame], [def_file, *def_frame]] = frames
+    assert module_file != def_file
+    assert module_frame == ["1", "(update [1 2])"]
+    assert def_frame == ["2", "(return (sub xs [0])))"]
+
+
+def test_compile_error_reports_buffer_line_and_column(isolated, tmp_path):
+    path = str(tmp_path / "unsaved.lpy")
+    error = dispatch(isolated, code="(return 1)", file=path, line=7, column=5)
+    assert error["error"].startswith(f"{path}:7:5: error: ")
+    assert error["error"].endswith("\n    (return 1)\n    ^")
+    code = "(+ 1 2)\n  (return 1)"
+    error = dispatch(isolated, code=code, file=path, line=10, column=5)
+    assert error["error"].startswith(f"{path}:11:3: error: ")
+
+
+def test_load_file_traceback_and_replaces_earlier_evals(isolated, tmp_path):
+    path = tmp_path / "prog.lpy"
+    path.write_text(f"{UPDATE}\n(update [1 2])\n")
+    stale = "(= a 1)\n(= b 2)\n(= c 3)\n(= d 4)\n;; stale"
+    assert dispatch(isolated, code=stale, file=str(path), line=1)["error"] is None
+    reply = tools._nrepl_dispatch({"op": "load-file", "path": str(path)}, isolated)
+    error = reply["error"]
+    assert_clean_traceback(error)
+    assert frame(path, 3, "<module>", "(update [1 2])") in error
+    assert frame(path, 2, "update", "(return (sub xs [0])))") in error
+    assert linecache.getlines(str(path)) == path.read_text().splitlines(True)
+
+
+@pytest.mark.parametrize(
+    ["field", "value"],
+    [["line", 0], ["line", "x"], ["line", True], ["column", 0], ["column", 1.0]],
+)
+def test_invalid_position_replies_with_error_and_keeps_serving(field, value):
+    request = line(op="eval", id=9, code="1", **{field: value})
+    replies = serve([request + line(op="ping", id=10)])
+    assert replies == [
+        {
+            "op": "error",
+            "error": f"ValueError: {field} must be an integer >= 1, got {value!r}",
+            "id": 9,
+        },
+        {"op": "pong", "id": 10},
+    ]
+
+
+def test_null_position_fields_take_the_defaults():
+    request = line(op="eval", id=1, code="(+ 1 2)", file=None, line=None, column=None)
+    [reply] = serve([request])
+    assert (reply["value"], reply["error"]) == ("3", None)

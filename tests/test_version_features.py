@@ -205,7 +205,9 @@ class TestEntryPoints:
 
     def test_nrepl_eval(self):
         result = tools.nrepl_eval(GATED_SRC, {"__macro_namespace": {}})
-        assert result["error"] == expected_report("<nrepl>").rstrip("\n")
+        # A file-less eval is named <nrepl-N>, N counting evals.
+        error = re.sub(r"^<nrepl-\d+>:", "<nrepl>:", result["error"])
+        assert error == expected_report("<nrepl>").rstrip("\n")
 
     def test_lsp_reads_the_position(self):
         # lispy.lsp re-exports the server *object* as ``server``; take the module.
@@ -929,8 +931,9 @@ class TestCompilerSyntaxErrors:
 
     def test_nrepl_eval(self):
         result = tools.nrepl_eval(RETURN_SRC, {"__macro_namespace": {}})
-        assert result["error"] == (
-            "<nrepl>:2:3: error: 'return' outside function\n  (return 1)\n  ^"
+        assert re.fullmatch(
+            r"<nrepl-\d+>:2:3: error: 'return' outside function\n  \(return 1\)\n  \^",
+            result["error"],
         )
 
     def test_nothing_runs_before_a_compile_error(self):

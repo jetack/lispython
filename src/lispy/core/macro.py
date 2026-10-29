@@ -98,9 +98,13 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
         elif str(op) == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
+            call_position = sexp.position_info
             sexp = scope["__macro_namespace"][str(op)](*[_unwrap_literal(o) for o in operands])
             if not isinstance(sexp, Node):
                 sexp = data_to_generator_expression(sexp)
+            # Template-built nodes have no position; give them the call's, so
+            # tracebacks and compile errors point at the macro call, not line 0.
+            fill_missing_positions(sexp, call_position)
             expanded = True
         else:
             expanded_list, expanded_feedbacks = zip(
