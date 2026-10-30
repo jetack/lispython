@@ -347,7 +347,6 @@ def _scope_children(node, count, genexp):
     here = (count, genexp)
     if isinstance(node, features.type_alias_classes()):
         return [
-            (node.name, *here),
             *((child, *own) for child in node.type_params),
             (node.value, *own),
         ]
