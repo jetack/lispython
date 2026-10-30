@@ -346,7 +346,8 @@ def test_a_plain_slot_reaching_a_form_list_keeps_its_data_raw(order):
     p.list.append(1)
     q = Paren(Symbol("h"))
     q.extra = p.list
-    tree = Paren(Symbol("g"), *((p, q) if order == "form-first" else (q, p)))
+    # The stack is LIFO: the last child is visited first.
+    tree = Paren(Symbol("g"), *((q, p) if order == "form-first" else (p, q)))
     copy = macro_expansion_nodes(tree, call_at(POSITION))
     [copied_p] = [n for n in copy.list[1:] if n.list[0] == "f"]
     [copied_q] = [n for n in copy.list[1:] if n.list[0] == "h"]

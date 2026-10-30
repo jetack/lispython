@@ -205,7 +205,8 @@ def macro_expansion_nodes(expansion, call):
     # the root, whichever memo the copy goes to. Meeting
     # one again is a self-reference, not sharing, and wiring its copy in
     # would make the copy a cycle that later passes recurse through forever.
-    # One set serves both, as the ids of live objects are distinct.
+    # One set serves all of these kinds, as the ids of live objects are
+    # distinct.
     active = set()
 
     def self_reference(value):
@@ -310,7 +311,8 @@ def macro_expansion_nodes(expansion, call):
             is_form = isinstance(value, Expression)
             # ⚠️ The other slots go below the list's exit marker, so they are
             # copied once the list has left the path: a sibling slot reaching
-            # the node's own list (p.orig = p.list) is sharing, not a cycle.
+            # the node's own list (p.orig = p.list) is not a cycle; it gets
+            # its own plain copy.
             stack.extend((attrs, k) for k in attrs if not (is_form and k == "list"))
             source = sources.get(id(value))
             if source is not None:
