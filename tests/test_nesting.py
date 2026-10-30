@@ -344,13 +344,14 @@ def test_the_check_refuses_exactly_what_compile_rejects(make):
         [sys.executable, "-c", EXACT_BOUNDARY, make],
         capture_output=True,
         text=True,
-        check=True,
+        timeout=120,
     )
+    assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["RecursionError", "compiled", "refused"]
 
 
 @pytest.mark.parametrize("bound", [True, False])
-def test_the_check_follows_the_probe(bound, scope, monkeypatch):
+def test_the_check_follows_the_version_comparison(bound, scope, monkeypatch):
     monkeypatch.setattr(
         features, "compile_depth_follows_recursion_limit", lambda: bound
     )
