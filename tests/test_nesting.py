@@ -33,6 +33,7 @@ from lispy.core.nodes import (
     contains_unquote,
 )
 from lispy.core.parser import parse
+from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
 NESTING_MESSAGE = nesting_error(Symbol("x")).msg
@@ -646,6 +647,7 @@ from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
+from lispy.core.utils import trampoline
 
 def outcome(src):
     try:
@@ -864,3 +866,45 @@ def test_contains_unquote_visits_a_shared_node_once(unquote):
     leaf = Unquote(Symbol("x")) if unquote else Symbol("x")
     found = contains_unquote(nest(lambda e: Paren(e, e), 60, leaf))
     assert found is unquote
+
+
+def test_the_trampoline_runs_steps_as_recursion_would():
+    log = []
+
+    def leaf(n):
+        if n == 0:
+            raise ValueError("leaf")
+        return n
+        yield
+
+    def step(depth):
+        # A non-generator is its own result; a generator is run.
+        assert (yield 7) == 7
+        if depth == 0:
+            return (yield leaf(1)) + (yield leaf(1))
+        try:
+            return 1 + (yield step(depth - 1))
+        finally:
+            log.append(depth)
+
+    def catching():
+        try:
+            yield leaf(0)
+        except ValueError as err:
+            return f"caught {err}"
+
+    assert trampoline(step(DEPTH)) == DEPTH + 2
+    assert log == list(range(1, DEPTH + 1))
+    assert trampoline(catching()) == "caught leaf"
+    assert trampoline("done") == "done"
+    log.clear()
+
+    def failing(depth):
+        try:
+            return (yield failing(depth - 1)) if depth else (yield leaf(0))
+        finally:
+            log.append(depth)
+
+    with pytest.raises(ValueError):
+        trampoline(failing(DEPTH))
+    assert log == list(range(DEPTH + 1))
