@@ -205,10 +205,9 @@ def attribute_p(sexp):
 
 
 def attribute_compile(sexp, ctx):
-    [[value], attrs] = form_parts(sexp, ("value",))
-    if not attrs:
-        # (. x) is x itself: its target context must reach the name home.
-        return expr_compile(value, ctx)
+    # Python has no attribute access without an attribute: (. x) is refused.
+    [[value, first_attr], more_attrs] = form_parts(sexp, ("value", "attr"))
+    attrs = [first_attr, *more_attrs]
     rst = expr_compile(value, ast.Load)
     position_info = {**sexp.position_info}
     for [i, attr] in enumerate(attrs):

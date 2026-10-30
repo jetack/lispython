@@ -830,14 +830,13 @@ class TestClassBases:
 
 
 class TestAnnotatedAssignmentSimple:
-    """AnnAssign.simple follows the compiled target: (. a) and (sub a) are the
-    name a, recorded in __annotations__ like a bare a."""
+    """AnnAssign.simple follows the compiled target: (sub a) is the name a,
+    recorded in __annotations__ like a bare a."""
 
     @pytest.mark.parametrize(
         ("lispy", "simple"),
         [
             ("(= a ^int 1)", 1),
-            ("(= (. a) ^int 1)", 1),
             ("(= (sub a) ^int 1)", 1),
             ("(= (. a b) ^int 1)", 0),
             ("(= (sub a 1) ^int 1)", 0),
@@ -849,4 +848,8 @@ class TestAnnotatedAssignmentSimple:
         assert node.simple == simple
 
     def test_wrapped_name_is_annotated_as_the_name(self):
-        assert stmt_to_dump("(= (. a) ^int 1)") == ast.dump(ast.parse("a: int = 1"))
+        assert stmt_to_dump("(= (sub a) ^int 1)") == ast.dump(ast.parse("a: int = 1"))
+
+    def test_one_operand_attribute_target_is_refused(self):
+        with pytest.raises(LispyCompileError, match="missing its attr"):
+            stmt_to_dump("(= (. a) ^int 1)")

@@ -63,7 +63,7 @@ def assign_compile(sexp):
         return ast.AnnAssign(
             target=target_node,
             annotation=expr_compile(annotation),
-            # Decided on the compiled target: (. a) and (sub a) compile to the
+            # Decided on the compiled target: (sub a) compiles to the
             # name a, which Python records in __annotations__ like a bare a.
             simple=int(isinstance(target_node, ast.Name)),
             **value_dict,
