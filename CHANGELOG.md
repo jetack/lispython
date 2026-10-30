@@ -110,11 +110,18 @@ follows [Semantic Versioning](https://semver.org/).
   instead of an `IndexError`, `ValueError` or `AttributeError` or an AST
   that means something else: a dangling `:attr` (`(P :x)`), a positional
   pattern after a keyword one (`(P :x 1 2)`, which compiled to `P(2, x=1)`),
-  a mapping key without a pattern (`{"a"}`), `**rest` not last or not a name
-  (`{**r 1}`, `{**_}`), a key that is no literal or dotted name (`{a 1}`),
-  a second `*rest` (`[*a *b]`), `*rest` outside a sequence (`(case *a ...)`),
-  `(| 1)`, a class pattern head that is no name (`(1)`, `((f) 1)`), a `()`
-  that is no call (`(+ 1 2)`, `(, a b)`, `f"x"`), `...` and a keyword.
+  a mapping key without a pattern (`{"a"}`), `**rest` not last (`{**r 1}`),
+  `**_` (the rest must be a capture name), a key that is no literal or
+  dotted name (`{a 1}`), a second `*rest` (`[*a *b]`), `*rest` outside a
+  sequence (`(case *a ...)`), `(| 1)`, a class pattern head that is no name
+  (`(1)`, `((f) 1)`), a `()` that is no call (`(+ 1 2)`, `(, a b)`,
+  `f"x"`), `...` and a `:x` keyword token as a pattern.
+- A name after `*`, `**` or `:` in a case pattern that is no Python
+  identifier (`[*1a]`, `{**1a}`, `(P :1a 2)`) is a compile error instead of
+  an AST naming `1a`.
+- A malformed dotted name in a case pattern (`.x`, `a..b`, `x.`), as a value
+  pattern, a mapping key or a class pattern head, is a compile error instead
+  of an attribute with an empty name.
 
 ### Changed
 
@@ -148,6 +155,13 @@ follows [Semantic Versioning](https://semver.org/).
   pattern, compared with `==` as in Python. It compiled to a capture pattern
   that matched every subject, so code that relied on that now falls through
   to the next case.
+- A `()` in a case pattern whose head is an expression form (`(sub x)`,
+  `(ife a b c)`, `(is-not x)`, `(not-in x)`) is a compile error ("pattern
+  expected") instead of a class pattern on a class of that name.
+- A sign before anything but a number in a case pattern (`(- a)`, `{-a 1}`)
+  reports "pattern can sign only a number literal, got (- a)" with the
+  pattern usage, instead of "only a number literal can be signed in a match
+  pattern".
 
 ## [0.5.0]
 
