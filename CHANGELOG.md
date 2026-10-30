@@ -52,9 +52,9 @@ follows [Semantic Versioning](https://semver.org/).
 - The operand after `^`, `*`, `**` or `:` keeps its own token type, so `*1`,
   `**1`, `:1` and `^1` read a number `1` instead of a symbol named `1`. A
   keyword with a number or other non-name after it (`(f :1 x)`, `(def g [:1
-  2] ...)`) is a compile error at it, a bare `:1` or `:a` used as a value
-  (`(= x :1)`) is a compile error instead of a raw `AttributeError` (or, for
-  `:a`, silently the name `a`), and a trailing `:a` with no value in a call,
+  2] ...)`) is a compile error at it, a bare `:a` or `**x` used as a value
+  (`(= x :a)`, `[**1]`) is a compile error instead of silently the name `a`
+  (or a raw `AttributeError`), and a trailing `:a` with no value in a call,
   def or class argument list is a compile error instead of a raw `IndexError`.
 - `~x` or `~@x` outside a quasiquote is a compile error at it (`~ (unquote)
   is only allowed inside a quasiquote`) instead of a raw `ValueError`.

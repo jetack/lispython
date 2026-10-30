@@ -75,8 +75,8 @@ class TestNumberAfterPrefix:
             ("(def g [**1] 1)", "expected a name, got 1", 11),
             ("(lambda [*1] 1)", "expected a name, got 1", 11),
             ("(class A [:1 2] 1)", "expected a name, got 1", 12),
-            ("(= x :1)", ":1 is a keyword argument or parameter name", 6),
-            ("(with [x :1] 1)", ":1 is a keyword argument or parameter name", 10),
+            ("(= x :1)", ":1 is only valid before a value", 6),
+            ("(with [x :1] 1)", ":1 is only valid before a value", 10),
         ],
     )
     def test_refused_at_the_operand_or_prefix(self, src, msg, col):
@@ -86,8 +86,24 @@ class TestNumberAfterPrefix:
         assert (info.value.lineno, info.value.offset) == (1, col)
 
     @pytest.mark.parametrize(
+        ("src", "msg", "col"),
+        [
+            ("(= x :a)", ":a is only valid before a value", 6),
+            ("(del :a)", ":a is only valid before a value", 6),
+            ("(f :a :b 1)", ":b is only valid before a value", 7),
+            ("[**1]", "**1 is only valid in a call, a dict", 2),
+            ("(= x **a)", "**a is only valid in a call, a dict", 6),
+        ],
+    )
+    def test_bare_prefixed_operand_refused(self, src, msg, col):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump(src)
+        assert info.value.msg.startswith(msg)
+        assert (info.value.lineno, info.value.offset) == (1, col)
+
+    @pytest.mark.parametrize(
         ("src", "py"),
-        [("(f *1)", "f(*1)"), ("(f **1)", "f(**1)"), ("[*1]", "[*1]")],
+        [("(def g [a ^1] 1)", "def g(a: 1):\n    1"), ("(f *1)", "f(*1)"), ("(f **1)", "f(**1)"), ("[*1]", "[*1]")],
     )
     def test_star_of_a_number_compiles(self, src, py):
         assert src_to_python_org(src) == py

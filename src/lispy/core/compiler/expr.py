@@ -30,12 +30,13 @@ def starred_compile(sexp, ctx):
     )
 
 
-def keyword_misuse(sexp):
-    """A ``:name`` reached expr_compile, so no call, def, class or pattern
-    consumed it with a value: it is no value of its own."""
+def prefix_misuse(sexp):
+    """A ``:name`` or ``**x`` reached expr_compile, so no call, def, class,
+    dict or pattern consumed it: it is no value of its own."""
     raise LispyCompileError(
-        f"{sexp} is a keyword argument or parameter name, not a value;"
-        " it needs a value after it in a call, def or class",
+        f"{sexp} is only valid before a value in a call, def or class"
+        if keyword_arg_p(sexp)
+        else f"{sexp} is only valid in a call, a dict or a parameter list",
         sexp,
     )
 
@@ -723,8 +724,8 @@ def expr_compile(sexp, ctx=ast.Load):
             if string_p(sexp)
             else metaindicator_compile(sexp)
             if metaindicator_p(sexp)
-            else keyword_misuse(sexp)
-            if keyword_arg_p(sexp)
+            else prefix_misuse(sexp)
+            if keyword_arg_p(sexp) or doublestarred_p(sexp)
             else name_compile(sexp, ctx)
         )
     except RecursionError:
