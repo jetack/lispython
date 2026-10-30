@@ -1,4 +1,5 @@
 import ast
+import enum
 
 import pytest
 
@@ -165,6 +166,139 @@ class TestSignedLiteralPatterns:
             stmt_to_dump(f"(match x\n  (case {pattern} ...))")
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == (2, 9)
+
+
+SEQ = "sequence pattern"
+MAP = "mapping pattern"
+CLS = "class pattern"
+
+
+class TestMalformedPatterns:
+    """A malformed case pattern is a LispyCompileError at the sub-form at
+    fault, never a raw IndexError/ValueError/AttributeError from building the
+    AST, nor an AST that compiles to something else."""
+
+    @pytest.mark.parametrize(
+        ("pattern", "msg", "at"),
+        [
+            ("(P :x)", f"{CLS} has :x without a pattern after it", ":x"),
+            ("(P 1 :x)", f"{CLS} has :x without a pattern after it", ":x"),
+            ("(P :x :y 1)", f"{CLS} has :x without a pattern after it", ":x"),
+            ("(P :x 1 2)", f"{CLS} has 2 after a keyword pattern", "2"),
+            ("(P :x.y 1)", f"{CLS} expects an attribute name after :, got x.y", ":x.y"),
+            ("(P :if 1)", f"{CLS} expects an attribute name after :, got if", ":if"),
+            ("(P :1 a)", f"{CLS} expects an attribute name after :, got 1", ":1"),
+            ("(1)", f"{CLS} needs a class name, got 1", "1"),
+            ("((f) 1)", f"{CLS} needs a class name, got (f)", "(f)"),
+            ('("s" 1)', f'{CLS} needs a class name, got "s"', '"s"'),
+            ("(:x 1)", f"{CLS} needs a class name, got :x", ":x"),
+            ('{"a"}', f'{MAP} has key "a" without a pattern after it', '"a"'),
+            ("{1 2 3}", f"{MAP} has key 3 without a pattern after it", "3"),
+            ("{**r 1}", f"{MAP} has **r before its end", "**r"),
+            ('{**r "a" 1}', f"{MAP} has **r before its end", "**r"),
+            ("{**r **s}", f"{MAP} has **r before its end", "**r"),
+            ("{**_}", f"{MAP} expects a name after **, got _", "**_"),
+            ("{**1}", f"{MAP} expects a name after **, got 1", "**1"),
+            ("{**x.y}", f"{MAP} expects a name after **, got x.y", "**x.y"),
+            ("{a 1}", f"{MAP} expects a literal or dotted name as a key, got a", "a@3"),
+            ("{(f) 1}", f"{MAP} expects a literal or dotted name as a key", "(f)"),
+            ("{... 1}", f"{MAP} expects a literal or dotted name as a key", "..."),
+            ("[*a *b]", f"{SEQ} has more than one *rest, got *b", "*b"),
+            ("[*a b *c]", f"{SEQ} has more than one *rest, got *c", "*c"),
+            ("[*(f)]", f"{SEQ} expects a name after *, got (f)", "*(f)"),
+            ("[*x.y]", f"{SEQ} expects a name after *, got x.y", "*x.y"),
+            ("[*if]", f"{SEQ} expects a name after *, got if", "*if"),
+            ("[*1]", f"{SEQ} expects a name after *, got 1", "*1"),
+            ("*a", "pattern can be *rest only in a sequence pattern", "*a"),
+            ("*1", "pattern can be *rest only in a sequence pattern", "*1"),
+            ("(| *a 1)", "pattern can be *rest only in a sequence pattern", "*a"),
+            ("{1 *a}", "pattern can be *rest only in a sequence pattern", "*a"),
+            ("(P *a)", "pattern can be *rest only in a sequence pattern", "*a"),
+            ("(P :x *a)", "pattern can be *rest only in a sequence pattern", "*a"),
+            ("(P **k)", "pattern can be **rest only last in a mapping", "**k"),
+            ("[**k]", "pattern can be **rest only last in a mapping", "**k"),
+            ("(|)", "(| ...) needs at least two patterns", "(|)"),
+            ("(| 1)", "(| ...) needs at least two patterns", "(| 1)"),
+            (":x", "pattern expected, got :x", ":x"),
+            ("[:x]", "pattern expected, got :x", ":x"),
+            ("...", "pattern expected, got ...", "..."),
+            ("(+ 1 2)", "pattern expected, got (+ 1 2)", "(+ 1 2)"),
+            ("(, a b)", "pattern expected, got (, a b)", "(, a b)"),
+            ("(. a b)", "pattern expected, got (. a b)", "(. a b)"),
+            ("(~ 1)", "pattern expected, got (~ 1)", "(~ 1)"),
+            ('f"x"', "pattern expected, got (f-string", 'f"x"'),
+            ("[(+ 1 2)]", "pattern expected, got (+ 1 2)", "(+ 1 2)"),
+        ],
+    )
+    def test_refused_where_it_is_malformed(self, pattern, msg, at):
+        form = f"(match x (case {pattern} 1))"
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg.startswith(msg)
+        assert ": " in info.value.msg[len(msg) :]
+        assert_at(info.value, form, at)
+
+    @pytest.mark.parametrize(
+        ("pattern", "at"),
+        [("if", "if"), ("[if]", "if"), ("a.if", "a.if"), ("(a.if 1)", "a.if")],
+    )
+    def test_keyword_name_refused_at_itself(self, pattern, at):
+        form = f"(match x (case {pattern} 1))"
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg == "if is a Python keyword and cannot be used as a name"
+        assert_at(info.value, form, at)
+
+    def test_message_quotes_the_pattern_usage(self):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(match x (case (P :x) 1))")
+        assert info.value.msg == (
+            "class pattern has :x without a pattern after it: "
+            "(Class pattern... :attr pattern...), positional patterns first"
+        )
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ("a.b", "a.b"),
+            ("a.b.c", "a.b.c"),
+            ("(P :x 1)", "P(x=1)"),
+            ("(P a :x 1)", "P(a, x=1)"),
+            ("(P a :x 1 :y [b])", "P(a, x=1, y=[b])"),
+            ("(a.b 1)", "a.b(1)"),
+            ("(P)", "P()"),
+            ("[*a b]", "[*a, b]"),
+            ("[*_]", "[*_]"),
+            ('{"a" 1 **r}', '{"a": 1, **r}'),
+            ("{x.y 1}", "{x.y: 1}"),
+            ("{None 1 True 2 -1 3}", "{None: 1, True: 2, -1: 3}"),
+            ("(| 1 2)", "1 | 2"),
+            ("(| a.b None)", "a.b | None"),
+            ('b"a"', 'b"a"'),
+            ("[a [b *c]]", "[a, [b, *c]]"),
+        ],
+    )
+    def test_same_ast_as_python(self, lpy, py):
+        assert stmt_to_dump(f"(match x (case {lpy} ...))") == ast.dump(
+            ast.parse(f"match x:\n    case {py}:\n        ...")
+        )
+
+    def test_dotted_name_is_a_value_not_a_capture(self):
+        """``Color.RED`` compares against the member, as in Python; it is no
+        capture pattern that matches anything."""
+        src = """
+(def name-of [c]
+  (match c
+    (case Color.RED (return "red"))
+    (case _ (return "other"))))
+"""
+        scope = {"Color": enum.Enum("Color", ["RED", "GREEN"])}
+        module = ast.Module(macroexpand_then_compile(parse(src), {}), [])
+        exec(compile(module, "<lpy>", "exec"), scope)
+        name_of = scope["name_of"]
+        assert name_of(scope["Color"].RED) == "red"
+        assert name_of(scope["Color"].GREEN) == "other"
+        assert name_of(1) == "other"
 
 
 class TestSignedNumberExpressions:
