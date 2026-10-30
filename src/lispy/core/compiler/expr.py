@@ -222,7 +222,10 @@ def attribute_compile(sexp, ctx):
 
 
 def methodcall_p(sexp):
-    return (atom_text(sexp.op) or "").startswith(".")
+    # A method head is a dot followed by a name: the Ellipsis heads ``...``
+    # and ``..`` are not one.
+    text = atom_text(sexp.op) or ""
+    return text.startswith(".") and not text[1:].startswith(".") and len(text) > 1
 
 
 def methodcall_compile(sexp):
@@ -491,13 +494,13 @@ def def_args_parse(sexp, annotated=True):
 
     def refuse_bare_star():
         if star is not None and vararg is None and not kwonlyargs:
-            raise LispyCompileError("named arguments must follow bare *", star)
+            raise LispyCompileError("named parameters must follow bare *", star)
 
     while q:
         arg = q.popleft()
         text = atom_text(arg)
         if kwarg is not None:
-            raise LispyCompileError("arguments cannot follow var-keyword argument", arg)
+            raise LispyCompileError("parameters cannot follow var-keyword parameter", arg)
         if text == "/":
             if slash is not None:
                 raise LispyCompileError("/ may appear only once", arg)
@@ -509,7 +512,7 @@ def def_args_parse(sexp, annotated=True):
             [posonlyargs, args] = [args, []]
         elif text == "*" or isinstance(arg, Starred):
             if star is not None:
-                raise LispyCompileError("* argument may appear only once", arg)
+                raise LispyCompileError("* may appear only once", arg)
             star = arg
             if isinstance(arg, Starred):
                 vararg = param(arg)

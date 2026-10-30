@@ -309,6 +309,8 @@ class TestNotCallableHead:
             ("({, 1} 2)", "set", "{, 1}"),
             ("((, 1) 2)", "tuple", "(, 1)"),
             ("((x for x in y))", "generator", "(x for x in y)"),
+            ("(...)", "ellipsis", "..."),
+            ("(... x)", "ellipsis", "..."),
         ],
     )
     def test_refused_at_the_head(self, src, kind, head):
