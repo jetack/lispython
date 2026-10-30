@@ -6,12 +6,14 @@ parse, so the error itself is reported.
 """
 
 import importlib
+import re
 import sys
 from types import SimpleNamespace
 
 import pytest
 
 from lispy.core.compiler import features
+from lispy.core.compiler.stmt import FORM_USAGE, PATTERN_KINDS
 from lispy.core.parser import parse
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
@@ -223,3 +225,32 @@ class TestRequireSelection:
     )
     def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
         assert self._find(form + "\n(print 1)", "print") is None
+
+
+# Hover usage text for statement forms comes from the compiler's FORM_USAGE,
+# the table its error messages quote, so the two cannot drift.
+FORM_KEYS = sorted(k for k in FORM_USAGE if k not in PATTERN_KINDS)
+
+
+@pytest.mark.parametrize("key", FORM_KEYS)
+def test_form_hover_usage_is_the_compilers(key):
+    doc = server.SPECIAL_FORM_DOCS[key]
+    assert doc.startswith("```\n" + FORM_USAGE[key] + "\n```\n\n")
+    assert re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1) == FORM_USAGE[key]
+
+
+def test_form_prose_must_match_form_usage():
+    with pytest.raises(RuntimeError, match="no prose for .*'del'"):
+        server.form_docs({"del": "(del x)"}, {})
+    with pytest.raises(RuntimeError, match="no usage for .*'zap'"):
+        server.form_docs({}, {"zap": "Zap."})
+
+
+def test_def_hover_shows_the_compilers_arguments():
+    hover = server.hover(ls_with("(def f [x] x)"), position(0, 2))
+    assert "(def name [args] body...)" in hover.contents.value
+    assert "[params]" not in hover.contents.value
+
+
+def test_or_operator_and_or_pattern_share_one_entry():
+    assert "or-pattern" in server.SPECIAL_FORM_DOCS["|"]
