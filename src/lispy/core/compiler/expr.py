@@ -253,7 +253,7 @@ def target_compile(sexp, kind):
         # Shape before name, as CPython: (:= a.__debug__ 1) is refused as an
         # attribute target, not as an assignment to __debug__.
         check_target(expr_compile(sexp), kind)
-        return name_compile(sexp, ast.Store)
+        return expr_compile(sexp, ast.Store)
     node = expr_compile(sexp, ast.Del if kind == "delete" else ast.Store)
     check_target(node, kind)
     return node

@@ -231,6 +231,7 @@ def test_type_parameter_names(src, msg, at):
         ("(def - [] 1)", "def _():\n    1"),
         ("(. a -)", "a._"),
         ("(f -)", "f(_)"),
+        ("(:= (. a) 1)", "(a := 1)"),
     ],
 )
 def test_python_names_still_compile(src, python):
