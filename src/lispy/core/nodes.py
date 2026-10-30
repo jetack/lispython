@@ -398,7 +398,9 @@ def _float_node(value):
 
 
 def _complex_node(value):
-    text = repr(value)
+    # repr parenthesises a complex with a real part, "(1+2j)"; unparenthesised,
+    # "1+2j" is one number token, where the parenthesised text reads as a call.
+    text = repr(value).removeprefix("(").removesuffix(")")
     try:
         parsed = _literal_eval(text)
     except (SyntaxError, ValueError):
