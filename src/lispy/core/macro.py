@@ -2,7 +2,7 @@ import ast
 import importlib
 from typing import Callable, Dict
 
-from lispy.core.compiler import def_args_parse, stmt_list_compile
+from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import constant_compile, string_node_value
 from lispy.core.compiler.utils import refuse_deep_ast
 from lispy.core.errors import LispyCompileError

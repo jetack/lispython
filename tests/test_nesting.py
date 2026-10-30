@@ -171,44 +171,6 @@ def test_macroexpand_of_a_form_nested_past_the_recursion_limit(wrap, scope):
         assert str(expanded) == f"(if c (do {inner}))"
 
 
-@pytest.mark.parametrize(
-    "src",
-    [
-        "[" * DEEP + "1" + "]" * DEEP,
-        "(f " * DEEP + "1" + ")" * DEEP,
-        "(" * DEEP + "f" + ")" * DEEP,
-        "(when c " + "[" * DEEP + "1" + "]" * DEEP + ")",
-        "(do " * DEEP + "(f)" + ")" * DEEP,
-        "'" + "[" * DEEP + "1" + "]" * DEEP,
-    ],
-    ids=["bracket", "paren-arg", "paren-op", "macro-arg", "do", "quote"],
-)
-def test_compiling_past_the_recursion_limit_is_a_positioned_error(src, scope):
-    with pytest.raises(LispyCompileError) as info:
-        compile_src("\n\n" + src, scope)
-    err = info.value
-    assert err.msg == NESTING_MESSAGE
-    assert str(sys.getrecursionlimit()) in err.msg
-    assert err.lineno == 3 and err.offset >= 1
-
-
-def run_cli(argv, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", argv)
-    with pytest.raises(SystemExit) as info:
-        tools.run()
-    out, err = capsys.readouterr()
-    return info.value.code, out, err
-
-
-def test_lpy_reports_a_too_deep_form_compiler_style(monkeypatch, capsys):
-    src = "\n" + "[" * DEEP + "1" + "]" * DEEP
-    [code, out, err] = run_cli(["lpy", "-c", src], monkeypatch, capsys)
-    assert code == 1
-    assert err.startswith("<string>:2:")
-    assert f": error: {NESTING_MESSAGE}\n" in err
-    assert "Traceback" not in out + err
-
-
 def plus(operands):
     """``(+ 1 1 ...)``: one lispython level, a BinOp chain ``operands`` deep."""
     return "(+" + " 1" * operands + ")"
@@ -221,6 +183,219 @@ needs_bound_compile = pytest.mark.skipif(
 needs_unbound_compile = pytest.mark.skipif(
     COMPILE_BOUND, reason="compile() depth follows the recursion limit"
 )
+
+
+def run_cli(argv, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as info:
+        tools.run()
+    out, err = capsys.readouterr()
+    return info.value.code, out, err
+
+
+@needs_bound_compile
+def test_lpy_reports_a_too_deep_form_compiler_style(monkeypatch, capsys):
+    src = "\n" + "[" * DEEP + "1" + "]" * DEEP
+    [code, out, err] = run_cli(["lpy", "-c", src], monkeypatch, capsys)
+    assert code == 1
+    assert err.startswith("<string>:2:")
+    assert f": error: {NESTING_MESSAGE}\n" in err
+    assert "Traceback" not in out + err
+
+
+DEPTH = 5000  # the compiler's nesting must cost no Python frame per level
+
+
+LINE_3 = {"lineno": 3, "end_lineno": 3, "col_offset": 0, "end_col_offset": 1}
+
+
+def fstring(field):
+    """``f"{field}"`` as the parser builds it, on line 3."""
+    return Paren(
+        Symbol("f-string", **LINE_3),
+        String("''", **LINE_3),
+        field,
+        String("''", **LINE_3),
+        **LINE_3,
+    )
+
+
+def field(value, spec=None):
+    """An f-string replacement field of ``value``, format spec ``spec``."""
+    return FStrExpr(
+        value, expr_text="x", conversion=-1, format_spec=spec, debug=None, **LINE_3
+    )
+
+
+# (id, source nesting DEPTH levels on its line, or a function building that
+# form as nodes; the AST class one level adds exactly once; whether to
+# compile() the AST too). Sources are built by repetition, never recursion.
+# compile() is skipped where CPython 3.12+ cannot take the AST at this depth
+# (two AST levels per level pass its ~10000 limit on 3.12/3.13; nested
+# comprehensions crash it) or takes over a second (nested scopes, tuple
+# constant folding, ife).
+EXPRESSION_DEPTHS = [
+    ("bracket", "[" * DEPTH + "1" + "]" * DEPTH, ast.List, True),
+    ("call-argument", "(f " * DEPTH + "1" + ")" * DEPTH, ast.Call, True),
+    ("call-head", "(" * DEPTH + "f" + ")" * DEPTH, ast.Call, True),
+    ("keyword-value", "(f :k " * DEPTH + "1" + ")" * DEPTH, ast.keyword, False),
+    ("doublestar-value", "(f **" * DEPTH + "d" + ")" * DEPTH, ast.keyword, False),
+    ("starred", "(f *" * DEPTH + "xs" + ")" * DEPTH, ast.Starred, False),
+    ("attribute", "(. " * DEPTH + "a" + " b)" * DEPTH, ast.Attribute, True),
+    ("method-instance", "(.m " * DEPTH + "a" + ")" * DEPTH, ast.Call, False),
+    ("method-argument", "(.m a " * DEPTH + "1" + ")" * DEPTH, ast.Call, True),
+    ("binop", "(+ 1 " * DEPTH + "1" + ")" * DEPTH, ast.BinOp, True),
+    ("unaryop", "(- " * DEPTH + "1" + ")" * DEPTH, ast.UnaryOp, True),
+    ("boolop", "(and a " * DEPTH + "b" + ")" * DEPTH, ast.BoolOp, True),
+    ("compare", "(< a " * DEPTH + "b" + ")" * DEPTH, ast.Compare, True),
+    ("tuple", "(, " * DEPTH + "1" + ")" * DEPTH, ast.Tuple, False),
+    ("set", "{, " * DEPTH + "1" + "}" * DEPTH, ast.Set, True),
+    ("dict-key", "{" * DEPTH + "1 2}" + " 2}" * (DEPTH - 1), ast.Dict, True),
+    ("dict-value", "{1 " * DEPTH + "2" + "}" * DEPTH, ast.Dict, True),
+    ("subscript-value", "(sub " * DEPTH + "a" + " 0)" * DEPTH, ast.Subscript, True),
+    ("subscript-slice", "(sub a " * DEPTH + "0" + ")" * DEPTH, ast.Subscript, True),
+    (
+        "slice-bound",
+        "(sub a " + "[: " * DEPTH + "1" + "]" * DEPTH + ")",
+        ast.Slice,
+        True,
+    ),
+    ("ife", "(ife c " * DEPTH + "1" + " 2)" * DEPTH, ast.IfExp, False),
+    ("walrus-value", "(:= x " * DEPTH + "1" + ")" * DEPTH, ast.NamedExpr, True),
+    ("lambda-body", "(lambda [] " * DEPTH + "1" + ")" * DEPTH, ast.Lambda, False),
+    (
+        "lambda-default",
+        "(lambda [:a " * DEPTH + "1" + "] a)" * DEPTH,
+        ast.Lambda,
+        False,
+    ),
+    (
+        "listcomp-element",
+        "[" * DEPTH + "x" + " for x in xs]" * DEPTH,
+        ast.ListComp,
+        False,
+    ),
+    (
+        "listcomp-iterable",
+        "[x for x in " * DEPTH + "xs" + "]" * DEPTH,
+        ast.ListComp,
+        False,
+    ),
+    (
+        "setcomp-element",
+        "{, " * DEPTH + "x" + " for x in xs}" * DEPTH,
+        ast.SetComp,
+        False,
+    ),
+    (
+        "setcomp-iterable",
+        "{, x for x in " * DEPTH + "xs" + "}" * DEPTH,
+        ast.SetComp,
+        False,
+    ),
+    (
+        "dictcomp-value",
+        "{k " * DEPTH + "v" + " for x in xs}" * DEPTH,
+        ast.DictComp,
+        False,
+    ),
+    (
+        "dictcomp-iterable",
+        "{k v for x in " * DEPTH + "xs" + "}" * DEPTH,
+        ast.DictComp,
+        False,
+    ),
+    (
+        "genexp-element",
+        "(" * DEPTH + "x" + " for x in xs)" * DEPTH,
+        ast.GeneratorExp,
+        False,
+    ),
+    (
+        "genexp-iterable",
+        "(x for x in " * DEPTH + "xs" + ")" * DEPTH,
+        ast.GeneratorExp,
+        False,
+    ),
+    (
+        "yield",
+        "(def g [] " + "(yield " * DEPTH + "1" + ")" * DEPTH + ")",
+        ast.Yield,
+        True,
+    ),
+    (
+        "yield-from",
+        "(def g [] " + "(yield-from " * DEPTH + "1" + ")" * DEPTH + ")",
+        ast.YieldFrom,
+        True,
+    ),
+    (
+        "await",
+        "(async-def g [] " + "(await " * DEPTH + "1" + ")" * DEPTH + ")",
+        ast.Await,
+        True,
+    ),
+    # The parser recurses into a nested f-string's fields, so these are nodes.
+    (
+        "fstring-field",
+        lambda: nest(lambda e: fstring(field(e)), DEPTH, Symbol("x", **LINE_3)),
+        ast.JoinedStr,
+        False,
+    ),
+    (
+        "fstring-format-spec",
+        lambda: fstring(
+            nest(
+                lambda s: field(Symbol("x", **LINE_3), fstring(s)),
+                DEPTH - 1,
+                field(Symbol("x", **LINE_3)),
+            )
+        ),
+        ast.JoinedStr,
+        False,
+    ),
+    (
+        "macro-argument",
+        "(when c " + "[" * DEPTH + "1" + "]" * DEPTH + ")",
+        ast.List,
+        True,
+    ),
+    (
+        "assignment-target",
+        "(= " + "(, " * DEPTH + "a" + ")" * DEPTH + " x)",
+        ast.Tuple,
+        True,
+    ),
+]
+
+
+def assert_compiles_at_depth(form, cls, compiles, scope):
+    """``form`` (source, or a function building it as nodes) compiles to an
+    AST with DEPTH ``cls`` nodes, which compile() takes when ``compiles``;
+    where compile() is bound by the recursion limit (3.11) it is refused as
+    too deep, positioned on line 3. Asserts on plain values only: a failing
+    comparison would repr a deep node or AST after the timer stopped."""
+    forms = [form()] if callable(form) else parse("\n\n" + form)
+    if COMPILE_BOUND:
+        with pytest.raises(LispyCompileError) as info:
+            macroexpand_then_compile(forms, scope)
+        assert info.value.msg == NESTING_MESSAGE
+        assert info.value.lineno == 3
+        return
+    module = ast.Module(macroexpand_then_compile(forms, scope), type_ignores=[])
+    assert sum(isinstance(node, cls) for node in ast.walk(module)) == DEPTH
+    if compiles:
+        compile(module, "<nesting>", "exec")
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "form, cls, compiles",
+    [case[1:] for case in EXPRESSION_DEPTHS],
+    ids=[case[0] for case in EXPRESSION_DEPTHS],
+)
+def test_expressions_nest_past_the_recursion_limit(form, cls, compiles, scope):
+    assert_compiles_at_depth(form, cls, compiles, scope)
 
 
 @pytest.mark.parametrize(
@@ -489,3 +664,20 @@ def test_a_compound_node_equals_its_rendering():
 def test_nested_case_patterns_compile_in_linear_time(pattern, scope):
     [stmt] = compile_src(f"(match x (case {pattern} 1))", scope)
     assert isinstance(stmt, ast.Match)
+
+
+@pytest.mark.parametrize(
+    "target, msg, col",
+    [
+        # A tuple's elements are all checked before its own starred check...
+        ("(, *a *b (f))", "cannot assign to function call", 13),
+        # ...which comes before the elements after that tuple.
+        ("(, (, *a *b) (f))", "multiple starred expressions in assignment", 13),
+        ("(, (f) (, *a *b))", "cannot assign to function call", 7),
+        ("[a *(f) 1]", "cannot assign to function call", 8),
+    ],
+)
+def test_a_target_is_refused_where_a_left_to_right_walk_first_fails(target, msg, col):
+    with pytest.raises(LispyCompileError) as info:
+        macroexpand_then_compile(parse(f"(= {target} x)"), {})
+    assert (info.value.msg, info.value.offset) == (msg, col)

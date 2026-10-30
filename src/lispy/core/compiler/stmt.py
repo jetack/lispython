@@ -59,7 +59,7 @@ def assign_compile(sexp):
         if len(value) > 1:
             raise form_error(sexp, "takes one value after an annotation")
         value_dict = {"value": expr_compile(value[0])} if value else {}
-        target_node = target_compile(target, "annotate")
+        target_node = trampoline(target_compile(target, "annotate"))
         return ast.AnnAssign(
             target=target_node,
             annotation=expr_compile(annotation),
@@ -72,7 +72,7 @@ def assign_compile(sexp):
     else:
         [*targets, value] = [target, *body]
         return ast.Assign(
-            targets=[target_compile(x, "assign") for x in targets],
+            targets=[trampoline(target_compile(x, "assign")) for x in targets],
             value=expr_compile(value),
             **sexp.position_info
         )
@@ -91,7 +91,7 @@ def augassign_compile(sexp):
         map(expr_compile, args),
     )
     return ast.AugAssign(
-        target=target_compile(target, "augassign"),
+        target=trampoline(target_compile(target, "augassign")),
         op=op(),
         value=value,
         **sexp.position_info
@@ -103,7 +103,7 @@ def del_compile(sexp):
     if not args:
         raise form_error(sexp, "needs at least one target")
     return ast.Delete(
-        targets=[target_compile(x, "delete") for x in args],
+        targets=[trampoline(target_compile(x, "delete")) for x in args],
         **sexp.position_info
     )
 
@@ -267,7 +267,7 @@ def for_compile(sexp, async_p=False):
         sexp, ("target", ("in", "iterable"))
     )
     return (ast.AsyncFor if async_p else ast.For)(
-        target=target_compile(target, "assign"),
+        target=trampoline(target_compile(target, "assign")),
         iter=expr_compile(iterable),
         body=stmt_list_compile(then),
         orelse=stmt_list_compile(orelse),
@@ -429,7 +429,7 @@ def with_items_parse(sexp, form):
                 raise form_error(elt, "has as without a context before it", form)
             if not q:
                 raise form_error(elt, "has as without a target after it", form)
-            rst[-1].optional_vars = target_compile(q.popleft(), "assign")
+            rst[-1].optional_vars = trampoline(target_compile(q.popleft(), "assign"))
             targeted = True
         else:
             rst.append(ast.withitem(context_expr=expr_compile(elt)))
@@ -837,7 +837,7 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
     return (ast.AsyncFunctionDef if async_p else ast.FunctionDef)(
         name=name,
         **type_params,
-        args=def_args_parse(args),
+        args=trampoline(def_args_parse(args)),
         body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
         decorator_list=list(map(expr_compile, decorator_list))
         if decorator_list
@@ -889,7 +889,7 @@ def classdef_compile(sexp, decorator_list):
     [clsname, args, body] = definition_parts(sexp, "bases")
     [name, type_params] = def_name_parse(clsname, str(sexp.op))
     # Bases are a call's arguments, as in Python: class A(B, *bs, m=M, **kw).
-    [bases, keywords] = call_args_parse(args)
+    [bases, keywords] = trampoline(call_args_parse(args))
     return ast.ClassDef(
         name=name,
         **type_params,
