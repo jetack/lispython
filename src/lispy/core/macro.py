@@ -4,7 +4,7 @@ from typing import Callable, Dict
 
 from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import constant_compile, string_node_value
-from lispy.core.compiler.utils import refuse_deep_ast
+from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
 from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
@@ -42,28 +42,22 @@ def define_macro(sexp, scope, include_meta=True):
             f"(defmacro ...) expects an undotted name, got {name}", name
         )
     transformed = defmacro_transform(sexp)
-    eval(
-        compile(
-            ast.Interactive(body=macroexpand_then_compile([transformed], include_meta=include_meta)),
-            "macro-defining",
-            "single",
-        ),
-        scope,
-    )
+    # Expand outside compile_nesting_errors: a RecursionError there is a
+    # macro's own, not nesting.
+    body = macroexpand_then_compile([transformed], include_meta=include_meta)
+    with compile_nesting_errors(body):
+        code = compile(ast.Interactive(body=body), "macro-defining", "single")
+    eval(code, scope)
     return transformed if include_meta else None
 
 
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
     try:
-        eval(
-            compile(
-                ast.Interactive(body=macroexpand_then_compile([transformed], include_meta=include_meta)),
-                "macro-requiring",
-                "single",
-            ),
-            scope,
-        )
+        body = macroexpand_then_compile([transformed], include_meta=include_meta)
+        with compile_nesting_errors(body):
+            code = compile(ast.Interactive(body=body), "macro-requiring", "single")
+        eval(code, scope)
     except (ModuleNotFoundError, ImportError):
         import sys
         module_name = str(sexp.list[1])

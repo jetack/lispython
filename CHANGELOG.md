@@ -67,6 +67,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Forms nested deeper than about 245–330 levels (case patterns about 490)
+  are no longer refused with "form nested too deeply to compile": the
+  compiler and quote expansion no longer spend Python frames per level, so
+  nesting compiles as deep as CPython's compile() takes (about 10,000
+  levels on 3.12/3.13, more on 3.14+). On 3.11 compile() itself still stops
+  near the recursion limit, and the positioned error remains.
+- Nesting past compile()'s own limit on 3.12+ is the positioned "form
+  nested too deeply to compile" error from `lpy`, imports, the REPL, nREPL
+  and `defmacro`, instead of a `RecursionError` traceback. A macro's own
+  runaway recursion still raises `RecursionError`.
 - Data a macro puts in its expansion, spliced with `~x` or placed in a
   form's list, that holds the same Python list or tuple in many places is
   converted to nodes in time linear in the distinct data, instead of

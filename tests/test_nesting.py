@@ -3,6 +3,7 @@ what Python can compile is a positioned LispyCompileError, never a
 RecursionError."""
 
 import ast
+import importlib
 import subprocess
 import sys
 
@@ -10,6 +11,7 @@ import pytest
 
 import lispy.tools as tools
 from lispy.core.compiler import features
+from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import LispyCompileError, nesting_error
 from lispy.core.macro import macroexpand, macroexpand_then_compile
 from lispy.core.nodes import (
@@ -195,14 +197,146 @@ def run_cli(argv, monkeypatch, capsys):
     return info.value.code, out, err
 
 
-@needs_bound_compile
+def attribute_chain(names):
+    """``(. a b b ...)``: one lispython level, an Attribute chain ``names``
+    deep. compile() takes as deep a chain as a BinOp chain, and our compiler
+    builds it in about half the time of ``plus``."""
+    return "(. a" + " b" * names + ")"
+
+
+# On line 2, past compile()'s own limit on every version: 3.11 refuses it
+# first (refuse_deep_ast); 3.12+ compile() raises RecursionError past 9995
+# levels (3.12/3.13), 47370 (3.14) and 26067 (3.15).
+TOO_DEEP = "\n" + attribute_chain(100_000)
+
+
+@pytest.mark.usefixtures("time_bound")
 def test_lpy_reports_a_too_deep_form_compiler_style(monkeypatch, capsys):
-    src = "\n" + "[" * DEEP + "1" + "]" * DEEP
-    [code, out, err] = run_cli(["lpy", "-c", src], monkeypatch, capsys)
+    [code, out, err] = run_cli(["lpy", "-c", TOO_DEEP], monkeypatch, capsys)
     assert code == 1
     assert err.startswith("<string>:2:")
     assert f": error: {NESTING_MESSAGE}\n" in err
     assert "Traceback" not in out + err
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_importing_a_too_deep_module_is_a_positioned_error(tmp_path, monkeypatch):
+    module = tmp_path / "lpy_too_deep_module.lpy"
+    module.write_text("(= x 1)" + TOO_DEEP)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        with pytest.raises(LispyCompileError) as info:
+            importlib.import_module("lpy_too_deep_module")
+    finally:
+        sys.modules.pop("lpy_too_deep_module", None)
+    err = info.value
+    assert (err.msg, err.lineno, err.filename) == (NESTING_MESSAGE, 2, str(module))
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_the_repl_reports_a_too_deep_form():
+    with pytest.raises(LispyCompileError) as info:
+        tools.eval_and_print(TOO_DEEP, {}, filename="<repl>")
+    err = info.value
+    assert (err.msg, err.lineno, err.filename) == (NESTING_MESSAGE, 2, "<repl>")
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_the_nrepl_reports_a_too_deep_form():
+    error = tools.nrepl_eval(TOO_DEEP, {}, filename="buffer.lpy")["error"]
+    assert error.startswith("buffer.lpy:2:")
+    assert f": error: {NESTING_MESSAGE}" in error
+    assert "Traceback" not in error
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_too_deep_defmacro_body_is_a_positioned_error():
+    src = "(defmacro m []" + TOO_DEEP + ")"
+    with pytest.raises(LispyCompileError) as info:
+        macroexpand_then_compile(parse(src), {})
+    assert (info.value.msg, info.value.lineno) == (NESTING_MESSAGE, 2)
+
+
+# A macro whose expansion recurses without end: that RecursionError is the
+# macro's own bug, with a traceback into it, never a nesting error.
+RUNAWAY_MACRO = """
+(defmacro runaway-macro []
+  (def f [n] (return (f n)))
+  (return (f 1)))
+(runaway-macro)
+"""
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_macro_s_runaway_recursion_keeps_its_recursion_error():
+    with pytest.raises(RecursionError) as info:
+        macroexpand_then_compile(parse(RUNAWAY_MACRO), {})
+    assert not isinstance(info.value, LispyCompileError)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_lpy_reports_a_macro_s_runaway_recursion_as_its_own(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["lpy", "-c", RUNAWAY_MACRO])
+    with pytest.raises(RecursionError) as info:
+        tools.run()
+    assert not isinstance(info.value, LispyCompileError)
+    [out, err] = capsys.readouterr()
+    assert NESTING_MESSAGE not in out + err
+
+
+def at(line, col, end_col=None):
+    end = col + 1 if end_col is None else end_col
+    return dict(lineno=line, col_offset=col, end_lineno=line, end_col_offset=end)
+
+
+def reported_at(stmts):
+    """Where compile_nesting_errors reports a RecursionError in its block."""
+    with pytest.raises(LispyCompileError) as info:
+        with compile_nesting_errors(stmts):
+            raise RecursionError
+    assert info.value.msg == NESTING_MESSAGE
+    assert info.value.__suppress_context__
+    return info.value.lineno, info.value.offset
+
+
+def test_compile_nesting_errors_reports_the_first_deepest_path():
+    load = ast.Load()
+    shallow = ast.Expr(ast.Name("s", load, **at(1, 0)), **at(1, 0))
+    deeper = ast.Expr(
+        ast.BinOp(
+            ast.BinOp(
+                ast.Name("x", load, **at(2, 5)),
+                ast.Add(),
+                ast.Name("y", load, **at(2, 7)),
+                **at(2, 3, 9),
+            ),
+            ast.Add(),
+            ast.Constant(1, **at(2, 11)),
+            **at(2, 0, 12),
+        ),
+        **at(2, 0, 12),
+    )
+    # The second statement is deeper; its paths to x and y tie, so x.
+    assert reported_at([shallow, deeper]) == (2, 6)
+    # Equally deep statements: the first.
+    other = ast.Expr(ast.Name("t", load, **at(3, 0)), **at(3, 0))
+    assert reported_at([shallow, other]) == (1, 1)
+
+
+def test_compile_nesting_errors_reports_an_unpositioned_bottom_at_its_ancestor():
+    # (lambda [] y): the empty ``arguments`` ties with the body and comes
+    # first, but has no position, so the error is at the lambda.
+    no_args = ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]
+    )
+    lam = ast.Lambda(no_args, ast.Name("y", ast.Load(), **at(4, 12)), **at(4, 2, 14))
+    assert reported_at([ast.Expr(lam, **at(4, 2, 14))]) == (4, 3)
+
+
+def test_compile_nesting_errors_leaves_other_errors_alone():
+    with pytest.raises(ValueError):
+        with compile_nesting_errors([]):
+            raise ValueError
 
 
 DEPTH = 5000  # the compiler's nesting must cost no Python frame per level

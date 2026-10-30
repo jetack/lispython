@@ -30,6 +30,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
+(from lispy.core.compiler.utils [compile-nesting-errors])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
 
@@ -377,11 +378,12 @@
 
 (def eval-and-print [src :scope SCOPE :translate False :filename "<string>"]
   ;; Compile every statement before running any, so compile-errors covers
-  ;; compiling only.
+  ;; compiling only; compile-nesting-errors wraps compile() alone.
   (with [(compile-errors filename src)]
     (= stl (macroexpand-then-compile (parse src) scope))
-    (= codes [(compile (ast.Interactive :body [st]) filename "single")
-              for st in stl]))
+    (with [(compile-nesting-errors stl)]
+      (= codes [(compile (ast.Interactive :body [st]) filename "single")
+                for st in stl])))
   (if translate
       (do ;; (print "python translation")
         (-> (.join "\n" (list (map ast-to-python stl)))
@@ -540,11 +542,12 @@
     ;; Compile every statement before running any (see eval-and-print).
     (with [(compile-errors filename padded)]
       (= stl (macroexpand-then-compile (parse padded) scope))
-      (= codes [(ife (isinstance st ast.Expr)
-                     (, eval (compile (ast.Expression :body st.value) filename "eval"))
-                     (, exec (compile (ast.Module :body [st] :type-ignores [])
-                                      filename "exec")))
-                for st in stl]))
+      (with [(compile-nesting-errors stl)]
+        (= codes [(ife (isinstance st ast.Expr)
+                       (, eval (compile (ast.Expression :body st.value) filename "eval"))
+                       (, exec (compile (ast.Module :body [st] :type-ignores [])
+                                        filename "exec")))
+                  for st in stl])))
     (= last-val None)
     (for [run code] codes
       (= last-val (run code scope)))

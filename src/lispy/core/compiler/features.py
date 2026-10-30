@@ -89,7 +89,9 @@ def compile_depth_follows_recursion_limit():
     ======  ==========================================  ======================
 
     Only the first is a depth lispython code meets, so ``refuse_deep_ast`` in
-    compiler/utils.py checks the depth only where this is True.
+    compiler/utils.py checks the depth only where this is True. Beyond the
+    limit on 3.12+, compile()'s RecursionError becomes the same positioned
+    nesting error through ``compile_nesting_errors`` (compiler/utils.py).
     """
     return tuple(running_version())[:2] < (3, 12)
 

@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import sys
 from collections import deque
 
@@ -207,6 +208,30 @@ def _stack_depth():
     return depth
 
 
+def _ast_depths(stmts):
+    """Yield ``(depth, positioned)`` for each node of each statement in
+    ``stmts``, depth first and left to right (so the first path to reach a
+    depth is the leftmost one). ``depth`` counts from the statement as 1,
+    leaving out ``_DEPTH_FREE_NODES``; ``positioned`` is the node itself, or
+    its nearest ancestor with a position when it has none (an ``arguments``,
+    a ``comprehension``). Iterative and linear in the AST's size: the ASTs it
+    walks are the ones too deep for recursion."""
+    for stmt in stmts:
+        # (node, depth, nearest positioned node on the path, itself included)
+        pending = [(stmt, 1, stmt)]
+        while pending:
+            [node, depth, positioned] = pending.pop()
+            if getattr(node, "lineno", None):
+                positioned = node
+            yield depth, positioned
+            # Reversed, so the first child is popped (walked) first.
+            pending.extend(
+                (child, depth + 1, positioned)
+                for child in reversed(list(ast.iter_child_nodes(node)))
+                if not isinstance(child, _DEPTH_FREE_NODES)
+            )
+
+
 def refuse_deep_ast(stmts):
     """Raise ``nesting_error`` if a statement in ``stmts`` is nested deeper
     than CPython's compile() takes, where that depth follows the recursion
@@ -223,31 +248,47 @@ def refuse_deep_ast(stmts):
     refused only where compile() would fail on it too. The count errs only
     the permissive way: C-level calls on the stack spend recursion depth too
     but have no frame, and an entry point may compile one frame deeper (a
-    comprehension), so a few levels can still meet the raw RecursionError.
+    comprehension), so a few levels past it can still reach compile(), whose
+    RecursionError ``compile_nesting_errors`` turns into the same error.
 
-    One iterative walk per statement, linear in the AST's size; the error is
-    at the node at the refused depth on the first (leftmost) too-deep path,
-    or at its nearest positioned ancestor when that node has no position (an
-    ``arguments``, a ``comprehension``). Contexts and operators are not
-    counted (``_DEPTH_FREE_NODES``).
+    The error is at the node at the refused depth on the first (leftmost)
+    too-deep path, or its nearest positioned ancestor (``_ast_depths``).
     """
     if not features.compile_depth_follows_recursion_limit():
         return stmts
     compile_frame = _stack_depth() - CHECK_TO_COMPILE_FRAMES
     refused = sys.getrecursionlimit() - compile_frame
-    for stmt in stmts:
-        # (node, depth, nearest positioned node on the path, itself included)
-        pending = [(stmt, 1, stmt)]
-        while pending:
-            [node, depth, positioned] = pending.pop()
-            if getattr(node, "lineno", None):
-                positioned = node
-            if depth >= refused:
-                raise nesting_error(positioned)
-            # Reversed, so the first child is popped (walked) first.
-            pending.extend(
-                (child, depth + 1, positioned)
-                for child in reversed(list(ast.iter_child_nodes(node)))
-                if not isinstance(child, _DEPTH_FREE_NODES)
-            )
+    for depth, positioned in _ast_depths(stmts):
+        if depth >= refused:
+            raise nesting_error(positioned)
     return stmts
+
+
+@contextlib.contextmanager
+def compile_nesting_errors(stmts):
+    """Run the block, which compile()s the statements ``stmts`` lispython
+    built, turning a RecursionError into ``nesting_error`` at the bottom of
+    the first (leftmost) deepest path in ``stmts``, or its nearest positioned
+    ancestor (``_ast_depths``).
+
+    CPython's compile() recurses over the AST and gives up past its own
+    limit with a RecursionError that names no line: on 3.12+ a fixed C limit
+    or the C stack (``features.compile_depth_follows_recursion_limit`` has
+    the measurements), on 3.11 the few levels ``refuse_deep_ast`` lets
+    through. So it applies on every version. Wrap compile() alone, never
+    macroexpansion: a RecursionError while a macro runs is that macro's own
+    runaway recursion, the user's bug, and must keep its traceback into the
+    macro. compile() runs no user code, so a RecursionError from it is
+    always nesting; ``compile_errors`` must not catch RecursionError for the
+    same reason.
+    """
+    try:
+        yield
+    except RecursionError:
+        deepest = None
+        for depth, positioned in _ast_depths(stmts):
+            if deepest is None or depth > deepest[0]:
+                deepest = (depth, positioned)
+        if deepest is None:
+            raise
+        raise nesting_error(deepest[1]) from None
