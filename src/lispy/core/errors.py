@@ -111,11 +111,16 @@ def format_compile_error(err):
     return f"{head}\n{text}\n{caret}"
 
 
-def nesting_error(at):
-    """The one error for a form nested deeper than Python can compile.
+def nesting_error(at, *, recursion_limit, what="compile"):
+    """The one error for a form nested deeper than Python can ``what``
+    (compile, or translate for l2py's ``ast.unparse``).
 
     ``at`` is a lispython node, or a Python AST node (positioned by its own
-    lineno/col_offset/end_lineno/end_col_offset).
+    lineno/col_offset/end_lineno/end_col_offset). ``recursion_limit`` says
+    whether the limit hit is Python's recursion limit, which the message then
+    names; it is not for compile() on 3.12+, whose limit is CPython's own (a C
+    limit or the C stack), so naming the recursion limit there would suggest
+    raising it helps.
     """
     if not hasattr(at, "position_info"):
         at = SimpleNamespace(
@@ -124,8 +129,7 @@ def nesting_error(at):
                 for key in ("lineno", "col_offset", "end_lineno", "end_col_offset")
             }
         )
-    return LispyCompileError(
-        "form nested too deeply to compile "
-        f"(Python's recursion limit is {sys.getrecursionlimit()})",
-        at,
-    )
+    msg = f"form nested too deeply to {what}"
+    if recursion_limit:
+        msg += f" (Python's recursion limit is {sys.getrecursionlimit()})"
+    return LispyCompileError(msg, at)

@@ -260,7 +260,7 @@ def refuse_deep_ast(stmts):
     refused = sys.getrecursionlimit() - compile_frame
     for depth, positioned in _ast_depths(stmts):
         if depth >= refused:
-            raise nesting_error(positioned)
+            raise nesting_error(positioned, recursion_limit=True)
     return stmts
 
 
@@ -291,4 +291,7 @@ def compile_nesting_errors(stmts):
                 deepest = (depth, positioned)
         if deepest is None:
             raise
-        raise nesting_error(deepest[1]) from None
+        raise nesting_error(
+            deepest[1],
+            recursion_limit=features.compile_depth_follows_recursion_limit(),
+        ) from None

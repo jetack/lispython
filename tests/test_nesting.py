@@ -11,8 +11,8 @@ import pytest
 
 import lispy.tools as tools
 from lispy.core.compiler import features
-from lispy.core.compiler.utils import compile_nesting_errors
-from lispy.core.errors import LispyCompileError, nesting_error
+from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
+from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand, macroexpand_then_compile
 from lispy.core.nodes import (
     Annotation,
@@ -38,7 +38,16 @@ from lispy.core.parser import parse
 from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
-NESTING_MESSAGE = nesting_error(Symbol("x")).msg
+# The nesting error names the recursion limit only where it is what was hit:
+# compile() on 3.11 and ast.unparse everywhere, never compile() on 3.12+.
+C_LIMIT_MESSAGE = "form nested too deeply to compile"
+RECURSION_LIMIT_MESSAGE = (
+    f"{C_LIMIT_MESSAGE} (Python's recursion limit is {sys.getrecursionlimit()})"
+)
+TRANSLATE_MESSAGE = (
+    "form nested too deeply to translate"
+    f" (Python's recursion limit is {sys.getrecursionlimit()})"
+)
 
 
 @pytest.fixture(scope="module")
@@ -181,6 +190,8 @@ def plus(operands):
 
 
 COMPILE_BOUND = features.compile_depth_follows_recursion_limit()
+# What this interpreter reports for a form past compile()'s limit.
+NESTING_MESSAGE = RECURSION_LIMIT_MESSAGE if COMPILE_BOUND else C_LIMIT_MESSAGE
 needs_bound_compile = pytest.mark.skipif(
     not COMPILE_BOUND, reason="compile() depth does not follow the recursion limit"
 )
@@ -249,6 +260,26 @@ def test_the_nrepl_reports_a_too_deep_form():
     assert "Traceback" not in error
 
 
+# Two statements past compile()'s limit on every version (55,000 levels
+# clears 3.14's 47,370), the second deeper: the error is at the first, the
+# one compile() fails on, not at the deepest of both.
+TWO_TOO_DEEP = "\n" + attribute_chain(55_000) + "\n" + attribute_chain(56_000)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_the_repl_reports_the_first_too_deep_statement():
+    with pytest.raises(LispyCompileError) as info:
+        tools.eval_and_print(TWO_TOO_DEEP, {}, filename="<repl>")
+    assert (info.value.msg, info.value.lineno) == (NESTING_MESSAGE, 2)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_the_nrepl_reports_the_first_too_deep_statement():
+    error = tools.nrepl_eval(TWO_TOO_DEEP, {}, filename="buffer.lpy")["error"]
+    assert error.startswith("buffer.lpy:2:")
+    assert f": error: {NESTING_MESSAGE}\n" in error
+
+
 @pytest.mark.usefixtures("time_bound")
 def test_a_too_deep_defmacro_body_is_a_positioned_error():
     src = "(defmacro m []" + TOO_DEEP + ")"
@@ -297,6 +328,26 @@ def reported_at(stmts):
     assert info.value.msg == NESTING_MESSAGE
     assert info.value.__suppress_context__
     return info.value.lineno, info.value.offset
+
+
+@pytest.mark.parametrize(
+    "bound, message",
+    [(True, RECURSION_LIMIT_MESSAGE), (False, C_LIMIT_MESSAGE)],
+    ids=["recursion-limit-bound", "c-limit-bound"],
+)
+def test_compile_nesting_errors_names_the_recursion_limit_only_where_it_binds(
+    bound, message, monkeypatch
+):
+    # On 3.12+ compile()'s limit is CPython's own, which raising the
+    # recursion limit does not move: the message must not name it there.
+    monkeypatch.setattr(
+        features, "compile_depth_follows_recursion_limit", lambda: bound
+    )
+    stmt = ast.Expr(ast.Name("s", ast.Load(), **at(1, 0)), **at(1, 0))
+    with pytest.raises(LispyCompileError) as info:
+        with compile_nesting_errors([stmt]):
+            raise RecursionError
+    assert info.value.msg == message
 
 
 def test_compile_nesting_errors_reports_the_first_deepest_path():
@@ -567,21 +618,30 @@ def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
     """``form`` (source, or a function building it as nodes) compiles to an
     AST with DEPTH ``cls`` nodes (an AST class, or a predicate on a node),
     which compile() takes when ``compiles``;
-    where compile() is bound by the recursion limit (3.11) it is refused as
+    where compile() is bound by the recursion limit (3.11) the compiler
+    still builds it with the check off, and ``refuse_deep_ast`` refuses it as
     too deep, positioned on line 3, unless the AST is ``flat`` (do, deco
     nest in lispython only). Asserts on plain values only: a failing
     comparison would repr a deep node or AST after the timer stopped."""
     forms = [form()] if callable(form) else parse("\n\n" + form)
-    if COMPILE_BOUND and not flat:
+    matches = (lambda node: isinstance(node, cls)) if isinstance(cls, type) else cls
+    refused = COMPILE_BOUND and not flat
+    # Where the AST is refused, build it with the check off, then check it:
+    # the compiler itself must take the depth on every version.
+    with pytest.MonkeyPatch.context() as patch:
+        if refused:
+            patch.setattr(
+                features, "compile_depth_follows_recursion_limit", lambda: False
+            )
+        body = macroexpand_then_compile(forms, scope)
+    module = ast.Module(body, type_ignores=[])
+    assert sum(1 for node in ast.walk(module) if matches(node)) == DEPTH
+    if refused:
         with pytest.raises(LispyCompileError) as info:
-            macroexpand_then_compile(forms, scope)
+            refuse_deep_ast(body)
         assert info.value.msg == NESTING_MESSAGE
         assert info.value.lineno == 3
-        return
-    module = ast.Module(macroexpand_then_compile(forms, scope), type_ignores=[])
-    matches = (lambda node: isinstance(node, cls)) if isinstance(cls, type) else cls
-    assert sum(1 for node in ast.walk(module) if matches(node)) == DEPTH
-    if compiles:
+    elif compiles:
         compile(module, "<nesting>", "exec")
 
 
@@ -872,7 +932,7 @@ def test_l2py_of_an_ast_unparse_cannot_write_is_a_positioned_error(scope):
     with pytest.raises(LispyCompileError) as info:
         tools.l2py_s(src, fresh_scope=True, format=False)
     err = info.value
-    assert err.msg == NESTING_MESSAGE
+    assert err.msg == TRANSLATE_MESSAGE
     assert (err.lineno, err.offset) == (2, 1)
 
 
