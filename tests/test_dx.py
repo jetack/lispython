@@ -10,6 +10,7 @@ import pytest
 from pygls.workspace import TextDocument
 
 import lispy.tools as tools
+from lispy.core.compiler.utils import FORM_USAGE
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
@@ -85,7 +86,7 @@ def test_signature_help(marked, expected):
 
 
 def test_signature_help_of_a_special_form_is_its_documented_form():
-    assert signature_at("(ife x |") == "(ife condition then-expr else-expr)"
+    assert signature_at("(ife x |") == FORM_USAGE["ife"]
 
 
 @pytest.mark.parametrize(

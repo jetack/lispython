@@ -70,6 +70,8 @@ def boolop_p(sexp):
 
 def boolop_compile(sexp):
     [op, *args] = sexp.list
+    if not args:
+        raise form_error(sexp, "needs at least one value")
     return ast.BoolOp(
         boolop_dict[atom_text(op)](),
         list(map(expr_compile, args)),
@@ -83,6 +85,8 @@ def compare_p(sexp):
 
 def compare_compile(sexp):
     [op, *args] = sexp.list
+    if len(args) < 2:
+        raise form_error(sexp, "needs at least two operands")
     [left, *comparators] = map(expr_compile, args)
     return ast.Compare(
         left=left,
@@ -101,25 +105,65 @@ def keyword_value(keyword, q):
 
 
 def call_args_parse(given):
+    """``[args, keywords]`` of a call's (or a class's bases') operands:
+    ``:name value`` and ``**mapping`` are keywords, the rest positional.
+    A keyword name given twice is refused at its second ``:name``, with
+    CPython's message, compared as the Python name (``:a-b`` is ``:a_b``)."""
     q = deque(given)
     args = []
     keywords = []
+    seen = set()
     while q:
         arg = q.popleft()
-        keywords.append(
-            ast.keyword(
-                arg=symbol_name(arg.value, ast.Store),
-                value=expr_compile(keyword_value(arg, q)),
-                **arg.position_info
+        if keyword_arg_p(arg):
+            name = symbol_name(arg.value, ast.Store)
+            if name in seen:
+                raise LispyCompileError(f"keyword argument repeated: {name}", arg)
+            seen.add(name)
+            keywords.append(
+                ast.keyword(
+                    arg=name,
+                    value=expr_compile(keyword_value(arg, q)),
+                    **arg.position_info
+                )
             )
-        ) if keyword_arg_p(arg) else keywords.append(
-            ast.keyword(value=expr_compile(arg.value), **arg.position_info)
-        ) if doublestarred_p(
-            arg
-        ) else args.append(
-            expr_compile(arg)
-        )
+        elif doublestarred_p(arg):
+            keywords.append(
+                ast.keyword(value=expr_compile(arg.value), **arg.position_info)
+            )
+        else:
+            args.append(expr_compile(arg))
     return [args, keywords]
+
+
+# The callees CPython's compiler knows are not callable (its check_caller: a
+# SyntaxWarning there, a TypeError at run time), by AST node class, named as
+# its message names their type. A Constant is named by its value's type.
+NOT_CALLABLE_TYPES = {
+    "JoinedStr": "str",
+    "TemplateStr": "Template",
+    "Tuple": "tuple",
+    "List": "list",
+    "ListComp": "list",
+    "Dict": "dict",
+    "DictComp": "dict",
+    "Set": "set",
+    "SetComp": "set",
+    "GeneratorExp": "generator",
+}
+
+
+def refuse_not_callable(func, head):
+    """A call whose compiled callee ``func`` can never be called is refused at
+    ``head``, in CPython's words."""
+    kind = type(func).__name__
+    name = (
+        type(func.value).__name__
+        if kind == "Constant"
+        else NOT_CALLABLE_TYPES.get(kind)
+    )
+    if name is not None:
+        raise LispyCompileError(f"'{name}' object is not callable", head)
 
 
 def call_compile(sexp):
@@ -133,9 +177,10 @@ def call_compile(sexp):
                 + (f"; {hint}" if hint else ""),
                 sexp,
             )
-    op = expr_compile(op)
+    func = expr_compile(op)
+    refuse_not_callable(func, op)
     [args, keywords] = call_args_parse(operands)
-    return ast.Call(func=op, args=args, keywords=keywords, **sexp.position_info)
+    return ast.Call(func=func, args=args, keywords=keywords, **sexp.position_info)
 
 
 def ifexp_p(sexp):
@@ -143,8 +188,10 @@ def ifexp_p(sexp):
 
 
 def ifexp_compile(sexp):
-    [_, test, body, *rest] = sexp.list
-    orelse = rest[0] if rest else Constant("None", **sexp.position_info)
+    [[test, body], rest] = form_parts(sexp, ("test", "then"))
+    if len(rest) > 1:
+        raise form_error(sexp, "takes a test, a then and at most one else")
+    orelse = rest[0] if len(rest) else Constant("None", **sexp.position_info)
     return ast.IfExp(
         test=expr_compile(test),
         body=expr_compile(body),
@@ -158,7 +205,7 @@ def attribute_p(sexp):
 
 
 def attribute_compile(sexp, ctx):
-    [_, value, *attrs] = sexp.list
+    [[value], attrs] = form_parts(sexp, ("value",))
     if not attrs:
         # (. x) is x itself: its target context must reach the name home.
         return expr_compile(value, ctx)
@@ -175,11 +222,15 @@ def attribute_compile(sexp, ctx):
 
 
 def methodcall_p(sexp):
-    return (atom_text(sexp.op) or "").startswith(".")
+    # A method head is a dot followed by a name: the Ellipsis heads ``...``
+    # and ``..`` are not one.
+    text = atom_text(sexp.op) or ""
+    return text.startswith(".") and not text[1:].startswith(".") and len(text) > 1
 
 
 def methodcall_compile(sexp):
-    [method, instance, *operands] = sexp.list
+    method = sexp.op
+    [[instance], operands] = form_parts(sexp, ("instance",), "method call")
     [args, keywords] = call_args_parse(operands)
     func = ast.Attribute(
         value=expr_compile(instance),
@@ -286,7 +337,12 @@ def namedexpr_p(sexp):
 
 
 def namedexpr_compile(sexp):
-    [_, target, value] = sexp.list
+    for x in sexp.operands:
+        if isinstance(x, Annotation):
+            raise form_error(x, "takes no annotation", ":=")
+    [[target, value], rest] = form_parts(sexp, ("name", "value"))
+    if len(rest):
+        raise form_error(sexp, "takes one name and one value")
     return ast.NamedExpr(
         target=target_compile(target, "walrus"),
         value=expr_compile(value),
@@ -307,7 +363,8 @@ def subscript_slice_compile(slice):
 
 
 def subscript_compile(sexp, ctx):
-    [op, value, *slices] = sexp.list
+    op = sexp.op
+    [[value], slices] = form_parts(sexp, ("value",))
     op_pos = op.position_info
     rst = reduce(
         lambda rst, slice: ast.Subscript(
@@ -323,21 +380,48 @@ def subscript_compile(sexp, ctx):
     return rst
 
 
+COMPREHENSION_FORS = ("for", "async-for")
+
+
 def parse_comprehensions(generator_body):
+    """The clauses after a comprehension's element: each ``for`` (or
+    ``async-for``), a target, an optional ``in`` and an iterable, then any
+    number of ``if test`` pairs. Anything else, or a clause cut short, is
+    refused at the item or at the clause's keyword."""
     q = deque(generator_body)
     rst = []
     while q:
-        is_async = 0 if q.popleft() == "for" else 1
+        keyword = q.popleft()
+        head = atom_text(keyword)
+        if head not in COMPREHENSION_FORS:
+            raise form_error(
+                keyword, f"expects a for clause, got {keyword}", "comprehension"
+            )
+        if not q:
+            raise form_error(keyword, f"has {head} without a target", "comprehension")
         target = target_compile(q.popleft(), "assign")
-        if q[0] == "in":
+        if len(q) and atom_text(q[0]) == "in":
             q.popleft()
+        if not q:
+            raise form_error(
+                keyword, f"has {head} without an iterable", "comprehension"
+            )
         iter = expr_compile(q.popleft())
-        comprehension = ast.comprehension(is_async=is_async, target=target, iter=iter)
         ifs = []
-        while q and (atom_text(q[0]) not in ("for", "async-for")):
-            ifs.append(q.popleft())
-        comprehension.ifs = list(map(expr_compile, ifs[slice(1, None, 2)]))
-        rst.append(comprehension)
+        while len(q) and atom_text(q[0]) not in COMPREHENSION_FORS:
+            word = q.popleft()
+            if atom_text(word) != "if":
+                raise form_error(
+                    word, f"expects if or a for clause, got {word}", "comprehension"
+                )
+            if not q or atom_text(q[0]) in COMPREHENSION_FORS:
+                raise form_error(word, "has if without a test", "comprehension")
+            ifs.append(expr_compile(q.popleft()))
+        rst.append(
+            ast.comprehension(
+                target=target, iter=iter, ifs=ifs, is_async=int(head == "async-for")
+            )
+        )
     return rst
 
 
@@ -357,14 +441,6 @@ def gen_exp_compile(sexp):
     )
 
 
-def starred_head_p(arg):
-    """Whether ``arg``'s text starts with ``*`` (a ``*args``/``**kwargs``
-    parameter, or the bare ``*``), read without rendering it."""
-    return isinstance(arg, (Starred, DoubleStarred)) or (
-        atom_text(arg) or ""
-    ).startswith("*")
-
-
 def param_name(arg):
     """The name a parameter binds: the symbol itself, or the one inside its
     ``:name`` (default), ``*args`` or ``**kwargs`` wrapper."""
@@ -373,62 +449,104 @@ def param_name(arg):
     return symbol_name(arg, ast.Store)
 
 
-def def_args_parse(sexp):
+def def_args_parse(sexp, annotated=True):
+    """The ast.arguments of a def/async-def/lambda ``[args]`` bracket.
+
+    One pass in Python's order: positional parameters (those before a ``/``
+    positional-only), one ``*`` or ``*args``, keyword-only parameters, one
+    ``**kwargs`` last. A parameter may be followed by its ``^annotation``;
+    ``:name value`` gives it a default. What CPython refuses in a parameter
+    list (a duplicate name, a misplaced or repeated ``/``, ``*`` or ``**``, a
+    bare ``*`` with no keyword-only parameter after it, a positional
+    parameter without a default after one with a default) is refused at the
+    offending item with CPython's message: read as it stands, such a list
+    would compile to a different signature or an AST compile() rejects.
+    Without ``annotated`` (a lambda) a ``^annotation`` is refused at itself:
+    compile() accepts an annotated lambda parameter no Python source spells.
+    """
     q = deque(sexp.list)
-    # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
-    rst = ast.arguments(posonlyargs=[])
+    posonlyargs = []
     args = []
     defaults = []
     kwonlyargs = []
     kw_defaults = []
+    vararg = None
+    kwarg = None
+    slash = None
+    star = None
+    seen = set()
 
-    # before starred
-    while q and not starred_head_p(q[0]):
+    def param(arg):
+        name = param_name(arg)
+        if name in seen:
+            raise LispyCompileError(
+                f"duplicate parameter '{name}' in function definition", arg
+            )
+        seen.add(name)
+        node = ast.arg(arg=name, **arg.position_info)
+        if len(q) and isinstance(q[0], Annotation):
+            if not annotated:
+                raise form_error(
+                    q[0], "takes no annotations on its parameters", "lambda"
+                )
+            node.annotation = expr_compile(q.popleft())
+        return node
+
+    def refuse_bare_star():
+        if star is not None and vararg is None and not kwonlyargs:
+            raise LispyCompileError("named parameters must follow bare *", star)
+
+    while q:
         arg = q.popleft()
-        if arg == "/":
-            rst.posonlyargs = args
-            args = []
-        else:
-            ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
-            if q and isinstance(q[0], Annotation):
-                ast_arg.annotation = expr_compile(q.popleft())
-            args.append(ast_arg)
+        text = atom_text(arg)
+        if kwarg is not None:
+            raise LispyCompileError("parameters cannot follow var-keyword parameter", arg)
+        if text == "/":
+            if slash is not None:
+                raise LispyCompileError("/ may appear only once", arg)
+            if star is not None:
+                raise LispyCompileError("/ must be ahead of *", arg)
+            if not args:
+                raise LispyCompileError("at least one parameter must precede /", arg)
+            slash = arg
+            [posonlyargs, args] = [args, []]
+        elif text == "*" or isinstance(arg, Starred):
+            if star is not None:
+                raise LispyCompileError("* may appear only once", arg)
+            star = arg
+            if isinstance(arg, Starred):
+                vararg = param(arg)
+        elif isinstance(arg, DoubleStarred):
+            refuse_bare_star()
+            kwarg = param(arg)
+        elif star is None:
+            node = param(arg)
             if keyword_arg_p(arg):
                 defaults.append(expr_compile(keyword_value(arg, q)))
-    rst.args = args
-    rst.defaults = defaults
-
-    # starred
-    if q and isinstance(q[0], Starred):
-        arg = q.popleft()
-        ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
-        if q and isinstance(q[0], Annotation):
-            ast_arg.annotation = expr_compile(q.popleft())
-        rst.vararg = ast_arg
-    if q and q[0] == "*":
-        q.popleft()
-
-    # before doublestarred
-    while q and (not isinstance(q[0], DoubleStarred)):
-        arg = q.popleft()
-        ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
-        if q and isinstance(q[0], Annotation):
-            ast_arg.annotation = expr_compile(q.popleft())
-        kwonlyargs.append(ast_arg)
-        kw_defaults.append(
-            expr_compile(keyword_value(arg, q)) if keyword_arg_p(arg) else None
-        )
-    rst.kwonlyargs = kwonlyargs
-    rst.kw_defaults = kw_defaults
-
-    # doublestarred
-    if q:
-        arg = q.popleft()
-        ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
-        if q and isinstance(q[0], Annotation):
-            ast_arg.annotation = expr_compile(q.popleft())
-        rst.kwarg = ast_arg
-    return rst
+            elif len(defaults):
+                # Positional-only and regular parameters share one defaults
+                # list, the last ones': a gap would shift every default.
+                raise LispyCompileError(
+                    "parameter without a default follows parameter with a default",
+                    arg,
+                )
+            args.append(node)
+        else:
+            kwonlyargs.append(param(arg))
+            kw_defaults.append(
+                expr_compile(keyword_value(arg, q)) if keyword_arg_p(arg) else None
+            )
+    refuse_bare_star()
+    # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
+    return ast.arguments(
+        posonlyargs=posonlyargs,
+        args=args,
+        vararg=vararg,
+        kwonlyargs=kwonlyargs,
+        kw_defaults=kw_defaults,
+        kwarg=kwarg,
+        defaults=defaults,
+    )
 
 
 def lambda_p(sexp):
@@ -436,24 +554,36 @@ def lambda_p(sexp):
 
 
 def lambda_compile(sexp):
-    [_, args, body] = sexp.list
+    [[args, body], rest] = form_parts(sexp, ("args", "body"))
+    if not isinstance(args, Bracket):
+        raise form_error(args, f"expects [args], got {args}", "lambda")
+    if len(rest):
+        raise form_error(sexp, "takes one body expression")
     return ast.Lambda(
-        args=def_args_parse(args), body=expr_compile(body), **sexp.position_info
+        args=def_args_parse(args, annotated=False),
+        body=expr_compile(body),
+        **sexp.position_info
     )
 
 
 def yield_compile(sexp):
+    if len(sexp.operands) > 1:
+        raise form_error(sexp, "takes at most one value")
     val_dict = {"value": expr_compile(sexp[1])} if len(sexp) > 1 else {}
     return ast.Yield(**val_dict, **sexp.position_info)
 
 
 def yield_from_compile(sexp):
-    value = sexp[1]
+    [[value], rest] = form_parts(sexp, ("iterable",))
+    if len(rest):
+        raise form_error(sexp, "takes one iterable")
     return ast.YieldFrom(value=expr_compile(value), **sexp.position_info)
 
 
 def await_compile(sexp):
-    [_, value] = sexp.list
+    [[value], rest] = form_parts(sexp, ("value",))
+    if len(rest):
+        raise form_error(sexp, "takes one value")
     return ast.Await(value=expr_compile(value), **sexp.position_info)
 
 
@@ -582,7 +712,8 @@ def paren_compiler(sexp, ctx):
 
 def slice_compile(sexp):
     [_, *args] = sexp.list
-    assert 1 <= len(args) <= 3
+    if not 1 <= len(args) <= 3:
+        raise form_error(sexp, "takes one to three operands", "slice")
     [lower, upper, step] = args if len(args) == 3 else args + ["_"] if len(args) == 2 else ["_"] + args + ["_"]
     args_dict = {}
     if lower != "None" and lower != "_":
@@ -630,14 +761,21 @@ def set_compile(sexp):
 
 
 def dict_compile(sexp):
-    elts = reduce(
-        lambda x, y: x
-        + ([None, expr_compile(y.value)] if doublestarred_p(y) else [expr_compile(y)]),
-        sexp,
-        [],
-    )
-    keys = elts[slice(None, None, 2)]
-    values = elts[slice(1, None, 2)]
+    """``{key value ... **mapping}``: a ``**mapping`` is a whole entry, so a
+    key with no value before it or at the end is refused at the key."""
+    q = deque(sexp)
+    keys = []
+    values = []
+    while q:
+        item = q.popleft()
+        if doublestarred_p(item):
+            keys.append(None)
+            values.append(expr_compile(item.value))
+            continue
+        if not q or doublestarred_p(q[0]):
+            raise form_error(item, "has a key without a value", "dict")
+        keys.append(expr_compile(item))
+        values.append(expr_compile(q.popleft()))
     return ast.Dict(keys=keys, values=values, **sexp.position_info)
 
 

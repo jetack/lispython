@@ -46,9 +46,31 @@ follows [Semantic Versioning](https://semver.org/).
 - A hard keyword called in an expression (`(f (else 1))`) is reported as
   `else is a Python keyword and cannot be used as a name`, at the keyword,
   instead of `else is a Python keyword and cannot be called` at the form.
+- Forms that compiled to something other than what they say are compile
+  errors: a call whose head is a literal, collection or comprehension
+  (`(1)`, `(None x)`, `("s")`, `([1] 2)`, `((, 1) 2)`; CPython only warns
+  and the call fails at run time), a repeated keyword argument (`(f :a 1 :a
+  2)`, class keywords too), `(ife a b c d)` (dropped `d`), `(yield a b)`, a
+  comprehension clause with a stray or dangling operand (`[x for y in z
+  if]`, `(x for y in z if a b)`), and a parameter list CPython refuses: a
+  duplicate name, a misplaced or repeated `/`, `*` or `**kw` (`[a / /]`
+  dropped `a`, `[*a *b]` made `b` keyword-only), a bare `*` with no
+  keyword-only parameter, and `[a :b 1 c]`, which compiled to `def f(a, b,
+  c=1)`. An annotated lambda parameter (`(lambda [a ^int] 1)`, which `l2py`
+  printed as `lambda a: int: 1`) is refused too.
+- Class bases are read as call arguments: `(class A [**kw])` compiles to
+  `class A(**kw)`.
 
 ### Fixed
 
+- A malformed expression form is a positioned compile error quoting its
+  usage instead of an IndexError, ValueError or AssertionError, or an AST
+  CPython rejects: `(:=)`, `(:= a ^int 1)`, `(.)`, `(.foo)`, `(ife a)`,
+  `(sub)`, `(lambda [a])`, `(await)`, `(yield-from)`, `(and)`, `(< a)`,
+  `[:]`, `{1 2 3}` and `(x for y)`. Hover and signature help for these forms
+  show the same usage line.
+- `(= (. a) ^int 1)` and `(= (sub a) ^int 1)` record `a` in
+  `__annotations__`, as `(= a ^int 1)` does.
 - The operand after `^`, `*`, `**` or `:` keeps its own token type, so `*1`,
   `**1`, `:1` and `^1` read a number `1` instead of a symbol named `1`. A
   keyword with a number or other non-name after it (`(f :1 x)`, `(def g [:1
