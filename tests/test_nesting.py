@@ -472,3 +472,20 @@ def test_a_compound_node_equals_its_rendering():
     assert Keyword(Symbol("x")) == ":x"
     assert Paren(Symbol("a"), Symbol("b")) != "a"
     assert Paren(Symbol("for")) != "for"
+
+
+# Against a pattern rendered or re-walked at every level, depth 40 is 2**40
+# steps: only the alarm would end it.
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "[" * 40 + "a" + "]" * 40,
+        "(C " * 40 + "a" + ")" * 40,
+        "{1 " * 40 + "a" + "}" * 40,
+    ],
+    ids=["sequence", "class", "mapping"],
+)
+def test_nested_case_patterns_compile_in_linear_time(pattern, scope):
+    [stmt] = compile_src(f"(match x (case {pattern} 1))", scope)
+    assert isinstance(stmt, ast.Match)
