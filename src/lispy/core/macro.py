@@ -84,22 +84,26 @@ def macroexpand_1(sexp, scope=globals()):
 def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     """One node's step of macroexpand_1_and_check, as a generator.
 
-    It asks for a child form's expansion with ``new = yield _expand_1(child, ...)``
+    It asks for a child form's expansion with ``new = yield expand(child, in_quasi)``
     and returns the node's replacement; ``expanded[0]`` is set once a macro
     call is expanded. macroexpand_1_and_check runs these steps on the shared
     trampoline (core/utils.py), so the order is a recursive pre-order walk's,
     left to right, but nesting depth costs no Python frames.
     """
+
+    def expand(child, child_in_quasi):
+        return _expand_1(child, scope, child_in_quasi, include_meta, expanded)
+
     if isinstance(sexp, QuasiQuote):
-        sexp.value = yield _expand_1(sexp.value, scope, True, include_meta, expanded)
+        sexp.value = yield expand(sexp.value, True)
     elif isinstance(sexp, Quote):
         pass
     elif isinstance(sexp, Unquote):
-        sexp.value = yield _expand_1(sexp.value, scope, False, include_meta, expanded)
+        sexp.value = yield expand(sexp.value, False)
     elif isinstance(sexp, Wrapper):
-        sexp.value = yield _expand_1(sexp.value, scope, in_quasi, include_meta, expanded)
+        sexp.value = yield expand(sexp.value, in_quasi)
     elif isinstance(sexp, GluedHead):
-        sexp.params = yield _expand_1(sexp.params, scope, in_quasi, include_meta, expanded)
+        sexp.params = yield expand(sexp.params, in_quasi)
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list
         name = atom_text(op)
@@ -124,7 +128,7 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
         else:
             expanded_list = []
             for x in sexp.list:
-                expanded_list.append((yield _expand_1(x, scope, in_quasi, include_meta, expanded)))
+                expanded_list.append((yield expand(x, in_quasi)))
             sexp.list = [x for x in expanded_list if x is not None]
     return sexp
 
