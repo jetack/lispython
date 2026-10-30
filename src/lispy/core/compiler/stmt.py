@@ -46,6 +46,12 @@ def do_p(sexp):
     return atom_text(sexp.op) == "do"
 
 
+def do_form_p(sexp):
+    """Whether stmt_steps compiles ``sexp`` with do_compile (stmt_list_steps
+    inlines exactly these)."""
+    return paren_p(sexp) and len(sexp) > 0 and do_p(sexp)
+
+
 def do_compile(sexp):
     [op, *sexps] = sexp.list
     return (yield stmt_list_steps(sexps))
@@ -943,10 +949,10 @@ def stmt_steps(sexp, decorator_list=None):
     (or list of nodes) itself for a statement with no sub-form (see expr.py's
     module docstring)."""
     return (
-        expr_wrapper(sexp)
+        do_compile(sexp)
+        if do_form_p(sexp)
+        else expr_wrapper(sexp)
         if not paren_p(sexp) or not len(sexp)
-        else do_compile(sexp)
-        if do_p(sexp)
         else assign_compile(sexp)
         if assign_p(sexp)
         else augassign_compile(sexp)
@@ -1015,10 +1021,10 @@ def stmt_list_steps(sexp_list):
     """The statements of ``sexp_list``, compiled in order; a form compiling to
     several (do, from) contributes them all.
 
-    A ``do`` that stmt_steps would give to do_compile is inlined from a
-    worklist of operand iterators instead: a nest of them would otherwise copy
-    each level's whole statement list into the level above, quadratic in the
-    nesting.
+    A ``do`` that stmt_steps would give to do_compile (do_form_p) is inlined
+    from a worklist of operand iterators instead: a nest of them would
+    otherwise copy each level's whole statement list into the level above,
+    quadratic in the nesting.
     """
     stmts = []
     pending = [iter(sexp_list)]
@@ -1027,7 +1033,7 @@ def stmt_list_steps(sexp_list):
         if sexp is _DONE:
             pending.pop()
             continue
-        if paren_p(sexp) and len(sexp) and do_p(sexp):
+        if do_form_p(sexp):
             pending.append(islice(sexp.list, 1, None))
             continue
         stmt = yield stmt_steps(sexp)
