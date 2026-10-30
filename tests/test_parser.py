@@ -324,7 +324,8 @@ class TestNestedFStringLimit:
         assert info.value.msg.startswith("t-string")
         assert (info.value.lineno, info.value.offset) == (1, 448)
 
-    def test_a_malformed_literal_is_reported_after_the_nesting(self):
+    def test_the_150th_literal_is_refused_before_its_fields_are_parsed(self):
+        # Its field's own error (a bad conversion) is never reached.
         depth = FSTRING_NESTING_LIMIT - 1
         with pytest.raises(LispyCompileError) as info:
             parse(nested('f"{', depth, inner='f"{x!z}"'))

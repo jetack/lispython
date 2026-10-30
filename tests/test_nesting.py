@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+import lispy.core.parser as parser_module
 import lispy.tools as tools
 from lispy.core import nodes
 from lispy.core.compiler import features
@@ -1175,19 +1176,32 @@ def skip_without_t_strings(needs_t):
         pytest.skip("t-strings need Python 3.14")
 
 
-@pytest.mark.usefixtures("time_bound")
+# No time_bound: each level rescans the rest of the text, so this takes
+# most of a second, and the limit bounds it; the count of literals parsed
+# is the cost guard.
 @pytest.mark.parametrize("newline", ["", "\n"], ids=["one-line", "a-line-each"])
 @pytest.mark.parametrize(
     "openings, needs_t",
     [case[1:] for case in NESTED_LITERALS],
     ids=[case[0] for case in NESTED_LITERALS],
 )
-def test_nested_f_strings_past_cpython_s_limit_are_refused(openings, needs_t, newline):
+def test_nested_f_strings_past_cpython_s_limit_are_refused(
+    openings, needs_t, newline, monkeypatch
+):
     # CPython 3.14+ refuses the 150th literal at its quote: offset 449 on one
     # line, column 2 of line 150 with a line each.
     skip_without_t_strings(needs_t)
+    literals = []
+    string_parse = parser_module.string_parse
+
+    def counting(*args):
+        literals.append(None)
+        return string_parse(*args)
+
+    monkeypatch.setattr(parser_module, "string_parse", counting)
     with pytest.raises(LispyCompileError) as info:
         parse(nested_literals(openings, DEPTH, newline))
+    assert len(literals) == FSTRING_NESTING_LIMIT
     assert info.value.msg == NESTED_LITERAL_MESSAGE
     position = (info.value.lineno, info.value.offset)
     assert position == ((150, 2) if newline else (1, 449))
