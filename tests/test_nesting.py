@@ -10,6 +10,7 @@ import sys
 import pytest
 
 import lispy.tools as tools
+from lispy.core import nodes
 from lispy.core.compiler import features
 from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
 from lispy.core.errors import BLOCK_OVERFLOW_MESSAGE, LispyCompileError
@@ -23,6 +24,7 @@ from lispy.core.nodes import (
     FStrExpr,
     GluedHead,
     Keyword,
+    Node,
     Paren,
     QuasiQuote,
     Quote,
@@ -1291,3 +1293,59 @@ def running_sums(widths):
         sums.append(total)
         total += width
     return sums
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_quasiquoted_nested_fields_check_for_an_unquote_once_each():
+    # Asking contains_unquote afresh at each field walks the rest of the
+    # nest: 4000 levels took about 15 s.
+    depth = 4000
+    quoted = nest(lambda e: fstring(field(e)), depth, Unquote(Symbol("x")))
+    rebuilt = quoted.generator_expression(True)
+    # Every field rebuilds its text from the unquote's expansion.
+    padded = 0
+    pending = [rebuilt]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, list):
+            pending.extend(node)
+        elif isinstance(node, Node):
+            padded += atom_text(node) == ":expr-padding"
+            pending.extend(vars(node).values())
+    assert padded == depth
+
+
+def shared_and_cyclic_forms():
+    """(id, form, the node to ask about first, then the form itself)."""
+    leaf = Unquote(Symbol("x"))
+    dag = nest(lambda e: Paren(e, e), 60, leaf)
+    plain_dag = nest(lambda e: Paren(e, e), 60, Symbol("x"))
+    # The unquote hangs off the cycle's entry: asked from inside the cycle
+    # first, a walk that cut the back edge would answer False.
+    inner = Paren(Symbol("a"))
+    entry = Paren(inner, leaf)
+    inner.list.append(entry)
+    plain_inner = Paren(Symbol("a"))
+    plain_entry = Paren(plain_inner, Symbol("b"))
+    plain_inner.list.append(plain_entry)
+    return [
+        ("dag", dag, dag.list[0]),
+        ("plain-dag", plain_dag, plain_dag.list[0]),
+        ("cycle", entry, inner),
+        ("plain-cycle", plain_entry, plain_inner),
+    ]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "form, first",
+    [case[1:] for case in shared_and_cyclic_forms()],
+    ids=[case[0] for case in shared_and_cyclic_forms()],
+)
+def test_the_memoized_unquote_check_answers_as_contains_unquote(form, first):
+    memo = nodes._UNQUOTE_MEMO.set({})
+    try:
+        answers = [nodes._contains_unquote_memoized(n) for n in [first, form]]
+    finally:
+        nodes._UNQUOTE_MEMO.reset(memo)
+    assert answers == [contains_unquote(first), contains_unquote(form)]
