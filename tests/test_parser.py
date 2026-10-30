@@ -226,3 +226,33 @@ class TestDanglingQuote:
     def test_quotes_with_a_form_still_parse(self, src, parsed):
         [form] = parse(src)
         assert repr(form) == parsed
+
+
+class TestPrefixedOperandType:
+    """The operand after ^, *, ** or : keeps its own token type, so a number
+    there is a Constant (as it is standing alone), not a Symbol named 1."""
+
+    @pytest.mark.parametrize(
+        ["src", "parsed"],
+        [
+            ("*1", "Star(Const('1'))"),
+            ("**1", "DStar(Const('1'))"),
+            (":1", "Kwd(Const('1'))"),
+            ("^1", "Ann(Const('1'))"),
+            (":1.5e3", "Kwd(Const('1.5e3'))"),
+            ("*2j", "Star(Const('2j'))"),
+            ("*0x1f", "Star(Const('0x1f'))"),
+            ("*-1", "Star(Paren(Sym(-), Const('1')))"),
+            ("*a1", "Star(Sym(a1))"),
+            (":a", "Kwd(Sym(a))"),
+            ("**kw", "DStar(Sym(kw))"),
+            ("*True", "Star(Const('True'))"),
+        ],
+    )
+    def test_operand_type(self, src, parsed):
+        [form] = parse(src)
+        assert repr(form) == parsed
+
+    def test_operand_position(self):
+        [form] = parse("**1")
+        assert (form.value.lineno, form.value.col_offset) == (1, 2)
