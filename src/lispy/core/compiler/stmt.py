@@ -598,26 +598,39 @@ def literal_pattern_expr(sexp):
     """The expression of a literal pattern (MatchValue value or mapping key).
 
     A signed number is the one Paren a literal pattern may be; numbers go
-    through number_pattern_expr, which builds ast.parse's shapes.
+    through number_pattern_expr, which builds ast.parse's shapes. The one
+    refusal of a sign before anything but a number (``(- a)``, ``(- 1+2j)``,
+    ``--1``). ``+`` is a sign as in Python 3.15, gated by number_pattern_expr.
     """
+    expr = None
     if signed_number_p(sexp):
         [sign, number] = sexp.list
         if (
-            not constant_p(number)
-            or str(number) in SPECIAL_CONSTANTS
-            or (number_parts(number.value) or [None] * 4)[2] is not None
+            constant_p(number)
+            and str(number) not in SPECIAL_CONSTANTS
+            and (number_parts(number.value) or [None] * 4)[2] is None
         ):
-            raise LispyCompileError(
-                "only a number literal can be signed in a match pattern", sexp
-            )
-        return number_pattern_expr(str(sign) + number.value, sexp)
-    if constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
-        return number_pattern_expr(sexp.value, sexp)
-    return expr_compile(sexp)
+            expr = number_pattern_expr(str(sign) + number.value, sexp)
+    elif constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
+        expr = number_pattern_expr(sexp.value, sexp)
+    else:
+        return expr_compile(sexp)
+    if expr is None:
+        raise form_error(sexp, f"can sign only a number literal, got {sexp}", "pattern")
+    return expr
 
 
 def dotted_name_p(sexp):
     return type(sexp) is Symbol and "." in sexp.value
+
+
+def name_or_attr_p(sexp):
+    """Python's name_or_attr: every dot-part of the mangled name is an
+    identifier, so ``.x``, ``a..b`` and ``x.`` are no value pattern, mapping
+    key or class name. Expressions do not check this yet (TASK-757)."""
+    return type(sexp) is Symbol and all(
+        part.isidentifier() for part in sexp.name.split(".")
+    )
 
 
 def literal_pattern_p(sexp):
@@ -633,7 +646,7 @@ def value_pattern_expr(sexp, kind):
     """The expression of a value pattern or mapping key: a literal or a dotted
     name (``a.b``, which Python reads as a value, never a capture). Anything
     else is refused at ``sexp`` as no ``kind``."""
-    if dotted_name_p(sexp):
+    if dotted_name_p(sexp) and name_or_attr_p(sexp):
         return name_compile(sexp, ast.Load)
     if literal_pattern_p(sexp):
         return literal_pattern_expr(sexp)
@@ -645,10 +658,19 @@ def value_pattern_expr(sexp, kind):
 
 
 def prefixed_name_p(sexp):
-    """The name after a pattern's *, ** or : is a plain name, never a number:
-    the reader keeps a prefixed token's operand a symbol (``**1`` reads as
-    DoubleStarred(Symbol 1)), which plain_name_p alone would take as a name."""
-    return plain_name_p(sexp) and number_parts(sexp.value) is None
+    """The name after a pattern's *, ** or : is an identifier that is no
+    keyword once mangled.
+
+    A stopgap for the reader bug TASK-756: parser.py's star_token_parse and
+    keyword_token_parse pass the outer token type down, so the operand of
+    ``*1``, ``**1a`` or ``:1a`` reads as a Symbol. Remove this check (back to
+    plain_name_p) when the reader is fixed.
+    """
+    return (
+        type(sexp) is Symbol
+        and sexp.name.isidentifier()
+        and not reserved_name_p(sexp.name)
+    )
 
 
 def match_sequence_parse(sexp):
@@ -705,7 +727,7 @@ def match_mapping_parse(sexp):
 def match_class_parse(sexp):
     """``(Class pattern... :attr pattern...)``, positional patterns first."""
     cls = sexp.op
-    if not isinstance(cls, Symbol):
+    if not name_or_attr_p(cls):
         raise form_error(cls, f"needs a class name, got {cls}", "class pattern")
     q = deque(sexp.operands)
     patterns = []
@@ -776,6 +798,8 @@ def pattern_parse(sexp):
             raise form_error(sexp, f"expected, got {sexp}", "pattern")
         return ast.MatchClass(**match_class_parse(sexp), **position_info)
     return ast.MatchValue(value=value_pattern_expr(sexp, "pattern"), **position_info)
+
+
 def case_parse(case):
     """``(case pattern [as name] [if guard] body...)``; the case is checked
     in match_compile, the parts here, each refusal at the case."""

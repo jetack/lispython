@@ -292,8 +292,8 @@ class TestInexactScalarData:
         src = "(match v (case (neg-nan) (= hit True)))"
         with pytest.raises(LispyCompileError) as info:
             macroexpand_then_compile(parse(src), scope)
-        assert info.value.msg == (
-            "only a number literal can be signed in a match pattern"
+        assert info.value.msg.startswith(
+            "pattern can sign only a number literal, got (- "
         )
 
     @pytest.mark.parametrize("value", INEXACT, ids=repr)

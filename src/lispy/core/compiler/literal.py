@@ -103,21 +103,20 @@ def number_pattern_expr(text, sexp):
     Constant carrying an ``exact`` value (see ``constant_compile``) is that
     value, which CPython accepts as a MatchValue; signed, it is no literal
     (its text is a call, for display only).
+
+    None when ``text`` is no number a pattern may sign (``--1``, a signed
+    exact value): the caller, stmt.literal_pattern_expr, owns that refusal.
     """
     if exact_p(sexp):
         return ast.Constant(value=sexp.exact, **sexp.position_info)
     if any(exact_p(operand) for operand in getattr(sexp, "list", ())):
-        raise LispyCompileError(
-            "only a number literal can be signed in a match pattern", sexp
-        )
+        return None
     parts = number_parts(text)
     if parts is None:
         # CPython's own message for a malformed number ("leading zeros ...").
         literal_value(text.lstrip("+-"), sexp)
     if parts is None or len(parts[0]) > 1:
-        raise LispyCompileError(
-            "only a number literal can be signed in a match pattern", sexp
-        )
+        return None
     [signs, real, op, imag] = parts
     position_info = sexp.position_info
     if signs == "+":

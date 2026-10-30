@@ -99,6 +99,13 @@ match x:
 
 
 
+SIGNED = "pattern can sign only a number literal, got"
+PATTERN_USAGE = (
+    "a name, _, a literal, a dotted name, [sequence], {mapping}, "
+    "(| ...) or (Class ...)"
+)
+
+
 class TestSignedLiteralPatterns:
     """Signed and complex literals build the AST ast.parse builds for a case."""
 
@@ -158,7 +165,7 @@ class TestSignedLiteralPatterns:
         [
             ("1j+2j", "real number required in complex literal"),
             ("-1j-2j", "real number required in complex literal"),
-            ("(- 1+2j)", "only a number literal can be signed in a match pattern"),
+            ("(- 1+2j)", f"{SIGNED} (- 1+2j): {PATTERN_USAGE}"),
         ],
     )
     def test_complex_literal_rules(self, pattern, msg):
@@ -228,6 +235,23 @@ class TestMalformedPatterns:
             ("(~ 1)", "pattern expected, got (~ 1)", "(~ 1)"),
             ('f"x"', "pattern expected, got (f-string", 'f"x"'),
             ("[(+ 1 2)]", "pattern expected, got (+ 1 2)", "(+ 1 2)"),
+            ("[*1a]", f"{SEQ} expects a name after *, got 1a", "*1a"),
+            ("[*a.]", f"{SEQ} expects a name after *, got a.", "*a."),
+            ("{**1a}", f"{MAP} expects a name after **, got 1a", "**1a"),
+            ("(P :1a 2)", f"{CLS} expects an attribute name after :, got 1a", ":1a"),
+            (".x", "pattern expected, got .x", ".x"),
+            ("a..b", "pattern expected, got a..b", "a..b"),
+            ("x.", "pattern expected, got x.", "x."),
+            ("[1 .x]", "pattern expected, got .x", ".x"),
+            ("(| 1 x.)", "pattern expected, got x.", "x."),
+            ("{.x 1}", f"{MAP} expects a literal or dotted name as a key", ".x"),
+            ("{a..b 1}", f"{MAP} expects a literal or dotted name as a key", "a..b"),
+            ("(a..b 1)", f"{CLS} needs a class name, got a..b", "a..b"),
+            ("(x. 1)", f"{CLS} needs a class name, got x.", "x."),
+            ("(- a)", f"{SIGNED} (- a)", "(- a)"),
+            ("{-a 1}", f"{SIGNED} (- a)", "-a"),
+            ("[0 (- a)]", f"{SIGNED} (- a)", "(- a)"),
+            ("--1", f"{SIGNED} (- (- 1))", "--1"),
         ],
     )
     def test_refused_where_it_is_malformed(self, pattern, msg, at):
@@ -329,9 +353,7 @@ class TestSignedNumberExpressions:
     def test_only_numbers_are_signed(self, pattern):
         with pytest.raises(LispyCompileError) as info:
             stmt_to_dump(f"(match x\n  (case {pattern} ...))")
-        assert info.value.msg == (
-            "only a number literal can be signed in a match pattern"
-        )
+        assert info.value.msg == f"{SIGNED} {pattern}: {PATTERN_USAGE}"
         assert (info.value.lineno, info.value.offset) == (2, 9)
 
 
