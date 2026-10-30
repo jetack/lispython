@@ -137,6 +137,12 @@
    "~@" "Unquote-splice — splice a list into a quasiquote."
    "f-string" "```\nf\"text {expr} more\"\n```\n\nFormatted string literal (f-string)."})
 
+;; A hand-written entry sharing a key with FORM-USAGE would silently override
+;; the derived one in the merge below, so it is refused here.
+(= shadowed (& (set HAND-WRITTEN-DOCS) (set FORM-USAGE)))
+(if shadowed
+    (raise (RuntimeError f"HAND-WRITTEN-DOCS shadows FORM_USAGE entries: {(sorted shadowed)}")))
+
 (= SPECIAL-FORM-DOCS {**(form-docs FORM-USAGE FORM-PROSE) **HAND-WRITTEN-DOCS})
 
 ;; ---------------------------------------------------------------------------

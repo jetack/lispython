@@ -232,6 +232,10 @@ class TestRequireSelection:
 FORM_KEYS = sorted(k for k in FORM_USAGE if k not in PATTERN_KINDS)
 
 
+def test_hand_written_docs_do_not_shadow_form_usage():
+    assert not (set(server.HAND_WRITTEN_DOCS) & set(FORM_USAGE))
+
+
 @pytest.mark.parametrize("key", FORM_KEYS)
 def test_form_hover_usage_is_the_compilers(key):
     doc = server.SPECIAL_FORM_DOCS[key]
