@@ -160,10 +160,12 @@ def macro_expansion_nodes(expansion, call):
     ``data_to_generator_expression``). Only those form slots are converted,
     never other attributes (lineno is an int, an f-string's conversion is an
     int). A value no literal spells (nan, a complex with a signed zero, inf
-    or nan part) becomes a Constant carrying it exactly (``_exact_constant``). Any other
-    value (a dict, a set, an object), or a form, list or tuple that contains
-    itself (also one a quasiquote unquoted, which the constructor leaves in
-    place), is a LispyCompileError at the call naming the macro.
+    or nan part) becomes a Constant carrying it exactly (``_exact_constant``).
+    An Expression's list may be any list, tuple or deque; its copy is a plain
+    list of nodes. Any other value (a dict, a set, an object, also as an
+    Expression's list), or a form, list or tuple that contains itself (also
+    one a quasiquote unquoted, which the constructor leaves in place), is a
+    LispyCompileError at the call naming the macro.
 
     A macro builds its expansion at run time from quasiquote templates, so
     those nodes (and the converted data) carry the Node default (lineno 0)
@@ -172,7 +174,7 @@ def macro_expansion_nodes(expansion, call):
     at the call. A node that has a position (an unquoted argument the user
     wrote) keeps its own. Descends every Node attribute, so f-string fields
     and their format specs, wrappers, quotes and glued heads are covered
-    alike; the copy memo keeps nodes shared between places in the expansion
+    alike; the copy memos keep nodes shared between places in the expansion
     shared in the copy.
 
     The tree is copied, not filled in place, because the macro may still own
@@ -181,7 +183,7 @@ def macro_expansion_nodes(expansion, call):
     call, and mixing such stale nodes with fresh ones can make a start line
     exceed its end line, which compile() rejects. Nodes are plain attribute
     bags compared by name, never by identity (gensym returns a Symbol with a
-    unique name); the id memo keeps sharing within the one expansion.
+    unique name); the id memos keep sharing within the one expansion.
 
     ⚠️ Convert, copy and fill are one iterative pass over an explicit stack,
     never copy.deepcopy or recursion: deepcopy spends several Python frames
@@ -198,8 +200,9 @@ def macro_expansion_nodes(expansion, call):
     made = []
     # id(Bracket made from a list or tuple) -> that list or tuple.
     sources = {}
-    # ids of the containers being copied (nodes, lists, deques) and of the
-    # data lists and tuples being converted: the path from the root. Meeting
+    # ids of the containers being copied (nodes, lists, deques), of the form
+    # lists and of the data lists and tuples being converted: the path from
+    # the root, whichever memo the copy goes to. Meeting
     # one again is a self-reference, not sharing, and wiring its copy in
     # would make the copy a cycle that later passes recurse through forever.
     # One set serves both, as the ids of live objects are distinct.
@@ -232,7 +235,37 @@ def macro_expansion_nodes(expansion, call):
             sources[id(node)] = data
         return node
 
-    memo = {}  # id(original) -> its copy
+    def form_list(elements):
+        # An Expression's list as a plain list of nodes. Any list (a subclass
+        # too, else a cycle through it escapes the checks), tuple or deque is
+        # walked; fresh nodes from data have no position and are pushed below
+        # to be filled like any template-built node. A Bracket made from a
+        # list still holds raw items, converted when the pass reaches it,
+        # never by recursion.
+        if not isinstance(elements, (list, tuple, deque)):
+            raise LispyCompileError(
+                f"macro {call.op} returned a {type(elements).__name__} as a "
+                f"form's list in its expansion, which has no lispython form",
+                call,
+            )
+        if id(elements) in active:
+            raise self_reference(elements)
+        if id(elements) in forms:
+            return forms[id(elements)]
+        enter(elements)
+        converted = [node_of(e) for e in elements]
+        forms[id(elements)] = converted
+        stack.extend((converted, i) for i in range(len(converted)))
+        return converted
+
+    # Two memos that never share an entry, because one container can be
+    # reached both ways and each way needs a different copy: ``memo`` holds
+    # plain copies (nodes, and lists, deques and tuples in any slot but a form
+    # list), which keep raw data raw; ``forms`` holds an Expression's form
+    # list (id of the original list, tuple or deque) converted through
+    # ``node_of`` into a plain list. Each keeps sharing within its kind.
+    memo = {}  # id(original) -> its plain copy
+    forms = {}  # id(original form list) -> its converted list
     root = [node_of(expansion)]
     # (container, key): the slot still holding an original, to be replaced by
     # its copy. A tuple's slot also gets a finisher, popped once every slot
@@ -240,7 +273,9 @@ def macro_expansion_nodes(expansion, call):
     # copied container (and the data a Bracket is made from) an exit marker
     # (None, its id), popped once its subtree is copied. A tuple needs none:
     # it memoizes only after its items, and any cycle through it also runs
-    # through a node or list, which memoizes before its children.
+    # through a node or list, which is active while its children are copied.
+    # A value on the path is a self-reference whichever memo holds it, so the
+    # active check comes before either memo.
     stack = [(root, 0)]
     while stack:
         item = stack.pop()
@@ -255,9 +290,9 @@ def macro_expansion_nodes(expansion, call):
             continue
         container, key = item
         value = container[key]
+        if id(value) in active:
+            raise self_reference(value)
         if id(value) in memo:
-            if id(value) in active:
-                raise self_reference(value)
             container[key] = memo[id(value)]
             continue
         if isinstance(value, Node):
@@ -272,35 +307,18 @@ def macro_expansion_nodes(expansion, call):
             enter(value)
             for k in _child_form_keys(value):
                 attrs[k] = node_of(attrs[k])
-            # A list subclass in a form slot is walked like a list (else a
-            # cycle through it escapes the checks); its copy is a plain list.
-            walked = isinstance(value, Expression) and isinstance(value.list, list)
+            is_form = isinstance(value, Expression)
             # ⚠️ The other slots go below the list's exit marker, so they are
             # copied once the list has left the path: a sibling slot reaching
             # the node's own list (p.orig = p.list) is sharing, not a cycle.
-            stack.extend((attrs, k) for k in attrs if not (walked and k == "list"))
+            stack.extend((attrs, k) for k in attrs if not (is_form and k == "list"))
             source = sources.get(id(value))
             if source is not None:
                 if id(source) in active:
                     raise self_reference(source)
                 enter(source)
-            if walked:
-                elements = value.list
-                if id(elements) in memo:
-                    if id(elements) in active:
-                        raise self_reference(elements)
-                    attrs["list"] = memo[id(elements)]
-                else:
-                    enter(elements)
-                    # Fresh nodes from data have no position; they are pushed
-                    # below and filled like any template-built node.
-                    # A Bracket made from a list still holds raw items; they
-                    # are converted when the pass reaches it, never by
-                    # recursion.
-                    converted = [node_of(e) for e in elements]
-                    memo[id(elements)] = converted
-                    attrs["list"] = converted
-                    stack.extend((converted, i) for i in range(len(converted)))
+            if is_form:
+                attrs["list"] = form_list(value.list)
         elif type(value) is list:
             copied = list(value)
             enter(value)
