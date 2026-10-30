@@ -86,9 +86,9 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
 
     It asks for a child form's expansion with ``new = yield _expand_1(child, ...)``
     and returns the node's replacement; ``expanded[0]`` is set once a macro
-    call is expanded. macroexpand_1_and_check runs these steps on an explicit
-    stack, so the order is a recursive pre-order walk's, left to right, but
-    nesting depth costs no Python frames.
+    call is expanded. macroexpand_1_and_check runs these steps on the shared
+    trampoline (core/utils.py), so the order is a recursive pre-order walk's,
+    left to right, but nesting depth costs no Python frames.
     """
     if isinstance(sexp, QuasiQuote):
         sexp.value = yield _expand_1(sexp.value, scope, True, include_meta, expanded)
