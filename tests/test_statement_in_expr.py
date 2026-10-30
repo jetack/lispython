@@ -73,9 +73,8 @@ def test_statement_position_is_untouched():
 
 def test_statement_heads_match_stmt_compile():
     """STATEMENT_HEADS lists every head stmt_compile dispatches as a statement."""
-    dispatched = set(
-        re.findall(r'str\(sexp\.op\) == "([^"]+)"', inspect.getsource(stmt_module))
-    )
+    source = inspect.getsource(stmt_module)
+    dispatched = set(re.findall(r'atom_text\(sexp\.op\) == "([^"]+)"', source))
     assert {"do", "=", "return", "def", "if"} <= dispatched
     assert dispatched <= STATEMENT_HEADS | {"match", "type"}
     assert set(augassignop_dict) <= STATEMENT_HEADS

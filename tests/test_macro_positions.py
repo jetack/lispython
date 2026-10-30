@@ -4,7 +4,6 @@ Without one they would carry the Node default (line 0), so a traceback or a
 compile error in macro-generated code would point nowhere."""
 
 import ast
-import signal
 from collections import deque
 
 import pytest
@@ -241,33 +240,6 @@ def test_unrepresentable_data_is_refused_at_the_call(make, type_name, scope):
         )
         assert (info.value.lineno, info.value.offset) == (3, 3)
         assert (info.value.end_lineno, info.value.end_offset) == (3, 5 + len(name))
-
-
-SELF_REFERENCE_BUDGET = 2.0  # seconds; a passing test takes milliseconds
-
-
-@pytest.fixture
-def time_bound():
-    """Fail the test once it runs past SELF_REFERENCE_BUDGET.
-
-    A self-referencing form has no finite copy: without the checks the
-    conversion grows memory without bound (about 120 MB/s), fast enough to
-    exhaust the machine before any memory error. The timer stops it first.
-    Where setitimer is missing the test is skipped, never run unguarded.
-    """
-    if not hasattr(signal, "setitimer"):
-        pytest.skip("needs signal.setitimer to bound a runaway self-reference")
-
-    def expire(signum, frame):
-        pytest.fail(f"ran past its {SELF_REFERENCE_BUDGET} s budget")
-
-    old_handler = signal.signal(signal.SIGALRM, expire)
-    signal.setitimer(signal.ITIMER_REAL, SELF_REFERENCE_BUDGET)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
 
 
 # A form, list or tuple that contains itself has no finite form. Every test

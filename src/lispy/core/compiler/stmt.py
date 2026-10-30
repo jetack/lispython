@@ -18,8 +18,8 @@ from lispy.core.compiler.literal import (
     reserved_name_p,
 )
 from lispy.core.compiler.utils import *
-from lispy.core.errors import LispyCompileError
-from lispy.core.nodes import GluedHead, Node, Paren
+from lispy.core.errors import LispyCompileError, nesting_error
+from lispy.core.nodes import GluedHead, Node, Paren, atom_text
 from lispy.core.utils import *
 
 
@@ -104,7 +104,7 @@ def target_compile(sexp, kind):
 
 
 def do_p(sexp):
-    return str(sexp.op) == "do"
+    return atom_text(sexp.op) == "do"
 
 
 def do_compile(sexp):
@@ -113,7 +113,7 @@ def do_compile(sexp):
 
 
 def assign_p(sexp):
-    return str(sexp.op) == "="
+    return atom_text(sexp.op) == "="
 
 
 def assign_compile(sexp):
@@ -147,13 +147,13 @@ def assign_compile(sexp):
 
 
 def augassign_p(sexp):
-    return str(sexp.op) in augassignop_dict
+    return atom_text(sexp.op) in augassignop_dict
 
 
 def augassign_compile(sexp):
     [[target, value], rest] = form_parts(sexp, ("target", "value"))
     args = [value, *rest]
-    op = augassignop_dict[str(sexp.op)]
+    op = augassignop_dict[atom_text(sexp.op)]
     value = reduce(
         lambda x, y: ast.BinOp(x, op(), y, **sexp.position_info),
         map(expr_compile, args),
@@ -239,7 +239,7 @@ def importfrom_compile(sexp, lazy=False):
                 raise LispyCompileError(
                     "lazy from ... import * is not allowed", sexp
                 )
-            if str(module) == "__future__":
+            if atom_text(module) == "__future__":
                 raise LispyCompileError(
                     "lazy from __future__ import is not allowed", sexp
                 )
@@ -264,7 +264,7 @@ def importfrom_compile(sexp, lazy=False):
 
 
 def if_p(sexp):
-    return str(sexp.op) == "if"
+    return atom_text(sexp.op) == "if"
 
 
 def if_stmt_compile(sexp):
@@ -361,7 +361,7 @@ def form_parts(sexp, header, form=None):
 
 def clause_p(sexp, heads):
     """A Paren whose head is one of ``heads``; an empty () is no clause."""
-    return isinstance(sexp, Paren) and len(sexp) > 0 and str(sexp.op) in heads
+    return isinstance(sexp, Paren) and len(sexp) > 0 and atom_text(sexp.op) in heads
 
 
 def loop_parse(sexp, header):
@@ -382,7 +382,7 @@ def loop_parse(sexp, header):
 
 
 def while_p(sexp):
-    return str(sexp.op) == "while"
+    return atom_text(sexp.op) == "while"
 
 
 def while_compile(sexp):
@@ -396,7 +396,7 @@ def while_compile(sexp):
 
 
 def for_p(sexp):
-    return str(sexp.op) == "for"
+    return atom_text(sexp.op) == "for"
 
 
 def for_compile(sexp, async_p=False):
@@ -413,7 +413,7 @@ def for_compile(sexp, async_p=False):
 
 
 def deco_p(sexp):
-    return str(sexp.op) == "deco"
+    return atom_text(sexp.op) == "deco"
 
 
 def raise_compile(sexp):
@@ -513,7 +513,7 @@ def try_parse(sexp):
     for clause in operands[n:]:
         if not clause_p(clause, TRY_CLAUSES):
             raise form_error(clause, f"has {clause} after its clauses", "try")
-        kind = str(clause.op)
+        kind = atom_text(clause.op)
         if kind in ("except", "except*"):
             if previous in ("else", "finally"):
                 raise form_error(clause, f"has {kind} after {previous}", "try")
@@ -591,7 +591,11 @@ def with_compile(sexp, async_p=False):
 
 
 def signed_number_p(sexp):
-    return isinstance(sexp, Paren) and len(sexp) == 2 and str(sexp.op) in ("+", "-")
+    return (
+        isinstance(sexp, Paren)
+        and len(sexp) == 2
+        and atom_text(sexp.op) in ("+", "-")
+    )
 
 
 def literal_pattern_expr(sexp):
@@ -607,11 +611,11 @@ def literal_pattern_expr(sexp):
         [sign, number] = sexp.list
         if (
             constant_p(number)
-            and str(number) not in SPECIAL_CONSTANTS
+            and atom_text(number) not in SPECIAL_CONSTANTS
             and (number_parts(number.value) or [None] * 4)[2] is None
         ):
             expr = number_pattern_expr(str(sign) + number.value, sexp)
-    elif constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
+    elif constant_p(sexp) and atom_text(sexp) not in SPECIAL_CONSTANTS:
         expr = number_pattern_expr(sexp.value, sexp)
     else:
         return expr_compile(sexp)
@@ -638,7 +642,7 @@ def literal_pattern_p(sexp):
     return (
         signed_number_p(sexp)
         or string_p(sexp)
-        or (constant_p(sexp) and str(sexp) != "...")
+        or (constant_p(sexp) and atom_text(sexp) != "...")
     )
 
 
@@ -687,13 +691,13 @@ def match_sequence_parse(sexp):
             )
         starred = True
         name = elt.value
-        if str(name) != "_" and not prefixed_name_p(name):
+        if atom_text(name) != "_" and not prefixed_name_p(name):
             raise form_error(
                 elt, f"expects a name after *, got {name}", "sequence pattern"
             )
         patterns.append(
             ast.MatchStar(
-                **{} if str(name) == "_" else {"name": name.name}, **elt.position_info
+                **{} if atom_text(name) == "_" else {"name": name.name}, **elt.position_info
             )
         )
     return {"patterns": patterns}
@@ -705,7 +709,7 @@ def match_mapping_parse(sexp):
     rst = {}
     if items and doublestarred_p(items[-1]):
         rest = items.pop()
-        if not prefixed_name_p(rest.value) or str(rest.value) == "_":
+        if not prefixed_name_p(rest.value) or atom_text(rest.value) == "_":
             raise form_error(
                 rest, f"expects a name after **, got {rest.value}", "mapping pattern"
             )
@@ -776,12 +780,12 @@ def pattern_parse(sexp):
         raise form_error(
             sexp, f"can be **rest only last in a mapping pattern, got {sexp}", "pattern"
         )
-    if type(sexp) is Symbol and str(sexp) == "_":
+    if type(sexp) is Symbol and atom_text(sexp) == "_":
         return ast.MatchAs(**position_info)
     if type(sexp) is Symbol and not dotted_name_p(sexp):
         name_compile(sexp, ast.Store)  # refuses a hard keyword (if) at itself
         return ast.MatchAs(name=sexp.name, **position_info)
-    if str(sexp) in ("True", "False", "None") and constant_p(sexp):
+    if atom_text(sexp) in ("True", "False", "None") and constant_p(sexp):
         return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
     if bracket_p(sexp):
         return ast.MatchSequence(**match_sequence_parse(sexp), **position_info)
@@ -927,7 +931,7 @@ def type_alias_p(sexp):
     # (one or three operands, any expression position, a non-symbol first
     # operand) is a call to the builtin type.  Code that rebinds `type` and calls
     # it as a bare two-argument statement must write (= _ (type a b)).
-    if str(sexp.op) != "type" or len(sexp) != 3:
+    if atom_text(sexp.op) != "type" or len(sexp) != 3:
         return False
     name = sexp[1]
     return plain_name_p(name.head if isinstance(name, GluedHead) else name)
@@ -972,7 +976,7 @@ def deco_compile(sexp, decorator_list):
 
 
 def functiondef_p(sexp):
-    return str(sexp.op) == "def"
+    return atom_text(sexp.op) == "def"
 
 
 def definition_parts(sexp, header):
@@ -1007,7 +1011,7 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
 
 
 def return_p(sexp):
-    return str(sexp.op) == "return"
+    return atom_text(sexp.op) == "return"
 
 
 def return_compile(sexp):
@@ -1040,7 +1044,7 @@ def nonlocal_compile(sexp):
 
 
 def classdef_p(sexp):
-    return str(sexp.op) == "class"
+    return atom_text(sexp.op) == "class"
 
 
 def classdef_args_parse(args):
@@ -1075,69 +1079,75 @@ def classdef_compile(sexp, decorator_list):
 
 
 def stmt_compile(sexp, decorator_list=None):
-    return (
-        expr_wrapper(sexp)
-        if not paren_p(sexp) or not len(sexp)
-        else do_compile(sexp)
-        if do_p(sexp)
-        else assign_compile(sexp)
-        if assign_p(sexp)
-        else augassign_compile(sexp)
-        if augassign_p(sexp)
-        else del_compile(sexp)
-        if str(sexp.op) == "del"
-        else ast.Pass(**sexp.position_info)
-        if str(sexp.op) == "pass"
-        else import_compile(sexp)
-        if str(sexp.op) == "import"
-        else importfrom_compile(sexp)
-        if str(sexp.op) == "from"
-        else import_compile(sexp, lazy=True)
-        if str(sexp.op) == "lazy-import"
-        else importfrom_compile(sexp, lazy=True)
-        if str(sexp.op) == "lazy-from"
-        else if_stmt_compile(sexp)
-        if if_p(sexp)
-        else while_compile(sexp)
-        if while_p(sexp)
-        else for_compile(sexp)
-        if for_p(sexp)
-        else ast.Break(**sexp.position_info)
-        if str(sexp.op) == "break"
-        else ast.Continue(**sexp.position_info)
-        if str(sexp.op) == "continue"
-        else raise_compile(sexp)
-        if str(sexp.op) == "raise"
-        else assert_compile(sexp)
-        if str(sexp.op) == "assert"
-        else try_compile(sexp)
-        if str(sexp.op) == "try"
-        else with_compile(sexp)
-        if str(sexp.op) == "with"
-        else match_compile(sexp)
-        if str(sexp.op) == "match"
-        else deco_compile(sexp, decorator_list)
-        if deco_p(sexp)
-        else functiondef_compile(sexp, decorator_list)
-        if functiondef_p(sexp)
-        else return_compile(sexp)
-        if return_p(sexp)
-        else global_compile(sexp)
-        if str(sexp.op) == "global"
-        else nonlocal_compile(sexp)
-        if str(sexp.op) == "nonlocal"
-        else classdef_compile(sexp, decorator_list)
-        if classdef_p(sexp)
-        else functiondef_compile(sexp, decorator_list, async_p=True)
-        if str(sexp.op) == "async-def"
-        else for_compile(sexp, async_p=True)
-        if str(sexp.op) == "async-for"
-        else with_compile(sexp, async_p=True)
-        if str(sexp.op) == "async-with"
-        else type_alias_compile(sexp)
-        if type_alias_p(sexp)
-        else expr_wrapper(sexp)
-    )
+    try:
+        return (
+            expr_wrapper(sexp)
+            if not paren_p(sexp) or not len(sexp)
+            else do_compile(sexp)
+            if do_p(sexp)
+            else assign_compile(sexp)
+            if assign_p(sexp)
+            else augassign_compile(sexp)
+            if augassign_p(sexp)
+            else del_compile(sexp)
+            if atom_text(sexp.op) == "del"
+            else ast.Pass(**sexp.position_info)
+            if atom_text(sexp.op) == "pass"
+            else import_compile(sexp)
+            if atom_text(sexp.op) == "import"
+            else importfrom_compile(sexp)
+            if atom_text(sexp.op) == "from"
+            else import_compile(sexp, lazy=True)
+            if atom_text(sexp.op) == "lazy-import"
+            else importfrom_compile(sexp, lazy=True)
+            if atom_text(sexp.op) == "lazy-from"
+            else if_stmt_compile(sexp)
+            if if_p(sexp)
+            else while_compile(sexp)
+            if while_p(sexp)
+            else for_compile(sexp)
+            if for_p(sexp)
+            else ast.Break(**sexp.position_info)
+            if atom_text(sexp.op) == "break"
+            else ast.Continue(**sexp.position_info)
+            if atom_text(sexp.op) == "continue"
+            else raise_compile(sexp)
+            if atom_text(sexp.op) == "raise"
+            else assert_compile(sexp)
+            if atom_text(sexp.op) == "assert"
+            else try_compile(sexp)
+            if atom_text(sexp.op) == "try"
+            else with_compile(sexp)
+            if atom_text(sexp.op) == "with"
+            else match_compile(sexp)
+            if atom_text(sexp.op) == "match"
+            else deco_compile(sexp, decorator_list)
+            if deco_p(sexp)
+            else functiondef_compile(sexp, decorator_list)
+            if functiondef_p(sexp)
+            else return_compile(sexp)
+            if return_p(sexp)
+            else global_compile(sexp)
+            if atom_text(sexp.op) == "global"
+            else nonlocal_compile(sexp)
+            if atom_text(sexp.op) == "nonlocal"
+            else classdef_compile(sexp, decorator_list)
+            if classdef_p(sexp)
+            else functiondef_compile(sexp, decorator_list, async_p=True)
+            if atom_text(sexp.op) == "async-def"
+            else for_compile(sexp, async_p=True)
+            if atom_text(sexp.op) == "async-for"
+            else with_compile(sexp, async_p=True)
+            if atom_text(sexp.op) == "async-with"
+            else type_alias_compile(sexp)
+            if type_alias_p(sexp)
+            else expr_wrapper(sexp)
+        )
+    except RecursionError:
+        # As in expr_compile: a form nested past Python's recursion limit.
+        # A handler that hits the limit again building the error leaves it to
+        # the next level's, which retries a level up.
+        raise nesting_error(sexp) from None
 
 
 def stmt_list_compile(sexp_list):

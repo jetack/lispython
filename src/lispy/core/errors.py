@@ -8,6 +8,8 @@ into text.
 """
 
 import contextlib
+import sys
+from types import SimpleNamespace
 
 
 class LispyCompileError(SyntaxError):
@@ -107,3 +109,23 @@ def format_compile_error(err):
     text = err.text.rstrip("\r\n")
     caret = " " * max((err.offset or 1) - 1, 0) + "^"
     return f"{head}\n{text}\n{caret}"
+
+
+def nesting_error(at):
+    """The one error for a form nested deeper than Python can compile.
+
+    ``at`` is a lispython node, or a Python AST node (positioned by its own
+    lineno/col_offset/end_lineno/end_col_offset).
+    """
+    if not hasattr(at, "position_info"):
+        at = SimpleNamespace(
+            position_info={
+                key: getattr(at, key, None)
+                for key in ("lineno", "col_offset", "end_lineno", "end_col_offset")
+            }
+        )
+    return LispyCompileError(
+        "form nested too deeply to compile "
+        f"(Python's recursion limit is {sys.getrecursionlimit()})",
+        at,
+    )

@@ -162,6 +162,15 @@ follows [Semantic Versioning](https://semver.org/).
   reports "pattern can sign only a number literal, got (- a)" with the
   pattern usage, instead of "only a number literal can be signed in a match
   pattern".
+- Deeply nested forms compile in time linear in their nesting: a nested list
+  (`[[[...]]]`, also inside a macro call such as `when`) was exponential (20
+  levels took seconds) and a form in head position (`((((f))))`) quadratic.
+  Rendering a form and expanding macros no longer recurse, so a form nested
+  past Python's recursion limit renders and expands, and compiling one is a
+  positioned compile error, "form nested too deeply to compile", instead of
+  a `RecursionError`; the same holds for an AST too deep for CPython's
+  `compile()` (such as `(+ 1 1 ...)` with thousands of operands) or for
+  `ast.unparse` in `l2py`.
 
 ## [0.5.0]
 
