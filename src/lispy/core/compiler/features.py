@@ -10,7 +10,9 @@ silent mistranslation.
 
 AST shapes: where releases build the same form differently, a named
 capability probe below asks the running ``ast`` module instead of comparing
-version numbers, so a backported change is followed automatically.  The
+version numbers, so a backported change is followed automatically.  The one
+exception is ``compile_depth_follows_recursion_limit``, a version comparison
+through ``running_version()``: probing it would overflow the C stack.  The
 compiler calls the probes through this module (``features.probe()``), which
 is also how tests replace them.
 
