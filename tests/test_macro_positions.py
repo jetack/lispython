@@ -502,6 +502,36 @@ def test_shared_data_dag_is_converted_once(form_kind, data_kind):
     assert b.list[0].value == "1"
 
 
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("data_kind", [list, tuple])
+def test_shared_data_dag_in_a_quasiquote_is_converted_once(data_kind):
+    d = data_kind([1])
+    for _ in range(30):
+        d = data_kind([d, d])
+    p = Paren(Symbol("f"), d)
+
+    def assert_shared(b):
+        assert type(b) is Bracket
+        for _ in range(30):
+            assert b.list[0] is b.list[1]
+            b = b.list[0]
+            assert type(b) is Bracket
+        assert type(b.list[0]) is Constant
+        assert b.list[0].value == "1"
+
+    assert_shared(p.list[1])
+    assert_shared(macro_expansion_nodes(p, call_at(POSITION)).list[1])
+
+
+@pytest.mark.parametrize("order", [0, 1])
+def test_cycle_through_shared_data_is_left_for_the_expander(order):
+    a = []
+    b = [a]
+    a.append(b)
+    root = [a, b] if order else [b, a]
+    assert data_to_generator_expression(root) is root
+
+
 @pytest.mark.parametrize(
     ("macro", "python"),
     [
