@@ -1,5 +1,6 @@
 import ast
 import contextlib
+import itertools
 import sys
 from collections import deque
 
@@ -285,22 +286,27 @@ def _ast_nodes(value):
     return []
 
 
-def _generator_defs(stmts):
-    """The ids of the defs in ``stmts`` whose own scope yields: one
-    iterative pass with the enclosing scope carried along, so linear in the
-    AST's size. A def's decorators, defaults and annotations belong to the
-    enclosing scope; a lambda's or class's body is a scope of its own."""
-    found = set()
-    pending = [(stmt, None) for stmt in stmts]
+_SCOPES = (*_DEFS, ast.Lambda, ast.ClassDef)
+
+
+def _yields(definition):
+    """Whether the def ``definition``'s own scope yields: a scan of its
+    body that stops at nested scopes' bodies (a nested def's decorators,
+    defaults and annotations belong to this scope; a lambda's or class's
+    body is a scope of its own). Each node is scanned for the one scope it
+    belongs to only, so scanning every def stays linear in the AST's size."""
+    pending = list(definition.body)
     while pending:
-        [node, scope] = pending.pop()
-        if isinstance(node, (ast.Yield, ast.YieldFrom)) and scope is not None:
-            found.add(id(scope))
-        opens_scope = isinstance(node, (*_DEFS, ast.Lambda, ast.ClassDef))
-        for field, value in ast.iter_fields(node):
-            inner = node if opens_scope and field == "body" else scope
-            pending.extend((child, inner) for child in _ast_nodes(value))
-    return found
+        node = pending.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+        if isinstance(node, _SCOPES):
+            for field, value in ast.iter_fields(node):
+                if field != "body":
+                    pending.extend(_ast_nodes(value))
+        else:
+            pending.extend(ast.iter_child_nodes(node))
+    return False
 
 
 def _comprehension_parts(node, count):
@@ -325,11 +331,32 @@ def _comprehension_parts(node, count):
     return parts
 
 
-def _counted_children(node, count, generator_defs):
+# The node types ``_counted_children`` counts other than as their parent:
+# every other node's children sit under the blocks it does.
+_BLOCK_COUNTED_NODES = frozenset(
+    {
+        *_INLINED_COMPREHENSIONS,
+        ast.GeneratorExp,
+        *_SCOPES,
+        *([ast.TypeAlias] if hasattr(ast, "TypeAlias") else []),
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.With,
+        ast.AsyncWith,
+        ast.Try,
+        *([ast.TryStar] if hasattr(ast, "TryStar") else []),
+        ast.ExceptHandler,
+    }
+)
+
+
+def _counted_children(node, count):
     """``(child, count)`` for each child of ``node``, in compile order, where
     ``count`` is the static blocks the child sits under in its code unit; a
     ``None`` child is a block slot ``node`` pushes, to check against the
-    limit. The model is what CPython releases that count inlined
+    limit. Only the ``_BLOCK_COUNTED_NODES`` count their children other than
+    at ``count``. The model is what CPython releases that count inlined
     comprehensions (3.13.16, 3.14.8, 3.15.1) measure."""
     if isinstance(node, _INLINED_COMPREHENSIONS):
         first = node.generators[0].iter
@@ -351,7 +378,7 @@ def _counted_children(node, count, generator_defs):
         unit = "value" if alias else "body"
         start = int(
             isinstance(node, ast.AsyncFunctionDef)
-            or (isinstance(node, ast.FunctionDef) and id(node) in generator_defs)
+            or (isinstance(node, ast.FunctionDef) and _yields(node))
         )
         fields = sorted(
             ast.iter_fields(node),
@@ -408,6 +435,29 @@ def _counted_children(node, count, generator_defs):
     ]
 
 
+def _overflows(stmts):
+    """Whether any block slot in ``stmts`` (``_counted_children``) is past
+    ``MAX_STATIC_BLOCKS``. Unordered and unpositioned, so a node of no
+    ``_BLOCK_COUNTED_NODES`` type costs one push per child: this is the pass
+    every compile pays, and ``refuse_block_overflow`` walks again in compile
+    order only when it finds one."""
+    pending = [(stmt, 0) for stmt in stmts]
+    pop = pending.pop
+    extend = pending.extend
+    counted = _BLOCK_COUNTED_NODES
+    child_nodes = ast.iter_child_nodes
+    while pending:
+        [node, count] = pop()
+        if node is None:
+            if count > MAX_STATIC_BLOCKS:
+                return True
+        elif type(node) in counted:
+            extend(_counted_children(node, count))
+        else:
+            extend(zip(child_nodes(node), itertools.repeat(count)))
+    return False
+
+
 def refuse_block_overflow(stmts):
     """Raise ``block_overflow_error`` at the first list/set/dict
     comprehension in ``stmts`` (depth first, in compile order) that pushes
@@ -433,12 +483,15 @@ def refuse_block_overflow(stmts):
     those itself on every release.
 
     The error is at the comprehension, or its nearest positioned ancestor.
-    Iterative and linear in the AST's size (one pre-pass finds the generator
-    defs): the ASTs it walks are deeper than recursion can take.
+    Iterative and linear in the AST's size: the ASTs it walks are deeper
+    than recursion can take. ``_overflows`` answers the common case, nothing
+    to refuse, in about a bare walk's time; only an AST it flags is walked
+    again in compile order to find and position the error.
     """
     if not features.inlined_comprehensions_overflow_block_stack():
         return stmts
-    generator_defs = _generator_defs(stmts)
+    if not _overflows(stmts):
+        return stmts
     for stmt in stmts:
         # (node or None for a block slot, blocks it sits under, nearest
         # positioned node on the path)
@@ -451,7 +504,7 @@ def refuse_block_overflow(stmts):
                 continue
             if getattr(node, "lineno", None):
                 positioned = node
-            children = _counted_children(node, count, generator_defs)
+            children = _counted_children(node, count)
             # Reversed, so the first child is popped (walked) first.
             pending.extend(
                 (child, child_count, positioned)

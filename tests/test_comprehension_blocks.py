@@ -273,6 +273,11 @@ PY_SHAPES = [
     ("generator-def", "def f():\n    yield\n    {C}"),
     ("yield-in-nested-default", "def f():\n    def g(a=(yield)): pass\n    {C}"),
     ("yield-in-nested-lambda", "def f():\n    lambda: (yield)\n    {C}"),
+    ("yield-in-nested-def", "def f():\n    def g():\n        yield\n    {C}"),
+    (
+        "yield-in-nested-class-decorator",
+        "def f():\n    @(yield)\n    class C: pass\n    {C}",
+    ),
     ("generator-lambda", "lambda: ((yield), {C})"),
     ("class", "class C:\n    {C}"),
     ("with", "with a:\n    {C}"),
