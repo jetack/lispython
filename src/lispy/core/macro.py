@@ -13,6 +13,7 @@ from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
 from lispy.core.nodes import atom_text, macro_expansion_nodes
+from lispy.core.utils import trampoline
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
@@ -83,22 +84,26 @@ def macroexpand_1(sexp, scope=globals()):
 def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     """One node's step of macroexpand_1_and_check, as a generator.
 
-    It asks for a child form's expansion with ``new = yield (child, in_quasi)``
+    It asks for a child form's expansion with ``new = yield expand(child, in_quasi)``
     and returns the node's replacement; ``expanded[0]`` is set once a macro
-    call is expanded. macroexpand_1_and_check runs these steps on an explicit
-    stack, so the order is a recursive pre-order walk's, left to right, but
-    nesting depth costs no Python frames.
+    call is expanded. macroexpand_1_and_check runs these steps on the shared
+    trampoline (core/utils.py), so the order is a recursive pre-order walk's,
+    left to right, but nesting depth costs no Python frames.
     """
+
+    def expand(child, child_in_quasi):
+        return _expand_1(child, scope, child_in_quasi, include_meta, expanded)
+
     if isinstance(sexp, QuasiQuote):
-        sexp.value = yield (sexp.value, True)
+        sexp.value = yield expand(sexp.value, True)
     elif isinstance(sexp, Quote):
         pass
     elif isinstance(sexp, Unquote):
-        sexp.value = yield (sexp.value, False)
+        sexp.value = yield expand(sexp.value, False)
     elif isinstance(sexp, Wrapper):
-        sexp.value = yield (sexp.value, in_quasi)
+        sexp.value = yield expand(sexp.value, in_quasi)
     elif isinstance(sexp, GluedHead):
-        sexp.params = yield (sexp.params, in_quasi)
+        sexp.params = yield expand(sexp.params, in_quasi)
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list
         name = atom_text(op)
@@ -123,7 +128,7 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
         else:
             expanded_list = []
             for x in sexp.list:
-                expanded_list.append((yield (x, in_quasi)))
+                expanded_list.append((yield expand(x, in_quasi)))
             sexp.list = [x for x in expanded_list if x is not None]
     return sexp
 
@@ -133,19 +138,8 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
     was expanded)``. Iterative (see _expand_1), so a form nested past the
     recursion limit expands like any other."""
     expanded = [False]
-    stack = [_expand_1(sexp, scope, in_quasi, include_meta, expanded)]
-    value = None
-    while True:
-        try:
-            [child, child_in_quasi] = stack[-1].send(value)
-        except StopIteration as done:
-            stack.pop()
-            if not stack:
-                return done.value, expanded[0]
-            value = done.value
-            continue
-        stack.append(_expand_1(child, scope, child_in_quasi, include_meta, expanded))
-        value = None
+    new = trampoline(_expand_1(sexp, scope, in_quasi, include_meta, expanded))
+    return new, expanded[0]
 
 
 def sexp_list_expand(sexp_list, scope, include_meta=True):

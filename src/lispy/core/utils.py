@@ -43,8 +43,8 @@ def trampoline(steps):
     in Python: nesting depth costs no Python frame per level. An exception
     from a step is thrown into the step that asked for it, as a recursive call
     would raise it there (so a step's try/finally runs), and leaves here once
-    no step catches it. The compiler (compiler/expr.py) and quote expansion
-    (nodes.py ``generator_expression``) run on it.
+    no step catches it. The compiler (compiler/expr.py), quote expansion and
+    source rendering (nodes.py) and macro expansion (macro.py) run on it.
     """
     if not isinstance(steps, GeneratorType):
         return steps
