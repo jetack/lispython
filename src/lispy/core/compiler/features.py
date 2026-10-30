@@ -10,11 +10,13 @@ silent mistranslation.
 
 AST shapes: where releases build the same form differently, a named
 capability probe below asks the running ``ast`` module instead of comparing
-version numbers, so a backported change is followed automatically.  The one
-exception is ``compile_depth_follows_recursion_limit``, a version comparison
-through ``running_version()``: probing it would overflow the C stack.  The
-compiler calls the probes through this module (``features.probe()``), which
-is also how tests replace them.
+version numbers, so a backported change is followed automatically.  The
+exceptions are ``compile_depth_follows_recursion_limit``,
+``inlined_comprehensions_overflow_block_stack`` and
+``annotations_have_own_scope``, version comparisons through
+``running_version()``: probing the first would overflow the C stack, the
+others would crash the interpreter.  The compiler calls the probes through
+this module (``features.probe()``), which is also how tests replace them.
 
 No other ``sys.version_info`` comparison belongs in the compiler.  The one
 exception in the package is ``_PY312_PLUS`` in core/importer.py: it chooses
@@ -94,6 +96,48 @@ def compile_depth_follows_recursion_limit():
     nesting error through ``compile_nesting_errors`` (compiler/utils.py).
     """
     return tuple(running_version())[:2] < (3, 12)
+
+
+def inlined_comprehensions_overflow_block_stack():
+    """Whether compile() can crash, instead of refusing, on list/set/dict
+    comprehensions nested past CPython's static block limit: every release
+    that inlines them (PEP 709, 3.12+). A fixed fact of the release, so it is
+    read from ``running_version()``; probing would crash the process.
+    ``refuse_block_overflow`` in compiler/utils.py has the mechanism and
+    applies the rule before compile() runs.
+
+    ======================  ===============================================
+    Python                  past the static block limit in one code unit
+    ======================  ===============================================
+    3.11                    no inlining: unaffected
+    3.12.x                  segfault (gh-156091; security-only, never fixed)
+    3.13 < 3.13.16,         segfault (gh-156091)
+    3.14 < 3.14.8, 3.15.0
+    3.13.16, 3.14.8,        SyntaxError "too many statically nested blocks"
+    3.15.1                  at the comprehension pushing past the limit, but
+                            still a segfault on an ``await`` (or an
+                            ``async for`` clause) inside a generator
+                            expression at the limit: a separate CPython
+                            bug no release has fixed
+    ======================  ===============================================
+    """
+    return tuple(running_version())[:2] >= (3, 12)
+
+
+def annotations_have_own_scope():
+    """Whether a def's parameter and return annotations compile in a code
+    unit of their own (PEP 649's ``__annotate__``, 3.14+) rather than
+    eagerly in the enclosing one. A fixed fact of the release, read from
+    ``running_version()`` like the block check it serves: compiling a probe
+    to find out is what that check guards."""
+    return tuple(running_version())[:2] >= (3, 14)
+
+
+@functools.cache
+def type_alias_classes():
+    """The ast classes of a ``type`` statement: ``(ast.TypeAlias,)`` from
+    3.12, none before."""
+    return (ast.TypeAlias,) if hasattr(ast, "TypeAlias") else ()
 
 
 def import_has_is_lazy():
