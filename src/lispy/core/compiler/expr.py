@@ -7,12 +7,13 @@ from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import *
 from lispy.core.compiler.utils import *
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, nesting_error
+from lispy.core.nodes import atom_text
 from lispy.core.utils import *
 
 
 def tuple_p(sexp):
-    return str(sexp.op) == ","
+    return atom_text(sexp.op) == ","
 
 
 def tuple_compile(sexp, ctx):
@@ -31,30 +32,30 @@ def starred_compile(sexp, ctx):
 
 
 def unaryop_p(sexp):
-    return str(sexp.op) in unaryop_dict and len(sexp) == 2
+    return atom_text(sexp.op) in unaryop_dict and len(sexp) == 2
 
 
 def unaryop_compile(sexp):
     [op, operand] = sexp.list
     return ast.UnaryOp(
-        unaryop_dict[str(op)](), expr_compile(operand), **sexp.position_info
+        unaryop_dict[atom_text(op)](), expr_compile(operand), **sexp.position_info
     )
 
 
 def binop_p(sexp):
-    return str(sexp.op) in binop_dict and len(sexp) > 2
+    return atom_text(sexp.op) in binop_dict and len(sexp) > 2
 
 
 def binop_compile(sexp):
     [op, *args] = sexp.list
     return reduce(
-        lambda x, y: ast.BinOp(x, binop_dict[str(op)](), y, **sexp.position_info),
+        lambda x, y: ast.BinOp(x, binop_dict[atom_text(op)](), y, **sexp.position_info),
         map(expr_compile, args),
     )
 
 
 def boolop_p(sexp):
-    return str(sexp.op) in boolop_dict
+    return atom_text(sexp.op) in boolop_dict
 
 
 def boolop_compile(sexp):
@@ -65,7 +66,7 @@ def boolop_compile(sexp):
 
 
 def compare_p(sexp):
-    return str(sexp.op) in compare_dict
+    return atom_text(sexp.op) in compare_dict
 
 
 def compare_compile(sexp):
@@ -73,7 +74,7 @@ def compare_compile(sexp):
     [left, *comparators] = map(expr_compile, args)
     return ast.Compare(
         left=left,
-        ops=[compare_dict[str(op)]() for i in range(len(comparators))],
+        ops=[compare_dict[atom_text(op)]() for i in range(len(comparators))],
         comparators=comparators,
         **sexp.position_info
     )
@@ -102,7 +103,7 @@ def call_args_parse(given):
 def call_compile(sexp):
     [op, *operands] = sexp.list
     if isinstance(op, Symbol):
-        head = str(op)
+        head = atom_text(op)
         if head in STATEMENT_HEADS:
             hint = STATEMENT_HINTS.get(head)
             raise LispyCompileError(
@@ -120,7 +121,7 @@ def call_compile(sexp):
 
 
 def ifexp_p(sexp):
-    return str(sexp.op) == "ife"
+    return atom_text(sexp.op) == "ife"
 
 
 def ifexp_compile(sexp):
@@ -135,7 +136,7 @@ def ifexp_compile(sexp):
 
 
 def attribute_p(sexp):
-    return str(sexp.op) == "."
+    return atom_text(sexp.op) == "."
 
 
 def attribute_compile(sexp, ctx):
@@ -151,7 +152,7 @@ def attribute_compile(sexp, ctx):
 
 
 def methodcall_p(sexp):
-    return str(sexp.op).startswith(".")
+    return (atom_text(sexp.op) or "").startswith(".")
 
 
 def methodcall_compile(sexp):
@@ -167,7 +168,7 @@ def methodcall_compile(sexp):
 
 
 def namedexpr_p(sexp):
-    return str(sexp.op) == ":="
+    return atom_text(sexp.op) == ":="
 
 
 def namedexpr_compile(sexp):
@@ -180,7 +181,7 @@ def namedexpr_compile(sexp):
 
 
 def subscript_p(sexp):
-    return str(sexp.op) == "sub"
+    return atom_text(sexp.op) == "sub"
 
 
 def subscript_slice_compile(slice):
@@ -219,7 +220,7 @@ def parse_comprehensions(generator_body):
         iter = expr_compile(q.popleft())
         comprehension = ast.comprehension(is_async=is_async, target=target, iter=iter)
         ifs = []
-        while q and (not str(q[0]) in ["for", "async-for"]):
+        while q and (atom_text(q[0]) not in ("for", "async-for")):
             ifs.append(q.popleft())
         comprehension.ifs = list(map(expr_compile, ifs[slice(1, None, 2)]))
         rst.append(comprehension)
@@ -242,6 +243,14 @@ def gen_exp_compile(sexp):
     )
 
 
+def starred_head_p(arg):
+    """Whether ``arg``'s text starts with ``*`` (a ``*args``/``**kwargs``
+    parameter, or the bare ``*``), read without rendering it."""
+    return isinstance(arg, (Starred, DoubleStarred)) or (
+        atom_text(arg) or ""
+    ).startswith("*")
+
+
 def def_args_parse(sexp):
     q = deque(sexp.list)
     # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
@@ -252,7 +261,7 @@ def def_args_parse(sexp):
     kw_defaults = []
 
     # before starred
-    while q and (not str(q[0]).startswith("*")):
+    while q and not starred_head_p(q[0]):
         arg = q.popleft()
         if arg == "/":
             rst.posonlyargs = args
@@ -299,7 +308,7 @@ def def_args_parse(sexp):
 
 
 def lambda_p(sexp):
-    return str(sexp.op) == "lambda"
+    return atom_text(sexp.op) == "lambda"
 
 
 def lambda_compile(sexp):
@@ -415,7 +424,7 @@ PAREN_FORMS = (
     (namedexpr_p, namedexpr_compile),
     (subscript_p, subscript_compile),
     (
-        lambda sexp: len(sexp) > 1 and str(sexp[1]) in ["for", "async-for"],
+        lambda sexp: len(sexp) > 1 and atom_text(sexp[1]) in ("for", "async-for"),
         gen_exp_compile,
     ),
     (lambda_p, lambda_compile),
@@ -484,9 +493,9 @@ def bracket_compiler(sexp, ctx):
         list_compile(sexp, ctx)
         if len(sexp) < 1
         else slice_compile(sexp)
-        if str(sexp.op) == ":"
+        if atom_text(sexp.op) == ":"
         else list_comp_compile(sexp)
-        if len(sexp) > 1 and str(sexp[1]) in ["for", "async-for"]
+        if len(sexp) > 1 and atom_text(sexp[1]) in ("for", "async-for")
         else list_compile(sexp, ctx)
     )
 
@@ -542,13 +551,15 @@ def brace_compiler(sexp):
     return (
         dict_compile(sexp)
         if len(sexp) < 1
-        else (set_comp_compile if str(sexp.op) == "," else dict_comp_compile)(sexp)
-        if len(sexp) > 2 and str(sexp[2]) in ["for", "async-for"]
+        else (
+            set_comp_compile if atom_text(sexp.op) == "," else dict_comp_compile
+        )(sexp)
+        if len(sexp) > 2 and atom_text(sexp[2]) in ("for", "async-for")
         else dict_unpack_comp_compile(sexp)
         if doublestarred_p(sexp[0]) and len(sexp) > 1
-        and str(sexp[1]) in ["for", "async-for"]
+        and atom_text(sexp[1]) in ("for", "async-for")
         else set_compile(sexp)
-        if str(sexp.op) == ","
+        if atom_text(sexp.op) == ","
         else dict_compile(sexp)
     )
 
@@ -569,22 +580,31 @@ def metaindicator_compile(sexp):
 def expr_compile(sexp, ctx=ast.Load):
     if isinstance(sexp, GluedHead):
         raise sexp.misuse_error()
-    return (
-        paren_compiler(sexp, ctx)
-        if paren_p(sexp)
-        else bracket_compiler(sexp, ctx)
-        if bracket_p(sexp)
-        else brace_compiler(sexp)
-        if brace_p(sexp)
-        else expr_compile(sexp.value)
-        if isinstance(sexp, Annotation)
-        else starred_compile(sexp, ctx)
-        if starred_p(sexp)
-        else constant_compile(sexp)
-        if constant_p(sexp)
-        else string_compile(sexp)
-        if string_p(sexp)
-        else metaindicator_compile(sexp)
-        if metaindicator_p(sexp)
-        else name_compile(sexp, ctx)
-    )
+    try:
+        return (
+            paren_compiler(sexp, ctx)
+            if paren_p(sexp)
+            else bracket_compiler(sexp, ctx)
+            if bracket_p(sexp)
+            else brace_compiler(sexp)
+            if brace_p(sexp)
+            else expr_compile(sexp.value)
+            if isinstance(sexp, Annotation)
+            else starred_compile(sexp, ctx)
+            if starred_p(sexp)
+            else constant_compile(sexp)
+            if constant_p(sexp)
+            else string_compile(sexp)
+            if string_p(sexp)
+            else metaindicator_compile(sexp)
+            if metaindicator_p(sexp)
+            else name_compile(sexp, ctx)
+        )
+    except RecursionError:
+        # The compiler recurses, several frames per nesting level, so a form
+        # nested past Python's recursion limit lands here. Building the error
+        # this deep may hit the limit again; that RecursionError reaches the
+        # next level's handler, which retries a level up, so the error is
+        # positioned a few levels above the deepest form. A LispyCompileError
+        # passes through every outer handler unchanged.
+        raise nesting_error(sexp) from None

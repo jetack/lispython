@@ -4,10 +4,10 @@ from typing import Callable, Dict
 
 from lispy.core.compiler import def_args_parse, stmt_list_compile
 from lispy.core.compiler.literal import constant_compile, string_node_value
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, refuse_deep_ast
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
-from lispy.core.nodes import macro_expansion_nodes
+from lispy.core.nodes import atom_text, macro_expansion_nodes
 
 __macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
 
@@ -72,51 +72,72 @@ def macroexpand_1(sexp, scope=globals()):
     return macroexpand_1_and_check(sexp, scope)[0]
 
 
-def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=True):
-    expanded = False
+def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
+    """One node's step of macroexpand_1_and_check, as a generator.
+
+    It asks for a child form's expansion with ``new = yield (child, in_quasi)``
+    and returns the node's replacement; ``expanded[0]`` is set once a macro
+    call is expanded. macroexpand_1_and_check runs these steps on an explicit
+    stack, so the order is a recursive pre-order walk's, left to right, but
+    nesting depth costs no Python frames.
+    """
     if isinstance(sexp, QuasiQuote):
-        sexp.value, expanded = macroexpand_1_and_check(
-            sexp.value, scope, in_quasi=True, include_meta=include_meta
-        )
+        sexp.value = yield (sexp.value, True)
     elif isinstance(sexp, Quote):
         pass
     elif isinstance(sexp, Unquote):
-        sexp.value, expanded = macroexpand_1_and_check(
-            sexp.value, scope, include_meta=include_meta
-        )
+        sexp.value = yield (sexp.value, False)
     elif isinstance(sexp, Wrapper):
-        sexp.value, expanded = macroexpand_1_and_check(
-            sexp.value, scope, in_quasi=in_quasi, include_meta=include_meta
-        )
+        sexp.value = yield (sexp.value, in_quasi)
     elif isinstance(sexp, GluedHead):
-        sexp.params, expanded = macroexpand_1_and_check(
-            sexp.params, scope, in_quasi=in_quasi, include_meta=include_meta
-        )
+        sexp.params = yield (sexp.params, in_quasi)
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list
-        if str(op) == "defmacro" and not in_quasi:
+        name = atom_text(op)
+        if name == "defmacro" and not in_quasi:
             sexp = define_macro(sexp, scope, include_meta=include_meta)
-        elif str(op) == "require" and not in_quasi:
+        elif name == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
-        elif str(op) in scope.setdefault("__macro_namespace", {}) and not in_quasi and isinstance(sexp, Paren):
-            expansion = scope["__macro_namespace"][str(op)](
+        elif (
+            name in scope.setdefault("__macro_namespace", {})
+            and not in_quasi
+            and isinstance(sexp, Paren)
+        ):
+            expansion = scope["__macro_namespace"][name](
                 *[_unwrap_literal(o) for o in operands]
             )
             # Python data anywhere in the expansion becomes nodes, and
             # template-built nodes take the call's position, so tracebacks and
-            # compile errors point at the macro call, not line 0.
+            # compile errors point at the macro call, not line 0. The
+            # expansion is expanded by the next pass, not this one.
             sexp = macro_expansion_nodes(expansion, sexp)
-            expanded = True
+            expanded[0] = True
         else:
-            expanded_list, expanded_feedbacks = zip(
-                *map(
-                    lambda x: macroexpand_1_and_check(x, scope, in_quasi=in_quasi, include_meta=include_meta),
-                    sexp.list,
-                )
-            )
-            sexp.list = list(filter(lambda x: not x is None, expanded_list))
-            expanded = any(expanded_feedbacks)
-    return sexp, expanded
+            expanded_list = []
+            for x in sexp.list:
+                expanded_list.append((yield (x, in_quasi)))
+            sexp.list = [x for x in expanded_list if x is not None]
+    return sexp
+
+
+def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=True):
+    """One expansion pass over ``sexp``: ``(new sexp, whether any macro call
+    was expanded)``. Iterative (see _expand_1), so a form nested past the
+    recursion limit expands like any other."""
+    expanded = [False]
+    stack = [_expand_1(sexp, scope, in_quasi, include_meta, expanded)]
+    value = None
+    while True:
+        try:
+            [child, child_in_quasi] = stack[-1].send(value)
+        except StopIteration as done:
+            stack.pop()
+            if not stack:
+                return done.value, expanded[0]
+            value = done.value
+            continue
+        stack.append(_expand_1(child, scope, child_in_quasi, include_meta, expanded))
+        value = None
 
 
 def sexp_list_expand(sexp_list, scope, include_meta=True):
@@ -127,6 +148,10 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
 
 
 def macroexpand_then_compile(sexp_list, scope=globals(), include_meta=True):
-    return stmt_list_compile(
-        sexp_list_expand(sexp_list, scope, include_meta=include_meta)
+    # Every entry point gets its AST here, so this is where an AST too deep
+    # for CPython's compile() is refused at a lispython position.
+    return refuse_deep_ast(
+        stmt_list_compile(
+            sexp_list_expand(sexp_list, scope, include_meta=include_meta)
+        )
     )

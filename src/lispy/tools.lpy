@@ -31,7 +31,7 @@
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
-                         format-compile-error])
+                         format-compile-error nesting-error])
 
 (def report-compile-error [err :filename None :source None]
   "Print a LispyCompileError compiler-style (path:line:col, source, caret) to stderr."
@@ -84,7 +84,12 @@
   (return st))
 
 (def ast-to-python [st]
-  (return (str (ast.unparse (_python-interpolations st)))))
+  ;; ast.unparse recurses and gives up on a shallower AST than compile()
+  ;; takes, so a statement it cannot write is the nesting error, at st.
+  (try
+    (return (str (ast.unparse (_python-interpolations st))))
+    (except [RecursionError]
+      (raise (nesting-error st) from None))))
 
 (def src-to-python-org [src :include-meta False :scope None]
   (if (is scope None)

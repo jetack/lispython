@@ -7,7 +7,44 @@ from math import isnan as _isnan
 
 
 def multiline_p(s):
-    return len(s.split("\n")) > 1
+    return "\n" in s
+
+
+def atom_text(node):
+    """``str(node)`` when that text contains no bracketed form, else None.
+
+    The one cheap way to read a form's name (a head such as ``def``, a word
+    such as ``for``/``in``, a dict key such as ``+``): it never renders a
+    subtree, so a lookup at every nesting level costs O(1) per level instead
+    of the whole subtree's text (which made nested lists exponential to
+    compile). Wrapper chains are followed iteratively.
+
+    ⚠️ Invariant, relied on by ``Node.__eq__`` and the tests: ``atom_text(n)
+    is None`` implies ``str(n)`` contains one of ``(``, ``[``, ``{``. So a
+    None matches no name, and code comparing it with a bracket-free word gets
+    exactly the answer ``str(n)`` would give.
+    """
+    parts = []
+    pending = [node]
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, Node):
+            parts.append(str(node))
+        elif isinstance(node, Literal):
+            parts.append(node._source(0))
+        elif isinstance(node, (Expression, FStrExpr)):
+            return None
+        elif getattr(type(node), "source_prefix", None) is not None:
+            parts.append(node.source_prefix)
+            pending.append(node.value)
+        elif isinstance(node, GluedHead):
+            # Popped head first: the text is head then params.
+            pending.append(node.params)
+            pending.append(node.head)
+        else:
+            # A Node subclass this function does not know: its own text.
+            parts.append(str(node))
+    return "".join(parts)
 
 
 class Node:
@@ -41,10 +78,52 @@ class Node:
     def generator_expression(self, in_quasi=False):
         return self._generator_expression(in_quasi)
 
+    def get_source(self, indent=0):
+        """The form's source text, its first line starting at column ``indent``.
+
+        Rendering is a trampoline, never recursion: each class's ``_source``
+        returns a leaf's text, or is a generator that asks for a child's text
+        with ``text = yield (child, child_indent)`` and returns its own. This
+        loop runs those generators on an explicit stack, so nesting depth costs
+        no Python frames (a form nested past the recursion limit still renders,
+        e.g. in a compile error message or macroexpand output).
+        """
+        result = self._source(indent)
+        if isinstance(result, str):
+            return result
+        stack = [result]
+        value = None
+        while True:
+            try:
+                [child, child_indent] = stack[-1].send(value)
+            except StopIteration as done:
+                stack.pop()
+                if not stack:
+                    return done.value
+                value = done.value
+                continue
+            if not isinstance(child, Node):
+                value = str(child)
+                continue
+            result = child._source(child_indent)
+            if isinstance(result, str):
+                value = result
+            else:
+                stack.append(result)
+                value = None
+
     def __str__(self):
         return self.get_source()
 
     def __eq__(self, other):
+        # Exactly ``str(self) == other``, without rendering in the common case
+        # of comparing with a name (see atom_text's invariant).
+        if isinstance(other, str):
+            text = atom_text(self)
+            if text is not None:
+                return text == other
+            if "(" not in other and "[" not in other and "{" not in other:
+                return False
         return str(self) == other
 
 
@@ -450,10 +529,16 @@ class Paren(Expression):
     def __repr__(self, depth=0):
         return "Paren" + "(" + ", ".join([repr(e) for e in self.list]) + ")"
 
-    def get_source(self, indent=0):
-        return "(" + " ".join([str(e) for e in self.list]) + ")"
+    def _source(self, indent):
+        # Elements render at indent 0, as str(e) always did.
+        texts = []
+        for e in self.list:
+            texts.append((yield (e, 0)))
+        return "(" + " ".join(texts) + ")"
 
 
+# list_format and comprehension_format are _source helpers: generators run
+# with ``yield from`` inside a node's _source (see Node.get_source).
 def list_format(q, indent=0, col_max=10):
     rst = ""
     cur = indent - 1
@@ -468,7 +553,7 @@ def list_format(q, indent=0, col_max=10):
         else:
             rst += " "
             cur += 1
-        e_src = e.get_source(cur)
+        e_src = yield (e, cur)
         rst += e_src
         if multiline_p(e_src) or cnt == col_max - 1:
             need_newline = True
@@ -480,18 +565,18 @@ def list_format(q, indent=0, col_max=10):
 
 
 def comprehension_format(q, org_indent=0):
-    rst = str(q.popleft())
+    rst = yield (q.popleft(), 0)
     indent = org_indent
     cur = indent + len(rst)
     need_newline = False
     while q:
         e = q.popleft()
-        e_src = e.get_source(cur)
+        e_src = yield (e, cur)
         if need_newline:
             need_newline = False
             rst += "\n" + " " * indent
             cur = indent
-        elif str(e) in ["for", "async-for"]:
+        elif atom_text(e) in ("for", "async-for"):
             rst += "\n" + " " * org_indent
             cur = org_indent
             indent = org_indent + len(e_src)
@@ -514,27 +599,27 @@ class Bracket(Expression):
     def __repr__(self, depth=0):
         return "Bracket" + "(" + ", ".join([repr(e) for e in self.list]) + ")"
 
-    def get_source(self, indent=0):
+    def _source(self, indent):
         rst = "["
         indent += 1
         if len(self):
             q = deque(self.list)
-            if str(self.op) == ":":
+            if atom_text(self.op) == ":":
                 rst += ": "
                 indent += 2
                 q.popleft()
-                rst += list_format(q, indent)
-            elif len(q) > 1 and str(q[1]) in ["for", "async-for"]:
-                e_src = q.popleft().get_source(indent)
+                rst += yield from list_format(q, indent)
+            elif len(q) > 1 and atom_text(q[1]) in ("for", "async-for"):
+                e_src = yield (q.popleft(), indent)
                 rst += e_src
                 if multiline_p(e_src):
                     rst += "\n" + " " * indent
                 else:
                     rst += " "
                     indent += len(e_src) + 1
-                rst += comprehension_format(q, indent)
+                rst += yield from comprehension_format(q, indent)
             else:
-                rst += list_format(q, indent)
+                rst += yield from list_format(q, indent)
         return rst + "]"
 
 
@@ -546,16 +631,16 @@ class Brace(Expression):
     def __repr__(self, depth=0):
         return "Brace" + "(" + ", ".join([repr(e) for e in self.list]) + ")"
 
-    def get_source(self, indent=0):
+    def _source(self, indent):
         rst = "{"
         indent += 1
         cur = indent
         if len(self):
             q = deque(self.list)
-            if len(q) > 2 and str(q[2]) in ["for", "async-for"]:
+            if len(q) > 2 and atom_text(q[2]) in ("for", "async-for"):
                 any_multiline = False
                 for _ in range(2):
-                    e_src = q.popleft().get_source(indent)
+                    e_src = yield (q.popleft(), indent)
                     rst += e_src
                     if any_multiline or multiline_p(e_src):
                         any_multiline = True
@@ -564,17 +649,17 @@ class Brace(Expression):
                     else:
                         rst += " "
                         cur += len(e_src) + 1
-                rst += comprehension_format(q, cur)
-            elif str(self.op) == ",":
+                rst += yield from comprehension_format(q, cur)
+            elif atom_text(self.op) == ",":
                 rst += ", "
                 indent += 2
                 q.popleft()
-                rst += list_format(q, indent)
+                rst += yield from list_format(q, indent)
             else:
                 while q:
                     any_multiline = False
                     for _ in range(2):
-                        e_src = q.popleft().get_source(indent)
+                        e_src = yield (q.popleft(), indent)
                         rst += e_src
                         if not q:
                             break
@@ -590,7 +675,15 @@ class Brace(Expression):
         return rst + "}"
 
 
+def _prefixed_source(self, indent):
+    """``_source`` of a wrapper or quote: its ``source_prefix`` (the one home of
+    that prefix, shared with atom_text), then its value rendered at indent 0."""
+    return self.source_prefix + (yield (self.value, 0))
+
+
 class Wrapper(Node):
+    _source = _prefixed_source
+
     def operands_generate(self, in_quasi):
         return self.value.generator_expression(in_quasi)
 
@@ -617,8 +710,8 @@ class FStrExpr(Wrapper):
     def __repr__(self):
         return "FStrExpr(" + repr(self.value) + ")"
 
-    def get_source(self, indent=0):
-        return "(FStrExpr " + str(self.value) + ")"
+    def _source(self, indent):
+        return "(FStrExpr " + (yield (self.value, 0)) + ")"
 
     def generator_expression(self, in_quasi=False):
         """Rebuild with conversion, format spec and expression text, so an
@@ -662,6 +755,8 @@ class FStrExpr(Wrapper):
 
 
 class Annotation(Wrapper):
+    source_prefix = "^"
+
     def __init__(self, value, **kwargs):
         super().__init__(**kwargs)
         self.value = value
@@ -669,9 +764,6 @@ class Annotation(Wrapper):
 
     def __repr__(self):
         return "Ann(" + repr(self.value) + ")"
-
-    def get_source(self, indent=0):
-        return "^" + str(self.value)
 
     def append(self, e):
         return self.value.append(e)
@@ -686,6 +778,8 @@ class Annotation(Wrapper):
 
 
 class Keyword(Wrapper):
+    source_prefix = ":"
+
     def __init__(self, value, **kwargs):
         super().__init__(**kwargs)
         self.value = value
@@ -693,9 +787,6 @@ class Keyword(Wrapper):
 
     def __repr__(self):
         return "Kwd(" + repr(self.value) + ")"
-
-    def get_source(self, indent=0):
-        return ":" + str(self.value)
 
     @property
     def name(self):
@@ -707,6 +798,8 @@ class Keyword(Wrapper):
 
 
 class Starred(Wrapper):
+    source_prefix = "*"
+
     def __init__(self, value, **kwargs):
         super().__init__(**kwargs)
         self.value = value
@@ -714,9 +807,6 @@ class Starred(Wrapper):
 
     def __repr__(self):
         return "Star(" + repr(self.value) + ")"
-
-    def get_source(self, indent=0):
-        return "*" + str(self.value)
 
     def append(self, e):
         return self.value.append(e)
@@ -727,6 +817,8 @@ class Starred(Wrapper):
 
 
 class DoubleStarred(Wrapper):
+    source_prefix = "**"
+
     def __init__(self, value, **kwargs):
         super().__init__(**kwargs)
         self.value = value
@@ -734,9 +826,6 @@ class DoubleStarred(Wrapper):
 
     def __repr__(self):
         return "DStar(" + repr(self.value) + ")"
-
-    def get_source(self, indent=0):
-        return "**" + str(self.value)
 
     def append(self, e):
         return self.value.append(e)
@@ -786,10 +875,10 @@ class GluedHead(Node):
     def __repr__(self):
         return "Glued(" + repr(self.head) + ", " + repr(self.params) + ")"
 
-    def get_source(self, indent=0):
-        return self.head.get_source(indent) + self.params.get_source(
-            indent + len(self.head.get_source())
-        )
+    def _source(self, indent):
+        # The params start where the head's text ends.
+        head = yield (self.head, indent)
+        return head + (yield (self.params, indent + len(head)))
 
 
 class Literal(Node):
@@ -810,7 +899,7 @@ class Symbol(Literal):
     def __repr__(self):
         return "Sym(" + self.value + ")"
 
-    def get_source(self, indent=0):
+    def _source(self, indent):
         return self.value
 
 
@@ -823,7 +912,7 @@ class String(Literal):
     def __repr__(self):
         return "Str(" + repr(self.value) + ")"
 
-    def get_source(self, indent=0):
+    def _source(self, indent):
         return self.value
 
 
@@ -851,11 +940,13 @@ class Constant(Literal):
     def __repr__(self):
         return "Const(" + repr(self.value) + ")"
 
-    def get_source(self, indent=0):
+    def _source(self, indent):
         return str(self.value).replace("'", "")
 
 
 class MetaIndicator(Node):
+    _source = _prefixed_source
+
     def __init__(self, value, **kwargs):
         super().__init__(**kwargs)
         self.value = value
@@ -865,6 +956,8 @@ class MetaIndicator(Node):
 
 
 class Quote(MetaIndicator):
+    source_prefix = "'"
+
     def __init__(self, value, **kwargs):
         super().__init__(value, **kwargs)
         self.classname = "Quote"
@@ -872,11 +965,10 @@ class Quote(MetaIndicator):
     def __repr__(self):
         return "Quote(" + repr(self.value) + ")"
 
-    def get_source(self, indent=0):
-        return "'" + str(self.value)
-
 
 class QuasiQuote(Quote):
+    source_prefix = "`"
+
     def __init__(self, value, **kwargs):
         super().__init__(value, **kwargs)
         self.classname = "QuasiQuote"
@@ -884,11 +976,10 @@ class QuasiQuote(Quote):
     def __repr__(self):
         return "QuasiQuote(" + repr(self.value) + ")"
 
-    def get_source(self, indent=0):
-        return "`" + str(self.value)
-
 
 class Unquote(MetaIndicator):
+    source_prefix = "~"
+
     def __init__(self, value, **kwargs):
         super().__init__(value, **kwargs)
         self.classname = "Unquote"
@@ -899,11 +990,10 @@ class Unquote(MetaIndicator):
     def __repr__(self):
         return "Unquote(" + repr(self.value) + ")"
 
-    def get_source(self, indent=0):
-        return "~" + str(self.value)
-
 
 class UnquoteSplice(Unquote):
+    source_prefix = "~@"
+
     def __init__(self, value, **kwargs):
         super().__init__(value, **kwargs)
         self.classname = "UnquoteSplice"
@@ -917,6 +1007,3 @@ class UnquoteSplice(Unquote):
 
     def __repr__(self):
         return "UnquoteSplice(" + repr(self.value) + ")"
-
-    def get_source(self, indent=0):
-        return "~@" + str(self.value)
