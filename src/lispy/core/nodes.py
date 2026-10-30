@@ -175,7 +175,8 @@ def macro_expansion_nodes(expansion, call):
     wrote) keeps its own. Descends every Node attribute, so f-string fields
     and their format specs, wrappers, quotes and glued heads are covered
     alike; the copy memos keep nodes shared between places in the expansion
-    shared in the copy.
+    shared in the copy, and a list or tuple of data met in many places
+    becomes one shared Bracket.
 
     The tree is copied, not filled in place, because the macro may still own
     its nodes (a template held in a global and returned on every call):
@@ -200,6 +201,11 @@ def macro_expansion_nodes(expansion, call):
     made = []
     # id(Bracket made from a list or tuple) -> that list or tuple.
     sources = {}
+    # id(data list or tuple) -> (data, its Bracket). One Bracket per distinct
+    # list or tuple, else data shared as a DAG (D0 = [1]; Dk = [Dk-1, Dk-1])
+    # is converted once per path, exponential in its depth. The value holds
+    # the data so its id is not reused while the memo is live.
+    brackets = {}
     # ids of the containers being copied (nodes, lists, deques), of the form
     # lists and of the data lists and tuples being converted: the path from
     # the root, whichever memo the copy goes to. Meeting
@@ -222,6 +228,12 @@ def macro_expansion_nodes(expansion, call):
         stack.append((None, id(value)))
 
     def node_of(data):
+        if isinstance(data, (list, tuple)):
+            # Before the memo, so a memoized Bracket never hides a cycle.
+            if id(data) in active:
+                raise self_reference(data)
+            if id(data) in brackets:
+                return brackets[id(data)][1]
         node = _data_node(data)
         if node is data:
             if isinstance(node, Node):
@@ -234,6 +246,7 @@ def macro_expansion_nodes(expansion, call):
         made.append(node)
         if isinstance(data, (list, tuple)):
             sources[id(node)] = data
+            brackets[id(data)] = (data, node)
         return node
 
     def form_list(elements):

@@ -481,6 +481,27 @@ def test_shared_data_is_not_a_self_reference(scope):
     assert ast.unparse(stmt) == "[[1], [1]]"
 
 
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("form_kind", [list, tuple, deque])
+@pytest.mark.parametrize("data_kind", [list, tuple])
+def test_shared_data_dag_is_converted_once(form_kind, data_kind):
+    d = data_kind([1])
+    for _ in range(30):
+        d = data_kind([d, d])
+    p = Paren(Symbol("f"))
+    p.list = form_kind([Symbol("f"), d, d])
+    copy = macro_expansion_nodes(p, call_at(POSITION))
+    assert copy.list[1] is copy.list[2]
+    b = copy.list[1]
+    assert type(b) is Bracket
+    for _ in range(30):
+        assert b.list[0] is b.list[1]
+        b = b.list[0]
+        assert type(b) is Bracket
+    assert type(b.list[0]) is Constant
+    assert b.list[0].value == "1"
+
+
 @pytest.mark.parametrize(
     ("macro", "python"),
     [
