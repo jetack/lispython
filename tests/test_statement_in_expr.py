@@ -51,8 +51,8 @@ def compile_error(src):
         ),
         (
             "(f (else 1))",
-            "else is a Python keyword and cannot be called",
-            (1, 4),
+            "else is a Python keyword and cannot be used as a name",
+            (1, 5),
         ),
     ],
 )

@@ -3,12 +3,17 @@
 
 (require lispy.macros *)
 
+(from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.nodes *)
 
 (def defmacro-transform [sexp]
   (= [op macroname *body] sexp.list)
   (= macroname (str macroname))
+  ;; The temp def is a Python name: a macro named ->> or ++ gets the bare
+  ;; prefix (it is deleted right after registering, so names never clash).
   (= newname (Symbol (+ "___defmacro_temp___" macroname)))
+  (if (not (identifier-p newname.name))
+      (= newname (Symbol "___defmacro_temp___")))
   (return `(do (from lispy.core.nodes *)
                (from lispy.core.builtins *)
                (def ~newname ~@body)

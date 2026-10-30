@@ -1,3 +1,5 @@
+import pytest
+
 from lispy.core.builtins import reset_gensym_counter
 from lispy.tools import src_to_python_org
 
@@ -229,3 +231,13 @@ class TestAsThreadDottedAndFormatSpec:
             self.compile("(as-> 5 x [(fn [x] x.real) x.real])")
             == "((__x_0 := 5), [lambda x: x.real, __x_0.real])[-1]"
         )
+
+
+@pytest.mark.parametrize("placeholder", ["%", "<>", "$"])
+def test_non_identifier_placeholder_evaluates(placeholder):
+    """A placeholder that is no Python name still threads: the gensym it is
+    renamed to falls back to a name (``gensym`` in builtins.py)."""
+    reset_gensym_counter()
+    p = placeholder
+    src = f"(= out (as-> 1 {p} (+ {p} 1) (* {p} 2)))"
+    assert run(src)["out"] == 4

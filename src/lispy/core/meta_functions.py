@@ -1,4 +1,5 @@
 WARNING = "This script should be edited in .lpy file, not translated .py file."
+from lispy.core.compiler.literal import identifier_p
 from lispy.core.nodes import *
 
 
@@ -6,6 +7,8 @@ def defmacro_transform(sexp):
     [op, macroname, *body] = sexp.list
     macroname = str(macroname)
     newname = Symbol("___defmacro_temp___" + macroname)
+    if not identifier_p(newname.name):
+        newname = Symbol("___defmacro_temp___")
     return Paren(
         Symbol("do"),
         Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),

@@ -6,6 +6,8 @@ import tokenize
 
 from lispy.core.compiler.features import require
 from lispy.core.errors import LispyCompileError
+from lispy.core.nodes import GluedHead, Node, Symbol, atom_text
+from lispy.core.utils import binop_dict, boolop_dict, compare_dict, unaryop_dict
 
 SPECIAL_CONSTANTS = ("True", "False", "None", "...")
 
@@ -194,24 +196,121 @@ def string_compile(string):
     return ast.Constant(value=string_node_value(string), **string.position_info)
 
 
-def reserved_name_p(name):
-    """A Python hard keyword (if, as, from, ...), which is no name.
+# The name model. Every identifier the compiler emits (a Name, an attribute,
+# a parameter, a keyword argument, an import or pattern name) comes from
+# python_name. The home is here, not Symbol.name (nodes.py): that property is
+# the data-level mangling macros read at expansion time and the compiler
+# reads for non-name purposes (operator heads, gensym prefixes, macro
+# registry keys, import paths); whether a text is a valid name depends on
+# the slot (dotted or not, binding or not, after a method's dot), which a
+# node does not know; and a refusal is a compiler concern, a
+# LispyCompileError positioned at the symbol. A pin test keeps expr.py,
+# stmt.py, compiler/utils.py and features.py from reading a symbol's mangled
+# name around these functions.
 
-    ``name`` is the mangled Python name. name_compile refuses it as a symbol
-    or any part of a dotted symbol, and plain_name_p (def, class, global,
-    nonlocal, case-as and except-as names) rejects it; other name slots
-    (attribute forms, keyword arguments, def parameters) do not consult it.
+# Operator heads, named as such when one is refused as a name. Only the
+# wording: an operator whose mangled text is a name (``-`` is ``_``,
+# ``is-not`` is ``is_not``) stays a legal name, as it always was.
+OPERATOR_TEXTS = frozenset([*unaryop_dict, *binop_dict, *compare_dict, *boolop_dict])
+
+# CPython refuses __debug__ wherever a name binds.
+_DEBUG_REFUSALS = {
+    ast.Store: "cannot assign to __debug__",
+    ast.Del: "cannot delete __debug__",
+}
+
+
+def identifier_p(name):
+    """Whether the mangled text ``name`` is a Python name: an identifier that
+    is no hard keyword. Soft keywords (match, case, type, _) are names."""
+    return name.isidentifier() and not keyword.iskeyword(name)
+
+
+def python_name(name, node, ctx=ast.Load):
+    """``name`` (mangled text) as a Python name, else a LispyCompileError at
+    ``node``: the one home every emitted identifier passes through.
+
+    ``ctx`` is ast.Store (or ast.Del) where the name binds: an assignment or
+    deletion, a def/class/parameter/type-parameter name, a keyword argument,
+    an import's bound name, a pattern capture, except-as. There __debug__ is
+    refused, with CPython's message; Load elsewhere.
     """
-    return keyword.iskeyword(name)
+    text = atom_text(node) if isinstance(node, Node) else name
+    if keyword.iskeyword(name):
+        raise LispyCompileError(
+            f"{name} is a Python keyword and cannot be used as a name", node
+        )
+    if not name.isidentifier():
+        msg = (
+            f"{text} is an operator and cannot be used as a name"
+            if text in OPERATOR_TEXTS
+            else f"{text} is not a valid Python name"
+        )
+        raise LispyCompileError(msg, node)
+    if name == "__debug__" and ctx in _DEBUG_REFUSALS:
+        raise LispyCompileError(_DEBUG_REFUSALS[ctx], node)
+    return name
+
+
+def symbol_name(sexp, ctx=ast.Load):
+    """The Python name an undotted symbol stands for (python_name); anything
+    else is a LispyCompileError at itself."""
+    if isinstance(sexp, GluedHead):
+        raise sexp.misuse_error()
+    if type(sexp) is not Symbol:
+        raise LispyCompileError(f"expected a name, got {sexp}", sexp)
+    return python_name(sexp.name, sexp, ctx)
+
+
+def method_name(method):
+    """The attribute of a ``(.method obj ...)`` head: the text after its dot,
+    mangled as a symbol and passed through python_name at the head."""
+    return python_name(Symbol(atom_text(method)[1:]).name, method)
+
+
+def module_path(sexp, ctx=ast.Load, relative=False):
+    """``[path, level]`` of a dotted module symbol, every part through
+    python_name. The first part takes ``ctx`` (``import a.b`` binds ``a``).
+    With ``relative``, leading dots are the level and the path may be empty
+    (None), as in ``from . import x``."""
+    name = sexp.name
+    level = len(name) - len(name.lstrip(".")) if relative else 0
+    path = name[level:]
+    if level and not path:
+        return [None, level]
+    [first, *rest] = path.split(".")
+    python_name(first, sexp, ctx)
+    for part in rest:
+        python_name(part, sexp)
+    return [path, level]
+
+
+def plain_name_p(sexp):
+    """Whether ``sexp`` is shaped as a name: a symbol whose mangled text
+    passes identifier_p (so no dot). A shape test for sites with their own
+    form error; the name itself is still read through symbol_name, which also
+    refuses an operator and a bound __debug__."""
+    return type(sexp) is Symbol and identifier_p(sexp.name)
+
+
+def name_or_attr_p(sexp):
+    """Python's name_or_attr shape: every dot-part of the mangled name is an
+    identifier, so ``.x``, ``a..b`` and ``x.`` are no value pattern, mapping
+    key or class name. A hard keyword part (``a.if``) passes the shape and is
+    refused by name_compile, with the keyword message, at the symbol."""
+    return type(sexp) is Symbol and all(
+        part.isidentifier() for part in sexp.name.split(".")
+    )
 
 
 def name_compile(symbol, ctx):
-    [name, *attrs] = symbol.name.replace("-", "_").split(".")
-    for part in [name, *attrs]:
-        if reserved_name_p(part):
-            raise LispyCompileError(
-                f"{part} is a Python keyword and cannot be used as a name", symbol
-            )
+    """A Name, or an Attribute chain for a dotted symbol, every part through
+    python_name. ``ctx`` is the undotted name's, else the last attribute's
+    (``a.__debug__`` loads but cannot be assigned); other parts load."""
+    [name, *attrs] = symbol.name.split(".")
+    python_name(name, symbol, ast.Load if attrs else ctx)
+    for [i, attr] in enumerate(attrs):
+        python_name(attr, symbol, ctx if i == len(attrs) - 1 else ast.Load)
     position_info = {**symbol.position_info}
     position_info["end_col_offset"] = position_info["col_offset"] + len(name)
     rst = ast.Name(id=name, ctx=ast.Load(), **position_info)

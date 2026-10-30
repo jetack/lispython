@@ -8,99 +8,27 @@ from lispy.core.compiler.expr import (
     def_args_parse,
     expr_compile,
     refuse_empty_form,
+    target_compile,
 )
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
+    module_path,
     name_compile,
+    name_or_attr_p,
     number_parts,
     number_pattern_expr,
-    reserved_name_p,
+    plain_name_p,
+    symbol_name,
 )
 from lispy.core.compiler.utils import *
 from lispy.core.errors import LispyCompileError, nesting_error
-from lispy.core.nodes import GluedHead, Node, Paren, atom_text
+from lispy.core.nodes import GluedHead, Paren, atom_text
 from lispy.core.utils import *
 
 
 def expr_wrapper(sexp):
     return ast.Expr(value=expr_compile(sexp), **sexp.position_info)
-
-
-# CPython's words for what cannot be a target ("cannot assign to literal").
-TARGET_DESCRIPTIONS = {
-    "Call": "function call",
-    "Constant": "literal",
-    "Compare": "comparison",
-    "Lambda": "lambda",
-    "IfExp": "conditional expression",
-    "NamedExpr": "named expression",
-    "Dict": "dict literal",
-    "Set": "set display",
-    "JoinedStr": "f-string expression",
-    "ListComp": "list comprehension",
-    "SetComp": "set comprehension",
-    "DictComp": "dict comprehension",
-    "GeneratorExp": "generator expression",
-    "Await": "await expression",
-    "Yield": "yield expression",
-    "YieldFrom": "yield expression",
-    "Tuple": "tuple",
-    "List": "list",
-    "Starred": "starred",
-}
-
-
-def target_error(node, kind):
-    desc = TARGET_DESCRIPTIONS.get(type(node).__name__, "expression")
-    msg = (
-        f"cannot delete {desc}"
-        if kind == "delete"
-        else f"'{desc}' is an illegal expression for augmented assignment"
-        if kind == "augassign"
-        else f"only single target (not {desc}) can be annotated"
-        if kind == "annotate" and desc in ("tuple", "list")
-        else "illegal target for annotation"
-        if kind == "annotate"
-        else "starred assignment target must be in a list or tuple"
-        if desc == "starred"
-        else f"cannot assign to {desc}"
-    )
-    position = {k: getattr(node, k) for k in Node().position_info}
-    return LispyCompileError(msg, Node(**position))
-
-
-def check_target(node, kind, top=True):
-    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
-        return
-    if kind in ("assign", "delete") and isinstance(node, (ast.Tuple, ast.List)):
-        for elt in node.elts:
-            check_target(elt, kind, top=False)
-        starred = [elt for elt in node.elts if isinstance(elt, ast.Starred)]
-        if len(starred) > 1:
-            raise LispyCompileError(
-                "multiple starred expressions in assignment",
-                Node(**{k: getattr(starred[1], k) for k in Node().position_info}),
-            )
-        return
-    if kind == "assign" and isinstance(node, ast.Starred) and not top:
-        check_target(node.value, kind, top=False)
-        return
-    raise target_error(node, kind)
-
-
-def target_compile(sexp, kind):
-    """The one home of what may be bound or deleted, as CPython has it.
-
-    ``kind`` is "assign" (=, for, with-as: names, attributes, subscripts and
-    tuples/lists of them, one starred each), "annotate" and "augassign" (a
-    single name, attribute or subscript) or "delete" (no starred). A bad
-    target is refused at itself, with CPython's message, instead of an AST
-    that compile() rejects.
-    """
-    node = expr_compile(sexp, ast.Del if kind == "delete" else ast.Store)
-    check_target(node, kind)
-    return node
 
 
 def do_p(sexp):
@@ -186,16 +114,32 @@ def import_name(sexp, form, dotted=True):
     return sexp
 
 
-def parse_names(names, form):
+def parse_names(names, form, from_p=False):
+    """The aliases of an import's names: ``name`` or ``name as alias``.
+
+    Every part goes through the name model; the name the statement binds (the
+    alias, else the first part of an import's module, else the imported
+    name) as a binding, so ``import __debug__`` is refused and
+    ``import __debug__ as x`` is not.
+    """
+    if names == "*":
+        return [ast.alias(name="*", **names.position_info)]
     rst = []
-    q = deque([names] if names == "*" else names)
+    q = deque(names)
     while q:
-        n = q.popleft()
-        if n == "as" and rst and q:
-            rst[-1].asname = import_name(q.popleft(), form, dotted=False).name
-        else:
-            n = import_name(n, form)
-            rst.append(ast.alias(name=n.name, **n.position_info))
+        n = import_name(q.popleft(), form, dotted=not from_p)
+        aliased = len(q) > 1 and q[0] == "as"
+        name_ctx = ast.Load if aliased else ast.Store
+        name = (
+            symbol_name(n, name_ctx) if from_p else module_path(n, name_ctx)[0]
+        )
+        alias = ast.alias(name=name, **n.position_info)
+        if aliased:
+            q.popleft()
+            alias.asname = symbol_name(
+                import_name(q.popleft(), form, dotted=False), ast.Store
+            )
+        rst.append(alias)
     return rst
 
 
@@ -244,17 +188,14 @@ def importfrom_compile(sexp, lazy=False):
                     "lazy from __future__ import is not allowed", sexp
                 )
 
-    def helper(module):
-        # Leading dots are the relative level; "." alone has no module name.
-        x = module.name
-        level = len(x) - len(x.lstrip("."))
-        return [x[level:] or None, level, module.position_info]
-
-    module_level = map(helper, modules)
+    module_level = [
+        [*module_path(module, relative=True), module.position_info]
+        for module in modules
+    ]
     return [
         ast.ImportFrom(
             module=module,
-            names=parse_names(names, form),
+            names=parse_names(names, form, from_p=True),
             level=level,
             **is_lazy,
             **merge_position_infos(module_pos_info, names.position_info)
@@ -455,7 +396,7 @@ def except_types_parse(bracket, form):
             raise form_error(x, "has as without a name after it", form)
         if i != len(lst) - 2 or not plain_name_p(lst[-1]):
             raise form_error(x, "expects one name after as", form)
-        return [lst[:i], lst[-1].name]
+        return [lst[:i], symbol_name(lst[-1], ast.Store)]
     if not len(lst):
         raise form_error(bracket, "has an empty [types] bracket", form)
     return [lst, None]
@@ -628,15 +569,6 @@ def dotted_name_p(sexp):
     return type(sexp) is Symbol and "." in sexp.value
 
 
-def name_or_attr_p(sexp):
-    """Python's name_or_attr: every dot-part of the mangled name is an
-    identifier, so ``.x``, ``a..b`` and ``x.`` are no value pattern, mapping
-    key or class name. Expressions do not check this yet (TASK-757)."""
-    return type(sexp) is Symbol and all(
-        part.isidentifier() for part in sexp.name.split(".")
-    )
-
-
 def literal_pattern_p(sexp):
     """A number (signed or complex too), string, bytes, None, True or False."""
     return (
@@ -661,22 +593,6 @@ def value_pattern_expr(sexp, kind):
     raise form_error(sexp, f"expected, got {sexp}", kind)
 
 
-def prefixed_name_p(sexp):
-    """The name after a pattern's *, ** or : is an identifier that is no
-    keyword once mangled.
-
-    A stopgap for the reader bug TASK-756: parser.py's star_token_parse and
-    keyword_token_parse pass the outer token type down, so the operand of
-    ``*1``, ``**1a`` or ``:1a`` reads as a Symbol. Remove this check (back to
-    plain_name_p) when the reader is fixed.
-    """
-    return (
-        type(sexp) is Symbol
-        and sexp.name.isidentifier()
-        and not reserved_name_p(sexp.name)
-    )
-
-
 def match_sequence_parse(sexp):
     """``[pattern... *rest pattern...]``: the one place a *rest is a pattern."""
     patterns = []
@@ -691,13 +607,16 @@ def match_sequence_parse(sexp):
             )
         starred = True
         name = elt.value
-        if atom_text(name) != "_" and not prefixed_name_p(name):
+        if atom_text(name) != "_" and not plain_name_p(name):
             raise form_error(
                 elt, f"expects a name after *, got {name}", "sequence pattern"
             )
         patterns.append(
             ast.MatchStar(
-                **{} if atom_text(name) == "_" else {"name": name.name}, **elt.position_info
+                **{}
+                if atom_text(name) == "_"
+                else {"name": symbol_name(name, ast.Store)},
+                **elt.position_info
             )
         )
     return {"patterns": patterns}
@@ -709,11 +628,11 @@ def match_mapping_parse(sexp):
     rst = {}
     if items and doublestarred_p(items[-1]):
         rest = items.pop()
-        if not prefixed_name_p(rest.value) or atom_text(rest.value) == "_":
+        if not plain_name_p(rest.value) or atom_text(rest.value) == "_":
             raise form_error(
                 rest, f"expects a name after **, got {rest.value}", "mapping pattern"
             )
-        rst["rest"] = rest.value.name
+        rst["rest"] = symbol_name(rest.value, ast.Store)
     for item in items:
         if doublestarred_p(item):
             raise form_error(item, f"has {item} before its end", "mapping pattern")
@@ -744,13 +663,13 @@ def match_class_parse(sexp):
                 raise form_error(
                     arg, f"has {arg} without a pattern after it", "class pattern"
                 )
-            if not prefixed_name_p(arg.value):
+            if not plain_name_p(arg.value):
                 raise form_error(
                     arg,
                     f"expects an attribute name after :, got {arg.value}",
                     "class pattern",
                 )
-            kwd_attrs.append(arg.name)
+            kwd_attrs.append(symbol_name(arg.value, ast.Store))
             kwd_patterns.append(pattern_parse(q.popleft()))
         elif kwd_attrs:
             raise form_error(arg, f"has {arg} after a keyword pattern", "class pattern")
@@ -783,8 +702,7 @@ def pattern_parse(sexp):
     if type(sexp) is Symbol and atom_text(sexp) == "_":
         return ast.MatchAs(**position_info)
     if type(sexp) is Symbol and not dotted_name_p(sexp):
-        name_compile(sexp, ast.Store)  # refuses a hard keyword (if) at itself
-        return ast.MatchAs(name=sexp.name, **position_info)
+        return ast.MatchAs(name=symbol_name(sexp, ast.Store), **position_info)
     if atom_text(sexp) in ("True", "False", "None") and constant_p(sexp):
         return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
     if bracket_p(sexp):
@@ -814,9 +732,13 @@ def case_parse(case):
             raise form_error(case, "has as without a name after it")
         if not plain_name_p(body[1]):
             raise form_error(body[1], f"expects a name after as, got {body[1]}", "case")
+        name = symbol_name(body[1], ast.Store)
+        if name == "_":
+            # A wildcard captures nothing: CPython refuses `case 1 as _`.
+            raise LispyCompileError("cannot use '_' as a target", body[1])
         pattern = ast.MatchAs(
             pattern=pattern,
-            name=body[1].name.replace("-", "_"),
+            name=name,
             **merge_position_infos(pattern_expr.position_info, body[1].position_info)
         )
         body = body[2:]
@@ -873,7 +795,7 @@ def type_params_parse(glued):
         )
         if type(symbol) is not Symbol or "." in symbol.value:
             raise LispyCompileError(f"invalid type parameter {param}", param)
-        fields = {"name": symbol.name}
+        fields = {"name": symbol_name(symbol, ast.Store)}
         if q and isinstance(q[0], Annotation):
             bound = q.popleft()
             if kind != "TypeVar":
@@ -908,20 +830,13 @@ def def_name_parse(name, form):
             raise LispyCompileError(
                 f"{name.head} is not a valid name for a generic definition", name
             )
-        return [name.head.name, {"type_params": type_params_parse(name)}]
+        return [
+            symbol_name(name.head, ast.Store),
+            {"type_params": type_params_parse(name)},
+        ]
     if not plain_name_p(name):
         raise form_error(name, f"expects a name, got {name}", form)
-    return [name.name, {}]
-
-
-def plain_name_p(sexp):
-    """A bare, undotted symbol that is no hard keyword: what Python accepts
-    as a def/class/type name."""
-    return (
-        type(sexp) is Symbol
-        and "." not in sexp.value
-        and not reserved_name_p(sexp.name)
-    )
+    return [symbol_name(name, ast.Store), {}]
 
 
 def type_alias_p(sexp):
@@ -1032,7 +947,8 @@ def scope_names(sexp):
             raise name.misuse_error()
         if not plain_name_p(name):
             raise form_error(name, f"expects a name, got {name}", str(sexp.op))
-    return [name.name for name in names]
+    # global/nonlocal declare names, binding none: __debug__ is accepted.
+    return [symbol_name(name, ast.Load) for name in names]
 
 
 def global_compile(sexp):
@@ -1055,7 +971,9 @@ def classdef_args_parse(args):
         arg = q.popleft()
         keywords.append(
             ast.keyword(
-                arg=arg.name, value=expr_compile(q.popleft()), **arg.position_info
+                arg=symbol_name(arg.value, ast.Store),
+                value=expr_compile(q.popleft()),
+                **arg.position_info
             )
         ) if keyword_arg_p(arg) else bases.append(expr_compile(arg))
     return [bases, keywords]
