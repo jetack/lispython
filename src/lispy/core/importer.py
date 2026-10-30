@@ -6,6 +6,7 @@ import os.path as osp
 import runpy
 import sys
 
+from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import compile_errors
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
@@ -20,11 +21,13 @@ def _lpy_code(source, path, compile_module):
 
     Every error names this file and line as a LispyCompileError: the forms
     lispython refuses, and the SyntaxErrors CPython's compiler raises on the
-    AST (e.g. a lazy import inside a def), whose positions are already ours.
+    AST (e.g. a lazy import inside a def), whose positions are already ours,
+    and the AST nested past what compile() takes (compile_nesting_errors).
     """
     with compile_errors(os.fsdecode(path), source):
         tree = ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
-        return compile_module(tree)
+        with compile_nesting_errors(tree.body):
+            return compile_module(tree)
 
 
 # # importlib.machinery.SourceFileLoader.source_to_code injection

@@ -1,3 +1,21 @@
+"""Expression forms to Python AST.
+
+The compiler recurses in shape but not in Python frames, so nesting depth is
+bounded by memory, never by the recursion limit. Every function that compiles
+a sub-form is a generator (a "step", run by ``trampoline`` in core/utils.py)
+that asks for each sub-result with ``node = yield <steps>``: ``expr_steps`` of
+the sub-form, or a generator helper (``call_args_parse``, ``target_compile``,
+``def_args_parse``, ...). A step never calls ``expr_compile``/``stmt_compile``
+(a second trampoline, so a Python frame per level again) and never uses
+``yield from`` on a sub-form (a frame per level inside the generators). The
+dispatchers (``expr_steps``, ``paren_compiler``, ...) are plain functions that
+pick the form's compiler and return its steps; a leaf (name, literal) is its
+own node, which the trampoline sends straight back. ``yield`` is illegal in a
+comprehension, so sub-forms are compiled in loops, in the order the recursive
+compiler used: it decides which error wins when several sub-forms are bad.
+``expr_compile`` is the plain entry point. stmt.py follows the same rule.
+"""
+
 import ast
 from collections import deque
 from functools import reduce
@@ -6,7 +24,7 @@ from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import *
 from lispy.core.compiler.utils import *
-from lispy.core.errors import LispyCompileError, nesting_error
+from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import atom_text
 from lispy.core.utils import *
 
@@ -17,17 +35,13 @@ def tuple_p(sexp):
 
 def tuple_compile(sexp, ctx):
     [op, *args] = sexp.list
-    return ast.Tuple(
-        elts=list(map(lambda x: expr_compile(x, ctx), args)),
-        ctx=ctx(),
-        **sexp.position_info
-    )
+    elts = yield expr_list_steps(args, ctx)
+    return ast.Tuple(elts=elts, ctx=ctx(), **sexp.position_info)
 
 
 def starred_compile(sexp, ctx):
-    return ast.Starred(
-        value=expr_compile(sexp.value, ctx), ctx=ctx(), **sexp.position_info
-    )
+    value = yield expr_steps(sexp.value, ctx)
+    return ast.Starred(value=value, ctx=ctx(), **sexp.position_info)
 
 
 def prefix_misuse(sexp):
@@ -48,7 +62,9 @@ def unaryop_p(sexp):
 def unaryop_compile(sexp):
     [op, operand] = sexp.list
     return ast.UnaryOp(
-        unaryop_dict[atom_text(op)](), expr_compile(operand), **sexp.position_info
+        unaryop_dict[atom_text(op)](),
+        (yield expr_steps(operand)),
+        **sexp.position_info
     )
 
 
@@ -58,9 +74,10 @@ def binop_p(sexp):
 
 def binop_compile(sexp):
     [op, *args] = sexp.list
+    operands = yield expr_list_steps(args)
     return reduce(
         lambda x, y: ast.BinOp(x, binop_dict[atom_text(op)](), y, **sexp.position_info),
-        map(expr_compile, args),
+        operands,
     )
 
 
@@ -72,11 +89,13 @@ def boolop_compile(sexp):
     [op, *args] = sexp.list
     if not args:
         raise form_error(sexp, "needs at least one value")
+    if len(args) < 2:
+        return (yield expr_steps(args[0]))
     return ast.BoolOp(
         boolop_dict[atom_text(op)](),
-        list(map(expr_compile, args)),
+        (yield expr_list_steps(args)),
         **sexp.position_info
-    ) if len(args) >= 2 else expr_compile(args[0])
+    )
 
 
 def compare_p(sexp):
@@ -87,7 +106,7 @@ def compare_compile(sexp):
     [op, *args] = sexp.list
     if len(args) < 2:
         raise form_error(sexp, "needs at least two operands")
-    [left, *comparators] = map(expr_compile, args)
+    [left, *comparators] = yield expr_list_steps(args)
     return ast.Compare(
         left=left,
         ops=[compare_dict[atom_text(op)]() for i in range(len(comparators))],
@@ -123,16 +142,16 @@ def call_args_parse(given):
             keywords.append(
                 ast.keyword(
                     arg=name,
-                    value=expr_compile(keyword_value(arg, q)),
+                    value=(yield expr_steps(keyword_value(arg, q))),
                     **arg.position_info
                 )
             )
         elif doublestarred_p(arg):
             keywords.append(
-                ast.keyword(value=expr_compile(arg.value), **arg.position_info)
+                ast.keyword(value=(yield expr_steps(arg.value)), **arg.position_info)
             )
         else:
-            args.append(expr_compile(arg))
+            args.append((yield expr_steps(arg)))
     return [args, keywords]
 
 
@@ -177,9 +196,9 @@ def call_compile(sexp):
                 + (f"; {hint}" if hint else ""),
                 sexp,
             )
-    func = expr_compile(op)
+    func = yield expr_steps(op)
     refuse_not_callable(func, op)
-    [args, keywords] = call_args_parse(operands)
+    [args, keywords] = yield call_args_parse(operands)
     return ast.Call(func=func, args=args, keywords=keywords, **sexp.position_info)
 
 
@@ -193,9 +212,9 @@ def ifexp_compile(sexp):
         raise form_error(sexp, "takes a test, a then and at most one else")
     orelse = rest[0] if len(rest) else Constant("None", **sexp.position_info)
     return ast.IfExp(
-        test=expr_compile(test),
-        body=expr_compile(body),
-        orelse=expr_compile(orelse),
+        test=(yield expr_steps(test)),
+        body=(yield expr_steps(body)),
+        orelse=(yield expr_steps(orelse)),
         **sexp.position_info
     )
 
@@ -208,7 +227,7 @@ def attribute_compile(sexp, ctx):
     # Python has no attribute access without an attribute: (. x) is refused.
     [[value, first_attr], more_attrs] = form_parts(sexp, ("value", "attr"))
     attrs = [first_attr, *more_attrs]
-    rst = expr_compile(value, ast.Load)
+    rst = yield expr_steps(value, ast.Load)
     position_info = {**sexp.position_info}
     for [i, attr] in enumerate(attrs):
         # One identifier per slot: (. a b.c) is refused, not read as a chain.
@@ -230,9 +249,9 @@ def methodcall_p(sexp):
 def methodcall_compile(sexp):
     method = sexp.op
     [[instance], operands] = form_parts(sexp, ("instance",), "method call")
-    [args, keywords] = call_args_parse(operands)
+    [args, keywords] = yield call_args_parse(operands)
     func = ast.Attribute(
-        value=expr_compile(instance),
+        value=(yield expr_steps(instance)),
         attr=method_name(method),
         ctx=ast.Load(),
         **merge_position_infos(method.position_info, instance.position_info)
@@ -287,27 +306,40 @@ def target_error(node, kind):
     return LispyCompileError(msg, Node(**position))
 
 
-def check_target(node, kind, top=True):
+def check_target(node, kind):
+    """Refuse a compiled target ``node`` CPython cannot bind as ``kind``.
+
+    One iterative walk, so a target nested past the recursion limit is
+    checked like any other. The refusal is the one recursion would raise
+    first: the first bad node in a left-to-right pre-order walk, and a tuple
+    or list with two starred elements once all its elements are checked.
+    """
     if kind == "walrus":
         if not isinstance(node, ast.Name):
             raise target_error(node, kind)
         return
-    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
-        return
-    if kind in ("assign", "delete") and isinstance(node, (ast.Tuple, ast.List)):
-        for elt in node.elts:
-            check_target(elt, kind, top=False)
-        starred = [elt for elt in node.elts if isinstance(elt, ast.Starred)]
-        if len(starred) > 1:
-            raise LispyCompileError(
-                "multiple starred expressions in assignment",
-                Node(**{k: getattr(starred[1], k) for k in Node().position_info}),
-            )
-        return
-    if kind == "assign" and isinstance(node, ast.Starred) and not top:
-        check_target(node.value, kind, top=False)
-        return
-    raise target_error(node, kind)
+    # (node, top): top is whether node is the whole target; None marks a
+    # tuple or list whose elements were all checked.
+    pending = [(node, True)]
+    while pending:
+        [node, top] = pending.pop()
+        if top is None:
+            starred = [elt for elt in node.elts if isinstance(elt, ast.Starred)]
+            if len(starred) > 1:
+                raise LispyCompileError(
+                    "multiple starred expressions in assignment",
+                    Node(**{k: getattr(starred[1], k) for k in Node().position_info}),
+                )
+        elif isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+            pass
+        elif kind in ("assign", "delete") and isinstance(node, (ast.Tuple, ast.List)):
+            pending.append((node, None))
+            # Reversed, so the first element is popped (checked) first.
+            pending.extend((elt, False) for elt in reversed(node.elts))
+        elif kind == "assign" and isinstance(node, ast.Starred) and not top:
+            pending.append((node.value, False))
+        else:
+            raise target_error(node, kind)
 
 
 def target_compile(sexp, kind):
@@ -324,9 +356,9 @@ def target_compile(sexp, kind):
     if kind == "walrus":
         # Shape before name, as CPython: (:= a.__debug__ 1) is refused as an
         # attribute target, not as an assignment to __debug__.
-        check_target(expr_compile(sexp), kind)
-        return expr_compile(sexp, ast.Store)
-    node = expr_compile(sexp, ast.Del if kind == "delete" else ast.Store)
+        check_target((yield expr_steps(sexp)), kind)
+        return (yield expr_steps(sexp, ast.Store))
+    node = yield expr_steps(sexp, ast.Del if kind == "delete" else ast.Store)
     check_target(node, kind)
     return node
 
@@ -343,8 +375,8 @@ def namedexpr_compile(sexp):
     if len(rest):
         raise form_error(sexp, "takes one name and one value")
     return ast.NamedExpr(
-        target=target_compile(target, "walrus"),
-        value=expr_compile(value),
+        target=(yield target_compile(target, "walrus")),
+        value=(yield expr_steps(value)),
         **sexp.position_info
     )
 
@@ -355,7 +387,7 @@ def subscript_p(sexp):
 
 def subscript_slice_compile(slice):
     """A lone ``*x`` slice is a one-element Tuple, as ``t[*x]`` parses."""
-    node = expr_compile(slice)
+    node = yield expr_steps(slice)
     if isinstance(node, ast.Starred):
         return ast.Tuple(elts=[node], ctx=ast.Load(), **slice.position_info)
     return node
@@ -365,16 +397,14 @@ def subscript_compile(sexp, ctx):
     op = sexp.op
     [[value], slices] = form_parts(sexp, ("value",))
     op_pos = op.position_info
-    rst = reduce(
-        lambda rst, slice: ast.Subscript(
+    rst = yield expr_steps(value)
+    for slice in slices:
+        rst = ast.Subscript(
             value=rst,
-            slice=subscript_slice_compile(slice),
+            slice=(yield subscript_slice_compile(slice)),
             ctx=ast.Load(),
             **merge_position_infos(op_pos, slice.position_info)
-        ),
-        slices,
-        expr_compile(value),
-    )
+        )
     rst.ctx = ctx()
     return rst
 
@@ -398,14 +428,14 @@ def parse_comprehensions(generator_body):
             )
         if not q:
             raise form_error(keyword, f"has {head} without a target", "comprehension")
-        target = target_compile(q.popleft(), "assign")
+        target = yield target_compile(q.popleft(), "assign")
         if len(q) and atom_text(q[0]) == "in":
             q.popleft()
         if not q:
             raise form_error(
                 keyword, f"has {head} without an iterable", "comprehension"
             )
-        iter = expr_compile(q.popleft())
+        iter = yield expr_steps(q.popleft())
         ifs = []
         while len(q) and atom_text(q[0]) not in COMPREHENSION_FORS:
             word = q.popleft()
@@ -415,7 +445,7 @@ def parse_comprehensions(generator_body):
                 )
             if not q or atom_text(q[0]) in COMPREHENSION_FORS:
                 raise form_error(word, "has if without a test", "comprehension")
-            ifs.append(expr_compile(q.popleft()))
+            ifs.append((yield expr_steps(q.popleft())))
         rst.append(
             ast.comprehension(
                 target=target, iter=iter, ifs=ifs, is_async=int(head == "async-for")
@@ -428,14 +458,14 @@ def comprehension_elt_compile(elt):
     """The element of a list/set/generator comprehension; ``*x`` is PEP 798."""
     if starred_p(elt):
         require("comprehension-unpacking", elt)
-    return expr_compile(elt)
+    return (yield expr_steps(elt))
 
 
 def gen_exp_compile(sexp):
     [elt, *generator_body] = sexp
     return ast.GeneratorExp(
-        elt=comprehension_elt_compile(elt),
-        generators=parse_comprehensions(generator_body),
+        elt=(yield comprehension_elt_compile(elt)),
+        generators=(yield parse_comprehensions(generator_body)),
         **sexp.position_info
     )
 
@@ -488,7 +518,7 @@ def def_args_parse(sexp, annotated=True):
                 raise form_error(
                     q[0], "takes no annotations on its parameters", "lambda"
                 )
-            node.annotation = expr_compile(q.popleft())
+            node.annotation = yield expr_steps(q.popleft())
         return node
 
     def refuse_bare_star():
@@ -514,14 +544,14 @@ def def_args_parse(sexp, annotated=True):
                 raise LispyCompileError("* may appear only once", arg)
             star = arg
             if isinstance(arg, Starred):
-                vararg = param(arg)
+                vararg = yield param(arg)
         elif isinstance(arg, DoubleStarred):
             refuse_bare_star()
-            kwarg = param(arg)
+            kwarg = yield param(arg)
         elif star is None:
-            node = param(arg)
+            node = yield param(arg)
             if keyword_arg_p(arg):
-                defaults.append(expr_compile(keyword_value(arg, q)))
+                defaults.append((yield expr_steps(keyword_value(arg, q))))
             elif len(defaults):
                 # Positional-only and regular parameters share one defaults
                 # list, the last ones': a gap would shift every default.
@@ -531,9 +561,11 @@ def def_args_parse(sexp, annotated=True):
                 )
             args.append(node)
         else:
-            kwonlyargs.append(param(arg))
+            kwonlyargs.append((yield param(arg)))
             kw_defaults.append(
-                expr_compile(keyword_value(arg, q)) if keyword_arg_p(arg) else None
+                (yield expr_steps(keyword_value(arg, q)))
+                if keyword_arg_p(arg)
+                else None
             )
     refuse_bare_star()
     # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
@@ -559,8 +591,8 @@ def lambda_compile(sexp):
     if len(rest):
         raise form_error(sexp, "takes one body expression")
     return ast.Lambda(
-        args=def_args_parse(args, annotated=False),
-        body=expr_compile(body),
+        args=(yield def_args_parse(args, annotated=False)),
+        body=(yield expr_steps(body)),
         **sexp.position_info
     )
 
@@ -568,7 +600,7 @@ def lambda_compile(sexp):
 def yield_compile(sexp):
     if len(sexp.operands) > 1:
         raise form_error(sexp, "takes at most one value")
-    val_dict = {"value": expr_compile(sexp[1])} if len(sexp) > 1 else {}
+    val_dict = {"value": (yield expr_steps(sexp[1]))} if len(sexp) > 1 else {}
     return ast.Yield(**val_dict, **sexp.position_info)
 
 
@@ -576,14 +608,14 @@ def yield_from_compile(sexp):
     [[value], rest] = form_parts(sexp, ("iterable",))
     if len(rest):
         raise form_error(sexp, "takes one iterable")
-    return ast.YieldFrom(value=expr_compile(value), **sexp.position_info)
+    return ast.YieldFrom(value=(yield expr_steps(value)), **sexp.position_info)
 
 
 def await_compile(sexp):
     [[value], rest] = form_parts(sexp, ("value",))
     if len(rest):
         raise form_error(sexp, "takes one value")
-    return ast.Await(value=expr_compile(value), **sexp.position_info)
+    return ast.Await(value=(yield expr_steps(value)), **sexp.position_info)
 
 
 def interpolated_values(sexp, field_compile):
@@ -592,6 +624,7 @@ def interpolated_values(sexp, field_compile):
     A ``{expr=}`` field echoes ``expr_text + debug`` at the end of the literal
     before it, built here so a field expanded from a quasiquote echoes its
     expanded text.  Empty literals are dropped, as in the AST CPython builds.
+    ``field_compile`` is the steps of one field.
     """
     literals = [string_compile(v) for v in sexp.operands[0::2]]
     fields = sexp.operands[1::2]
@@ -603,44 +636,43 @@ def interpolated_values(sexp, field_compile):
         if literal.value:
             values.append(literal)
         if k < len(fields):
-            values.append(field_compile(fields[k]))
+            values.append((yield field_compile(fields[k])))
     return values
 
 
 def format_spec_dict(sexp):
-    return (
-        {}
-        if sexp.format_spec is None
-        else {"format_spec": f_string_compile(sexp.format_spec)}
-    )
+    if sexp.format_spec is None:
+        return {}
+    return {"format_spec": (yield f_string_compile(sexp.format_spec))}
 
 
 def f_str_value_compile(sexp):
     return ast.FormattedValue(
-        value=expr_compile(sexp.value),
+        value=(yield expr_steps(sexp.value)),
         conversion=sexp.conversion,
-        **format_spec_dict(sexp),
+        **(yield format_spec_dict(sexp)),
         **sexp.position_info
     )
 
 
 def f_string_compile(sexp):
     return ast.JoinedStr(
-        values=interpolated_values(sexp, f_str_value_compile), **sexp.position_info
+        values=(yield interpolated_values(sexp, f_str_value_compile)),
+        **sexp.position_info
     )
 
 
 def interpolation_compile(sexp):
     text = sexp.expr_text
     return ast.Interpolation(
-        value=expr_compile(sexp.value),
+        value=(yield expr_steps(sexp.value)),
         str=(
             text
             if features.interpolation_keeps_trailing_whitespace()
             else text.rstrip()
         ),
         conversion=sexp.conversion,
-        **format_spec_dict(sexp),
+        **(yield format_spec_dict(sexp)),
         **sexp.position_info
     )
 
@@ -648,7 +680,8 @@ def interpolation_compile(sexp):
 def t_string_compile(sexp):
     require("t-string", sexp)
     return ast.TemplateStr(
-        values=interpolated_values(sexp, interpolation_compile), **sexp.position_info
+        values=(yield interpolated_values(sexp, interpolation_compile)),
+        **sexp.position_info
     )
 
 
@@ -664,7 +697,8 @@ def refuse_empty_form(sexp):
 # Which compiler a non-empty () goes to: the first predicate that holds wins,
 # and a () none claims is a call (call_compile). The one home of that dispatch:
 # paren_compiler compiles through it, and pattern_parse asks call_form_p
-# whether a () is call-shaped, i.e. a class pattern.
+# whether a () is call-shaped, i.e. a class pattern. Every compiler here is a
+# step (a generator, see the module docstring).
 PAREN_FORMS = (
     (tuple_p, tuple_compile),
     (unaryop_p, unaryop_compile),
@@ -702,8 +736,7 @@ def call_form_p(sexp):
 
 
 def paren_compiler(sexp, ctx):
-    # Calls the compiler directly, adding no frame per nesting level: deeply
-    # nested code is compiled by recursion.
+    """The steps of a () expression."""
     refuse_empty_form(sexp)
     form = paren_form(sexp)
     return form(sexp, ctx) if form in CTX_PAREN_FORMS else form(sexp)
@@ -716,30 +749,27 @@ def slice_compile(sexp):
     [lower, upper, step] = args if len(args) == 3 else args + ["_"] if len(args) == 2 else ["_"] + args + ["_"]
     args_dict = {}
     if lower != "None" and lower != "_":
-        args_dict["lower"] = expr_compile(lower)
+        args_dict["lower"] = yield expr_steps(lower)
     if upper != "None" and upper != "_":
-        args_dict["upper"] = expr_compile(upper)
+        args_dict["upper"] = yield expr_steps(upper)
     if step != "None" and step != "_":
-        args_dict["step"] = expr_compile(step)
+        args_dict["step"] = yield expr_steps(step)
     return ast.Slice(**args_dict, **sexp.position_info)
 
 
 def list_comp_compile(sexp):
     [elt, *generator_body] = sexp
     return ast.ListComp(
-        elt=comprehension_elt_compile(elt),
-        generators=parse_comprehensions(generator_body),
+        elt=(yield comprehension_elt_compile(elt)),
+        generators=(yield parse_comprehensions(generator_body)),
         **sexp.position_info
     )
 
 
 def list_compile(sexp, ctx):
     args = sexp.list
-    return ast.List(
-        elts=list(map(lambda x: expr_compile(x, ctx), args)),
-        ctx=ctx(),
-        **sexp.position_info
-    )
+    elts = yield expr_list_steps(args, ctx)
+    return ast.List(elts=elts, ctx=ctx(), **sexp.position_info)
 
 
 def bracket_compiler(sexp, ctx):
@@ -756,7 +786,7 @@ def bracket_compiler(sexp, ctx):
 
 def set_compile(sexp):
     [op, *args] = sexp.list
-    return ast.Set(elts=list(map(expr_compile, args)), **sexp.position_info)
+    return ast.Set(elts=(yield expr_list_steps(args)), **sexp.position_info)
 
 
 def dict_compile(sexp):
@@ -769,21 +799,21 @@ def dict_compile(sexp):
         item = q.popleft()
         if doublestarred_p(item):
             keys.append(None)
-            values.append(expr_compile(item.value))
+            values.append((yield expr_steps(item.value)))
             continue
         if not q or doublestarred_p(q[0]):
             raise form_error(item, "has a key without a value", "dict")
-        keys.append(expr_compile(item))
-        values.append(expr_compile(q.popleft()))
+        keys.append((yield expr_steps(item)))
+        values.append((yield expr_steps(q.popleft())))
     return ast.Dict(keys=keys, values=values, **sexp.position_info)
 
 
 def dict_comp_compile(sexp):
     [key, value, *generator_body] = sexp
     return ast.DictComp(
-        key=expr_compile(key),
-        value=expr_compile(value),
-        generators=parse_comprehensions(generator_body),
+        key=(yield expr_steps(key)),
+        value=(yield expr_steps(value)),
+        generators=(yield parse_comprehensions(generator_body)),
         **sexp.position_info
     )
 
@@ -793,8 +823,8 @@ def dict_unpack_comp_compile(sexp):
     [unpacked, *generator_body] = sexp
     require("comprehension-unpacking", unpacked)
     return ast.DictComp(
-        key=expr_compile(unpacked.value),
-        generators=parse_comprehensions(generator_body),
+        key=(yield expr_steps(unpacked.value)),
+        generators=(yield parse_comprehensions(generator_body)),
         **sexp.position_info
     )
 
@@ -802,8 +832,8 @@ def dict_unpack_comp_compile(sexp):
 def set_comp_compile(sexp):
     [elt, *generator_body] = sexp.operands
     return ast.SetComp(
-        elt=comprehension_elt_compile(elt),
-        generators=parse_comprehensions(generator_body),
+        elt=(yield comprehension_elt_compile(elt)),
+        generators=(yield parse_comprehensions(generator_body)),
         **sexp.position_info
     )
 
@@ -831,8 +861,10 @@ def metaindicator_p(sexp):
 
 def metaindicator_compile(sexp):
     if isinstance(sexp, Quote):
-        return expr_compile(
-            sexp.value.generator_expression(isinstance(sexp, QuasiQuote))
+        return (
+            yield expr_steps(
+                sexp.value.generator_expression(isinstance(sexp, QuasiQuote))
+            )
         )
     form = (
         "~@ (unquote-splice)" if isinstance(sexp, UnquoteSplice) else "~ (unquote)"
@@ -840,36 +872,42 @@ def metaindicator_compile(sexp):
     raise LispyCompileError(f"{form} is only allowed inside a quasiquote", sexp)
 
 
-def expr_compile(sexp, ctx=ast.Load):
+def expr_steps(sexp, ctx=ast.Load):
+    """The steps compiling one expression: its form's generator, or the node
+    itself for a leaf (see the module docstring)."""
+    # An annotation compiles as its value, loaded; a chain of them in a loop.
+    while isinstance(sexp, Annotation):
+        [sexp, ctx] = [sexp.value, ast.Load]
     if isinstance(sexp, GluedHead):
         raise sexp.misuse_error()
-    try:
-        return (
-            paren_compiler(sexp, ctx)
-            if paren_p(sexp)
-            else bracket_compiler(sexp, ctx)
-            if bracket_p(sexp)
-            else brace_compiler(sexp)
-            if brace_p(sexp)
-            else expr_compile(sexp.value)
-            if isinstance(sexp, Annotation)
-            else starred_compile(sexp, ctx)
-            if starred_p(sexp)
-            else constant_compile(sexp)
-            if constant_p(sexp)
-            else string_compile(sexp)
-            if string_p(sexp)
-            else metaindicator_compile(sexp)
-            if metaindicator_p(sexp)
-            else prefix_misuse(sexp)
-            if keyword_arg_p(sexp) or doublestarred_p(sexp)
-            else name_compile(sexp, ctx)
-        )
-    except RecursionError:
-        # The compiler recurses, several frames per nesting level, so a form
-        # nested past Python's recursion limit lands here. Building the error
-        # this deep may hit the limit again; that RecursionError reaches the
-        # next level's handler, which retries a level up, so the error is
-        # positioned a few levels above the deepest form. A LispyCompileError
-        # passes through every outer handler unchanged.
-        raise nesting_error(sexp) from None
+    return (
+        paren_compiler(sexp, ctx)
+        if paren_p(sexp)
+        else bracket_compiler(sexp, ctx)
+        if bracket_p(sexp)
+        else brace_compiler(sexp)
+        if brace_p(sexp)
+        else starred_compile(sexp, ctx)
+        if starred_p(sexp)
+        else constant_compile(sexp)
+        if constant_p(sexp)
+        else string_compile(sexp)
+        if string_p(sexp)
+        else metaindicator_compile(sexp)
+        if metaindicator_p(sexp)
+        else prefix_misuse(sexp)
+        if keyword_arg_p(sexp) or doublestarred_p(sexp)
+        else name_compile(sexp, ctx)
+    )
+
+
+def expr_list_steps(sexps, ctx=ast.Load):
+    """The nodes of ``sexps``, compiled in order."""
+    nodes = []
+    for sexp in sexps:
+        nodes.append((yield expr_steps(sexp, ctx)))
+    return nodes
+
+
+def expr_compile(sexp, ctx=ast.Load):
+    return trampoline(expr_steps(sexp, ctx))

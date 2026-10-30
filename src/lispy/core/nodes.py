@@ -5,6 +5,8 @@ from math import isfinite as _isfinite
 from math import isinf as _isinf
 from math import isnan as _isnan
 
+from lispy.core.utils import trampoline
+
 
 def multiline_p(s):
     return "\n" in s
@@ -68,15 +70,28 @@ class Node:
             "end_col_offset": self.end_col_offset,
         }
 
-    def _generator_expression(self, in_quasi):
+    def generator_expression(self, in_quasi=False):
+        """The form that builds this node at run time: a quote's expansion,
+        ``(Paren (Symbol "f") ...)`` for ``(f ...)``. In a quasiquote
+        (``in_quasi``) an unquote is its value and ``~@x`` is ``*x``.
+
+        A trampoline (core/utils.py), never recursion: each class's
+        ``_generator_steps`` returns a leaf's form, or is a generator that asks
+        for a child's with ``form = yield child._generator_steps(in_quasi)``,
+        so nesting depth costs no Python frames.
+        """
+        return trampoline(self._generator_steps(in_quasi))
+
+    def _generator_steps(self, in_quasi):
+        return self._classname_call((yield self.operands_generate(in_quasi)))
+
+    def _classname_call(self, *operands):
+        """``(ClassName operand ...)`` at this node's position."""
         return Paren(
             Symbol(self.classname, **self.position_info),
-            self.operands_generate(in_quasi),
-            **self.position_info
+            *operands,
+            **self.position_info,
         )
-
-    def generator_expression(self, in_quasi=False):
-        return self._generator_expression(in_quasi)
 
     def get_source(self, indent=0):
         """The form's source text, its first line starting at column ``indent``.
@@ -128,15 +143,19 @@ class Node:
 
 
 def contains_unquote(node):
-    """Whether an Unquote (or ~@) occurs anywhere in ``node``."""
-    if isinstance(node, Unquote):
-        return True
-    if isinstance(node, Node):
-        return any(
-            contains_unquote(v) for v in vars(node).values() if v is not node
-        )
-    if isinstance(node, list):
-        return any(contains_unquote(v) for v in node)
+    """Whether an Unquote (or ~@) occurs anywhere in ``node``: in a node's
+    attributes or a list's items, at any depth. One iterative walk, each node
+    and list visited once, so neither nesting nor sharing costs more."""
+    pending = [node]
+    seen = set()
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Unquote):
+            return True
+        if not isinstance(node, (Node, list)) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        pending.extend(vars(node).values() if isinstance(node, Node) else node)
     return False
 
 
@@ -549,15 +568,11 @@ class Expression(Node):
     def append(self, t):
         return self.list.append(t)
 
-    def operands_generate(self, in_quasi):
-        return [sexp.generator_expression(in_quasi) for sexp in self.list]
-
-    def generator_expression(self, in_quasi=False):
-        return Paren(
-            Symbol(self.classname, **self.position_info),
-            *self.operands_generate(in_quasi),
-            **self.position_info
-        )
+    def _generator_steps(self, in_quasi):
+        operands = []
+        for sexp in self.list:
+            operands.append((yield sexp._generator_steps(in_quasi)))
+        return self._classname_call(*operands)
 
     def __repr__(self, depth=0):
         return "Expr(" + ", ".join([repr(e) for e in self.list]) + ")"
@@ -744,7 +759,7 @@ class Wrapper(Node):
     _source = _prefixed_source
 
     def operands_generate(self, in_quasi):
-        return self.value.generator_expression(in_quasi)
+        return self.value._generator_steps(in_quasi)
 
 
 class FStrExpr(Wrapper):
@@ -772,7 +787,7 @@ class FStrExpr(Wrapper):
     def _source(self, indent):
         return "(FStrExpr " + (yield (self.value, 0)) + ")"
 
-    def generator_expression(self, in_quasi=False):
+    def _generator_steps(self, in_quasi):
         """Rebuild with conversion, format spec and expression text, so an
         f/t-string survives a quasiquote."""
         position_info = self.position_info
@@ -789,15 +804,16 @@ class FStrExpr(Wrapper):
             ]
         else:
             text_args = [Keyword(Symbol("expr-text")), String(repr(text))]
+        value = yield self.value._generator_steps(in_quasi)
         return Paren(
             Symbol(self.classname, **position_info),
-            self.value.generator_expression(in_quasi),
+            value,
             Keyword(Symbol("conversion")),
             Constant(str(getattr(self, "conversion", -1))),
             Keyword(Symbol("format-spec")),
             Constant("None")
             if format_spec is None
-            else format_spec.generator_expression(in_quasi),
+            else (yield format_spec._generator_steps(in_quasi)),
             Keyword(Symbol("debug")),
             Constant("None") if debug is None else String(repr(debug)),
             *text_args,
@@ -923,12 +939,10 @@ class GluedHead(Node):
     def name(self):
         raise self.misuse_error()
 
-    def generator_expression(self, in_quasi=False):
-        return Paren(
-            Symbol(self.classname, **self.position_info),
-            self.head.generator_expression(in_quasi),
-            self.params.generator_expression(in_quasi),
-            **self.position_info
+    def _generator_steps(self, in_quasi):
+        head = yield self.head._generator_steps(in_quasi)
+        return self._classname_call(
+            head, (yield self.params._generator_steps(in_quasi))
         )
 
     def __repr__(self):
@@ -943,6 +957,10 @@ class GluedHead(Node):
 class Literal(Node):
     def operands_generate(self, in_quasi):
         return String(string_literal_source(self.value), **self.position_info)
+
+    def _generator_steps(self, in_quasi):
+        # A leaf: its form, no generator.
+        return self._classname_call(self.operands_generate(in_quasi))
 
 
 class Symbol(Literal):
@@ -981,19 +999,14 @@ class Constant(Literal):
         self.value = value
         self.classname = "Constant"
 
-    def generator_expression(self, in_quasi=False):
+    def _generator_steps(self, in_quasi):
         """Rebuild from the text, and keep an exact value (``_exact_constant``)
         exact: the Constant itself compiles to that value, so the rebuilt
         code names no ``float``/``complex`` a user may have rebound."""
         if "exact" not in self.__dict__:
-            return super().generator_expression(in_quasi)
-        position_info = self.position_info
-        return Paren(
-            Symbol(self.classname, **position_info),
-            self.operands_generate(in_quasi),
-            Keyword(Symbol("exact")),
-            self,
-            **position_info
+            return super()._generator_steps(in_quasi)
+        return self._classname_call(
+            self.operands_generate(in_quasi), Keyword(Symbol("exact")), self
         )
 
     def __repr__(self):
@@ -1011,7 +1024,7 @@ class MetaIndicator(Node):
         self.value = value
 
     def operands_generate(self, in_quasi):
-        return self.value.generator_expression(isinstance(self, QuasiQuote))
+        return self.value._generator_steps(isinstance(self, QuasiQuote))
 
 
 class Quote(MetaIndicator):
@@ -1043,8 +1056,8 @@ class Unquote(MetaIndicator):
         super().__init__(value, **kwargs)
         self.classname = "Unquote"
 
-    def generator_expression(self, in_quasi=False):
-        return self.value if in_quasi else self._generator_expression(False)
+    def _generator_steps(self, in_quasi):
+        return self.value if in_quasi else Node._generator_steps(self, False)
 
     def __repr__(self):
         return "Unquote(" + repr(self.value) + ")"
@@ -1057,11 +1070,11 @@ class UnquoteSplice(Unquote):
         super().__init__(value, **kwargs)
         self.classname = "UnquoteSplice"
 
-    def generator_expression(self, in_quasi=False):
+    def _generator_steps(self, in_quasi):
         return (
             Starred(self.value, **self.position_info)
             if in_quasi
-            else self._generator_expression(False)
+            else Node._generator_steps(self, False)
         )
 
     def __repr__(self):
