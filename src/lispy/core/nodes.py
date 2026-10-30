@@ -81,8 +81,8 @@ class Node:
         for a child's with ``form = yield child._generator_steps(in_quasi)``,
         so nesting depth costs no Python frames.
         """
-        # The outermost run owns the unquote memo; the tree it expands is not
-        # mutated while it runs, so ids stay valid.
+        # The outermost run owns the unquote memo. Its ids stay valid because
+        # each entry holds the node or list it answers for, keeping it alive.
         memo = _UNQUOTE_MEMO.set({}) if _UNQUOTE_MEMO.get() is None else None
         try:
             return trampoline(self._generator_steps(in_quasi))
@@ -806,6 +806,18 @@ class Wrapper(Node):
     def operands_generate(self, in_quasi):
         return self.value._generator_steps(in_quasi)
 
+    def update_dict(self, key, value):
+        """Set ``key`` on this wrapper and on everything it wraps, down to
+        the first value that is not such a wrapper, which sets it its own way.
+        A loop, so a long chain of wrappers costs no frame per wrapper."""
+        node = self
+        while (
+            isinstance(node, Wrapper) and type(node).update_dict is Wrapper.update_dict
+        ):
+            node.__dict__[key] = value
+            node = node.value
+        return node.update_dict(key, value)
+
 
 class FStrExpr(Wrapper):
     """A replacement field of an f/t-string.
@@ -869,10 +881,6 @@ class FStrExpr(Wrapper):
     def name(self):
         return self.value.name
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class Annotation(Wrapper):
     source_prefix = "^"
@@ -892,10 +900,6 @@ class Annotation(Wrapper):
     def name(self):
         return self.value.name
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class Keyword(Wrapper):
     source_prefix = ":"
@@ -912,10 +916,6 @@ class Keyword(Wrapper):
     def name(self):
         return self.value.name
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class Starred(Wrapper):
     source_prefix = "*"
@@ -931,10 +931,6 @@ class Starred(Wrapper):
     def append(self, e):
         return self.value.append(e)
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class DoubleStarred(Wrapper):
     source_prefix = "**"
@@ -949,10 +945,6 @@ class DoubleStarred(Wrapper):
 
     def append(self, e):
         return self.value.append(e)
-
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
 
 
 class GluedHead(Node):

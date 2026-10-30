@@ -1287,6 +1287,51 @@ def test_a_prefix_chain_past_the_recursion_limit_parses(prefix, wrappers, scope)
         pass  # a refusal is fine; a RecursionError is not
 
 
+# (id, prefixes repeated, the glued form after them, the wrappers they make):
+# the prefixes close over the GluedHead the bracket makes.
+GLUED_PREFIX_CHAINS = [
+    ("annotation", "^", "a[int]", ["Annotation"]),
+    ("keyword", ":", "a[0]", ["Keyword"]),
+    ("star", "**", "a[0]", ["DoubleStarred"]),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "prefix, glued, wrappers",
+    [case[1:] for case in GLUED_PREFIX_CHAINS],
+    ids=[case[0] for case in GLUED_PREFIX_CHAINS],
+)
+def test_a_prefix_chain_glued_to_a_bracket_past_the_recursion_limit_parses(
+    prefix, glued, wrappers
+):
+    repeat = DEPTH // len(prefix)
+    src = "\n" + prefix * repeat + glued
+    [form] = parse(src)
+    found = []
+    node = form
+    while isinstance(node, Wrapper):
+        found.append(type(node).__name__)
+        node = node.value
+    assert found == wrappers * repeat
+    # Every wrapper ends with the bracket; each starts at its prefix.
+    ends = {(n.end_lineno, n.end_col_offset) for n in chain(form)}
+    assert ends == {(2, DEPTH + len(glued))}
+    assert [n.col_offset for n in chain(form)] == list(range(0, DEPTH, len(prefix)))
+    assert type(node) is GluedHead
+    assert (atom_text(node.head), node.head.col_offset) == ("a", DEPTH)
+    assert str(form) == src[1:]
+
+
+def chain(node):
+    """The wrappers from ``node`` down, without recursion."""
+    nodes = []
+    while isinstance(node, Wrapper):
+        nodes.append(node)
+        node = node.value
+    return nodes
+
+
 def running_sums(widths):
     sums = []
     total = 0

@@ -368,14 +368,24 @@ def _parse_steps(src, rst, nesting):
                 e = yield string_parse(t, tktype, position_info, error, nesting)
             else:
                 e = token_parse(t, tktype, position_info)
+            closed = 0
             while stack and isinstance(stack[-1], (MetaIndicator, Wrapper, GluedHead)):
                 popped = stack.pop()
                 if isinstance(popped, GluedHead):
                     popped.params = e
                 else:
                     popped.value = e
-                popped.update_dict("end_lineno", end_lineno)
-                popped.update_dict("end_col_offset", end_col_offset)
+                if closed:
+                    # e already carries these ends down its whole chain (set
+                    # when it was popped), so a wrapper's update_dict would
+                    # only set them again: setting this node alone keeps a
+                    # chain of N prefixes linear rather than quadratic.
+                    popped.__dict__["end_lineno"] = end_lineno
+                    popped.__dict__["end_col_offset"] = end_col_offset
+                else:
+                    popped.update_dict("end_lineno", end_lineno)
+                    popped.update_dict("end_col_offset", end_col_offset)
+                closed += 1
                 e = popped
             (stack[-1] if stack else rst).append(e)
     _check_all_closed(stack)
@@ -778,6 +788,8 @@ def field_parse(text, field, kind, raw, locate, nesting):
         delimiter = "="
         if conversion is None and spec_start is None:
             conversion = "r"
+    # Asks for _parse_steps with yield, never calls parse(), so a nested
+    # f-string costs no Python frame per level.
     try:
         forms = (
             (yield _parse_steps(expr_text, [], nesting)) if expr_text.strip() else []
