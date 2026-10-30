@@ -3,6 +3,7 @@ what Python can compile is a positioned LispyCompileError, never a
 RecursionError."""
 
 import ast
+import subprocess
 import sys
 
 import pytest
@@ -222,10 +223,16 @@ needs_unbound_compile = pytest.mark.skipif(
 )
 
 
-def test_the_compile_depth_probe_matches_the_measurement():
+@pytest.mark.parametrize(
+    "version, bound", [((3, 11, 9), True), ((3, 12, 0), False), ((3, 15, 0), False)]
+)
+def test_compile_depth_follows_the_recursion_limit_before_3_12(
+    version, bound, monkeypatch
+):
     # 3.11 compile() follows the recursion limit; 3.12+ has a C limit
     # (3.12/3.13) or the C stack (3.14+), thousands of levels deeper.
-    assert COMPILE_BOUND == (sys.version_info < (3, 12))
+    monkeypatch.setattr(features, "running_version", lambda: version)
+    assert features.compile_depth_follows_recursion_limit() is bound
 
 
 @needs_bound_compile
@@ -252,11 +259,20 @@ def compile_in_this_frame(src, scope):
 
 
 @needs_bound_compile
-def test_the_check_never_refuses_what_compile_takes(scope, monkeypatch):
+@pytest.mark.parametrize(
+    "make",
+    [
+        plus,
+        lambda n: "(+" + " a" * n + ")",
+        lambda n: "(. a" + " b" * n + ")",
+    ],
+    ids=["constant-leaves", "name-leaves", "attribute-chain"],
+)
+def test_the_check_never_refuses_what_compile_takes(make, scope, monkeypatch):
     # Every attempt runs at the same stack depth, through this one helper.
     def outcome(operands):
         try:
-            compile_in_this_frame(plus(operands), scope)
+            compile_in_this_frame(make(operands), scope)
             return "compiled"
         except LispyCompileError:
             return "refused"
@@ -279,6 +295,58 @@ def test_the_check_never_refuses_what_compile_takes(scope, monkeypatch):
     # it, the check refuses.
     assert outcome(low) == "compiled"
     assert outcome(low + 20) == "refused"
+
+
+# Run in a fresh interpreter, whose stack has no C-level calls: there the
+# frame count is exact, so the check refuses exactly what compile() rejects.
+EXACT_BOUNDARY = """
+import ast, sys
+from lispy.core.compiler import features
+from lispy.core.errors import LispyCompileError
+from lispy.core.macro import macroexpand_then_compile
+from lispy.core.parser import parse
+
+def outcome(src):
+    try:
+        body = macroexpand_then_compile(parse(src), {})
+        compile(ast.Module(body, type_ignores=[]), "<n>", "exec")
+        return "compiled"
+    except LispyCompileError:
+        return "refused"
+    except RecursionError:
+        return "RecursionError"
+
+make = eval(sys.argv[1])
+check = features.compile_depth_follows_recursion_limit
+features.compile_depth_follows_recursion_limit = lambda: False
+# A plain loop: a generator expression would run outcome a frame deeper.
+low = 900
+while low < 2000 and outcome(make(low + 1)) == "compiled":
+    low += 1
+off = outcome(make(low + 1))
+features.compile_depth_follows_recursion_limit = check
+print(off, outcome(make(low)), outcome(make(low + 1)))
+"""
+
+
+@needs_bound_compile
+@pytest.mark.parametrize(
+    "make",
+    [
+        'lambda n: "(+" + " 1" * n + ")"',
+        'lambda n: "(+" + " a" * n + ")"',
+        'lambda n: "(. a" + " b" * n + ")"',
+    ],
+    ids=["constant-leaves", "name-leaves", "attribute-chain"],
+)
+def test_the_check_refuses_exactly_what_compile_rejects(make):
+    result = subprocess.run(
+        [sys.executable, "-c", EXACT_BOUNDARY, make],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.split() == ["RecursionError", "compiled", "refused"]
 
 
 @pytest.mark.parametrize("bound", [True, False])

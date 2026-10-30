@@ -64,34 +64,32 @@ def interpolation_keeps_trailing_whitespace():
     return probe.values[0].str == "x "
 
 
-@functools.cache
 def compile_depth_follows_recursion_limit():
     """Whether compile() refuses an AST nested about as deep as the Python
-    recursion limit, raising a RecursionError that names no line.
+    recursion limit, raising a RecursionError that names no line: CPython
+    before 3.12, whose compiler recursion counts against the Python limit
+    (3.12 moved it to a C-level limit). A fixed fact of the release, so it is
+    read from ``running_version()``; compiling a probe AST to find out would
+    itself overflow the C stack under a raised recursion limit.
 
     Measured on ASTs built with explicit positions (fix_missing_locations
-    recurses itself), at the default limit 1000: 3.11 accepts an AST nested
-    ``limit - stack depth`` levels (994 at the top level; 2492 at limit 3000,
-    500 frames deep); 3.12 and 3.13 have a fixed C limit (about 9995 levels
-    at any recursion limit); 3.14 and 3.15 run until the C stack overflows
-    (16821 to 47381 levels by node kind), both a RecursionError. Only the
-    first is a limit lispython code meets, so ``refuse_deep_ast`` in
-    compiler/utils.py checks for it only where this probe finds it.
+    recurses itself), default limit 1000 unless noted:
 
-    The probe compiles, once, a list nested 10 levels past the recursion
-    limit, which no stack depth lets 3.11 accept. With the limit raised past
-    the fixed C limit before the first call, 3.12/3.13 read True too; the
-    check then refuses nothing compile() would have taken.
+    ======  ==========================================  ======================
+    Python  deepest AST compile() accepts               beyond
+    ======  ==========================================  ======================
+    3.11    limit - stack depth (994 at the top level;  RecursionError
+            2492 at limit 3000, 504 frames deep)
+    3.12    about 9995, at any recursion limit          RecursionError (C limit)
+    3.13    about 9996, at any recursion limit          RecursionError (C limit)
+    3.14    47381 BinOp / 28955 List levels             RecursionError (C stack)
+    3.15    26073 BinOp / 16821 List levels             RecursionError (C stack)
+    ======  ==========================================  ======================
+
+    Only the first is a depth lispython code meets, so ``refuse_deep_ast`` in
+    compiler/utils.py checks the depth only where this is True.
     """
-    position = {"lineno": 1, "col_offset": 0, "end_lineno": 1, "end_col_offset": 1}
-    node = ast.Constant(1, **position)
-    for _ in range(sys.getrecursionlimit() + 10):
-        node = ast.List([node], ast.Load(), **position)
-    try:
-        compile(ast.Expression(node), "<depth-probe>", "eval")
-    except RecursionError:
-        return True
-    return False
+    return tuple(running_version())[:2] < (3, 12)
 
 
 def import_has_is_lazy():

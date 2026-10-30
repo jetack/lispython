@@ -80,6 +80,10 @@ STATEMENT_HINTS = {
 CHECK_TO_COMPILE_FRAMES = 2
 
 
+# Leaf singletons compile() does not recurse into: they cost it no depth.
+_DEPTH_FREE_NODES = (ast.expr_context, ast.operator, ast.cmpop, ast.unaryop, ast.boolop)
+
+
 def _stack_depth():
     """Frames on the stack, the caller's included (a module's code is 1)."""
     depth = 0
@@ -111,7 +115,8 @@ def refuse_deep_ast(stmts):
     One iterative walk per statement, linear in the AST's size; the error is
     at the node at the refused depth on the first (leftmost) too-deep path,
     or at its nearest positioned ancestor when that node has no position (an
-    operator, a context).
+    ``arguments``, a ``comprehension``). Contexts and operators are not
+    counted (``_DEPTH_FREE_NODES``).
     """
     if not features.compile_depth_follows_recursion_limit():
         return stmts
@@ -130,5 +135,6 @@ def refuse_deep_ast(stmts):
             pending.extend(
                 (child, depth + 1, positioned)
                 for child in reversed(list(ast.iter_child_nodes(node)))
+                if not isinstance(child, _DEPTH_FREE_NODES)
             )
     return stmts
