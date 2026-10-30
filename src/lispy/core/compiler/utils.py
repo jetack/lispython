@@ -362,16 +362,19 @@ def _counted_children(node, count, generator_defs):
             for field, value in fields
             for child in _ast_nodes(value)
         ]
+    # A loop pushes its block before its header, except an async for's
+    # iterable, evaluated before the push.
     if isinstance(node, (ast.For, ast.AsyncFor)):
+        iterable = count + (0 if isinstance(node, ast.AsyncFor) else 1)
         return [
-            (node.iter, count),
-            (node.target, count),
+            (node.iter, iterable),
+            (node.target, count + 1),
             *((child, count + 1) for child in node.body),
             *((child, count) for child in node.orelse),
         ]
     if isinstance(node, ast.While):
         return [
-            (node.test, count),
+            (node.test, count + 1),
             *((child, count + 1) for child in node.body),
             *((child, count) for child in node.orelse),
         ]
