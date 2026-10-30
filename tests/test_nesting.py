@@ -656,24 +656,19 @@ def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
         assert info.value.msg == NESTING_MESSAGE
         assert info.value.lineno == 3
     elif compiles == BLOCKS:
-        assert_too_many_blocks(form, module, scope)
+        assert_too_many_blocks(form, scope)
     elif compiles:
         compile(module, "<nesting>", "exec")
 
 
-def assert_too_many_blocks(form, module, scope):
-    """``form`` (source), compiled to ``module``, has more static blocks than
-    CPython 3.12+ takes: refused on line 3 before compile() where compile()
-    would crash, refused by compile() itself where it counts them."""
-    if features.inlined_comprehensions_overflow_block_stack():
-        # Never compile() here: this interpreter would crash.
-        with pytest.raises(LispyCompileError) as info:
-            macroexpand_then_compile(parse("\n\n" + form), scope)
-        assert (info.value.msg, info.value.lineno) == (BLOCK_OVERFLOW_MESSAGE, 3)
-    else:
-        with pytest.raises(SyntaxError) as info:
-            compile(module, "<nesting>", "exec")
-        assert (info.value.msg, info.value.lineno) == (BLOCK_OVERFLOW_MESSAGE, 3)
+def assert_too_many_blocks(form, scope):
+    """``form`` (source) has more static blocks than CPython 3.12+ takes:
+    refused on line 3 before compile(), never compile()d here, since every
+    3.12+ release can crash on such ASTs (test_comprehension_blocks.py)."""
+    assert features.inlined_comprehensions_overflow_block_stack()
+    with pytest.raises(LispyCompileError) as info:
+        macroexpand_then_compile(parse("\n\n" + form), scope)
+    assert (info.value.msg, info.value.lineno) == (BLOCK_OVERFLOW_MESSAGE, 3)
 
 
 @pytest.mark.usefixtures("time_bound")

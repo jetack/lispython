@@ -1,8 +1,9 @@
-"""List/set/dict comprehensions nested past CPython's static block limit are a
-positioned LispyCompileError, never a crashed interpreter (gh-156091).
+"""List/set/dict comprehensions nested past CPython's static block limit, and
+an await at that limit in a generator expression, are a positioned
+LispyCompileError, never a crashed interpreter (gh-156091).
 
-CPython 3.12-3.15.0 segfault in compile() on such an AST, so anything that
-may compile() one there runs in a subprocess, never in the pytest process.
+Every CPython 3.12+ can segfault in compile() on such an AST, so anything
+that may compile() one runs in a subprocess, never in the pytest process.
 """
 
 import ast
@@ -18,39 +19,67 @@ from lispy.core.errors import BLOCK_OVERFLOW_MESSAGE, LispyCompileError
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
 
-RUNNING = tuple(sys.version_info)[:2]
+RUNNING = tuple(sys.version_info)[:3]
 # 3.11 compiles each comprehension as a code unit of its own: no limit.
-INLINES = RUNNING >= (3, 12)
-UNFIXED = features.inlined_comprehensions_overflow_block_stack()
+INLINES = RUNNING[:2] >= (3, 12)
+# The first patch release of each line that counts an inlined comprehension
+# as a static block (gh-156091); 3.12 is security-only and never got it.
+COMPREHENSION_BLOCK_FIX = {(3, 13): 16, (3, 14): 8, (3, 15): 1}
+
+
+def counts_inlined_comprehensions(version):
+    """Whether CPython ``version`` refuses an inlined comprehension past the
+    static block limit itself rather than crashing."""
+    fix = COMPREHENSION_BLOCK_FIX.get(tuple(version[:2]))
+    return version[:2] > (3, 15) or (fix is not None and version[2] >= fix)
+
+
+FIXED = INLINES and counts_inlined_comprehensions(RUNNING)
 needs_inlining = pytest.mark.skipif(
     not INLINES, reason="3.11 does not inline comprehensions"
 )
 needs_fixed = pytest.mark.skipif(
-    not INLINES or UNFIXED,
+    not FIXED,
     reason="needs a CPython that refuses the overflow itself (3.13.16+, 3.14.8+)",
 )
 needs_unfixed = pytest.mark.skipif(
-    not UNFIXED, reason="this CPython does not crash on the overflow"
+    not INLINES or FIXED,
+    reason="this CPython does not crash on a plain comprehension overflow",
 )
 
 
 @pytest.mark.parametrize(
-    "version, overflows",
+    "version, checked",
     [
         ((3, 11, 13), False),
         ((3, 12, 11), True),
         ((3, 13, 15), True),
-        ((3, 13, 16), False),
+        # The fixed releases still crash on an await in a genexp at the limit.
+        ((3, 13, 16), True),
         ((3, 14, 7), True),
-        ((3, 14, 8), False),
+        ((3, 14, 8), True),
         ((3, 15, 0), True),
-        ((3, 15, 1), False),
-        ((3, 16, 0), False),
+        ((3, 15, 1), True),
+        ((3, 16, 0), True),
     ],
 )
-def test_which_releases_crash_on_the_overflow(version, overflows, monkeypatch):
+def test_every_inlining_release_gets_the_check(version, checked, monkeypatch):
     monkeypatch.setattr(features, "running_version", lambda: version)
-    assert features.inlined_comprehensions_overflow_block_stack() is overflows
+    assert features.inlined_comprehensions_overflow_block_stack() is checked
+
+
+@pytest.mark.parametrize(
+    "version, own_scope",
+    [
+        ((3, 12, 11), False),
+        ((3, 13, 16), False),
+        ((3, 14, 0), True),
+        ((3, 15, 1), True),
+    ],
+)
+def test_annotations_have_their_own_scope_from_3_14(version, own_scope, monkeypatch):
+    monkeypatch.setattr(features, "running_version", lambda: version)
+    assert features.annotations_have_own_scope() is own_scope
 
 
 # Compiles a lispython source through the import pipeline (``_lpy_code``) and
@@ -189,7 +218,7 @@ def test_one_comprehension_past_the_bound_is_a_positioned_error(context):
 ASYNC_CONTEXT = ("async-comprehension", "async", "(async-def f []\n{})", 1)
 
 
-@needs_unfixed
+@needs_inlining
 def test_async_comprehensions_count_their_async_for():
     # 1 + 2 * 10 blocks fit; the 11th comprehension pushes to 22.
     n = at_bound(ASYNC_CONTEXT)
@@ -197,6 +226,55 @@ def test_async_comprehensions_count_their_async_for():
     assert compile_lpy(placed(ASYNC_CONTEXT, n)[0]) == "compiled"
     [src, line, column] = placed(ASYNC_CONTEXT, n + 1)
     assert compile_lpy(src) == [BLOCK_OVERFLOW_MESSAGE, line, column + n + 1]
+
+
+# A generator expression's body sits under a StopIteration handler CPython
+# never counts, and an await (or an async for clause's anext) pushes one more:
+# each takes a slot past the blocks it sits under. Every 3.12+ release,
+# fixed or not, crashes one comprehension past these bounds.
+# (id, the leaf the comprehensions nest around, the most comprehensions taken)
+GENEXP_AWAITS = [
+    # 20 blocks, then the await's slot is the 21st.
+    ("await", "(await z)", 20),
+    # 18 blocks, the leaf comprehension's, its async for's, then its anext's.
+    ("inner-async-comprehension", "[q async-for q in qs]", 18),
+]
+
+
+def genexp_await(leaf, n):
+    """An async def's generator expression whose element nests ``n`` list
+    comprehensions around ``leaf``, on line 2 with the leaf at column
+    ``n + 1``."""
+    return (
+        "(async-def f []\n(" + "[" * n + leaf + " for x in xs]" * n + " for y in ys))"
+    )
+
+
+@pytest.mark.parametrize(
+    "leaf, bound", [c[1:] for c in GENEXP_AWAITS], ids=[c[0] for c in GENEXP_AWAITS]
+)
+def test_awaits_in_a_generator_expression_at_the_bound_compile(leaf, bound):
+    assert compile_lpy(genexp_await(leaf, bound)) == "compiled"
+
+
+@pytest.mark.parametrize(
+    "leaf, bound", [c[1:] for c in GENEXP_AWAITS], ids=[c[0] for c in GENEXP_AWAITS]
+)
+def test_an_await_past_the_bound_in_a_generator_expression_is_refused(leaf, bound):
+    outcome = compile_lpy(genexp_await(leaf, bound + 1))
+    if not INLINES:
+        assert outcome == "compiled"
+        return
+    # At the await, or the comprehension holding the async for.
+    assert outcome == [BLOCK_OVERFLOW_MESSAGE, 2, bound + 3]
+
+
+@needs_inlining
+def test_without_the_check_an_await_in_a_generator_expression_crashes():
+    # Why the check runs on every 3.12+ release, fixed ones included.
+    [_, leaf, bound] = GENEXP_AWAITS[0]
+    outcome = compile_lpy(genexp_await(leaf, bound + 1), "off")
+    assert outcome[0] == "exit" and outcome[1] < 0, outcome
 
 
 # Comprehensions in the first iterable are evaluated before the comprehension
@@ -265,7 +343,9 @@ def test_the_check_takes_a_comprehension_nest_past_the_recursion_limit(monkeypat
 
 
 # Python shapes for the model: (id, source with {C} for n comprehensions);
-# {A} is the async form. Each covers a rule in _counted_children.
+# {A} is the async form. Each covers a rule in _counted_children. None may
+# crash fixed CPython in SHAPE_SIZES (an await in a genexp would: those are
+# GENEXP_AWAITS), or the ground truth below has no answer for it.
 PY_SHAPES = [
     ("module", "{C}"),
     ("def", "def f():\n    {C}"),
@@ -321,7 +401,35 @@ PY_SHAPES = [
     ),
     ("type-alias-in-with", "with a:\n    type T = {C}"),
     ("default-under-with", "with a:\n    def f(a={C}): pass"),
+    ("kw-default-under-with", "with a:\n    def f(*, a={C}): pass"),
+    ("class-base-under-with", "with a:\n    class C({C}): pass"),
+    # Type parameters are a scope of their own.
+    ("type-var-bound-under-with", "with a:\n    def f[T: {C}](): pass"),
+    ("class-type-var-bound-under-with", "with a:\n    class C[T: {C}]: pass"),
+    ("type-alias-param-under-with", "with a:\n    type T[U: {C}] = int"),
+    ("type-var-default-under-with", "with a:\n    def f[T = {C}](): pass", (3, 13)),
+    # Annotations: the enclosing unit's on 3.12/3.13, their own from 3.14.
+    ("annotation-under-with", "with a:\n    def f(a: {C}): pass"),
+    ("vararg-annotation-under-with", "with a:\n    def f(*a: {C}): pass"),
+    ("return-annotation-under-with", "with a:\n    def f() -> {C}: pass"),
 ]
+
+
+def shape_params():
+    """``PY_SHAPES`` as pytest params; a shape with a third item needs that
+    Python to parse."""
+    return [
+        pytest.param(
+            shape[1],
+            id=shape[0],
+            marks=pytest.mark.skipif(
+                RUNNING[:2] < shape[2], reason="syntax this Python lacks"
+            )
+            if len(shape) > 2
+            else (),
+        )
+        for shape in PY_SHAPES
+    ]
 
 
 def python_shape(shape, n):
@@ -358,9 +466,7 @@ def model_refuses(src, monkeypatch):
 
 
 @needs_fixed
-@pytest.mark.parametrize(
-    "shape", [s[1] for s in PY_SHAPES], ids=[s[0] for s in PY_SHAPES]
-)
+@pytest.mark.parametrize("shape", shape_params())
 def test_the_model_refuses_what_fixed_cpython_refuses(shape, monkeypatch):
     sources = [python_shape(shape, n) for n in SHAPE_SIZES]
     result = subprocess.run(
@@ -378,9 +484,7 @@ def test_the_model_refuses_what_fixed_cpython_refuses(shape, monkeypatch):
 
 
 @needs_unfixed
-@pytest.mark.parametrize(
-    "shape", [s[1] for s in PY_SHAPES], ids=[s[0] for s in PY_SHAPES]
-)
+@pytest.mark.parametrize("shape", shape_params())
 def test_what_the_model_accepts_compiles_on_a_crashing_cpython(shape, monkeypatch):
     # The most comprehensions the model accepts in each shape: the handler
     # stack holds them where CPython does not count them.
