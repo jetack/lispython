@@ -31,10 +31,11 @@ from lispy.core.nodes import (
     Symbol,
     Unquote,
     UnquoteSplice,
+    Wrapper,
     atom_text,
     contains_unquote,
 )
-from lispy.core.parser import parse
+from lispy.core.parser import FSTRING_NESTING_LIMIT, parse
 from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
@@ -532,7 +533,8 @@ EXPRESSION_DEPTHS = [
         ast.Await,
         True,
     ),
-    # The parser recurses into a nested f-string's fields, so these are nodes.
+    # The parser refuses f-strings nested past CPython's limit, so these are
+    # nodes.
     (
         "fstring-field",
         lambda: nest(lambda e: fstring(field(e)), DEPTH, Symbol("x", **LINE_3)),
@@ -1128,3 +1130,164 @@ def test_the_trampoline_runs_steps_as_recursion_would():
     with pytest.raises(ValueError):
         trampoline(failing(DEPTH))
     assert log == list(range(DEPTH + 1))
+
+
+T_STRINGS = (
+    tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
+)
+NESTED_LITERAL_MESSAGE = "too many nested f-strings or t-strings"
+
+
+def nested_literals(openings, depth, newline=""):
+    """``depth`` f/t-string literals nested in each other's single field,
+    cycling through ``openings`` from the outside; each opening is 3
+    characters, then ``newline``."""
+    heads = [openings[k % len(openings)] for k in range(depth)]
+    return "".join(h + newline for h in heads) + "x" + '}"' * depth
+
+
+def literal_depth(node):
+    """How many f/t-strings nest through their single field, with the
+    innermost field's value."""
+    depth = 0
+    while isinstance(node, Paren) and atom_text(node.list[0]) in (
+        "f-string",
+        "t-string",
+    ):
+        node = node.list[2].value
+        depth += 1
+    return depth, node
+
+
+# (id, openings, needs t-strings): every literal is counted, f or t alike.
+NESTED_LITERALS = [
+    ("f-strings", ['f"{'], False),
+    ("t-strings", ['t"{'], True),
+    ("mixed", ['f"{', 't"{'], True),
+]
+
+
+def skip_without_t_strings(needs_t):
+    if needs_t and not T_STRINGS:
+        pytest.skip("t-strings need Python 3.14")
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("newline", ["", "\n"], ids=["one-line", "a-line-each"])
+@pytest.mark.parametrize(
+    "openings, needs_t",
+    [case[1:] for case in NESTED_LITERALS],
+    ids=[case[0] for case in NESTED_LITERALS],
+)
+def test_nested_f_strings_past_cpython_s_limit_are_refused(openings, needs_t, newline):
+    # CPython 3.14+ refuses the 150th literal at its quote: offset 449 on one
+    # line, column 2 of line 150 with a line each.
+    skip_without_t_strings(needs_t)
+    with pytest.raises(LispyCompileError) as info:
+        parse(nested_literals(openings, DEPTH, newline))
+    assert info.value.msg == NESTED_LITERAL_MESSAGE
+    position = (info.value.lineno, info.value.offset)
+    assert position == ((150, 2) if newline else (1, 449))
+
+
+@pytest.mark.parametrize(
+    "openings, needs_t",
+    [case[1:] for case in NESTED_LITERALS],
+    ids=[case[0] for case in NESTED_LITERALS],
+)
+def test_the_most_nested_f_strings_cpython_takes_parse_on_a_deep_stack(
+    openings, needs_t
+):
+    # A frame per literal would not fit in the room the caller leaves.
+    skip_without_t_strings(needs_t)
+    depth = FSTRING_NESTING_LIMIT - 1
+    src = nested_literals(openings, depth)
+
+    def at_depth(frames):
+        return at_depth(frames - 1) if frames else parse(src)
+
+    [form] = at_depth(sys.getrecursionlimit() - 200)
+    [found, leaf] = literal_depth(form)
+    assert found == depth
+    assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_format_spec_chain_past_the_recursion_limit_parses():
+    # Rescanning makes each level cost the rest of the text: 1000 levels is
+    # past the old recursion limit and well inside the budget.
+    depth = 1000
+    [form] = parse('f"' + "{x:" * depth + "x" + "}" * depth + '"')
+    fields = []
+    node = form
+    while len(node.list) > 2:  # the literal, then each spec with a field
+        fields.append(node.list[2])
+        node = fields[-1].format_spec
+    assert len(fields) == depth
+    leaf = fields[-1].value
+    assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
+    # The innermost spec is the literal text x.
+    assert [atom_text(n) for n in node.list] == ["f-string", "'x'"]
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_brackets_nested_past_the_recursion_limit_in_one_field_parse():
+    [form] = parse('\nf"{' + "[" * DEPTH + "x" + "]" * DEPTH + '}"')
+    node = form.list[2].value
+    depth = 0
+    while isinstance(node, Bracket):
+        [node] = node.list
+        depth += 1
+    assert depth == DEPTH
+    position = (node.lineno, node.col_offset, node.end_col_offset)
+    assert (type(node), atom_text(node), position) == (
+        Symbol,
+        "x",
+        (2, 3 + DEPTH, 4 + DEPTH),
+    )
+
+
+# (id, the prefixes repeated, the wrappers they make in order).
+PREFIX_CHAINS = [
+    ("annotation", "^", ["Annotation"]),
+    ("keyword", ":", ["Keyword"]),
+    ("star", "**", ["DoubleStarred"]),
+    ("annotation-star", "^*", ["Annotation", "Starred"]),
+    ("keyword-star-annotation", ":*^", ["Keyword", "Starred", "Annotation"]),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "prefix, wrappers",
+    [case[1:] for case in PREFIX_CHAINS],
+    ids=[case[0] for case in PREFIX_CHAINS],
+)
+def test_a_prefix_chain_past_the_recursion_limit_parses(prefix, wrappers, scope):
+    repeat = DEPTH // len(prefix)
+    src = prefix * repeat + "x"
+    [form] = parse(src)
+    found = []
+    node = form
+    while isinstance(node, Wrapper):
+        found.append((type(node).__name__, node.col_offset))
+        node = node.value
+    widths = [2 if name == "DoubleStarred" else 1 for name in wrappers] * repeat
+    assert [name for [name, _] in found] == wrappers * repeat
+    # Each wrapper starts where its prefix does; the leaf after the last.
+    assert [col for [_, col] in found] == running_sums(widths)
+    assert (type(node), atom_text(node), node.col_offset) == (Symbol, "x", len(src) - 1)
+    assert str(form) == src
+    try:
+        macroexpand_then_compile([form], scope)
+    except LispyCompileError:
+        pass  # a refusal is fine; a RecursionError is not
+
+
+def running_sums(widths):
+    sums = []
+    total = 0
+    for width in widths:
+        sums.append(total)
+        total += width
+    return sums

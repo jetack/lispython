@@ -1,8 +1,9 @@
 import pytest
 
+from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import Paren, Symbol
-from lispy.core.parser import parse, tokenize
+from lispy.core.parser import FSTRING_NESTING_LIMIT, parse, tokenize
 
 
 class TestParser:
@@ -256,3 +257,79 @@ class TestPrefixedOperandType:
     def test_operand_position(self):
         [form] = parse("**1")
         assert (form.value.lineno, form.value.col_offset) == (1, 2)
+
+
+def nested(opening, depth, closing='}"', before="", inner="x"):
+    """``depth`` literals opened by ``opening``, nested through one field, in
+    the parens ``before`` opens."""
+    return before + opening * depth + inner + closing * depth + ")" * len(before)
+
+
+class TestNestedFStringLimit:
+    """CPython's lexer refuses the 150th nested f/t-string literal; positions
+    are CPython 3.15's (lineno, offset) for the same text."""
+
+    NESTING_MESSAGE = "too many nested f-strings or t-strings"
+
+    def test_the_limit_is_cpython_s(self):
+        assert FSTRING_NESTING_LIMIT == 150
+
+    @pytest.mark.parametrize(
+        ["opening", "closing", "before", "inner", "at"],
+        [
+            ('f"{', '}"', "", "x", (1, 449)),
+            # The opening's last character, as CPython reports it.
+            ('f"""{', '}"""', "", "x", (1, 749)),
+            ('rf"{', '}"', "", "x", (1, 599)),
+            ('f"{\n', '}"', "", "x", (150, 2)),
+            ('f"{', '}"', "(((", "x", (1, 452)),
+            # A plain string inside is not counted.
+            ('f"{', '}"', "", '"x"', (1, 449)),
+        ],
+        ids=["single", "triple", "raw", "multiline", "in-a-form", "plain-inside"],
+    )
+    def test_the_150th_literal_is_refused_where_cpython_refuses_it(
+        self, opening, closing, before, inner, at
+    ):
+        depth = FSTRING_NESTING_LIMIT - 1
+        assert len(parse(nested(opening, depth, closing, before, inner))) == 1
+        with pytest.raises(LispyCompileError) as info:
+            parse(nested(opening, depth + 1, closing, before, inner))
+        assert info.value.msg == self.NESTING_MESSAGE
+        assert (info.value.lineno, info.value.offset) == at
+
+    def test_a_literal_in_a_format_spec_counts_its_enclosing_literals(self):
+        depth = FSTRING_NESTING_LIMIT - 1
+        assert len(parse('f"{x:{' + nested('f"{', depth - 1) + '}}"')) == 1
+        with pytest.raises(LispyCompileError) as info:
+            parse('f"{x:{' + nested('f"{', depth) + '}}"')
+        assert info.value.msg == self.NESTING_MESSAGE
+        # The 150th literal's quote: past f"{x:{ and 148 more openings.
+        assert (info.value.lineno, info.value.offset) == (1, 6 + 3 * (depth - 1) + 2)
+
+    def test_a_bad_prefix_is_reported_before_the_nesting(self):
+        depth = FSTRING_NESTING_LIMIT - 1
+        with pytest.raises(LispyCompileError) as info:
+            parse(nested('f"{', depth, inner='fb"x"'))
+        assert info.value.msg == "invalid string prefix 'fb'"
+        assert (info.value.lineno, info.value.offset) == (1, 448)
+
+    def test_the_t_string_version_gate_is_reported_before_the_nesting(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(features, "running_version", lambda: (3, 13, 0))
+        depth = FSTRING_NESTING_LIMIT - 1
+        with pytest.raises(LispyCompileError) as info:
+            parse(nested('f"{', depth, inner='t"{x}"'))
+        assert info.value.msg.startswith("t-string")
+        assert (info.value.lineno, info.value.offset) == (1, 448)
+
+    def test_a_malformed_literal_is_reported_after_the_nesting(self):
+        depth = FSTRING_NESTING_LIMIT - 1
+        with pytest.raises(LispyCompileError) as info:
+            parse(nested('f"{', depth, inner='f"{x!z}"'))
+        assert info.value.msg == self.NESTING_MESSAGE
+
+    def test_partial_parse_keeps_the_forms_before_the_refusal(self):
+        src = "a " + nested('f"{', FSTRING_NESTING_LIMIT)
+        assert [str(form) for form in parse(src, partial=True)] == ["a"]
