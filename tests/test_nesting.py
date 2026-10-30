@@ -30,6 +30,7 @@ from lispy.core.nodes import (
     Unquote,
     UnquoteSplice,
     atom_text,
+    contains_unquote,
 )
 from lispy.core.parser import parse
 
@@ -366,12 +367,71 @@ EXPRESSION_DEPTHS = [
         ast.Tuple,
         True,
     ),
+    # A quoted [...] is a (Bracket ...) call per level.
+    ("quote", "'" + "[" * DEPTH + "]" * DEPTH, ast.Call, True),
+    ("quasiquote-unquote", "`" + "[" * DEPTH + "~x" + "]" * DEPTH, ast.Call, True),
+    (
+        "quasiquote-unquote-splice",
+        "`" + "[" * DEPTH + "~@xs" + "]" * DEPTH,
+        ast.Call,
+        True,
+    ),
 ]
+
+
+def calls_to(name):
+    """A predicate: the AST node is a call of the bare name ``name``."""
+    return lambda node: (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == name
+    )
+
+
+def quoted(make):
+    """A function building ``'x`` nested DEPTH levels deep by ``make``, on
+    line 3 (the parser cannot spell some of these shapes that deep)."""
+    return lambda: Quote(nest(make, DEPTH, Symbol("x", **LINE_3)), **LINE_3)
+
+
+# Each node class's own quote expansion: (id, make one level, the class its
+# expansion calls once per level, whether to compile() it).
+QUOTED_NODE_DEPTHS = [
+    ("keyword", lambda e: Keyword(e, **LINE_3), "Keyword", True),
+    ("starred", lambda e: Starred(e, **LINE_3), "Starred", True),
+    ("annotation", lambda e: Annotation(e, **LINE_3), "Annotation", True),
+    (
+        "glued-head",
+        lambda e: GluedHead(Symbol("f", **LINE_3), e, **LINE_3),
+        "GluedHead",
+        True,
+    ),
+    ("fstring-field", lambda e: field(e), "FStrExpr", True),
+    (
+        "fstring-format-spec",
+        lambda e: field(Symbol("x", **LINE_3), fstring(e)),
+        "FStrExpr",
+        False,
+    ),
+    ("quote", lambda e: Quote(e, **LINE_3), "Quote", True),
+    ("unquote-outside-quasiquote", lambda e: Unquote(e, **LINE_3), "Unquote", True),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "make, name, compiles",
+    [case[1:] for case in QUOTED_NODE_DEPTHS],
+    ids=[case[0] for case in QUOTED_NODE_DEPTHS],
+)
+def test_quoted_nodes_nest_past_the_recursion_limit(make, name, compiles, scope):
+    assert_compiles_at_depth(quoted(make), calls_to(name), compiles, scope)
 
 
 def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
     """``form`` (source, or a function building it as nodes) compiles to an
-    AST with DEPTH ``cls`` nodes, which compile() takes when ``compiles``;
+    AST with DEPTH ``cls`` nodes (an AST class, or a predicate on a node),
+    which compile() takes when ``compiles``;
     where compile() is bound by the recursion limit (3.11) it is refused as
     too deep, positioned on line 3, unless the AST is ``flat`` (do, deco
     nest in lispython only). Asserts on plain values only: a failing
@@ -384,7 +444,8 @@ def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
         assert info.value.lineno == 3
         return
     module = ast.Module(macroexpand_then_compile(forms, scope), type_ignores=[])
-    assert sum(isinstance(node, cls) for node in ast.walk(module)) == DEPTH
+    matches = (lambda node: isinstance(node, cls)) if isinstance(cls, type) else cls
+    assert sum(1 for node in ast.walk(module) if matches(node)) == DEPTH
     if compiles:
         compile(module, "<nesting>", "exec")
 
@@ -786,3 +847,20 @@ def test_a_target_is_refused_where_a_left_to_right_walk_first_fails(target, msg,
     with pytest.raises(LispyCompileError) as info:
         macroexpand_then_compile(parse(f"(= {target} x)"), {})
     assert (info.value.msg, info.value.offset) == (msg, col)
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("unquote", [True, False])
+def test_contains_unquote_past_the_recursion_limit(unquote):
+    leaf = Unquote(Symbol("x")) if unquote else Symbol("x")
+    found = contains_unquote(nest(lambda e: Bracket(Keyword(e)), DEPTH, leaf))
+    assert found is unquote  # a plain value: a failing node would be rendered
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("unquote", [True, False])
+def test_contains_unquote_visits_a_shared_node_once(unquote):
+    # 2**60 paths through 60 nodes: a walk per path would never end.
+    leaf = Unquote(Symbol("x")) if unquote else Symbol("x")
+    found = contains_unquote(nest(lambda e: Paren(e, e), 60, leaf))
+    assert found is unquote
