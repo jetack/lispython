@@ -42,6 +42,11 @@ follows [Semantic Versioning](https://semver.org/).
   instead of `(1+2j)`, which read back as a call, not a number. A negative
   nan (alone or as a complex part) shows as `(- (float "nan"))` instead of
   losing its sign.
+- A macro whose expansion puts Python data in a form's list compiles when
+  another attribute also holds that list, and when the form's list is a
+  tuple or deque, instead of failing with `AttributeError: 'int' object has
+  no attribute 'name'`. A form's list of any other type (a dict, a set) is a
+  compile error at the macro call naming the macro.
 - Code a macro builds (from a quasiquote template) takes the position of the
   macro call, so a traceback or compile error in it points at that call
   instead of line 0; arguments written by the user keep their own positions.

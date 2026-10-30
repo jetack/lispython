@@ -309,7 +309,12 @@ def test_a_slot_reaching_the_node_own_list_is_sharing():
     p = Paren(Symbol("f"), Symbol("a"))
     p.orig = p.list
     copy = macro_expansion_nodes(p, call_at(POSITION))
-    assert copy.orig is copy.list and copy.list is not p.list
+    # The form list gets the converted copy, the other slot a plain one, both
+    # holding the same node copies.
+    assert type(copy.list) is list and copy.list is not p.list
+    assert copy.orig is not p.list and copy.orig is not copy.list
+    assert all(a is b for a, b in zip(copy.orig, copy.list, strict=True))
+    assert copy.list[0] is not p.list[0]
     p = Paren(Symbol("f"), Symbol("a"))
     q = Paren()
     q.list = p.list
@@ -330,6 +335,118 @@ def test_a_cycle_through_a_shared_list_is_refused():
 
 class FormList(list):
     pass
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("order", ["form-first", "plain-first"])
+def test_a_plain_slot_reaching_a_form_list_keeps_its_data_raw(order):
+    # One list both as p's form list and as q's plain attribute: the form
+    # list is converted, the attribute copied as is, in either visit order.
+    p = Paren(Symbol("f"))
+    p.list.append(1)
+    q = Paren(Symbol("h"))
+    q.extra = p.list
+    # The stack is LIFO: the last child is visited first.
+    tree = Paren(Symbol("g"), *((q, p) if order == "form-first" else (p, q)))
+    copy = macro_expansion_nodes(tree, call_at(POSITION))
+    [copied_p] = [n for n in copy.list[1:] if n.list[0] == "f"]
+    [copied_q] = [n for n in copy.list[1:] if n.list[0] == "h"]
+    assert type(copied_p.list[1]) is Constant and copied_p.list[1].value == "1"
+    assert copied_q.extra[1] == 1 and type(copied_q.extra[1]) is int
+    assert copied_q.extra is not p.list and copied_q.extra[0] is copied_p.list[0]
+    assert p.list[1] == 1 and q.extra is p.list
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("kind", ["tuple", "deque", "subclass"])
+def test_a_form_list_of_any_sequence_kind_is_converted(kind):
+    make = {"tuple": tuple, "deque": deque, "subclass": FormList}[kind]
+    p = Paren(Symbol("f"))
+    p.list = make([Symbol("f"), 1])
+    q = Paren(Symbol("h"))
+    q.list = p.list
+    copy = macro_expansion_nodes(Paren(Symbol("g"), p, q), call_at(POSITION))
+    [_, copied_p, copied_q] = copy.list
+    assert type(copied_p.list) is list and type(copied_p.list[1]) is Constant
+    assert copied_q.list is copied_p.list
+
+
+# A form list reached by a plain attribute too, the attribute visited first or
+# last; the form list a list, deque or tuple.
+SHARED_FORM_LIST = {
+    "plain-first": (
+        "(= p `(f)) (p.list.append 1) (= q `(h)) (= q.extra p.list)"
+        " (return `(g ~p ~q))",
+        "x = g(f(1), h())",
+    ),
+    "plain-last": (
+        "(= p `(f)) (p.list.append 1) (= q `(h)) (= q.extra p.list)"
+        " (return `(g ~q ~p))",
+        "x = g(h(), f(1))",
+    ),
+    "deque": (
+        "(import collections) (= p `(f))"
+        " (= p.list (collections.deque (+ p.list [1]))) (return `(g ~p))",
+        "x = g(f(1))",
+    ),
+    "deque-plain-first": (
+        "(import collections) (= p `(f)) (= d (collections.deque (+ p.list [1])))"
+        " (= p.list d) (= q `(h)) (= q.extra d) (return `(g ~p ~q))",
+        "x = g(f(1), h())",
+    ),
+    "deque-plain-last": (
+        "(import collections) (= p `(f)) (= d (collections.deque (+ p.list [1])))"
+        " (= p.list d) (= q `(h)) (= q.extra d) (return `(g ~q ~p))",
+        "x = g(h(), f(1))",
+    ),
+    "tuple": (
+        "(= p `(f)) (= p.list (tuple (+ p.list [1]))) (return `(g ~p))",
+        "x = g(f(1))",
+    ),
+}
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("name", sorted(SHARED_FORM_LIST))
+def test_form_list_data_compiles_whatever_else_reaches_it(name, scope):
+    [body, python] = SHARED_FORM_LIST[name]
+    define(f"(defmacro form-list-{name} [] {body})", scope)
+    stl = compile_at_line(3, f"(= x (form-list-{name}))", scope)
+    assert ast.unparse(ast.Module(stl, [])) == python
+
+
+@pytest.mark.parametrize(
+    ("make", "type_name"), [("{1 2}", "dict"), ("(set [1])", "set")]
+)
+def test_a_form_list_of_another_type_is_refused_at_the_call(make, type_name, scope):
+    name = f"form-list-of-{type_name}"
+    define(f"(defmacro {name} [] (= p `(f)) (= p.list {make}) (return `(g ~p)))", scope)
+    with pytest.raises(LispyCompileError) as info:
+        compile_at_line(3, f"  ({name})", scope)
+    assert info.value.msg == (
+        f"macro {name} returned a {type_name} as a form's list in its "
+        "expansion, which has no lispython form"
+    )
+    assert (info.value.lineno, info.value.offset) == (3, 3)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_cycle_between_a_form_list_and_a_plain_slot_is_refused():
+    # Entered as q's form list, met again through r's plain attribute.
+    shared = [Symbol("h")]
+    q = Paren()
+    q.list = shared
+    r = Paren(Symbol("r"))
+    r.extra = shared
+    shared.append(r)
+    with pytest.raises(LispyCompileError, match="self-referencing list"):
+        macro_expansion_nodes(Paren(Symbol("g"), q), call_at(POSITION))
+    # Entered as r's plain attribute, met again as q's form list.
+    tree = Paren(Symbol("g"))
+    tree.extra = shared
+    shared[1] = q
+    with pytest.raises(LispyCompileError, match="self-referencing list"):
+        macro_expansion_nodes(tree, call_at(POSITION))
 
 
 @pytest.mark.usefixtures("time_bound")
