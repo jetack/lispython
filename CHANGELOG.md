@@ -25,8 +25,35 @@ follows [Semantic Versioning](https://semver.org/).
   `NREPL-MAX-POSITION-LINE`, 1,000,000, or `NREPL-MAX-POSITION-COLUMN`,
   100,000) gets an `error` reply with the request id instead of being
   accepted.
+- Every name the compiler emits must be a Python name, or it is a compile
+  error at the symbol. A symbol that is no Python identifier (`foo!`, `a.`)
+  and an operator used as a value (`(f +)`, `(print ~)`, `(f -)`) are
+  refused, the operator with a hint to call it as `(+ ...)`. A hard keyword
+  is refused in every name slot: attributes (`(. a if)`, `(.if x)`),
+  keyword arguments (`(f :if 1)`, class keywords), parameters, type
+  parameters, import names and aliases, and match captures and class
+  pattern attributes. Each of these used to compile to Python that means
+  nothing (`a.if`, `f(if=1)`, `f(+)`).
+- Binding `__debug__` (assignment, `del`, a def/class/parameter name, a
+  keyword argument, an import, a match capture, `except ... as`) is a
+  compile error with CPython's message (`cannot assign to __debug__`);
+  reading it, `a.__debug__`, `(import __debug__ as x)` and
+  `(global __debug__)` still compile.
+- An attribute slot takes one name: `(. a b.c)` and `(.a.b x)` are compile
+  errors; write `(. a b c)` and `(.b x.a)`.
+- A hard keyword called in an expression (`(f (else 1))`) is reported as
+  `else is a Python keyword and cannot be used as a name`, at the keyword,
+  instead of `else is a Python keyword and cannot be called` at the form.
 
 ### Fixed
+
+- `~x` or `~@x` outside a quasiquote is a compile error at it (`~ (unquote)
+  is only allowed inside a quasiquote`) instead of a raw `ValueError`.
+- A comprehension target that cannot be assigned (`[x for 1 in xs]`) and a
+  walrus target that is not a name (`(:= a.b 1)`, `(:= 1 2)`) are compile
+  errors with CPython's messages (`cannot assign to literal`, `cannot use
+  assignment expressions with attribute`) at the target, instead of a raw
+  `ValueError` or `TypeError`.
 
 - LSP hover and signature help for a statement form show the same usage
   line as the compiler's error messages (`(def name [args] body...)`,

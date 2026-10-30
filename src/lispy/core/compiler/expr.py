@@ -1,5 +1,4 @@
 import ast
-import keyword
 from collections import deque
 from functools import reduce
 
@@ -61,7 +60,9 @@ def boolop_p(sexp):
 def boolop_compile(sexp):
     [op, *args] = sexp.list
     return ast.BoolOp(
-        boolop_dict[op.name](), list(map(expr_compile, args)), **sexp.position_info
+        boolop_dict[atom_text(op)](),
+        list(map(expr_compile, args)),
+        **sexp.position_info
     ) if len(args) >= 2 else expr_compile(args[0])
 
 
@@ -88,7 +89,9 @@ def call_args_parse(given):
         arg = q.popleft()
         keywords.append(
             ast.keyword(
-                arg=arg.name, value=expr_compile(q.popleft()), **arg.position_info
+                arg=symbol_name(arg.value, ast.Store),
+                value=expr_compile(q.popleft()),
+                **arg.position_info
             )
         ) if keyword_arg_p(arg) else keywords.append(
             ast.keyword(value=expr_compile(arg.value), **arg.position_info)
@@ -110,10 +113,6 @@ def call_compile(sexp):
                 f"({head} ...) is a statement and cannot be used as an expression"
                 + (f"; {hint}" if hint else ""),
                 sexp,
-            )
-        if keyword.iskeyword(op.name):
-            raise LispyCompileError(
-                f"{head} is a Python keyword and cannot be called", sexp
             )
     op = expr_compile(op)
     [args, keywords] = call_args_parse(operands)
@@ -143,10 +142,12 @@ def attribute_compile(sexp, ctx):
     [_, value, *attrs] = sexp.list
     rst = expr_compile(value, ast.Load)
     position_info = {**sexp.position_info}
-    for attr in attrs:
+    for [i, attr] in enumerate(attrs):
+        # One identifier per slot: (. a b.c) is refused, not read as a chain.
+        name = symbol_name(attr, ctx if i == len(attrs) - 1 else ast.Load)
         position_info["end_lineno"] = attr.position_info["end_lineno"]
         position_info["end_col_offset"] = attr.position_info["end_col_offset"]
-        rst = ast.Attribute(value=rst, attr=attr.name, ctx=ast.Load(), **position_info)
+        rst = ast.Attribute(value=rst, attr=name, ctx=ast.Load(), **position_info)
     rst.ctx = ctx()
     return rst
 
@@ -160,11 +161,97 @@ def methodcall_compile(sexp):
     [args, keywords] = call_args_parse(operands)
     func = ast.Attribute(
         value=expr_compile(instance),
-        attr=method.name[slice(1, None)],
+        attr=method_name(method),
         ctx=ast.Load(),
         **merge_position_infos(method.position_info, instance.position_info)
     )
     return ast.Call(func=func, args=args, keywords=keywords, **sexp.position_info)
+
+
+# CPython's words for what cannot be a target ("cannot assign to literal").
+TARGET_DESCRIPTIONS = {
+    "Call": "function call",
+    "Constant": "literal",
+    "Compare": "comparison",
+    "Lambda": "lambda",
+    "IfExp": "conditional expression",
+    "NamedExpr": "named expression",
+    "Dict": "dict literal",
+    "Set": "set display",
+    "JoinedStr": "f-string expression",
+    "ListComp": "list comprehension",
+    "SetComp": "set comprehension",
+    "DictComp": "dict comprehension",
+    "GeneratorExp": "generator expression",
+    "Await": "await expression",
+    "Yield": "yield expression",
+    "YieldFrom": "yield expression",
+    "Tuple": "tuple",
+    "List": "list",
+    "Starred": "starred",
+    "Attribute": "attribute",
+    "Subscript": "subscript",
+}
+
+
+def target_error(node, kind):
+    desc = TARGET_DESCRIPTIONS.get(type(node).__name__, "expression")
+    msg = (
+        f"cannot use assignment expressions with {desc}"
+        if kind == "walrus"
+        else f"cannot delete {desc}"
+        if kind == "delete"
+        else f"'{desc}' is an illegal expression for augmented assignment"
+        if kind == "augassign"
+        else f"only single target (not {desc}) can be annotated"
+        if kind == "annotate" and desc in ("tuple", "list")
+        else "illegal target for annotation"
+        if kind == "annotate"
+        else "starred assignment target must be in a list or tuple"
+        if desc == "starred"
+        else f"cannot assign to {desc}"
+    )
+    position = {k: getattr(node, k) for k in Node().position_info}
+    return LispyCompileError(msg, Node(**position))
+
+
+def check_target(node, kind, top=True):
+    if kind == "walrus":
+        if not isinstance(node, ast.Name):
+            raise target_error(node, kind)
+        return
+    if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+        return
+    if kind in ("assign", "delete") and isinstance(node, (ast.Tuple, ast.List)):
+        for elt in node.elts:
+            check_target(elt, kind, top=False)
+        starred = [elt for elt in node.elts if isinstance(elt, ast.Starred)]
+        if len(starred) > 1:
+            raise LispyCompileError(
+                "multiple starred expressions in assignment",
+                Node(**{k: getattr(starred[1], k) for k in Node().position_info}),
+            )
+        return
+    if kind == "assign" and isinstance(node, ast.Starred) and not top:
+        check_target(node.value, kind, top=False)
+        return
+    raise target_error(node, kind)
+
+
+def target_compile(sexp, kind):
+    """The one home of what may be bound or deleted, as CPython has it.
+
+    ``kind`` is "assign" (=, for, with-as, a comprehension's for: names,
+    attributes, subscripts and tuples/lists of them, one starred each),
+    "annotate" and "augassign" (a single name, attribute or subscript),
+    "delete" (no starred) or "walrus" (a single name). A bad target is
+    refused at itself, with CPython's message, instead of an AST that
+    compile() rejects. Each name in it comes from name_compile, which refuses
+    binding __debug__.
+    """
+    node = expr_compile(sexp, ast.Del if kind == "delete" else ast.Store)
+    check_target(node, kind)
+    return node
 
 
 def namedexpr_p(sexp):
@@ -174,7 +261,7 @@ def namedexpr_p(sexp):
 def namedexpr_compile(sexp):
     [_, target, value] = sexp.list
     return ast.NamedExpr(
-        target=expr_compile(target, ctx=ast.Store),
+        target=target_compile(target, "walrus"),
         value=expr_compile(value),
         **sexp.position_info
     )
@@ -214,7 +301,7 @@ def parse_comprehensions(generator_body):
     rst = []
     while q:
         is_async = 0 if q.popleft() == "for" else 1
-        target = expr_compile(q.popleft(), ctx=ast.Store)
+        target = target_compile(q.popleft(), "assign")
         if q[0] == "in":
             q.popleft()
         iter = expr_compile(q.popleft())
@@ -251,6 +338,14 @@ def starred_head_p(arg):
     ).startswith("*")
 
 
+def param_name(arg):
+    """The name a parameter binds: the symbol itself, or the one inside its
+    ``:name`` (default), ``*args`` or ``**kwargs`` wrapper."""
+    if isinstance(arg, (Keyword, Starred, DoubleStarred)):
+        arg = arg.value
+    return symbol_name(arg, ast.Store)
+
+
 def def_args_parse(sexp):
     q = deque(sexp.list)
     # ast.arguments has no _attributes: position keywords are a TypeError on 3.15+.
@@ -267,7 +362,7 @@ def def_args_parse(sexp):
             rst.posonlyargs = args
             args = []
         else:
-            ast_arg = ast.arg(arg=arg.name, **arg.position_info)
+            ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
             if q and isinstance(q[0], Annotation):
                 ast_arg.annotation = expr_compile(q.popleft())
             args.append(ast_arg)
@@ -279,7 +374,7 @@ def def_args_parse(sexp):
     # starred
     if q and isinstance(q[0], Starred):
         arg = q.popleft()
-        ast_arg = ast.arg(arg=arg.value.name, **arg.position_info)
+        ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
         if q and isinstance(q[0], Annotation):
             ast_arg.annotation = expr_compile(q.popleft())
         rst.vararg = ast_arg
@@ -289,7 +384,7 @@ def def_args_parse(sexp):
     # before doublestarred
     while q and (not isinstance(q[0], DoubleStarred)):
         arg = q.popleft()
-        ast_arg = ast.arg(arg=arg.name, **arg.position_info)
+        ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
         if q and isinstance(q[0], Annotation):
             ast_arg.annotation = expr_compile(q.popleft())
         kwonlyargs.append(ast_arg)
@@ -300,7 +395,7 @@ def def_args_parse(sexp):
     # doublestarred
     if q:
         arg = q.popleft()
-        ast_arg = ast.arg(arg=arg.value.name, **arg.position_info)
+        ast_arg = ast.arg(arg=param_name(arg), **arg.position_info)
         if q and isinstance(q[0], Annotation):
             ast_arg.annotation = expr_compile(q.popleft())
         rst.kwarg = ast_arg
@@ -573,8 +668,10 @@ def metaindicator_compile(sexp):
         return expr_compile(
             sexp.value.generator_expression(isinstance(sexp, QuasiQuote))
         )
-    else:
-        raise ValueError("'unquote' is not allowed here")
+    form = (
+        "~@ (unquote-splice)" if isinstance(sexp, UnquoteSplice) else "~ (unquote)"
+    )
+    raise LispyCompileError(f"{form} is only allowed inside a quasiquote", sexp)
 
 
 def expr_compile(sexp, ctx=ast.Load):
