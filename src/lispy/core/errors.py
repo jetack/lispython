@@ -7,7 +7,6 @@ understands Python syntax errors (tracebacks, IDEs, the LSP's
 into text.
 """
 
-import ast
 import contextlib
 import sys
 from types import SimpleNamespace
@@ -130,48 +129,3 @@ def nesting_error(at):
         f"(Python's recursion limit is {sys.getrecursionlimit()})",
         at,
     )
-
-
-# Frames to spare below the recursion limit when checking an AST's depth.
-# CPython's compile() accepts an AST nested about recursion-limit minus the
-# current Python stack depth (measured on 3.11-3.15: limit 1000 at the top
-# level -> 992 levels; limit 3000 at 500 frames deep -> 2486) and raises a
-# raw RecursionError beyond. The entry points call compile() a few frames
-# away from refuse_deep_ast's caller, so the margin covers that difference
-# and the few levels CPython spends itself.
-AST_NESTING_MARGIN = 50
-
-
-def _stack_depth():
-    depth = 0
-    frame = sys._getframe(1)
-    while frame is not None:
-        depth += 1
-        frame = frame.f_back
-    return depth
-
-
-def refuse_deep_ast(stmts):
-    """Raise ``nesting_error`` if any statement in ``stmts`` is nested deeper
-    than CPython's compile() can take from here, else return ``stmts``.
-
-    One iterative walk per statement (linear in the AST's size), so a deep
-    tree is refused at a lispython position instead of failing in compile()
-    with a RecursionError that names no line. The error is at the node at the
-    budget's depth on the first too-deep path, or at its nearest positioned
-    ancestor when that node has no position (an operator, a context).
-    """
-    budget = sys.getrecursionlimit() - _stack_depth() - AST_NESTING_MARGIN
-    for stmt in stmts:
-        # (node, depth, nearest positioned node on the path, itself included)
-        pending = [(stmt, 1, stmt)]
-        while pending:
-            [node, depth, positioned] = pending.pop()
-            if getattr(node, "lineno", None):
-                positioned = node
-            if depth >= budget:
-                raise nesting_error(positioned)
-            pending.extend(
-                (child, depth + 1, positioned) for child in ast.iter_child_nodes(node)
-            )
-    return stmts

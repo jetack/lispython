@@ -4,7 +4,8 @@ from typing import Callable, Dict
 
 from lispy.core.compiler import def_args_parse, stmt_list_compile
 from lispy.core.compiler.literal import constant_compile, string_node_value
-from lispy.core.errors import LispyCompileError, refuse_deep_ast
+from lispy.core.compiler.utils import refuse_deep_ast
+from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
 from lispy.core.nodes import atom_text, macro_expansion_nodes

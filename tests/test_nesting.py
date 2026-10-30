@@ -8,6 +8,7 @@ import sys
 import pytest
 
 import lispy.tools as tools
+from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError, nesting_error
 from lispy.core.macro import macroexpand, macroexpand_then_compile
 from lispy.core.nodes import (
@@ -212,12 +213,104 @@ def plus(operands):
     return "(+" + " 1" * operands + ")"
 
 
+COMPILE_BOUND = features.compile_depth_follows_recursion_limit()
+needs_bound_compile = pytest.mark.skipif(
+    not COMPILE_BOUND, reason="compile() depth does not follow the recursion limit"
+)
+needs_unbound_compile = pytest.mark.skipif(
+    COMPILE_BOUND, reason="compile() depth follows the recursion limit"
+)
+
+
+def test_the_compile_depth_probe_matches_the_measurement():
+    # 3.11 compile() follows the recursion limit; 3.12+ has a C limit
+    # (3.12/3.13) or the C stack (3.14+), thousands of levels deeper.
+    assert COMPILE_BOUND == (sys.version_info < (3, 12))
+
+
+@needs_bound_compile
 def test_an_ast_too_deep_for_cpython_is_a_positioned_error(scope):
     with pytest.raises(LispyCompileError) as info:
         compile_src("\n" + plus(3000), scope)
     err = info.value
     assert err.msg == NESTING_MESSAGE
     assert err.lineno == 2 and err.offset >= 1
+
+
+@needs_unbound_compile
+def test_a_deep_ast_compiles_where_compile_is_not_bound(scope):
+    [stmt] = compile_src(plus(3000), scope)
+    code = compile(ast.Expression(stmt.value), "<nesting>", "eval")
+    assert eval(code) == 3000
+
+
+def compile_in_this_frame(src, scope):
+    """Expand, compile to AST and compile() in one frame, as define_macro does
+    (the earliest frame refuse_deep_ast allows for)."""
+    body = macroexpand_then_compile(parse(src), scope)
+    compile(ast.Module(body, type_ignores=[]), "<nesting>", "exec")
+
+
+@needs_bound_compile
+def test_the_check_never_refuses_what_compile_takes(scope, monkeypatch):
+    # Every attempt runs at the same stack depth, through this one helper.
+    def outcome(operands):
+        try:
+            compile_in_this_frame(plus(operands), scope)
+            return "compiled"
+        except LispyCompileError:
+            return "refused"
+        except RecursionError:
+            return "RecursionError"
+
+    # The deepest sum compile() itself takes, with the check off.
+    with monkeypatch.context() as patch:
+        patch.setattr(features, "compile_depth_follows_recursion_limit", lambda: False)
+        [low, high] = [1, 3000]
+        while low < high:
+            mid = (low + high + 1) // 2
+            compiled = outcome(mid) == "compiled"
+            [low, high] = [mid, high] if compiled else [low, mid - 1]
+        assert outcome(low + 1) == "RecursionError"
+    assert 900 < low < 1000
+    # The check never refuses it. It counts Python frames, and C-level calls
+    # on the stack (pytest has some) also spend recursion depth, so a few
+    # levels past it can still meet compile()'s RecursionError; well past
+    # it, the check refuses.
+    assert outcome(low) == "compiled"
+    assert outcome(low + 20) == "refused"
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_the_check_follows_the_probe(bound, scope, monkeypatch):
+    monkeypatch.setattr(
+        features, "compile_depth_follows_recursion_limit", lambda: bound
+    )
+    if bound:
+        with pytest.raises(LispyCompileError):
+            macroexpand_then_compile(parse(plus(3000)), scope)
+    else:
+        assert len(macroexpand_then_compile(parse(plus(3000)), scope)) == 1
+
+
+def test_the_check_reports_the_first_too_deep_path(scope, monkeypatch):
+    monkeypatch.setattr(features, "compile_depth_follows_recursion_limit", lambda: True)
+    src = f"(f\n  {plus(3000)}\n  {plus(3000)})"
+    with pytest.raises(LispyCompileError) as info:
+        macroexpand_then_compile(parse(src), scope)
+    assert (info.value.lineno, info.value.offset) == (2, 3)
+
+
+def test_trivial_code_compiles_with_a_deep_caller_stack(scope):
+    # The budget shrinks with the caller's stack; a shallow statement must
+    # still compile as long as the stack leaves room for compile() itself.
+    def at_depth(frames):
+        if frames:
+            return at_depth(frames - 1)
+        compile_in_this_frame("(= x (+ 1 2))", scope)
+        return True
+
+    assert at_depth(sys.getrecursionlimit() - 200)
 
 
 def test_a_deep_ast_within_the_limit_compiles(scope):
