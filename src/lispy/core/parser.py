@@ -75,6 +75,7 @@ _TOKEN_PATTERNS = [
 ]
 _TOKEN_RE = re.compile("|".join(f"({p})" for [p, _] in _TOKEN_PATTERNS))
 _TOKEN_LABELS = [label for [_, label] in _TOKEN_PATTERNS]
+_NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
 
 
 def _advance(text, lineno, col_offset):
@@ -414,24 +415,38 @@ def _signed_complex_p(token):
     return parts is not None and parts[2] is not None
 
 
+def _operand_type(operand, tktype):
+    """Token type of the text after a ^, * or ** or : prefix: the prefixed
+    token is one lexeme, so it is the operand's own text that says whether
+    it is a number (*1 is a starred 1, not a starred symbol named 1)."""
+    return "number" if _NUMBER_TOKEN_RE.match(operand) else tktype
+
+
 def annotation_token_parse(token, tktype, position_info):
     inner_position = {**position_info}
     inner_position["col_offset"] += 1
-    return Annotation(token_parse(token[1:], tktype, inner_position), **position_info)
+    return Annotation(
+        token_parse(token[1:], _operand_type(token[1:], tktype), inner_position),
+        **position_info,
+    )
 
 
 def keyword_token_parse(token, tktype, position_info):
     inner_position = {**position_info}
     inner_position["col_offset"] += 1
-    return Keyword(token_parse(token[1:], tktype, inner_position), **position_info)
+    return Keyword(
+        token_parse(token[1:], _operand_type(token[1:], tktype), inner_position),
+        **position_info,
+    )
 
 
 def star_token_parse(token, tktype, position_info):
     num_star = 2 if token[1] == "*" else 1
     inner_position = {**position_info}
     inner_position["col_offset"] += num_star
+    operand = token[num_star:]
     return wrapper_dict["*" * num_star](
-        token_parse(token[slice(num_star, None)], tktype, inner_position),
+        token_parse(operand, _operand_type(operand, tktype), inner_position),
         **position_info,
     )
 

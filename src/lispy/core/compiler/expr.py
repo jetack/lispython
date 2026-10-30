@@ -30,6 +30,17 @@ def starred_compile(sexp, ctx):
     )
 
 
+def prefix_misuse(sexp):
+    """A ``:name`` or ``**x`` reached expr_compile, so no call, def, class,
+    dict or pattern consumed it: it is no value of its own."""
+    raise LispyCompileError(
+        f"{sexp} is only valid before a value in a call, def or class"
+        if keyword_arg_p(sexp)
+        else f"{sexp} is only valid in a call, a dict or a parameter list",
+        sexp,
+    )
+
+
 def unaryop_p(sexp):
     return atom_text(sexp.op) in unaryop_dict and len(sexp) == 2
 
@@ -81,6 +92,14 @@ def compare_compile(sexp):
     )
 
 
+def keyword_value(keyword, q):
+    """The value after ``keyword`` in ``q``, popped; a keyword with nothing
+    after it is a LispyCompileError at the keyword."""
+    if not q:
+        raise LispyCompileError(f"{keyword} has no value after it", keyword)
+    return q.popleft()
+
+
 def call_args_parse(given):
     q = deque(given)
     args = []
@@ -90,7 +109,7 @@ def call_args_parse(given):
         keywords.append(
             ast.keyword(
                 arg=symbol_name(arg.value, ast.Store),
-                value=expr_compile(q.popleft()),
+                value=expr_compile(keyword_value(arg, q)),
                 **arg.position_info
             )
         ) if keyword_arg_p(arg) else keywords.append(
@@ -375,7 +394,7 @@ def def_args_parse(sexp):
                 ast_arg.annotation = expr_compile(q.popleft())
             args.append(ast_arg)
             if keyword_arg_p(arg):
-                defaults.append(expr_compile(q.popleft()))
+                defaults.append(expr_compile(keyword_value(arg, q)))
     rst.args = args
     rst.defaults = defaults
 
@@ -396,7 +415,9 @@ def def_args_parse(sexp):
         if q and isinstance(q[0], Annotation):
             ast_arg.annotation = expr_compile(q.popleft())
         kwonlyargs.append(ast_arg)
-        kw_defaults.append(expr_compile(q.popleft()) if keyword_arg_p(arg) else None)
+        kw_defaults.append(
+            expr_compile(keyword_value(arg, q)) if keyword_arg_p(arg) else None
+        )
     rst.kwonlyargs = kwonlyargs
     rst.kw_defaults = kw_defaults
 
@@ -703,6 +724,8 @@ def expr_compile(sexp, ctx=ast.Load):
             if string_p(sexp)
             else metaindicator_compile(sexp)
             if metaindicator_p(sexp)
+            else prefix_misuse(sexp)
+            if keyword_arg_p(sexp) or doublestarred_p(sexp)
             else name_compile(sexp, ctx)
         )
     except RecursionError:

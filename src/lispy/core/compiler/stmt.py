@@ -7,6 +7,7 @@ from lispy.core.compiler.expr import (
     call_form_p,
     def_args_parse,
     expr_compile,
+    keyword_value,
     refuse_empty_form,
     target_compile,
 )
@@ -972,7 +973,7 @@ def classdef_args_parse(args):
         keywords.append(
             ast.keyword(
                 arg=symbol_name(arg.value, ast.Store),
-                value=expr_compile(q.popleft()),
+                value=expr_compile(keyword_value(arg, q)),
                 **arg.position_info
             )
         ) if keyword_arg_p(arg) else bases.append(expr_compile(arg))
