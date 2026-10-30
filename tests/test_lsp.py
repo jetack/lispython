@@ -234,6 +234,12 @@ FORM_KEYS = sorted(k for k in FORM_USAGE if k not in HEADLESS_FORMS)
 
 def test_hand_written_docs_do_not_shadow_form_usage():
     assert not (set(server.HAND_WRITTEN_DOCS) & set(FORM_USAGE))
+    server.refuse_shadowing(server.HAND_WRITTEN_DOCS, FORM_USAGE)
+
+
+def test_a_hand_written_entry_shadowing_form_usage_is_refused():
+    with pytest.raises(RuntimeError, match="shadows FORM_USAGE entries: .*'del'"):
+        server.refuse_shadowing({"del": "Delete."}, {"del": "(del x)"})
 
 
 @pytest.mark.parametrize("key", FORM_KEYS)
@@ -247,9 +253,14 @@ def test_form_hover_usage_is_the_compilers(key):
 
 def test_form_prose_must_match_form_usage():
     with pytest.raises(RuntimeError, match="no prose for .*'del'"):
-        server.form_docs({"del": "(del x)"}, {})
+        server.form_docs({"del": "(del x)"}, {}, {})
     with pytest.raises(RuntimeError, match="no usage for .*'zap'"):
-        server.form_docs({}, {"zap": "Zap."})
+        server.form_docs({}, {"zap": "Zap."}, {})
+
+
+def test_an_extra_usage_key_without_form_usage_is_refused():
+    with pytest.raises(RuntimeError, match="EXTRA-USAGE.*'zap'"):
+        server.form_docs({"del": "(del x)"}, {"del": "Del."}, {"zap": "(zap)"})
 
 
 def test_def_hover_shows_the_compilers_arguments():
