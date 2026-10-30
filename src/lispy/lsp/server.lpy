@@ -62,7 +62,6 @@
    "|"         "Bitwise OR as an operator; inside a `case`, an or-pattern matching any alternative."
    ":="        "Walrus operator (assignment expression)."
    "."         "Attribute access (`obj.attr`); `(. obj a b)` is `obj.a.b`."
-   ".method"   "Method call (`instance.method(args...)`), written with the method name after the dot."
    "ife"       "Ternary conditional expression (`then if test else else`)."
    "sub"       "Subscript access (`obj[index]`); more indexes subscript again."
    "lambda"    "Anonymous function (lambda expression)."

@@ -227,7 +227,7 @@ def methodcall_p(sexp):
 
 def methodcall_compile(sexp):
     method = sexp.op
-    [[instance], operands] = form_parts(sexp, ("instance",), ".method")
+    [[instance], operands] = form_parts(sexp, ("instance",), "method call")
     [args, keywords] = call_args_parse(operands)
     func = ast.Attribute(
         value=expr_compile(instance),
@@ -446,7 +446,7 @@ def param_name(arg):
     return symbol_name(arg, ast.Store)
 
 
-def def_args_parse(sexp):
+def def_args_parse(sexp, annotated=True):
     """The ast.arguments of a def/async-def/lambda ``[args]`` bracket.
 
     One pass in Python's order: positional parameters (those before a ``/``
@@ -458,6 +458,8 @@ def def_args_parse(sexp):
     parameter without a default after one with a default) is refused at the
     offending item with CPython's message: read as it stands, such a list
     would compile to a different signature or an AST compile() rejects.
+    Without ``annotated`` (a lambda) a ``^annotation`` is refused at itself:
+    compile() accepts an annotated lambda parameter no Python source spells.
     """
     q = deque(sexp.list)
     posonlyargs = []
@@ -480,6 +482,10 @@ def def_args_parse(sexp):
         seen.add(name)
         node = ast.arg(arg=name, **arg.position_info)
         if len(q) and isinstance(q[0], Annotation):
+            if not annotated:
+                raise form_error(
+                    q[0], "takes no annotations on its parameters", "lambda"
+                )
             node.annotation = expr_compile(q.popleft())
         return node
 
@@ -551,7 +557,9 @@ def lambda_compile(sexp):
     if len(rest):
         raise form_error(sexp, "takes one body expression")
     return ast.Lambda(
-        args=def_args_parse(args), body=expr_compile(body), **sexp.position_info
+        args=def_args_parse(args, annotated=False),
+        body=expr_compile(body),
+        **sexp.position_info
     )
 
 

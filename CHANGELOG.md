@@ -56,7 +56,8 @@ follows [Semantic Versioning](https://semver.org/).
   duplicate name, a misplaced or repeated `/`, `*` or `**kw` (`[a / /]`
   dropped `a`, `[*a *b]` made `b` keyword-only), a bare `*` with no
   keyword-only parameter, and `[a :b 1 c]`, which compiled to `def f(a, b,
-  c=1)`.
+  c=1)`. An annotated lambda parameter (`(lambda [a ^int] 1)`, which `l2py`
+  printed as `lambda a: int: 1`) is refused too.
 - Class bases are read as call arguments: `(class A [**kw])` compiles to
   `class A(**kw)`.
 

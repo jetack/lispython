@@ -263,3 +263,9 @@ def test_or_operator_and_or_pattern_share_one_entry():
     block = re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1)
     assert block == "(| a b ...)\n" + FORM_USAGE["|"]
     assert "or-pattern" in doc
+
+
+def test_headless_forms_are_no_hover_or_completion_entry():
+    # A headless kind ("method call", "slice") is no word a user types.
+    assert not (set(HEADLESS_FORMS) & set(server.SPECIAL_FORM_DOCS))
+    assert ".method" not in server.SPECIAL_FORM_DOCS
