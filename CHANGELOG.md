@@ -64,8 +64,23 @@ follows [Semantic Versioning](https://semver.org/).
   printed as `lambda a: int: 1`) is refused too.
 - Class bases are read as call arguments: `(class A [**kw])` compiles to
   `class A(**kw)`.
+- An f-string or t-string nested in the replacement fields of 149 others
+  (the 150th literal, f and t counted together) is refused with CPython's
+  "too many nested f-strings or t-strings", at that literal's quote, as
+  CPython refuses the same source; it used to compile.
 
 ### Fixed
+
+- Parsing no longer spends Python frames per nesting level, so these parse
+  at any depth and from a deep caller stack instead of raising
+  `RecursionError`: f/t-strings nested in each other's fields (up to the 149
+  CPython takes), format specs nested in format specs, brackets nested deep
+  inside one replacement field, and long prefix chains on one token
+  (`^^^x`, `:::x`, `***x`, `^*^*x`).
+- Quasiquoting f-strings nested in each other's fields checks each field for
+  an unquote once, linear instead of quadratic in the nesting (4,000 levels
+  took 15 s), and a deep nest of `(do ...)` statements compiles in linear
+  time.
 
 - Forms nested deeper than about 245–330 levels (case patterns about 490)
   are no longer refused with "form nested too deeply to compile": the
