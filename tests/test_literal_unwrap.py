@@ -248,6 +248,9 @@ INEXACT_DEFS = PREAMBLE + """
 
 INEXACT = [
     NAN,
+    -NAN,
+    complex(1.0, -NAN),
+    complex(-NAN, 0.0),
     complex(0.0, -0.0),
     complex(-0.0, 1.0),
     complex(INF, NAN),

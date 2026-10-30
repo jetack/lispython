@@ -39,8 +39,9 @@ follows [Semantic Versioning](https://semver.org/).
   `case` were already offered as keywords).
   Hover text for `defmacro`, `lambda` and `fn` says `[args]`, matching `def`.
 - A complex number a macro returns shows in macroexpand output as `1+2j`
-  instead of `(1+2j)`, which read back as a call, not a number. Every other
-  macro-returned number already read back as the same value.
+  instead of `(1+2j)`, which read back as a call, not a number. A negative
+  nan (alone or as a complex part) shows as `(- (float "nan"))` instead of
+  losing its sign.
 - Code a macro builds (from a quasiquote template) takes the position of the
   macro call, so a traceback or compile error in it points at that call
   instead of line 0; arguments written by the user keep their own positions.

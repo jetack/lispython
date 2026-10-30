@@ -80,7 +80,7 @@ def constant_compile(constant):
         )
     parts = number_parts(text)
     if parts is None:
-        # Numbers a macro returned, written by str(): "(1+2j)", "-1.5".
+        # Not a signed number token (number_parts): a malformed literal.
         # CPython's own message for a malformed number ("leading zeros ...").
         value = literal_value(text, constant)
         if type(value) not in (int, float, complex):
