@@ -9,6 +9,7 @@ convention is stated in expr.py's module docstring). ``stmt_compile`` and
 import ast
 from collections import deque
 from functools import reduce
+from itertools import islice
 
 from lispy.core.compiler import features
 from lispy.core.compiler.expr import (
@@ -1006,11 +1007,29 @@ def stmt_steps(sexp, decorator_list=None):
     )
 
 
+# The end of an operand iterator in stmt_list_steps.
+_DONE = object()
+
+
 def stmt_list_steps(sexp_list):
     """The statements of ``sexp_list``, compiled in order; a form compiling to
-    several (do, from) contributes them all."""
+    several (do, from) contributes them all.
+
+    A ``do`` that stmt_steps would give to do_compile is inlined from a
+    worklist of operand iterators instead: a nest of them would otherwise copy
+    each level's whole statement list into the level above, quadratic in the
+    nesting.
+    """
     stmts = []
-    for sexp in sexp_list:
+    pending = [iter(sexp_list)]
+    while pending:
+        sexp = next(pending[-1], _DONE)
+        if sexp is _DONE:
+            pending.pop()
+            continue
+        if paren_p(sexp) and len(sexp) and do_p(sexp):
+            pending.append(islice(sexp.list, 1, None))
+            continue
         stmt = yield stmt_steps(sexp)
         if isinstance(stmt, list):
             stmts.extend(stmt)

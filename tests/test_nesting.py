@@ -12,6 +12,7 @@ import pytest
 import lispy.tools as tools
 from lispy.core import nodes
 from lispy.core.compiler import features
+from lispy.core.compiler import stmt as stmt_module
 from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
 from lispy.core.errors import BLOCK_OVERFLOW_MESSAGE, LispyCompileError
 from lispy.core.macro import macroexpand, macroexpand_then_compile
@@ -1349,3 +1350,28 @@ def test_the_memoized_unquote_check_answers_as_contains_unquote(form, first):
     finally:
         nodes._UNQUOTE_MEMO.reset(memo)
     assert answers == [contains_unquote(first), contains_unquote(form)]
+
+
+def test_nested_do_collects_each_statement_once(monkeypatch):
+    # Inlining each level's statement list into the level above copies the
+    # rest of the nest at every level: about DEPTH**2 / 2 statements.
+    collected = []
+    steps = stmt_module.stmt_list_steps
+
+    def counting(sexp_list):
+        stmts = yield steps(sexp_list)
+        collected.append(len(stmts))
+        return stmts
+
+    monkeypatch.setattr(stmt_module, "stmt_list_steps", counting)
+    src = "".join(f"(do {k} " for k in range(DEPTH)) + "(do) end (do 1 (do 2 3) 4)"
+    stmts = stmt_module.stmt_list_compile(parse(src + ")" * DEPTH))
+    values = [s.value.value if k != DEPTH else s.value.id for k, s in enumerate(stmts)]
+    assert values == [*range(DEPTH), "end", 1, 2, 3, 4]
+    assert sum(collected) == len(stmts)
+
+
+def test_a_do_compiled_on_its_own_is_its_statements():
+    [form] = parse("(do 1 (do 2) 3)")
+    stmts = stmt_module.stmt_compile(form)
+    assert [s.value.value for s in stmts] == [1, 2, 3]
