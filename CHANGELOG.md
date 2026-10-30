@@ -28,6 +28,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- LSP hover and signature help for a statement form show the same usage
+  line as the compiler's error messages (`(def name [args] body...)`,
+  `(for target in iterable body...)`), and now cover the `except`,
+  `except*`, `else`, `finally` and `case` clauses, augmented assignment
+  (`+=` and friends), and `|` as an or-pattern.
 - Code a macro builds (from a quasiquote template) takes the position of the
   macro call, so a traceback or compile error in it points at that call
   instead of line 0; arguments written by the user keep their own positions.
