@@ -390,7 +390,17 @@ def t_string_compile(sexp):
     )
 
 
+def refuse_empty_form(sexp):
+    """The one refusal of an empty (): an expression, a statement (through
+    paren_compiler) or a match pattern (pattern_parse) reads its head."""
+    if paren_p(sexp) and not len(sexp):
+        raise LispyCompileError(
+            "() is an empty form; use (,) for an empty tuple", sexp
+        )
+
+
 def paren_compiler(sexp, ctx):
+    refuse_empty_form(sexp)
     return (
         tuple_compile(sexp, ctx)
         if tuple_p(sexp)

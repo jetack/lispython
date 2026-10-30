@@ -41,15 +41,22 @@ _COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
 _WRAPPER = "(?:\\^|\\*{1,2})?"
 _OPENING = "[\\(\\{\\[]"
 _META_CHARS = "(?:'|`|~@|~)"
-_META_INDICATOR = _META_CHARS + "(?!\\s|$)"
+# What can follow a form but never start one: it ends a number or a symbol
+# (so a comment needs no space before it: a;c is the symbol a), a quote
+# followed by it quotes nothing, and ~ followed by it is the symbol ~.
+_FORM_END = "\\s\\)\\}\\],;"
+_META_INDICATOR = _META_CHARS + f"(?![{_FORM_END}]|$)"
 # What ends a symbol token.
-_SYMBOL_STOP = '\\s\\)\\}\\]\\"\\[,'
+_SYMBOL_STOP = _FORM_END + '\\"\\['
 _TOKEN_PATTERNS = [
     [_WRAPPER + _OPENING, "opening"],
     ["[\\)\\}\\]]", "closing"],
     # Only the opening of a string (prefix and quote): scan_interpolated, the
     # one scanner of string bodies, finds where it ends.
     ["\\w*(?:\"\"\"|'''|\")", "string"],
+    # ' ` ~@ (any wrapper) with no form right after: refused by _parse. ~
+    # alone is the invert operator, a symbol.
+    [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|$)", "dangling-quote"],
     [_WRAPPER + _META_INDICATOR, "meta-indicator"],
     [
         f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|(?=[{_SYMBOL_STOP}]|$))",
@@ -57,7 +64,7 @@ _TOKEN_PATTERNS = [
     ],
     [";[^\\n]*", "comment"],
     [
-        "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")(?=\\s|$|\\)|\\}|\\]|,)",
+        "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|$)",
         "number",
     ],
     [",", "comma"],
@@ -316,6 +323,10 @@ def _parse(src, rst):
                 if indicator
                 else f"{prefix} has no meaning on its own",
                 Symbol(t, **position_info),
+            )
+        elif tktype == "dangling-quote":
+            raise LispyCompileError(
+                f"{t} must be directly followed by a form", Symbol(t, **position_info)
             )
         elif tktype == "meta-indicator":
             wrapper = (

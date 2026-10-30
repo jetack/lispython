@@ -160,3 +160,69 @@ class TestWrapperPrefix:
     def test_single_wrappers_still_parse(self, src, parsed):
         [form] = parse(src)
         assert repr(form) == parsed
+
+
+class TestSemicolonEndsToken:
+    """A ; ends a symbol or number, so a comment needs no space before it."""
+
+    @pytest.mark.parametrize(
+        ["src", "parsed"],
+        [
+            ("(f a;c\n b)", "Paren(Sym(f), Sym(a), Sym(b))"),
+            ("(f 1;c\n 2)", "Paren(Sym(f), Const('1'), Const('2'))"),
+            ("(f *;c\n a)", "Paren(Sym(f), Sym(*), Sym(a))"),
+            ("(f x);c", "Paren(Sym(f), Sym(x))"),
+            ('(f "a;b")', "Paren(Sym(f), Str('\"a;b\"'))"),
+        ],
+    )
+    def test_comment_follows_without_space(self, src, parsed):
+        [form] = parse(src)
+        assert repr(form) == parsed
+
+    def test_bare_annotated_star_before_comment_is_refused(self):
+        with pytest.raises(LispyCompileError) as info:
+            parse("(def f [^*;c\n] 1)")
+        assert info.value.msg == "^* has no meaning on its own"
+        assert (info.value.lineno, info.value.offset) == (1, 9)
+
+
+class TestDanglingQuote:
+    """A quote, quasiquote or unquote-splice (wrapped or not) with no form
+    right after it is refused at the token, never a symbol, a quote of the
+    next form or an unbalanced closing."""
+
+    @pytest.mark.parametrize(
+        "token",
+        ["'", "`", "~@", "*'", "**'", "^'", "*`", "^~@"],
+    )
+    @pytest.mark.parametrize("after", [" a)", ")", ",a)", ";c\n a)", "\n a)", ""])
+    def test_refused_at_the_token(self, token, after):
+        src = "(g)\n  (f " + token + after
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == f"{token} must be directly followed by a form"
+        assert (info.value.lineno, info.value.offset) == (2, 6)
+        assert (info.value.end_lineno, info.value.end_offset) == (2, 6 + len(token))
+        assert [str(f) for f in parse(src, partial=True)] == ["(g)"]
+
+    @pytest.mark.parametrize(
+        ["src", "parsed"],
+        [
+            ("(~ x)", "Paren(Sym(~), Sym(x))"),
+            ("(f ~ x)", "Paren(Sym(f), Sym(~), Sym(x))"),
+            ("'[a b]", "Quote(Bracket(Sym(a), Sym(b)))"),
+            ('\'"s"', "Quote(Str('\"s\"'))"),
+            ("'(a)", "Quote(Paren(Sym(a)))"),
+            ("`(a ~@b)", "QuasiQuote(Paren(Sym(a), UnquoteSplice(Sym(b))))"),
+            ("(f *'a)", "Paren(Sym(f), Star(Quote(Sym(a))))"),
+            ("(f ^*Ts)", "Paren(Sym(f), Ann(Star(Sym(Ts))))"),
+            # ~ with no form after it is the symbol ~, as before a space.
+            ("(f ~)", "Paren(Sym(f), Sym(~))"),
+            ("(f ~;c\n a)", "Paren(Sym(f), Sym(~), Sym(a))"),
+            ("(f ~,a)", "Paren(Sym(f), Sym(~), Sym(a))"),
+            ("~;c", "Sym(~)"),
+        ],
+    )
+    def test_quotes_with_a_form_still_parse(self, src, parsed):
+        [form] = parse(src)
+        assert repr(form) == parsed

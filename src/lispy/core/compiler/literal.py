@@ -1,5 +1,6 @@
 import ast
 import io
+import keyword
 import re
 import tokenize
 
@@ -194,8 +195,24 @@ def string_compile(string):
     return ast.Constant(value=string_node_value(string), **string.position_info)
 
 
+def reserved_name_p(name):
+    """A Python hard keyword (if, as, from, ...), which is no name.
+
+    ``name`` is the mangled Python name. name_compile refuses it as a symbol
+    or any part of a dotted symbol, and plain_name_p (def, class, global,
+    nonlocal, case-as and except-as names) rejects it; other name slots
+    (attribute forms, keyword arguments, def parameters) do not consult it.
+    """
+    return keyword.iskeyword(name)
+
+
 def name_compile(symbol, ctx):
     [name, *attrs] = symbol.name.replace("-", "_").split(".")
+    for part in [name, *attrs]:
+        if reserved_name_p(part):
+            raise LispyCompileError(
+                f"{part} is a Python keyword and cannot be used as a name", symbol
+            )
     position_info = {**symbol.position_info}
     position_info["end_col_offset"] = position_info["col_offset"] + len(name)
     rst = ast.Name(id=name, ctx=ast.Load(), **position_info)
