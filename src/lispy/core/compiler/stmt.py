@@ -4,10 +4,10 @@ from functools import reduce
 
 from lispy.core.compiler import features
 from lispy.core.compiler.expr import (
+    call_args_parse,
     call_form_p,
     def_args_parse,
     expr_compile,
-    keyword_value,
     refuse_empty_form,
     target_compile,
 )
@@ -59,10 +59,13 @@ def assign_compile(sexp):
         if len(value) > 1:
             raise form_error(sexp, "takes one value after an annotation")
         value_dict = {"value": expr_compile(value[0])} if value else {}
+        target_node = target_compile(target, "annotate")
         return ast.AnnAssign(
-            target=target_compile(target, "annotate"),
+            target=target_node,
             annotation=expr_compile(annotation),
-            simple=int(plain_name_p(target)),
+            # Decided on the compiled target: (. a) and (sub a) compile to the
+            # name a, which Python records in __annotations__ like a bare a.
+            simple=int(isinstance(target_node, ast.Name)),
             **value_dict,
             **sexp.position_info
         )
@@ -217,88 +220,6 @@ def if_stmt_compile(sexp):
         orelse=stmt_list_compile(orelse),
         **sexp.position_info
     )
-
-
-# How every statement form and clause is written: the one home of their arity,
-# quoted by form_error in each refusal. Literal [ ] are lispython brackets.
-FORM_USAGE = {
-    "if": "(if test then else...)",
-    "while": "(while test body...)",
-    "for": "(for target in iterable body...)",
-    "async-for": "(async-for target in iterable body...)",
-    "def": "(def name [args] body...)",
-    "async-def": "(async-def name [args] body...)",
-    "class": "(class name [bases] body...)",
-    "with": "(with [context as target ...] body...), each as target optional",
-    "async-with": (
-        "(async-with [context as target ...] body...), each as target optional"
-    ),
-    "try": "(try body... (except ...)... (else ...) (finally ...))",
-    "except": (
-        "(except [type ... as name] body...) or (except body...), as name optional"
-    ),
-    "except*": "(except* [type ... as name] body...), as name optional",
-    "else": "(else body...)",
-    "finally": "(finally body...)",
-    "match": "(match subject (case ...)...)",
-    "case": "(case pattern as name if guard body...), as name and if guard optional",
-    "|": "(| pattern pattern...)",
-    "pattern": (
-        "a name, _, a literal, a dotted name, [sequence], {mapping}, "
-        "(| ...) or (Class ...)"
-    ),
-    "sequence pattern": "[pattern... *rest pattern...], at most one *rest",
-    "mapping pattern": (
-        "{key pattern... **rest}, each key a literal or dotted name, **rest last"
-    ),
-    "class pattern": "(Class pattern... :attr pattern...), positional patterns first",
-    "deco": "(deco decorator definition) or (deco [decorator ...] definition)",
-    "raise": "(raise), (raise exception) or (raise exception from cause)",
-    "assert": "(assert test) or (assert test message)",
-    "=": (
-        "(= target... value) or (= target ^annotation value), "
-        "value optional after an annotation"
-    ),
-    **{op: f"({op} target value...)" for op in augassignop_dict},
-    "del": "(del target...)",
-    "global": "(global name...)",
-    "nonlocal": "(nonlocal name...)",
-}
-
-# FORM_USAGE entries that are no head word: a message names them as they are
-# ("class pattern has ..."), not as a form ("(| ...) needs ...").
-PATTERN_KINDS = ("pattern", "sequence pattern", "mapping pattern", "class pattern")
-
-
-def form_error(sexp, problem, form=None):
-    """The one shape of a malformed-statement error: the problem, then usage.
-
-    Positioned at ``sexp``; ``form`` (default: ``sexp``'s own head) names the
-    statement or pattern kind whose usage is quoted, so an error at a clause
-    or operand can still quote the enclosing form.
-    """
-    form = str(sexp.op) if form is None else form
-    subject = form if form in PATTERN_KINDS else f"({form} ...)"
-    return LispyCompileError(f"{subject} {problem}: {FORM_USAGE[form]}", sexp)
-
-
-def form_parts(sexp, header, form=None):
-    """``[parts, rest]``: the header operands of ``sexp`` in order, then the rest.
-
-    ``header`` names the required operands; an entry ``(word, name)`` lets an
-    optional ``word`` precede that operand (for's ``in``). A missing one is
-    "is missing its {name}", at the form.
-    """
-    q = deque(sexp.operands)
-    parts = []
-    for entry in header:
-        [word, name] = entry if isinstance(entry, tuple) else [None, entry]
-        if word is not None and len(q) and q[0] == word:
-            q.popleft()
-        if not q:
-            raise form_error(sexp, f"is missing its {name}", form)
-        parts.append(q.popleft())
-    return [parts, list(q)]
 
 
 def clause_p(sexp, heads):
@@ -964,26 +885,11 @@ def classdef_p(sexp):
     return atom_text(sexp.op) == "class"
 
 
-def classdef_args_parse(args):
-    q = deque(args)
-    bases = []
-    keywords = []
-    while q:
-        arg = q.popleft()
-        keywords.append(
-            ast.keyword(
-                arg=symbol_name(arg.value, ast.Store),
-                value=expr_compile(keyword_value(arg, q)),
-                **arg.position_info
-            )
-        ) if keyword_arg_p(arg) else bases.append(expr_compile(arg))
-    return [bases, keywords]
-
-
 def classdef_compile(sexp, decorator_list):
     [clsname, args, body] = definition_parts(sexp, "bases")
     [name, type_params] = def_name_parse(clsname, str(sexp.op))
-    [bases, keywords] = classdef_args_parse(args)
+    # Bases are a call's arguments, as in Python: class A(B, *bs, m=M, **kw).
+    [bases, keywords] = call_args_parse(args)
     return ast.ClassDef(
         name=name,
         **type_params,

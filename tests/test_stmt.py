@@ -743,3 +743,110 @@ class TestFormArity:
             ast.Module(want.decorator_list, [])
         )
         assert ast.dump(ast.Module(got.body, [])) == ast.dump(ast.Module(want.body, []))
+
+
+class TestParameterLists:
+    """A def/async-def/lambda parameter list CPython refuses is refused at the
+    offending item with CPython's message, never compiled to another
+    signature (dropped or reordered parameters, shifted defaults) or to an
+    AST compile() rejects."""
+
+    @pytest.mark.parametrize(
+        ("form", "msg", "at"),
+        [
+            ("(def f [a a] 1)", "duplicate parameter 'a' in function", "a@2"),
+            ("(def f [a *a] 1)", "duplicate parameter 'a' in function", "*a"),
+            ("(def f [a **a] 1)", "duplicate parameter 'a' in function", "**a"),
+            ("(def f [a / a] 1)", "duplicate parameter 'a' in function", "a@2"),
+            ("(def f [* a :a 1] 1)", "duplicate parameter 'a' in function", ":a"),
+            ("(lambda [x x] 1)", "duplicate parameter 'x' in function", "x@2"),
+            (
+                "(def f [a :b 1 c] 1)",
+                "parameter without a default follows parameter with a default",
+                "c",
+            ),
+            (
+                "(def f [a :b 1 / c] 1)",
+                "parameter without a default follows parameter with a default",
+                "c",
+            ),
+            ("(def f [/ a] 1)", "at least one parameter must precede /", "/"),
+            ("(def f [a / /] 1)", "/ may appear only once", "/@2"),
+            ("(def f [a * /] 1)", "/ must be ahead of *", "/"),
+            ("(def f [*a / b] 1)", "/ must be ahead of *", "/"),
+            ("(def f [*a *b] 1)", "* argument may appear only once", "*b"),
+            ("(def f [* *a b] 1)", "* argument may appear only once", "*a"),
+            ("(def f [*a * b] 1)", "* argument may appear only once", "*@2"),
+            ("(def f [*] 1)", "named arguments must follow bare *", "*"),
+            ("(def f [* **k] 1)", "named arguments must follow bare *", "*"),
+            ("(def f [**a b] 1)", "arguments cannot follow var-keyword", "b"),
+            ("(def f [**a **b] 1)", "arguments cannot follow var-keyword", "**b"),
+            ("(async-def f [x x] 1)", "duplicate parameter 'x' in function", "x@2"),
+        ],
+    )
+    def test_refused_at_the_offending_item(self, form, msg, at):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg.startswith(msg)
+        assert_at(info.value, form, at)
+
+    @pytest.mark.parametrize(
+        ("lispy", "python"),
+        [
+            ("(def f [a / b * c :d 1 **k] 1)", "def f(a, /, b, *, c, d=1, **k): 1"),
+            ("(def f [a :b 1 / :c 2 :d 3] 1)", "def f(a, b=1, /, c=2, d=3): 1"),
+            ("(def f [a :b 1 * c] 1)", "def f(a, b=1, *, c): 1"),
+            ("(def f [*a b :c 1 d] 1)", "def f(*a, b, c=1, d): 1"),
+            ("(def f [a ^int :b ^str 1] 1)", "def f(a: int, b: str = 1): 1"),
+            ("(lambda [a :b 1 *c **d] 1)", "lambda a, b=1, *c, **d: 1"),
+        ],
+    )
+    def test_valid_lists_compile_as_python(self, lispy, python):
+        # Unparsed: a def/class AST has no type_params on 3.12, unlike ast.parse.
+        assert src_to_python_org(lispy) == ast.unparse(ast.parse(python))
+
+
+class TestClassBases:
+    """Class bases are call arguments: the same keyword check, ** too."""
+
+    def test_repeated_keyword_refused_at_the_second(self):
+        form = "(class A [:metaclass M :metaclass N])"
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg == "keyword argument repeated: metaclass"
+        assert_at(info.value, form, ":metaclass@2")
+
+    @pytest.mark.parametrize(
+        ("lispy", "python"),
+        [
+            ("(class A [B :metaclass M **kw] 1)", "class A(B, metaclass=M, **kw): 1"),
+            ("(class A [*bs] 1)", "class A(*bs): 1"),
+            ("(class A [**kw])", "class A(**kw): pass"),
+        ],
+    )
+    def test_bases_compile_as_python(self, lispy, python):
+        # Unparsed: a def/class AST has no type_params on 3.12, unlike ast.parse.
+        assert src_to_python_org(lispy) == ast.unparse(ast.parse(python))
+
+
+class TestAnnotatedAssignmentSimple:
+    """AnnAssign.simple follows the compiled target: (. a) and (sub a) are the
+    name a, recorded in __annotations__ like a bare a."""
+
+    @pytest.mark.parametrize(
+        ("lispy", "simple"),
+        [
+            ("(= a ^int 1)", 1),
+            ("(= (. a) ^int 1)", 1),
+            ("(= (sub a) ^int 1)", 1),
+            ("(= (. a b) ^int 1)", 0),
+            ("(= (sub a 1) ^int 1)", 0),
+        ],
+    )
+    def test_simple_is_set_for_a_name_target(self, lispy, simple):
+        [node] = macroexpand_then_compile(parse(lispy))
+        assert isinstance(node, ast.AnnAssign)
+        assert node.simple == simple
+
+    def test_wrapped_name_is_annotated_as_the_name(self):
+        assert stmt_to_dump("(= (. a) ^int 1)") == ast.dump(ast.parse("a: int = 1"))

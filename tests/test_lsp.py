@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from lispy.core.compiler import features
-from lispy.core.compiler.stmt import FORM_USAGE, PATTERN_KINDS
+from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
 from lispy.core.parser import parse
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
@@ -229,7 +229,7 @@ class TestRequireSelection:
 
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,
 # the table its error messages quote, so the two cannot drift.
-FORM_KEYS = sorted(k for k in FORM_USAGE if k not in PATTERN_KINDS)
+FORM_KEYS = sorted(k for k in FORM_USAGE if k not in HEADLESS_FORMS)
 
 
 def test_hand_written_docs_do_not_shadow_form_usage():

@@ -3,9 +3,9 @@ import sys
 from collections import deque
 
 from lispy.core.compiler import features
-from lispy.core.errors import nesting_error
+from lispy.core.errors import LispyCompileError, nesting_error
 from lispy.core.nodes import *
-from lispy.core.utils import augassignop_dict
+from lispy.core.utils import augassignop_dict, boolop_dict, compare_dict
 
 
 def paren_p(sexp):
@@ -73,6 +73,118 @@ STATEMENT_HINTS = {
         "to sequence expressions use (sub (, a b c) -1)"
     ),
 }
+
+
+# How every statement and expression form, clause and pattern is written: the
+# one home of their arity, quoted by form_error in each refusal and shown as the
+# LSP hover usage line. Literal [ ] are lispython brackets.
+FORM_USAGE = {
+    "if": "(if test then else...)",
+    "while": "(while test body...)",
+    "for": "(for target in iterable body...)",
+    "async-for": "(async-for target in iterable body...)",
+    "def": "(def name [args] body...)",
+    "async-def": "(async-def name [args] body...)",
+    "class": "(class name [bases] body...)",
+    "with": "(with [context as target ...] body...), each as target optional",
+    "async-with": (
+        "(async-with [context as target ...] body...), each as target optional"
+    ),
+    "try": "(try body... (except ...)... (else ...) (finally ...))",
+    "except": (
+        "(except [type ... as name] body...) or (except body...), as name optional"
+    ),
+    "except*": "(except* [type ... as name] body...), as name optional",
+    "else": "(else body...)",
+    "finally": "(finally body...)",
+    "match": "(match subject (case ...)...)",
+    "case": "(case pattern as name if guard body...), as name and if guard optional",
+    "|": "(| pattern pattern...)",
+    "pattern": (
+        "a name, _, a literal, a dotted name, [sequence], {mapping}, "
+        "(| ...) or (Class ...)"
+    ),
+    "sequence pattern": "[pattern... *rest pattern...], at most one *rest",
+    "mapping pattern": (
+        "{key pattern... **rest}, each key a literal or dotted name, **rest last"
+    ),
+    "class pattern": "(Class pattern... :attr pattern...), positional patterns first",
+    "deco": "(deco decorator definition) or (deco [decorator ...] definition)",
+    "raise": "(raise), (raise exception) or (raise exception from cause)",
+    "assert": "(assert test) or (assert test message)",
+    "=": (
+        "(= target... value) or (= target ^annotation value), "
+        "value optional after an annotation"
+    ),
+    **{op: f"({op} target value...)" for op in augassignop_dict},
+    "del": "(del target...)",
+    "global": "(global name...)",
+    "nonlocal": "(nonlocal name...)",
+    ":=": "(:= name value)",
+    ".": "(. value attr...)",
+    ".method": "(.method instance args...)",
+    "ife": "(ife test then else), else optional",
+    "sub": "(sub value index...)",
+    "lambda": "(lambda [args] body)",
+    "await": "(await value)",
+    "yield": "(yield) or (yield value)",
+    "yield-from": "(yield-from iterable)",
+    **{op: f"({op} value...)" for op in boolop_dict},
+    **{op: f"({op} a b...)" for op in compare_dict},
+    "slice": (
+        "[: stop], [: start stop] or [: start stop step], "
+        "_ or None for a default"
+    ),
+    "dict": "{key value ... **mapping}",
+    "comprehension": (
+        "element for target in iterable if test..., "
+        "then more for or async-for clauses, each in optional"
+    ),
+}
+
+# FORM_USAGE entries that are no head word, named as they are in a message
+# ("class pattern has ..."), not as a form ("(| ...) needs ..."). The LSP
+# gives them no hover entry.
+HEADLESS_FORMS = (
+    "pattern",
+    "sequence pattern",
+    "mapping pattern",
+    "class pattern",
+    "slice",
+    "dict",
+    "comprehension",
+)
+
+
+def form_error(sexp, problem, form=None):
+    """The one shape of a malformed-form error: the problem, then usage.
+
+    Positioned at ``sexp``; ``form`` (default: ``sexp``'s own head) names the
+    form or headless kind whose usage is quoted, so an error at a clause or
+    operand can still quote the enclosing form.
+    """
+    form = str(sexp.op) if form is None else form
+    subject = form if form in HEADLESS_FORMS else f"({form} ...)"
+    return LispyCompileError(f"{subject} {problem}: {FORM_USAGE[form]}", sexp)
+
+
+def form_parts(sexp, header, form=None):
+    """``[parts, rest]``: the header operands of ``sexp`` in order, then the rest.
+
+    ``header`` names the required operands; an entry ``(word, name)`` lets an
+    optional ``word`` precede that operand (for's ``in``). A missing one is
+    "is missing its {name}", at the form.
+    """
+    q = deque(sexp.operands)
+    parts = []
+    for entry in header:
+        [word, name] = entry if isinstance(entry, tuple) else [None, entry]
+        if word is not None and len(q) and q[0] == word:
+            q.popleft()
+        if not q:
+            raise form_error(sexp, f"is missing its {name}", form)
+        parts.append(q.popleft())
+    return [parts, list(q)]
 
 
 # Frames from refuse_deep_ast up to the earliest frame that can compile() its

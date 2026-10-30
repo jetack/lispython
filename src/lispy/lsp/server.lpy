@@ -14,7 +14,8 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse tokenize])
-(from lispy.core.compiler.stmt [type-alias-p FORM-USAGE PATTERN-KINDS])
+(from lispy.core.compiler.stmt [type-alias-p])
+(from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 
@@ -30,9 +31,10 @@
 ;; Special-form documentation (for hover)
 ;; ---------------------------------------------------------------------------
 
-;; Statement forms: the usage line is FORM-USAGE (the compiler's own
-;; error-message table), so hover and compile errors cannot drift apart. Only
-;; the explanatory sentence is written here, keyed by FORM-USAGE key.
+;; Statement and expression forms: the usage line is FORM-USAGE (the
+;; compiler's own error-message table), so hover and compile errors cannot
+;; drift apart. Only the explanatory sentence is written here, keyed by
+;; FORM-USAGE key.
 (= FORM-PROSE
   {"def"       "Define a function. Arguments are given in a bracket list. An optional docstring can follow the argument list."
    "async-def" "Define an async function (coroutine)."
@@ -57,7 +59,28 @@
    "global"    "Declare names as global variables."
    "nonlocal"  "Declare names as nonlocal variables."
    "deco"      "Apply a decorator to the following function/class definition."
-   "|"         "Bitwise OR as an operator; inside a `case`, an or-pattern matching any alternative."})
+   "|"         "Bitwise OR as an operator; inside a `case`, an or-pattern matching any alternative."
+   ":="        "Walrus operator (assignment expression)."
+   "."         "Attribute access (`obj.attr`); `(. obj a b)` is `obj.a.b`."
+   ".method"   "Method call (`instance.method(args...)`), written with the method name after the dot."
+   "ife"       "Ternary conditional expression (`then if test else else`)."
+   "sub"       "Subscript access (`obj[index]`); more indexes subscript again."
+   "lambda"    "Anonymous function (lambda expression)."
+   "await"     "Await a coroutine."
+   "yield"     "Yield a value from a generator."
+   "yield-from" "Yield all values from a sub-generator."
+   "and"       "Logical AND (short-circuit)."
+   "or"        "Logical OR (short-circuit)."
+   "=="        "Equality test."
+   "!="        "Inequality test."
+   "<"         "Less than."
+   "<="        "Less than or equal."
+   ">"         "Greater than."
+   ">="        "Greater than or equal."
+   "is"        "Identity test (`x is y`)."
+   "is-not"    "Negated identity test (`x is not y`)."
+   "in"        "Membership test (`x in y`)."
+   "not-in"    "Negated membership test (`x not in y`)."})
 
 (for op in augassignop-dict
   (= (sub FORM-PROSE op) f"Augmented assignment (`target {op} value`)."))
@@ -68,9 +91,9 @@
 (= EXTRA-USAGE {"|" "(| a b ...)"})
 
 (def form-docs [usage prose]
-  "Hover entries for the statement forms; raises if usage and prose disagree."
+  "Hover entries for the FORM-USAGE forms; raises if usage and prose disagree."
   (= usage-keys (set usage))
-  (for kind in PATTERN-KINDS
+  (for kind in HEADLESS-FORMS
     (.discard usage-keys kind))
   (= missing (- usage-keys (set prose)))
   (= extra (- (set prose) usage-keys))
@@ -89,19 +112,11 @@
    "import"    "```\n(import module)\n(import module :as alias)\n```\n\nImport a module."
    "from"      "```\n(from module [names...])\n(from module [name :as alias ...])\n```\n\nImport specific names from a module."
    "require"   "```\n(require module)\n(require module *)\n(require module [names...])\n```\n\nImport macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none."
-   ":="        "```\n(:= target value)\n```\n\nWalrus operator (assignment expression)."
    "return"    "```\n(return value)\n```\n\nReturn a value from a function."
    "pass"      "```\n(pass)\n```\n\nNo-op placeholder statement."
    "break"     "```\n(break)\n```\n\nBreak out of a loop."
    "continue"  "```\n(continue)\n```\n\nContinue to the next loop iteration."
-   "yield"     "```\n(yield value)\n```\n\nYield a value from a generator."
-   "yield-from" "```\n(yield-from iterable)\n```\n\nYield all values from a sub-generator."
-   "await"     "```\n(await expr)\n```\n\nAwait a coroutine."
-   "lambda"    "```\n(lambda [args] body)\n```\n\nAnonymous function (lambda expression)."
    ;; Expression forms
-   "ife"       "```\n(ife condition then-expr else-expr)\n```\n\nTernary conditional expression (`then-expr if condition else else-expr`)."
-   "."         "```\n(. obj attr)\n```\n\nAttribute access (`obj.attr`)."
-   "sub"       "```\n(sub obj index)\n```\n\nSubscript access (`obj[index]`)."
    ","         "```\n(, a b c)\n```\n\nTuple literal."
    "fn"        "```\n(fn [args] body)\n```\n\nLambda alias — same as `lambda`."
    ;; Operators
@@ -118,19 +133,7 @@
    "^"  "Bitwise XOR."
    "&"  "Bitwise AND."
    "~"  "Bitwise NOT / unquote (inside quasiquote)."
-   "and" "Logical AND (short-circuit)."
-   "or"  "Logical OR (short-circuit)."
    "not" "Logical NOT."
-   "==" "Equality test."
-   "!=" "Inequality test."
-   "<"  "Less than."
-   "<=" "Less than or equal."
-   ">"  "Greater than."
-   ">=" "Greater than or equal."
-   "is"     "Identity test (`x is y`)."
-   "is-not" "Negated identity test (`x is not y`)."
-   "in"     "Membership test (`x in y`)."
-   "not-in" "Negated membership test (`x not in y`)."
    ;; Macro-related
    "'"  "Quote — prevent evaluation; return the form as data."
    "`"  "Quasiquote — like quote but allows unquote (`~`) splicing."
