@@ -10,11 +10,12 @@ silent mistranslation.
 
 AST shapes: where releases build the same form differently, a named
 capability probe below asks the running ``ast`` module instead of comparing
-version numbers, so a backported change is followed automatically.  The one
-exception is ``compile_depth_follows_recursion_limit``, a version comparison
-through ``running_version()``: probing it would overflow the C stack.  The
-compiler calls the probes through this module (``features.probe()``), which
-is also how tests replace them.
+version numbers, so a backported change is followed automatically.  The
+exceptions are ``compile_depth_follows_recursion_limit`` and
+``inlined_comprehensions_overflow_block_stack``, version comparisons through
+``running_version()``: probing the first would overflow the C stack, the
+second would crash the interpreter.  The compiler calls the probes through
+this module (``features.probe()``), which is also how tests replace them.
 
 No other ``sys.version_info`` comparison belongs in the compiler.  The one
 exception in the package is ``_PY312_PLUS`` in core/importer.py: it chooses
@@ -94,6 +95,48 @@ def compile_depth_follows_recursion_limit():
     nesting error through ``compile_nesting_errors`` (compiler/utils.py).
     """
     return tuple(running_version())[:2] < (3, 12)
+
+
+# The first patch release of each line that counts an inlined comprehension
+# as a static block (gh-156091); 3.12 is security-only and never got it.
+_INLINED_COMPREHENSION_BLOCK_FIX = {(3, 13): 16, (3, 14): 8, (3, 15): 1}
+
+
+def inlined_comprehensions_overflow_block_stack():
+    """Whether compile() crashes, instead of refusing, on list/set/dict
+    comprehensions nested past CPython's static block limit
+    (https://github.com/python/cpython/issues/156091).
+
+    Since PEP 709 (3.12) each such comprehension is inlined and pushes an
+    exception handler without counting as a static block, so the "too many
+    statically nested blocks" check never fires and the flowgraph's handler
+    stack (CO_MAXBLOCKS + 2 = 23 entries) overflows: a segfault. The fix
+    counts each inlined comprehension as a block. A fixed fact of the release,
+    so it is read from ``running_version()``; probing would crash the process.
+
+    ======================  ===============================================
+    Python                  past 21 static blocks in one code unit
+    ======================  ===============================================
+    3.11                    no inlining: unaffected
+    3.12.x                  segfault (security-only, never fixed)
+    3.13 < 3.13.16          segfault (22 comprehensions compile, 23 crash)
+    3.14 < 3.14.8           segfault
+    3.15.0                  segfault
+    3.13.16, 3.14.8,        SyntaxError "too many statically nested blocks"
+    3.15.1, 3.16+           at the comprehension pushing past 21
+    ======================  ===============================================
+
+    Where this is True, ``refuse_block_overflow`` in compiler/utils.py
+    applies the fixed releases' rule before compile() runs.
+    """
+    version = tuple(running_version())[:3]
+    line = version[:2]
+    if line < (3, 12):
+        return False
+    if line == (3, 12):
+        return True
+    fix = _INLINED_COMPREHENSION_BLOCK_FIX.get(line)
+    return fix is not None and version[2] < fix
 
 
 def import_has_is_lazy():

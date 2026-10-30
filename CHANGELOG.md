@@ -84,6 +84,12 @@ follows [Semantic Versioning](https://semver.org/).
   only where that is the limit hit (3.11, and `l2py`), since raising it does
   not move compile()'s limit on 3.12+. A macro's own runaway recursion still
   raises `RecursionError`.
+- Deeply nested list, set and dict comprehensions (more than 21 static
+  blocks counting the enclosing `with`, `try`, `for` and `while`) are the
+  positioned compile error "too many statically nested blocks", at the
+  comprehension that passes the limit, instead of crashing the interpreter
+  on CPython 3.12–3.15.0 ([gh-156091](https://github.com/python/cpython/issues/156091)).
+  Releases that fix it (3.13.16, 3.14.8, 3.15.1) report the same error.
 - Data a macro puts in its expansion, spliced with `~x` or placed in a
   form's list, that holds the same Python list or tuple in many places is
   converted to nodes in time linear in the distinct data, instead of

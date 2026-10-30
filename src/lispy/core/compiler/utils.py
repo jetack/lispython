@@ -4,7 +4,11 @@ import sys
 from collections import deque
 
 from lispy.core.compiler import features
-from lispy.core.errors import LispyCompileError, nesting_error
+from lispy.core.errors import (
+    LispyCompileError,
+    block_overflow_error,
+    nesting_error,
+)
 from lispy.core.nodes import *
 from lispy.core.utils import augassignop_dict, boolop_dict, compare_dict
 
@@ -261,6 +265,195 @@ def refuse_deep_ast(stmts):
     for depth, positioned in _ast_depths(stmts):
         if depth >= refused:
             raise nesting_error(positioned, recursion_limit=True)
+    return stmts
+
+
+# CPython's CO_MAXBLOCKS (3.12-3.15): the most static blocks (loops, with,
+# try, inlined comprehensions) one code unit may nest.
+MAX_STATIC_BLOCKS = 21
+
+_INLINED_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp)
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _ast_nodes(value):
+    """The AST nodes in a field value (a node, a list of them, or a leaf)."""
+    if isinstance(value, ast.AST):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, ast.AST)]
+    return []
+
+
+def _generator_defs(stmts):
+    """The ids of the defs in ``stmts`` whose own scope yields: one
+    iterative pass with the enclosing scope carried along, so linear in the
+    AST's size. A def's decorators, defaults and annotations belong to the
+    enclosing scope; a lambda's or class's body is a scope of its own."""
+    found = set()
+    pending = [(stmt, None) for stmt in stmts]
+    while pending:
+        [node, scope] = pending.pop()
+        if isinstance(node, (ast.Yield, ast.YieldFrom)) and scope is not None:
+            found.add(id(scope))
+        opens_scope = isinstance(node, (*_DEFS, ast.Lambda, ast.ClassDef))
+        for field, value in ast.iter_fields(node):
+            inner = node if opens_scope and field == "body" else scope
+            pending.extend((child, inner) for child in _ast_nodes(value))
+    return found
+
+
+def _comprehension_parts(node, count):
+    """``(child, count)`` for a comprehension's parts after its first
+    iterable, in CPython's compile order (each generator's iterable, target
+    and ifs, then the element), from ``count``. An ``async for`` clause is
+    one more block for the rest, entered as ``(None, count)`` (a slot to
+    check) before its target, which CPython stores with the block pushed."""
+    parts = []
+    for index, generator in enumerate(node.generators):
+        if index:
+            parts.append((generator.iter, count))
+        if generator.is_async:
+            count += 1
+            parts.append((None, count))
+        parts.append((generator.target, count))
+        parts.extend((test, count) for test in generator.ifs)
+    if isinstance(node, ast.DictComp):
+        parts.extend([(node.key, count), (node.value, count)])
+    else:
+        parts.append((node.elt, count))
+    return parts
+
+
+def _counted_children(node, count, generator_defs):
+    """``(child, count)`` for each child of ``node``, in compile order, where
+    ``count`` is the static blocks the child sits under in its code unit; a
+    ``None`` child is a block slot ``node`` pushes, to check against the
+    limit. The model is what CPython releases that count inlined
+    comprehensions (3.13.16, 3.14.8, 3.15.1) measure."""
+    if isinstance(node, _INLINED_COMPREHENSIONS):
+        first = node.generators[0].iter
+        return [
+            (first, count),
+            (None, count + 1),
+            *_comprehension_parts(node, count + 1),
+        ]
+    if isinstance(node, ast.GeneratorExp):
+        # Its own code unit, all but the first iterable.
+        return [(node.generators[0].iter, count), *_comprehension_parts(node, 0)]
+    # By name: TypeAlias exists from 3.12 only.
+    alias = type(node).__name__ == "TypeAlias"
+    if alias or isinstance(node, (*_DEFS, ast.ClassDef, ast.Lambda)):
+        # The body (a type alias's value) is a code unit of its own, where a
+        # coroutine's or generator's body sits under its StopIteration
+        # handler; everything else is at ``count``, decorators first, the
+        # unit last.
+        unit = "value" if alias else "body"
+        start = int(
+            isinstance(node, ast.AsyncFunctionDef)
+            or (isinstance(node, ast.FunctionDef) and id(node) in generator_defs)
+        )
+        fields = sorted(
+            ast.iter_fields(node),
+            key=lambda item: (item[0] == unit) - (item[0] == "decorator_list"),
+        )
+        return [
+            (child, start if field == unit else count)
+            for field, value in fields
+            for child in _ast_nodes(value)
+        ]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [
+            (node.iter, count),
+            (node.target, count),
+            *((child, count + 1) for child in node.body),
+            *((child, count) for child in node.orelse),
+        ]
+    if isinstance(node, ast.While):
+        return [
+            (node.test, count),
+            *((child, count + 1) for child in node.body),
+            *((child, count) for child in node.orelse),
+        ]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        children = []
+        for index, item in enumerate(node.items):
+            children.append((item.context_expr, count + index))
+            children.extend(
+                (child, count + index + 1) for child in _ast_nodes(item.optional_vars)
+            )
+        return children + [(child, count + len(node.items)) for child in node.body]
+    if isinstance(node, (ast.Try, ast.TryStar)):
+        final = 1 if node.finalbody else 0
+        body = count + final + (1 if node.handlers else 0)
+        return [
+            *((child, body) for child in node.body),
+            # An ExceptHandler's own parts are counted from here.
+            *((child, count + final) for child in node.handlers),
+            *((child, count + final) for child in node.orelse),
+            *((child, count + 1) for child in node.finalbody),
+        ]
+    if isinstance(node, ast.ExceptHandler):
+        return [
+            *((child, count + 1) for child in _ast_nodes(node.type)),
+            *((child, count + 2) for child in node.body),
+        ]
+    return [
+        (child, count)
+        for child in ast.iter_child_nodes(node)
+        if not isinstance(child, _DEPTH_FREE_NODES)
+    ]
+
+
+def refuse_block_overflow(stmts):
+    """Raise ``block_overflow_error`` at the first list/set/dict
+    comprehension in ``stmts`` (depth first, in compile order) that pushes
+    past ``MAX_STATIC_BLOCKS`` static blocks in its code unit, where the
+    running CPython would crash on it
+    (``features.inlined_comprehensions_overflow_block_stack``); return
+    ``stmts``.
+
+    CPython 3.12-3.15.0 inline these comprehensions (PEP 709): each pushes
+    an exception handler but is not counted as a static block, so the
+    "too many statically nested blocks" check never fires and compile()
+    overflows the flowgraph's handler stack (CO_MAXBLOCKS + 2 entries) and
+    segfaults (https://github.com/python/cpython/issues/156091). The rule
+    applied is the fixed releases' own (3.13.16, 3.14.8, 3.15.1): at most
+    ``MAX_STATIC_BLOCKS`` blocks, inlined comprehensions and their
+    ``async for`` clauses included, on any path within one code unit; the
+    per-construct counts are in ``_counted_children``. On the unfixed
+    releases every construct pushes no more handlers than it takes block
+    slots, except a generator unit (a genexp, a generator def or lambda),
+    which pushes one more once per unit; so an AST within the rule pushes
+    at most 22 handlers, which fit, and the same code compiles on every
+    release. Statements past the limit are not refused here: CPython counts
+    those itself on every release.
+
+    The error is at the comprehension, or its nearest positioned ancestor.
+    Iterative and linear in the AST's size (one pre-pass finds the generator
+    defs): the ASTs it walks are deeper than recursion can take.
+    """
+    if not features.inlined_comprehensions_overflow_block_stack():
+        return stmts
+    generator_defs = _generator_defs(stmts)
+    for stmt in stmts:
+        # (node or None for a block slot, blocks it sits under, nearest
+        # positioned node on the path)
+        pending = [(stmt, 0, stmt)]
+        while pending:
+            [node, count, positioned] = pending.pop()
+            if node is None:
+                if count > MAX_STATIC_BLOCKS:
+                    raise block_overflow_error(positioned)
+                continue
+            if getattr(node, "lineno", None):
+                positioned = node
+            children = _counted_children(node, count, generator_defs)
+            # Reversed, so the first child is popped (walked) first.
+            pending.extend(
+                (child, child_count, positioned)
+                for child, child_count in reversed(children)
+            )
     return stmts
 
 

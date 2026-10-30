@@ -12,7 +12,7 @@ import pytest
 import lispy.tools as tools
 from lispy.core.compiler import features
 from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import BLOCK_OVERFLOW_MESSAGE, LispyCompileError
 from lispy.core.macro import macroexpand, macroexpand_then_compile
 from lispy.core.nodes import (
     Annotation,
@@ -133,7 +133,14 @@ def counting(cls, bound):
     ],
     ids=["bracket", "paren-arg", "paren-op", "brace-set", "comprehension"],
 )
-def test_leaf_text_is_produced_o_depth_times(make, leaf_class, leaf_text, scope):
+def test_leaf_text_is_produced_o_depth_times(
+    make, leaf_class, leaf_text, scope, monkeypatch
+):
+    # 30 nested comprehensions pass CPython's static block limit; this counts
+    # renders and never compile()s, so the block check is off.
+    monkeypatch.setattr(
+        features, "inlined_comprehensions_overflow_block_stack", lambda: False
+    )
     depth = 30
     bound = 4 * depth
     [cls, renders] = counting(leaf_class, bound)
@@ -416,11 +423,14 @@ def field(value, spec=None):
 
 # (id, source nesting DEPTH levels on its line, or a function building that
 # form as nodes; the AST class one level adds exactly once; whether to
-# compile() the AST too). Sources are built by repetition, never recursion.
-# compile() is skipped where CPython 3.12+ cannot take the AST at this depth
-# (two AST levels per level pass its ~10000 limit on 3.12/3.13; nested
-# comprehensions crash it) or takes over a second (nested scopes, tuple
-# constant folding, ife).
+# compile() the AST too, or BLOCKS). Sources are built by repetition, never
+# recursion. compile() is skipped where CPython 3.12+ cannot take the AST at
+# this depth (two AST levels per level pass its ~10000 limit on 3.12/3.13,
+# comprehensions nested in an iterable) or takes over a second (nested
+# scopes, genexps, tuple constant folding, ife). BLOCKS: list/set/dict
+# comprehensions nested in the element pass CPython's static block limit on
+# 3.12+, refused as too many blocks (test_comprehension_blocks.py).
+BLOCKS = "blocks"
 EXPRESSION_DEPTHS = [
     ("bracket", "[" * DEPTH + "1" + "]" * DEPTH, ast.List, True),
     ("call-argument", "(f " * DEPTH + "1" + ")" * DEPTH, ast.Call, True),
@@ -460,7 +470,7 @@ EXPRESSION_DEPTHS = [
         "listcomp-element",
         "[" * DEPTH + "x" + " for x in xs]" * DEPTH,
         ast.ListComp,
-        False,
+        BLOCKS,
     ),
     (
         "listcomp-iterable",
@@ -472,7 +482,7 @@ EXPRESSION_DEPTHS = [
         "setcomp-element",
         "{, " * DEPTH + "x" + " for x in xs}" * DEPTH,
         ast.SetComp,
-        False,
+        BLOCKS,
     ),
     (
         "setcomp-iterable",
@@ -484,7 +494,7 @@ EXPRESSION_DEPTHS = [
         "dictcomp-value",
         "{k " * DEPTH + "v" + " for x in xs}" * DEPTH,
         ast.DictComp,
-        False,
+        BLOCKS,
     ),
     (
         "dictcomp-iterable",
@@ -626,12 +636,16 @@ def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
     forms = [form()] if callable(form) else parse("\n\n" + form)
     matches = (lambda node: isinstance(node, cls)) if isinstance(cls, type) else cls
     refused = COMPILE_BOUND and not flat
-    # Where the AST is refused, build it with the check off, then check it:
+    # Where the AST is refused, build it with the checks off, then check it:
     # the compiler itself must take the depth on every version.
     with pytest.MonkeyPatch.context() as patch:
         if refused:
             patch.setattr(
                 features, "compile_depth_follows_recursion_limit", lambda: False
+            )
+        if compiles == BLOCKS:
+            patch.setattr(
+                features, "inlined_comprehensions_overflow_block_stack", lambda: False
             )
         body = macroexpand_then_compile(forms, scope)
     module = ast.Module(body, type_ignores=[])
@@ -641,8 +655,25 @@ def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
             refuse_deep_ast(body)
         assert info.value.msg == NESTING_MESSAGE
         assert info.value.lineno == 3
+    elif compiles == BLOCKS:
+        assert_too_many_blocks(form, module, scope)
     elif compiles:
         compile(module, "<nesting>", "exec")
+
+
+def assert_too_many_blocks(form, module, scope):
+    """``form`` (source), compiled to ``module``, has more static blocks than
+    CPython 3.12+ takes: refused on line 3 before compile() where compile()
+    would crash, refused by compile() itself where it counts them."""
+    if features.inlined_comprehensions_overflow_block_stack():
+        # Never compile() here: this interpreter would crash.
+        with pytest.raises(LispyCompileError) as info:
+            macroexpand_then_compile(parse("\n\n" + form), scope)
+        assert (info.value.msg, info.value.lineno) == (BLOCK_OVERFLOW_MESSAGE, 3)
+    else:
+        with pytest.raises(SyntaxError) as info:
+            compile(module, "<nesting>", "exec")
+        assert (info.value.msg, info.value.lineno) == (BLOCK_OVERFLOW_MESSAGE, 3)
 
 
 @pytest.mark.usefixtures("time_bound")
