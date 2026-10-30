@@ -1321,6 +1321,8 @@ def test_a_prefix_chain_glued_to_a_bracket_past_the_recursion_limit_parses(
 ):
     # Closing the chain must set each wrapper's end once, not walk the
     # chain below every wrapper again (quadratic, yet within the budget).
+    # The GluedHead closes first and sets only itself, so no wrapper here
+    # needs to walk the chain at all.
     walked = []
     update_dict = Wrapper.update_dict
 
@@ -1332,7 +1334,7 @@ def test_a_prefix_chain_glued_to_a_bracket_past_the_recursion_limit_parses(
     repeat = DEPTH // len(prefix)
     src = "\n" + prefix * repeat + glued
     [form] = parse(src)
-    assert sum(walked) <= 2 * repeat
+    assert walked == []
     found = []
     node = form
     while isinstance(node, Wrapper):
