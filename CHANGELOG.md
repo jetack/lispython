@@ -73,8 +73,8 @@ follows [Semantic Versioning](https://semver.org/).
   `(sub)`, `(lambda [a])`, `(await)`, `(yield-from)`, `(and)`, `(< a)`,
   `[:]`, `{1 2 3}` and `(x for y)`. Hover and signature help for these forms
   show the same usage line.
-- `(= (. a) ^int 1)` and `(= (sub a) ^int 1)` record `a` in
-  `__annotations__`, as `(= a ^int 1)` does.
+- `(= (sub a) ^int 1)` records `a` in `__annotations__`, as `(= a ^int 1)`
+  does.
 - The operand after `^`, `*`, `**` or `:` keeps its own token type, so `*1`,
   `**1`, `:1` and `^1` read a number `1` instead of a symbol named `1`. A
   keyword with a number or other non-name after it (`(f :1 x)`, `(def g [:1
