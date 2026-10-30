@@ -105,6 +105,16 @@ follows [Semantic Versioning](https://semver.org/).
   (`(f ' a)`, `(f *' a)`, `(f ~@ a)`, `(f ')`, `',a`) is a compile error at
   the quote instead of a symbol `'`, `f(*', a)`, an unquote of `@` or
   "unmatched ')'". `~` alone is still the invert operator.
+- A malformed `match` case pattern is a compile error at the part at fault,
+  quoting the usage of its kind (class, mapping or sequence pattern, `(| ...)`),
+  instead of an `IndexError`, `ValueError` or `AttributeError` or an AST
+  that means something else: a dangling `:attr` (`(P :x)`), a positional
+  pattern after a keyword one (`(P :x 1 2)`, which compiled to `P(2, x=1)`),
+  a mapping key without a pattern (`{"a"}`), `**rest` not last or not a name
+  (`{**r 1}`, `{**_}`), a key that is no literal or dotted name (`{a 1}`),
+  a second `*rest` (`[*a *b]`), `*rest` outside a sequence (`(case *a ...)`),
+  `(| 1)`, a class pattern head that is no name (`(1)`, `((f) 1)`), a `()`
+  that is no call (`(+ 1 2)`, `(, a b)`, `f"x"`), `...` and a keyword.
 
 ### Changed
 
@@ -134,6 +144,10 @@ follows [Semantic Versioning](https://semver.org/).
 - `~` directly before a closing bracket, a comma, `;` or the end of input
   (`(f ~)`, `(f ~,a)`, `~;c`) is the symbol `~`, as before a space, instead
   of an unquote that took the next form or gave "unmatched ')'".
+- A dotted name in a case pattern (`(case Color.RED ...)`) is a value
+  pattern, compared with `==` as in Python. It compiled to a capture pattern
+  that matched every subject, so code that relied on that now falls through
+  to the next case.
 
 ## [0.5.0]
 
