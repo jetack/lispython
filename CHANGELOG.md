@@ -43,6 +43,10 @@ follows [Semantic Versioning](https://semver.org/).
   `(global __debug__)` still compile.
 - An attribute slot takes one name: `(. a b.c)` and `(.a.b x)` are compile
   errors; write `(. a b c)` and `(.b x.a)`.
+- `(. a)`, an attribute form with no attribute, is a compile error in every
+  context (value, assignment, `del`, annotated and augmented targets); it
+  used to compile to the plain name `a`. Write `a`, or `(. a b)` for an
+  attribute.
 - A hard keyword called in an expression (`(f (else 1))`) is reported as
   `else is a Python keyword and cannot be used as a name`, at the keyword,
   instead of `else is a Python keyword and cannot be called` at the form.
