@@ -40,6 +40,16 @@ class TestGensym:
         result = gensym(Symbol("tmp"))
         assert result.name == "__tmp_0"
 
+    def test_non_name_prefix_falls_back_to_a_name(self):
+        """'+ (or a string such as "%") would make no Python name: the
+        symbol is still one, and usable in compiled code."""
+        plus = gensym(Symbol("+"))
+        percent = gensym("%")
+        assert [plus.name, percent.name] == ["__gensym_0", "__gensym_1"]
+        scope = {}
+        exec(src_to_python_org(f"(= {plus.value} 1)"), scope)
+        assert scope[plus.name] == 1
+
     def test_rejects_invalid_prefix(self):
         import pytest
 

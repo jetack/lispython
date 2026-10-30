@@ -204,11 +204,13 @@ def string_compile(string):
 # registry keys, import paths); whether a text is a valid name depends on
 # the slot (dotted or not, binding or not, after a method's dot), which a
 # node does not know; and a refusal is a compiler concern, a
-# LispyCompileError positioned at the symbol. A pin test keeps expr.py and
-# stmt.py from reading a symbol's mangled name around these functions.
+# LispyCompileError positioned at the symbol. A pin test keeps expr.py,
+# stmt.py, compiler/utils.py and features.py from reading a symbol's mangled
+# name around these functions.
 
-# Operator heads: as a value they are no name, even where the mangled text is
-# an identifier (``-`` mangles to ``_``).
+# Operator heads, named as such when one is refused as a name. Only the
+# wording: an operator whose mangled text is a name (``-`` is ``_``,
+# ``is-not`` is ``is_not``) stays a legal name, as it always was.
 OPERATOR_TEXTS = frozenset([*unaryop_dict, *binop_dict, *compare_dict, *boolop_dict])
 
 # CPython refuses __debug__ wherever a name binds.
@@ -238,14 +240,13 @@ def python_name(name, node, ctx=ast.Load):
         raise LispyCompileError(
             f"{name} is a Python keyword and cannot be used as a name", node
         )
-    if text in OPERATOR_TEXTS:
-        raise LispyCompileError(
-            f"{text} is an operator and cannot be used as a name; "
-            f"call it as ({text} ...)",
-            node,
-        )
     if not name.isidentifier():
-        raise LispyCompileError(f"{text} is not a valid Python name", node)
+        msg = (
+            f"{text} is an operator and cannot be used as a name"
+            if text in OPERATOR_TEXTS
+            else f"{text} is not a valid Python name"
+        )
+        raise LispyCompileError(msg, node)
     if name == "__debug__" and ctx in _DEBUG_REFUSALS:
         raise LispyCompileError(_DEBUG_REFUSALS[ctx], node)
     return name

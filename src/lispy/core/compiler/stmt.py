@@ -732,9 +732,13 @@ def case_parse(case):
             raise form_error(case, "has as without a name after it")
         if not plain_name_p(body[1]):
             raise form_error(body[1], f"expects a name after as, got {body[1]}", "case")
+        name = symbol_name(body[1], ast.Store)
+        if name == "_":
+            # A wildcard captures nothing: CPython refuses `case 1 as _`.
+            raise LispyCompileError("cannot use '_' as a target", body[1])
         pattern = ast.MatchAs(
             pattern=pattern,
-            name=symbol_name(body[1], ast.Store),
+            name=name,
             **merge_position_infos(pattern_expr.position_info, body[1].position_info)
         )
         body = body[2:]

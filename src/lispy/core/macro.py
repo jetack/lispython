@@ -31,7 +31,16 @@ def define_macro(sexp, scope, include_meta=True):
     if isinstance(name, GluedHead):
         raise name.misuse_error()
     if type(name) is not Symbol:
-        raise LispyCompileError(f"(defmacro ...) expects a name, got {name}", sexp)
+        raise LispyCompileError(
+            f"(defmacro ...) expects a name, got {name}",
+            sexp if name is None else name,
+        )
+    if "." in name.value:
+        # Dotted registry keys belong to (require mod), which qualifies a
+        # module's macros as mod.name; defmacro defines a local one.
+        raise LispyCompileError(
+            f"(defmacro ...) expects an undotted name, got {name}", name
+        )
     transformed = defmacro_transform(sexp)
     eval(
         compile(

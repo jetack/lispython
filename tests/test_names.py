@@ -1,7 +1,8 @@
 """The name model: every identifier the compiler emits passes through
 ``python_name`` (``compiler/literal.py``). A symbol that is no Python name in
-a name slot is a LispyCompileError at the symbol, never an AST that CPython
-accepts but that means nothing (``a.if``, ``f(if=1)``, ``Name("+")``)."""
+a name slot is a LispyCompileError at the symbol, never put in the AST, where
+CPython would compile it although no Python source spells it (``a.if``,
+``f(if=1)``, ``Name("+")``)."""
 
 import pathlib
 import re
@@ -21,9 +22,7 @@ ASSIGN_DEBUG = "cannot assign to __debug__"
 
 
 def operator(text):
-    return (
-        f"{text} is an operator and cannot be used as a name; call it as ({text} ...)"
-    )
+    return f"{text} is an operator and cannot be used as a name"
 
 
 def invalid(text):
@@ -88,8 +87,9 @@ def assert_refused(src, msg, at):
         # Operators as values.
         ("+", operator("+"), "+"),
         ("(f +)", operator("+"), "+"),
-        ("(f -)", operator("-"), "-"),
         ("(f ~)", operator("~"), "~"),
+        ("(+)", operator("+"), "+"),
+        ("(f <)", operator("<"), "<"),
         ("(print ~)", operator("~"), "~"),
         ("(f ~ x)", operator("~"), "~"),
         ("(. a +)", operator("+"), "+"),
@@ -148,6 +148,20 @@ def assert_refused(src, msg, at):
             "sub a 0",
         ),
         ("(:= (, a b) 1)", "cannot use assignment expressions with tuple", "(, a b)"),
+        # CPython checks a walrus target's shape before its name.
+        (
+            "(:= a.__debug__ 1)",
+            "cannot use assignment expressions with attribute",
+            "a.__debug__",
+        ),
+        # A wildcard captures nothing.
+        ("(match x (case 1 as _ 1))", "cannot use '_' as a target", "_"),
+        # A macro name is one symbol; dotted keys are require's.
+        (
+            "(defmacro a.b [] (return 1))",
+            "(defmacro ...) expects an undotted name, got a.b",
+            "a.b",
+        ),
     ],
 )
 def test_no_python_name_is_refused_at_the_symbol(src, msg, at):
@@ -205,6 +219,18 @@ def test_type_parameter_names(src, msg, at):
         ("(from ..a [x])", "from ..a import x"),
         ("(from a *)", "from a import *"),
         ("(lambda [a :b 1 *c d **e] 1)", "lambda a, b=1, *c, d, **e: 1"),
+        # Operator symbols whose mangled text is a name stay names.
+        ("(from operator [is-not not-in])", "from operator import is_not, not_in"),
+        ("(. operator is-not)", "operator.is_not"),
+        ("(. operator not-in)", "operator.not_in"),
+        ("(def is-not [a b] 1)", "def is_not(a, b):\n    1"),
+        ("(def not-in [a b] 1)", "def not_in(a, b):\n    1"),
+        ("(f :is-not 1 :not-in 2)", "f(is_not=1, not_in=2)"),
+        ("(for - in xs 1)", "for _ in xs:\n    1"),
+        ("(import -)", "import _"),
+        ("(def - [] 1)", "def _():\n    1"),
+        ("(. a -)", "a._"),
+        ("(f -)", "f(_)"),
     ],
 )
 def test_python_names_still_compile(src, python):

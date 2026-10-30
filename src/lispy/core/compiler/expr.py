@@ -249,6 +249,11 @@ def target_compile(sexp, kind):
     compile() rejects. Each name in it comes from name_compile, which refuses
     binding __debug__.
     """
+    if kind == "walrus":
+        # Shape before name, as CPython: (:= a.__debug__ 1) is refused as an
+        # attribute target, not as an assignment to __debug__.
+        check_target(expr_compile(sexp), kind)
+        return name_compile(sexp, ast.Store)
     node = expr_compile(sexp, ast.Del if kind == "delete" else ast.Store)
     check_target(node, kind)
     return node

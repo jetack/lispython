@@ -26,14 +26,16 @@ follows [Semantic Versioning](https://semver.org/).
   100,000) gets an `error` reply with the request id instead of being
   accepted.
 - Every name the compiler emits must be a Python name, or it is a compile
-  error at the symbol. A symbol that is no Python identifier (`foo!`, `a.`)
-  and an operator used as a value (`(f +)`, `(print ~)`, `(f -)`) are
-  refused, the operator with a hint to call it as `(+ ...)`. A hard keyword
-  is refused in every name slot: attributes (`(. a if)`, `(.if x)`),
-  keyword arguments (`(f :if 1)`, class keywords), parameters, type
-  parameters, import names and aliases, and match captures and class
-  pattern attributes. Each of these used to compile to Python that means
-  nothing (`a.if`, `f(if=1)`, `f(+)`).
+  error at the symbol. Code that compiled and ran before is now refused:
+  a symbol whose mangled text is no Python identifier (`foo!`, `a.`, as in
+  `(= foo! 1)`), an operator whose mangled text is no identifier used as a
+  value (`(f +)`, `(print ~)`), and a hard keyword in any name slot:
+  attributes (`(. a if)`, `(.if x)`), keyword arguments (`(f :if 1)`, class
+  keywords), parameters (`(def f [:if 1] ...)`), type parameters, import
+  names and aliases, match captures and class pattern attributes. CPython
+  compiled such names from the AST, but no Python source spells them, so
+  `l2py` printed code that does not parse. Operators that mangle to a name
+  (`-` is `_`, `is-not` is `is_not`) are names as before.
 - Binding `__debug__` (assignment, `del`, a def/class/parameter name, a
   keyword argument, an import, a match capture, `except ... as`) is a
   compile error with CPython's message (`cannot assign to __debug__`);
@@ -54,7 +56,11 @@ follows [Semantic Versioning](https://semver.org/).
   errors with CPython's messages (`cannot assign to literal`, `cannot use
   assignment expressions with attribute`) at the target, instead of a raw
   `ValueError` or `TypeError`.
-
+- `(case pattern as _ ...)` is a compile error at the `_` (`cannot use '_'
+  as a target`, as in CPython) instead of a raw `ValueError`.
+- A dotted `defmacro` name (`(defmacro a.b ...)`) is refused as
+  `(defmacro ...) expects an undotted name, got a.b`, at the name, instead
+  of an error about the internal `___defmacro_temp___a.b` def.
 - LSP hover and signature help for a statement form show the same usage
   line as the compiler's error messages (`(def name [args] body...)`,
   `(for target in iterable body...)`), and now cover the `except`,

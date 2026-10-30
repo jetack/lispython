@@ -1,3 +1,4 @@
+from lispy.core.compiler.literal import identifier_p as _identifier_p
 from lispy.core.nodes import (
     Annotation,
     Bracket,
@@ -18,12 +19,19 @@ _gensym_counter = 0
 
 
 def gensym(prefix="gensym"):
+    """A fresh symbol ``__<prefix>_<N>``. It is always a Python name: a prefix
+    that would make it none (``%``, ``<>``, ``+``, the placeholders as->
+    names) falls back to ``gensym``, since the counter alone keeps it unique.
+    """
     global _gensym_counter
     if isinstance(prefix, Symbol):
         prefix = prefix.name
     elif not isinstance(prefix, str):
         raise TypeError(f"gensym prefix must be a Symbol or string, got {type(prefix).__name__}")
-    sym = Symbol("__" + prefix + "_" + str(_gensym_counter))
+    suffix = "_" + str(_gensym_counter)
+    sym = Symbol("__" + prefix + suffix)
+    if not _identifier_p(sym.name):
+        sym = Symbol("__gensym" + suffix)
     _gensym_counter += 1
     return sym
 
