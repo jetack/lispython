@@ -248,6 +248,9 @@ INEXACT_DEFS = PREAMBLE + """
 
 INEXACT = [
     NAN,
+    -NAN,
+    complex(1.0, -NAN),
+    complex(-NAN, 0.0),
     complex(0.0, -0.0),
     complex(-0.0, 1.0),
     complex(INF, NAN),
@@ -303,6 +306,18 @@ class TestInexactScalarData:
         text = str(data_to_generator_expression(value))
         [form] = parse(text)
         assert same_value(compiled_value(form), value), text
+
+    @pytest.mark.parametrize(
+        "value",
+        TRICKY_SCALARS + [1e16, -1e-7, 2j, 1e16j, 1.5 + 2.5j, -2 - 3j, -1 + 1j, 1 - 1j],
+        ids=lambda v: f"int-{v.bit_length()}-bits" if type(v) is int else repr(v),
+    )
+    def test_every_scalars_display_text_reads_back_as_the_value(self, value):
+        # A complex with a real part used to show as "(1+2j)", which reads back
+        # as a call of the number 1+2j.
+        text = str(data_to_generator_expression(value))
+        [form] = parse(text)
+        assert same_value(compiled_value(form), value), text[:60]
 
     @pytest.mark.parametrize("value", INEXACT, ids=repr)
     def test_quasiquote_rebuild_keeps_the_value(self, value):

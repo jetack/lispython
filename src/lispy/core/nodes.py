@@ -370,7 +370,8 @@ def _float_source(value):
     if _isinf(value):
         # The literal overflows to inf, as in CPython source.
         return "1e999" if value > 0 else "-1e999"
-    return '(float "nan")'
+    # nan carries a sign bit that `same value` readers can tell.
+    return '(- (float "nan"))' if _copysign(1.0, value) < 0 else '(float "nan")'
 
 
 def _exact_constant(value):
@@ -398,7 +399,9 @@ def _float_node(value):
 
 
 def _complex_node(value):
-    text = repr(value)
+    # repr parenthesises a complex with a real part, "(1+2j)"; unparenthesised,
+    # "1+2j" is one number token, where the parenthesised text reads as a call.
+    text = repr(value).removeprefix("(").removesuffix(")")
     try:
         parsed = _literal_eval(text)
     except (SyntaxError, ValueError):
