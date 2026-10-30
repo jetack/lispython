@@ -149,6 +149,52 @@ def assert_refused_at(src, msg, at):
     return info.value
 
 
+class TestAttributeNeedsAnAttribute:
+    """Python has no attribute access without an attribute: (. x) is refused
+    in every context, at the whole form, quoting the attribute form's usage."""
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "(. a)",
+            "(f (. a))",
+            "(= (. a) 1)",
+            "(= x (. a))",
+            "(del (. a))",
+            "(= (. a) ^int 1)",
+            "(+= (. a) 1)",
+            "(:= (. a) 1)",
+            "(for (. a) in xs 1)",
+            "(. (. a))",
+            "(. (. a b))",
+        ],
+    )
+    def test_one_operand_form_is_refused(self, src):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump(src)
+        assert info.value.msg.startswith(
+            "(. ...) is missing its attr: (. value attr...)"
+        )
+
+    @pytest.mark.parametrize(
+        ("src", "at"),
+        [
+            ("(. a)", "(. a)"),
+            ("(= (. a) 1)", "(. a)"),
+            ("(del (. a))", "(. a)"),
+            ("(= (. a) ^int 1)", "(. a)"),
+            ("(+= (. a) 1)", "(. a)"),
+        ],
+    )
+    def test_positioned_at_the_form(self, src, at):
+        assert_refused_at(src, "(. ...) is missing its attr: (. value attr...)", at)
+
+    def test_attribute_with_an_attr_still_compiles(self):
+        assert stmt_to_dump("(= (. a b) ^int 1)") == ast.dump(
+            ast.parse("a.b: int = 1")
+        )
+
+
 class TestExpressionFormArity:
     """A malformed expression form is a LispyCompileError naming the problem
     and quoting the form's FORM_USAGE line, positioned at the form or at the
@@ -163,6 +209,7 @@ class TestExpressionFormArity:
             ("(:= a 1 2)", "(:= ...) takes one name and one value", None),
             ("(:= a ^int 1)", "(:= ...) takes no annotation", "^int"),
             ("(.)", "(. ...) is missing its value", None),
+            ("(. a)", "(. ...) is missing its attr", None),
             ("(.foo)", "method call is missing its instance", None),
             ("(ife)", "(ife ...) is missing its test", None),
             ("(ife a)", "(ife ...) is missing its then", None),
@@ -240,7 +287,6 @@ class TestExpressionFormArity:
     @pytest.mark.parametrize(
         ("lispy", "python"),
         [
-            ("(. a)", "a"),
             ("(sub a)", "a"),
             ("(ife a b)", "b if a else None"),
             ("(ife a b c)", "b if a else c"),

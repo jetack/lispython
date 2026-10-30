@@ -43,6 +43,10 @@ follows [Semantic Versioning](https://semver.org/).
   `(global __debug__)` still compile.
 - An attribute slot takes one name: `(. a b.c)` and `(.a.b x)` are compile
   errors; write `(. a b c)` and `(.b x.a)`.
+- `(. a)`, an attribute form with no attribute, is a compile error in every
+  context (value, assignment, `del`, annotated and augmented targets); it
+  used to compile to the plain name `a`. Write `a`, or `(. a b)` for an
+  attribute.
 - A hard keyword called in an expression (`(f (else 1))`) is reported as
   `else is a Python keyword and cannot be used as a name`, at the keyword,
   instead of `else is a Python keyword and cannot be called` at the form.
@@ -69,8 +73,8 @@ follows [Semantic Versioning](https://semver.org/).
   `(sub)`, `(lambda [a])`, `(await)`, `(yield-from)`, `(and)`, `(< a)`,
   `[:]`, `{1 2 3}` and `(x for y)`. Hover and signature help for these forms
   show the same usage line.
-- `(= (. a) ^int 1)` and `(= (sub a) ^int 1)` record `a` in
-  `__annotations__`, as `(= a ^int 1)` does.
+- `(= (sub a) ^int 1)` records `a` in `__annotations__`, as `(= a ^int 1)`
+  does.
 - The operand after `^`, `*`, `**` or `:` keeps its own token type, so `*1`,
   `**1`, `:1` and `^1` read a number `1` instead of a symbol named `1`. A
   keyword with a number or other non-name after it (`(f :1 x)`, `(def g [:1
