@@ -399,45 +399,52 @@ def refuse_empty_form(sexp):
         )
 
 
+# Which compiler a non-empty () goes to: the first predicate that holds wins,
+# and a () none claims is a call (call_compile). The one home of that dispatch:
+# paren_compiler compiles through it, and pattern_parse asks call_form_p
+# whether a () is call-shaped, i.e. a class pattern.
+PAREN_FORMS = (
+    (tuple_p, tuple_compile),
+    (unaryop_p, unaryop_compile),
+    (binop_p, binop_compile),
+    (boolop_p, boolop_compile),
+    (compare_p, compare_compile),
+    (ifexp_p, ifexp_compile),
+    (attribute_p, attribute_compile),
+    (methodcall_p, methodcall_compile),
+    (namedexpr_p, namedexpr_compile),
+    (subscript_p, subscript_compile),
+    (
+        lambda sexp: len(sexp) > 1 and str(sexp[1]) in ["for", "async-for"],
+        gen_exp_compile,
+    ),
+    (lambda_p, lambda_compile),
+    (lambda sexp: sexp.op == "yield", yield_compile),
+    (lambda sexp: sexp.op == "yield-from", yield_from_compile),
+    (lambda sexp: sexp.op == "await", await_compile),
+    (lambda sexp: sexp.op == "f-string", f_string_compile),
+    (lambda sexp: sexp.op == "t-string", t_string_compile),
+)
+# The PAREN_FORMS compilers that take the context (Load/Store/Del) too.
+CTX_PAREN_FORMS = (tuple_compile, attribute_compile, subscript_compile)
+
+
+def paren_form(sexp):
+    """The compiler of a non-empty () (see PAREN_FORMS)."""
+    return next((form for [p, form] in PAREN_FORMS if p(sexp)), call_compile)
+
+
+def call_form_p(sexp):
+    """Whether a non-empty () compiles as a call."""
+    return paren_form(sexp) is call_compile
+
+
 def paren_compiler(sexp, ctx):
+    # Calls the compiler directly, adding no frame per nesting level: deeply
+    # nested code is compiled by recursion.
     refuse_empty_form(sexp)
-    return (
-        tuple_compile(sexp, ctx)
-        if tuple_p(sexp)
-        else unaryop_compile(sexp)
-        if unaryop_p(sexp)
-        else binop_compile(sexp)
-        if binop_p(sexp)
-        else boolop_compile(sexp)
-        if boolop_p(sexp)
-        else compare_compile(sexp)
-        if compare_p(sexp)
-        else ifexp_compile(sexp)
-        if ifexp_p(sexp)
-        else attribute_compile(sexp, ctx)
-        if attribute_p(sexp)
-        else methodcall_compile(sexp)
-        if methodcall_p(sexp)
-        else namedexpr_compile(sexp)
-        if namedexpr_p(sexp)
-        else subscript_compile(sexp, ctx)
-        if subscript_p(sexp)
-        else gen_exp_compile(sexp)
-        if len(sexp) > 1 and str(sexp[1]) in ["for", "async-for"]
-        else lambda_compile(sexp)
-        if lambda_p(sexp)
-        else yield_compile(sexp)
-        if sexp.op == "yield"
-        else yield_from_compile(sexp)
-        if sexp.op == "yield-from"
-        else await_compile(sexp)
-        if sexp.op == "await"
-        else f_string_compile(sexp)
-        if sexp.op == "f-string"
-        else t_string_compile(sexp)
-        if sexp.op == "t-string"
-        else call_compile(sexp)
-    )
+    form = paren_form(sexp)
+    return form(sexp, ctx) if form in CTX_PAREN_FORMS else form(sexp)
 
 
 def slice_compile(sexp):

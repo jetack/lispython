@@ -473,6 +473,8 @@ PLUS_CASES = [
     ("+1+2j", "+1 + 2j"),
     ("[+1 -1]", "[+1, -1]"),
     ("{+1 _}", "{+1: _}"),
+    ("(+ 1)", "+1"),
+    ("{(+ 1) _}", "{+1: _}"),
 ]
 
 
@@ -521,6 +523,14 @@ class TestMatchUnaryPlusRefused:
         err = refusal(match_src(pattern))
         assert err.msg == PLUS_MSG.format(".".join(map(str, sys.version_info[:3])))
         assert (err.lineno, err.offset) == (2, 9 + pattern.index("+"))
+
+    @pytest.mark.usefixtures("old_python")
+    @pytest.mark.parametrize("pattern", ["(+ 1)", "{(+ 1) _}", "[0 (+ 1.5)]"])
+    def test_paren_plus_refused_below_315(self, pattern):
+        """``(+ 1)`` is the spelled-out ``+1``: the same gate, at the form."""
+        err = refusal(match_src(pattern))
+        assert err.msg == PLUS_MSG.format("3.11.13")
+        assert (err.lineno, err.offset) == (2, 9 + pattern.index("(+"))
 
     @pytest.mark.usefixtures("old_python")
     def test_minus_needs_no_new_python(self):

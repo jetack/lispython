@@ -4,6 +4,7 @@ from functools import reduce
 
 from lispy.core.compiler import features
 from lispy.core.compiler.expr import (
+    call_form_p,
     def_args_parse,
     expr_compile,
     refuse_empty_form,
@@ -299,6 +300,16 @@ FORM_USAGE = {
     "finally": "(finally body...)",
     "match": "(match subject (case ...)...)",
     "case": "(case pattern as name if guard body...), as name and if guard optional",
+    "|": "(| pattern pattern...)",
+    "pattern": (
+        "a name, _, a literal, a dotted name, [sequence], {mapping}, "
+        "(| ...) or (Class ...)"
+    ),
+    "sequence pattern": "[pattern... *rest pattern...], at most one *rest",
+    "mapping pattern": (
+        "{key pattern... **rest}, each key a literal or dotted name, **rest last"
+    ),
+    "class pattern": "(Class pattern... :attr pattern...), positional patterns first",
     "deco": "(deco decorator definition) or (deco [decorator ...] definition)",
     "raise": "(raise), (raise exception) or (raise exception from cause)",
     "assert": "(assert test) or (assert test message)",
@@ -312,16 +323,21 @@ FORM_USAGE = {
     "nonlocal": "(nonlocal name...)",
 }
 
+# FORM_USAGE entries that are no head word: a message names them as they are
+# ("class pattern has ..."), not as a form ("(| ...) needs ...").
+PATTERN_KINDS = ("pattern", "sequence pattern", "mapping pattern", "class pattern")
+
 
 def form_error(sexp, problem, form=None):
     """The one shape of a malformed-statement error: the problem, then usage.
 
     Positioned at ``sexp``; ``form`` (default: ``sexp``'s own head) names the
-    statement whose usage is quoted, so an error at a clause or operand can
-    still quote the enclosing form.
+    statement or pattern kind whose usage is quoted, so an error at a clause
+    or operand can still quote the enclosing form.
     """
     form = str(sexp.op) if form is None else form
-    return LispyCompileError(f"({form} ...) {problem}: {FORM_USAGE[form]}", sexp)
+    subject = form if form in PATTERN_KINDS else f"({form} ...)"
+    return LispyCompileError(f"{subject} {problem}: {FORM_USAGE[form]}", sexp)
 
 
 def form_parts(sexp, header, form=None):
@@ -582,82 +598,206 @@ def literal_pattern_expr(sexp):
     """The expression of a literal pattern (MatchValue value or mapping key).
 
     A signed number is the one Paren a literal pattern may be; numbers go
-    through number_pattern_expr, which builds ast.parse's shapes.
+    through number_pattern_expr, which builds ast.parse's shapes. The one
+    refusal of a sign before anything but a number (``(- a)``, ``(- 1+2j)``,
+    ``--1``). ``+`` is a sign as in Python 3.15, gated by number_pattern_expr.
     """
+    expr = None
     if signed_number_p(sexp):
         [sign, number] = sexp.list
         if (
-            not constant_p(number)
-            or str(number) in SPECIAL_CONSTANTS
-            or (number_parts(number.value) or [None] * 4)[2] is not None
+            constant_p(number)
+            and str(number) not in SPECIAL_CONSTANTS
+            and (number_parts(number.value) or [None] * 4)[2] is None
         ):
-            raise LispyCompileError(
-                "only a number literal can be signed in a match pattern", sexp
+            expr = number_pattern_expr(str(sign) + number.value, sexp)
+    elif constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
+        expr = number_pattern_expr(sexp.value, sexp)
+    else:
+        return expr_compile(sexp)
+    if expr is None:
+        raise form_error(sexp, f"can sign only a number literal, got {sexp}", "pattern")
+    return expr
+
+
+def dotted_name_p(sexp):
+    return type(sexp) is Symbol and "." in sexp.value
+
+
+def name_or_attr_p(sexp):
+    """Python's name_or_attr: every dot-part of the mangled name is an
+    identifier, so ``.x``, ``a..b`` and ``x.`` are no value pattern, mapping
+    key or class name. Expressions do not check this yet (TASK-757)."""
+    return type(sexp) is Symbol and all(
+        part.isidentifier() for part in sexp.name.split(".")
+    )
+
+
+def literal_pattern_p(sexp):
+    """A number (signed or complex too), string, bytes, None, True or False."""
+    return (
+        signed_number_p(sexp)
+        or string_p(sexp)
+        or (constant_p(sexp) and str(sexp) != "...")
+    )
+
+
+def value_pattern_expr(sexp, kind):
+    """The expression of a value pattern or mapping key: a literal or a dotted
+    name (``a.b``, which Python reads as a value, never a capture). Anything
+    else is refused at ``sexp`` as no ``kind``."""
+    if dotted_name_p(sexp) and name_or_attr_p(sexp):
+        return name_compile(sexp, ast.Load)
+    if literal_pattern_p(sexp):
+        return literal_pattern_expr(sexp)
+    if kind == "mapping pattern":
+        raise form_error(
+            sexp, f"expects a literal or dotted name as a key, got {sexp}", kind
+        )
+    raise form_error(sexp, f"expected, got {sexp}", kind)
+
+
+def prefixed_name_p(sexp):
+    """The name after a pattern's *, ** or : is an identifier that is no
+    keyword once mangled.
+
+    A stopgap for the reader bug TASK-756: parser.py's star_token_parse and
+    keyword_token_parse pass the outer token type down, so the operand of
+    ``*1``, ``**1a`` or ``:1a`` reads as a Symbol. Remove this check (back to
+    plain_name_p) when the reader is fixed.
+    """
+    return (
+        type(sexp) is Symbol
+        and sexp.name.isidentifier()
+        and not reserved_name_p(sexp.name)
+    )
+
+
+def match_sequence_parse(sexp):
+    """``[pattern... *rest pattern...]``: the one place a *rest is a pattern."""
+    patterns = []
+    starred = False
+    for elt in sexp.list:
+        if not starred_p(elt):
+            patterns.append(pattern_parse(elt))
+            continue
+        if starred:
+            raise form_error(
+                elt, f"has more than one *rest, got {elt}", "sequence pattern"
             )
-        return number_pattern_expr(str(sign) + number.value, sexp)
-    if constant_p(sexp) and str(sexp) not in SPECIAL_CONSTANTS:
-        return number_pattern_expr(sexp.value, sexp)
-    return expr_compile(sexp)
+        starred = True
+        name = elt.value
+        if str(name) != "_" and not prefixed_name_p(name):
+            raise form_error(
+                elt, f"expects a name after *, got {name}", "sequence pattern"
+            )
+        patterns.append(
+            ast.MatchStar(
+                **{} if str(name) == "_" else {"name": name.name}, **elt.position_info
+            )
+        )
+    return {"patterns": patterns}
 
 
-def match_mapping_parse(lst):
-    keys = lst[::2]
-    patterns = lst[1::2]
+def match_mapping_parse(sexp):
+    """``{key pattern... **rest}``: **rest once, last, a plain name."""
+    items = list(sexp.list)
     rst = {}
-    if keys and isinstance(keys[-1], DoubleStarred):
-        rst["rest"] = keys.pop().value.name
-    rst["keys"] = list(map(literal_pattern_expr, keys))
-    rst["patterns"] = list(map(pattern_parse, patterns))
+    if items and doublestarred_p(items[-1]):
+        rest = items.pop()
+        if not prefixed_name_p(rest.value) or str(rest.value) == "_":
+            raise form_error(
+                rest, f"expects a name after **, got {rest.value}", "mapping pattern"
+            )
+        rst["rest"] = rest.value.name
+    for item in items:
+        if doublestarred_p(item):
+            raise form_error(item, f"has {item} before its end", "mapping pattern")
+    if len(items) % 2:
+        raise form_error(
+            items[-1],
+            f"has key {items[-1]} without a pattern after it",
+            "mapping pattern",
+        )
+    rst["keys"] = [value_pattern_expr(key, "mapping pattern") for key in items[::2]]
+    rst["patterns"] = list(map(pattern_parse, items[1::2]))
     return rst
 
 
-def match_class_parse(lst):
-    q = deque(lst)
+def match_class_parse(sexp):
+    """``(Class pattern... :attr pattern...)``, positional patterns first."""
+    cls = sexp.op
+    if not name_or_attr_p(cls):
+        raise form_error(cls, f"needs a class name, got {cls}", "class pattern")
+    q = deque(sexp.operands)
     patterns = []
     kwd_attrs = []
     kwd_patterns = []
     while q:
         arg = q.popleft()
-        if isinstance(arg, Keyword):
-            kwd_attrs.append(arg.value.name)
+        if keyword_arg_p(arg):
+            if not q or keyword_arg_p(q[0]):
+                raise form_error(
+                    arg, f"has {arg} without a pattern after it", "class pattern"
+                )
+            if not prefixed_name_p(arg.value):
+                raise form_error(
+                    arg,
+                    f"expects an attribute name after :, got {arg.value}",
+                    "class pattern",
+                )
+            kwd_attrs.append(arg.name)
             kwd_patterns.append(pattern_parse(q.popleft()))
+        elif kwd_attrs:
+            raise form_error(arg, f"has {arg} after a keyword pattern", "class pattern")
         else:
             patterns.append(pattern_parse(arg))
-    return {"patterns": patterns, "kwd_attrs": kwd_attrs, "kwd_patterns": kwd_patterns}
+    return {
+        "cls": name_compile(cls, ast.Load),
+        "patterns": patterns,
+        "kwd_attrs": kwd_attrs,
+        "kwd_patterns": kwd_patterns,
+    }
 
 
 def pattern_parse(sexp):
+    """One case pattern, refused at the sub-form at fault when malformed.
+
+    A ``()`` is a class pattern exactly when it would compile as a call
+    (call_form_p), so (+ 1 2), (, a b) or f"x" is no pattern.
+    """
     refuse_empty_form(sexp)
-    return (
-        ast.MatchAs(**sexp.position_info)
-        if str(sexp) == "_"
-        else ast.MatchAs(name=sexp.name, **sexp.position_info)
-        if isinstance(sexp, Symbol)
-        else ast.MatchSingleton(value=eval(str(sexp)), **sexp.position_info)
-        if str(sexp) in ["True", "False", "None"]
-        else ast.MatchStar(
-            **{} if str(sexp.value) == "_" else {"name": sexp.value.name},
-            **sexp.position_info
+    position_info = sexp.position_info
+    if starred_p(sexp):
+        raise form_error(
+            sexp, f"can be *rest only in a sequence pattern, got {sexp}", "pattern"
         )
-        if isinstance(sexp, Starred)
-        else ast.MatchValue(value=literal_pattern_expr(sexp), **sexp.position_info)
-        if not isinstance(sexp, Expression) or signed_number_p(sexp)
-        else ast.MatchSequence(
-            patterns=list(map(pattern_parse, sexp.list)), **sexp.position_info
+    if doublestarred_p(sexp):
+        raise form_error(
+            sexp, f"can be **rest only last in a mapping pattern, got {sexp}", "pattern"
         )
-        if isinstance(sexp, Bracket)
-        else ast.MatchMapping(**match_mapping_parse(sexp.list), **sexp.position_info)
-        if isinstance(sexp, Brace)
-        else ast.MatchOr(
-            patterns=list(map(pattern_parse, sexp.operands)), **sexp.position_info
+    if type(sexp) is Symbol and str(sexp) == "_":
+        return ast.MatchAs(**position_info)
+    if type(sexp) is Symbol and not dotted_name_p(sexp):
+        name_compile(sexp, ast.Store)  # refuses a hard keyword (if) at itself
+        return ast.MatchAs(name=sexp.name, **position_info)
+    if str(sexp) in ("True", "False", "None") and constant_p(sexp):
+        return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
+    if bracket_p(sexp):
+        return ast.MatchSequence(**match_sequence_parse(sexp), **position_info)
+    if brace_p(sexp):
+        return ast.MatchMapping(**match_mapping_parse(sexp), **position_info)
+    if paren_p(sexp) and sexp.op == "|":
+        if len(sexp.operands) < 2:
+            raise form_error(sexp, "needs at least two patterns", "|")
+        return ast.MatchOr(
+            patterns=list(map(pattern_parse, sexp.operands)), **position_info
         )
-        if sexp.op == "|"
-        else ast.MatchClass(
-            cls=expr_compile(sexp.op),
-            **match_class_parse(sexp.operands),
-            **sexp.position_info
-        )
-    )
+    if paren_p(sexp) and not signed_number_p(sexp):
+        if not call_form_p(sexp):
+            raise form_error(sexp, f"expected, got {sexp}", "pattern")
+        return ast.MatchClass(**match_class_parse(sexp), **position_info)
+    return ast.MatchValue(value=value_pattern_expr(sexp, "pattern"), **position_info)
 
 
 def case_parse(case):
