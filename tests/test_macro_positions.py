@@ -481,6 +481,64 @@ def test_shared_data_is_not_a_self_reference(scope):
     assert ast.unparse(stmt) == "[[1], [1]]"
 
 
+def shared_dag_problem(b):
+    """Why `b` is not a 30-deep Bracket chain with shared halves, or None.
+
+    Returns plain strings: an `assert` on a Bracket would make pytest repr it,
+    and repr recurses without sharing (2**30 paths) outside the time bound.
+    """
+    if type(b) is not Bracket:
+        return "root is not a Bracket"
+    for level in range(30):
+        if b.list[0] is not b.list[1]:
+            return f"level {level} is not shared"
+        b = b.list[0]
+        if type(b) is not Bracket:
+            return f"level {level + 1} is not a Bracket"
+    leaf = b.list[0]
+    if type(leaf) is not Constant or leaf.value != "1":
+        return "leaf is not Constant 1"
+    return None
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("form_kind", [list, tuple, deque])
+@pytest.mark.parametrize("data_kind", [list, tuple])
+def test_shared_data_dag_is_converted_once(form_kind, data_kind):
+    d = data_kind([1])
+    for _ in range(30):
+        d = data_kind([d, d])
+    p = Paren(Symbol("f"))
+    p.list = form_kind([Symbol("f"), d, d])
+    copy = macro_expansion_nodes(p, call_at(POSITION))
+    same = copy.list[1] is copy.list[2]
+    assert same, "the two form slots are separate conversions"
+    problem = shared_dag_problem(copy.list[1])
+    assert problem is None, problem
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize("data_kind", [list, tuple])
+def test_shared_data_dag_in_a_quasiquote_is_converted_once(data_kind):
+    d = data_kind([1])
+    for _ in range(30):
+        d = data_kind([d, d])
+    p = Paren(Symbol("f"), d)
+    problem = shared_dag_problem(p.list[1])
+    assert problem is None, problem
+    problem = shared_dag_problem(macro_expansion_nodes(p, call_at(POSITION)).list[1])
+    assert problem is None, problem
+
+
+@pytest.mark.parametrize("order", [0, 1])
+def test_cycle_through_shared_data_is_left_for_the_expander(order):
+    a = []
+    b = [a]
+    a.append(b)
+    root = [a, b] if order else [b, a]
+    assert data_to_generator_expression(root) is root
+
+
 @pytest.mark.parametrize(
     ("macro", "python"),
     [

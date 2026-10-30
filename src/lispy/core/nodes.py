@@ -175,7 +175,8 @@ def macro_expansion_nodes(expansion, call):
     wrote) keeps its own. Descends every Node attribute, so f-string fields
     and their format specs, wrappers, quotes and glued heads are covered
     alike; the copy memos keep nodes shared between places in the expansion
-    shared in the copy.
+    shared in the copy, and a list or tuple of data met in many places
+    becomes one shared Bracket.
 
     The tree is copied, not filled in place, because the macro may still own
     its nodes (a template held in a global and returned on every call):
@@ -200,6 +201,11 @@ def macro_expansion_nodes(expansion, call):
     made = []
     # id(Bracket made from a list or tuple) -> that list or tuple.
     sources = {}
+    # id(data list or tuple) -> (data, its Bracket). One Bracket per distinct
+    # list or tuple, else data shared as a DAG (D0 = [1]; Dk = [Dk-1, Dk-1])
+    # is converted once per path, exponential in its depth. The value holds
+    # the data so its id is not reused while the memo is live.
+    brackets = {}
     # ids of the containers being copied (nodes, lists, deques), of the form
     # lists and of the data lists and tuples being converted: the path from
     # the root, whichever memo the copy goes to. Meeting
@@ -222,6 +228,12 @@ def macro_expansion_nodes(expansion, call):
         stack.append((None, id(value)))
 
     def node_of(data):
+        if isinstance(data, (list, tuple)):
+            # Before the memo, so a memoized Bracket never hides a cycle.
+            if id(data) in active:
+                raise self_reference(data)
+            if id(data) in brackets:
+                return brackets[id(data)][1]
         node = _data_node(data)
         if node is data:
             if isinstance(node, Node):
@@ -234,6 +246,7 @@ def macro_expansion_nodes(expansion, call):
         made.append(node)
         if isinstance(data, (list, tuple)):
             sources[id(node)] = data
+            brackets[id(data)] = (data, node)
         return node
 
     def form_list(elements):
@@ -479,14 +492,26 @@ def data_to_generator_expression(data):
     call (a quasiquote's Expression constructor comes here first).
 
     The one home of the data-to-node conversion, through ``_data_node``.
-    Iterative, so a deeply nested list does not hit RecursionError.
+    Iterative, so a deeply nested list does not hit RecursionError. A list or
+    tuple met in many places becomes one shared Bracket.
     """
     root = _data_node(data)
+    brackets = {}
+    pending = []
+    if isinstance(data, (list, tuple)):
+        # The memo value holds the data so its id is not reused meanwhile.
+        brackets[id(data)] = (data, root)
+        pending.append((root, data))
     # (Bracket, the list or tuple it is made from); (None, id) leaves that
     # list, so ``active`` is the path from the root and meeting a list on it
     # again is a self-reference (sharing a list in two places is fine).
-    pending = [(root, data)] if isinstance(data, (list, tuple)) else []
+    # ``done`` holds the lists already filled. A shared list is queued at
+    # every place it appears but filled once, when first popped; queueing it
+    # even on a memo hit keeps the cycle check sound: a cycle through a list
+    # still waiting in the queue is found when that list is popped and its
+    # items are checked against the path then, never skipped by the memo.
     active = set()
+    done = set()
     while pending:
         [bracket, items] = pending.pop()
         if bracket is None:
@@ -494,14 +519,25 @@ def data_to_generator_expression(data):
             continue
         if id(items) in active:
             return data
+        if id(items) in done:
+            continue
+        done.add(id(items))
         active.add(id(items))
         pending.append((None, id(items)))
-        bracket.list = [_data_node(item) for item in items]
-        pending.extend(
-            (node, item)
-            for item, node in zip(items, bracket.list)
-            if isinstance(item, (list, tuple))
-        )
+        nodes = []
+        for item in items:
+            if isinstance(item, (list, tuple)):
+                if id(item) not in brackets:
+                    brackets[id(item)] = (item, _data_node(item))
+                node = brackets[id(item)][1]
+                if id(item) in active:
+                    return data
+                if id(item) not in done:
+                    pending.append((node, item))
+            else:
+                node = _data_node(item)
+            nodes.append(node)
+        bracket.list = nodes
     return root
 
 

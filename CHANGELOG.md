@@ -67,6 +67,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Data a macro puts in its expansion, spliced with `~x` or placed in a
+  form's list, that holds the same Python list or tuple in many places is
+  converted to nodes in time linear in the distinct data, instead of
+  exponential in the depth of the sharing. Compiling such data still emits
+  each shared value where it appears.
 - A malformed expression form is a positioned compile error quoting its
   usage instead of an IndexError, ValueError or AssertionError, or an AST
   CPython rejects: `(:=)`, `(:= a ^int 1)`, `(.)`, `(.foo)`, `(ife a)`,
