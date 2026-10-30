@@ -1,3 +1,11 @@
+"""Statement forms and match patterns to Python AST.
+
+Compiled on the trampoline as expressions are: every function that compiles
+a sub-form is a step that asks for each sub-result with ``yield`` (the
+convention is stated in expr.py's module docstring). ``stmt_compile`` and
+``stmt_list_compile`` are the plain entry points.
+"""
+
 import ast
 from collections import deque
 from functools import reduce
@@ -7,7 +15,8 @@ from lispy.core.compiler.expr import (
     call_args_parse,
     call_form_p,
     def_args_parse,
-    expr_compile,
+    expr_list_steps,
+    expr_steps,
     refuse_empty_form,
     target_compile,
 )
@@ -23,13 +32,13 @@ from lispy.core.compiler.literal import (
     symbol_name,
 )
 from lispy.core.compiler.utils import *
-from lispy.core.errors import LispyCompileError, nesting_error
+from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import GluedHead, Paren, atom_text
 from lispy.core.utils import *
 
 
 def expr_wrapper(sexp):
-    return ast.Expr(value=expr_compile(sexp), **sexp.position_info)
+    return ast.Expr(value=(yield expr_steps(sexp)), **sexp.position_info)
 
 
 def do_p(sexp):
@@ -38,7 +47,7 @@ def do_p(sexp):
 
 def do_compile(sexp):
     [op, *sexps] = sexp.list
-    return stmt_list_compile(sexps)
+    return (yield stmt_list_steps(sexps))
 
 
 def assign_p(sexp):
@@ -58,11 +67,11 @@ def assign_compile(sexp):
         [annotation, *value] = body
         if len(value) > 1:
             raise form_error(sexp, "takes one value after an annotation")
-        value_dict = {"value": expr_compile(value[0])} if value else {}
-        target_node = trampoline(target_compile(target, "annotate"))
+        value_dict = {"value": (yield expr_steps(value[0]))} if value else {}
+        target_node = yield target_compile(target, "annotate")
         return ast.AnnAssign(
             target=target_node,
-            annotation=expr_compile(annotation),
+            annotation=(yield expr_steps(annotation)),
             # Decided on the compiled target: (sub a) compiles to the
             # name a, which Python records in __annotations__ like a bare a.
             simple=int(isinstance(target_node, ast.Name)),
@@ -71,9 +80,12 @@ def assign_compile(sexp):
         )
     else:
         [*targets, value] = [target, *body]
+        target_nodes = []
+        for x in targets:
+            target_nodes.append((yield target_compile(x, "assign")))
         return ast.Assign(
-            targets=[trampoline(target_compile(x, "assign")) for x in targets],
-            value=expr_compile(value),
+            targets=target_nodes,
+            value=(yield expr_steps(value)),
             **sexp.position_info
         )
 
@@ -88,10 +100,10 @@ def augassign_compile(sexp):
     op = augassignop_dict[atom_text(sexp.op)]
     value = reduce(
         lambda x, y: ast.BinOp(x, op(), y, **sexp.position_info),
-        map(expr_compile, args),
+        (yield expr_list_steps(args)),
     )
     return ast.AugAssign(
-        target=trampoline(target_compile(target, "augassign")),
+        target=(yield target_compile(target, "augassign")),
         op=op(),
         value=value,
         **sexp.position_info
@@ -102,10 +114,10 @@ def del_compile(sexp):
     [op, *args] = sexp.list
     if not args:
         raise form_error(sexp, "needs at least one target")
-    return ast.Delete(
-        targets=[trampoline(target_compile(x, "delete")) for x in args],
-        **sexp.position_info
-    )
+    targets = []
+    for x in args:
+        targets.append((yield target_compile(x, "delete")))
+    return ast.Delete(targets=targets, **sexp.position_info)
 
 
 def import_name(sexp, form, dotted=True):
@@ -215,9 +227,9 @@ def if_p(sexp):
 def if_stmt_compile(sexp):
     [[test, then], orelse] = form_parts(sexp, ("test", "then"))
     return ast.If(
-        test=expr_compile(test),
-        body=stmt_list_compile([then]),
-        orelse=stmt_list_compile(orelse),
+        test=(yield expr_steps(test)),
+        body=(yield stmt_list_steps([then])),
+        orelse=(yield stmt_list_steps(orelse)),
         **sexp.position_info
     )
 
@@ -251,9 +263,9 @@ def while_p(sexp):
 def while_compile(sexp):
     [[test], then, orelse] = loop_parse(sexp, ("test",))
     return ast.While(
-        test=expr_compile(test),
-        body=stmt_list_compile(then),
-        orelse=stmt_list_compile(orelse),
+        test=(yield expr_steps(test)),
+        body=(yield stmt_list_steps(then)),
+        orelse=(yield stmt_list_steps(orelse)),
         **sexp.position_info
     )
 
@@ -267,10 +279,10 @@ def for_compile(sexp, async_p=False):
         sexp, ("target", ("in", "iterable"))
     )
     return (ast.AsyncFor if async_p else ast.For)(
-        target=trampoline(target_compile(target, "assign")),
-        iter=expr_compile(iterable),
-        body=stmt_list_compile(then),
-        orelse=stmt_list_compile(orelse),
+        target=(yield target_compile(target, "assign")),
+        iter=(yield expr_steps(iterable)),
+        body=(yield stmt_list_steps(then)),
+        orelse=(yield stmt_list_steps(orelse)),
         **sexp.position_info
     )
 
@@ -286,9 +298,9 @@ def raise_compile(sexp):
         raise form_error(sexp, "is missing its cause")
     if len(body) not in (0, 1, 3) or (len(body) == 3 and body[1] != "from"):
         raise form_error(sexp, "takes an exception and an optional from cause")
-    kwargs = {"exc": expr_compile(body[0])} if len(body) else {}
+    kwargs = {"exc": (yield expr_steps(body[0]))} if len(body) else {}
     if len(body) == 3:
-        kwargs["cause"] = expr_compile(body[2])
+        kwargs["cause"] = yield expr_steps(body[2])
     return ast.Raise(**kwargs, **sexp.position_info)
 
 
@@ -296,9 +308,9 @@ def assert_compile(sexp):
     [[test], rest] = form_parts(sexp, ("test",))
     if len(rest) > 1:
         raise form_error(sexp, "takes a test and at most one message")
-    kwargs = {"test": expr_compile(test)}
+    kwargs = {"test": (yield expr_steps(test))}
     if len(rest):
-        kwargs["msg"] = expr_compile(rest[0])
+        kwargs["msg"] = yield expr_steps(rest[0])
     return ast.Assert(**kwargs, **sexp.position_info)
 
 
@@ -334,12 +346,12 @@ def parse_except(handler):
         [types, name] = except_types_parse(bracket, form)
         kwargs["type"] = (
             ast.Tuple(
-                elts=list(map(expr_compile, types)),
+                elts=(yield expr_list_steps(types)),
                 ctx=ast.Load(),
                 **bracket.position_info
             )
             if len(types) > 1
-            else expr_compile(types[0])
+            else (yield expr_steps(types[0]))
         )
         if name is not None:
             kwargs["name"] = name
@@ -348,7 +360,7 @@ def parse_except(handler):
     if not body:
         raise form_error(handler, "needs a body")
     return ast.ExceptHandler(
-        body=stmt_list_compile(body), **kwargs, **handler.position_info
+        body=(yield stmt_list_steps(body)), **kwargs, **handler.position_info
     )
 
 
@@ -362,7 +374,8 @@ def try_parse(sexp):
     except clauses or except* clauses (never both, a bare except last), an
     optional else (only after an except), an optional finally, and at least
     one except or a finally. A form out of that order is refused where it
-    stands, never left in the body to compile as a call to a keyword.
+    stands, never left in the body to compile as a call to a keyword. The
+    handlers are compiled here, as each is read.
     """
     operands = sexp.operands
     n = 0
@@ -385,7 +398,7 @@ def try_parse(sexp):
             if bare:
                 raise form_error(clause, "has an except after a bare except", "try")
             star = kind == "except*"
-            handlers.append(parse_except(clause))
+            handlers.append((yield parse_except(clause)))
             bare = handlers[-1].type is None
         else:
             if previous == kind:
@@ -407,12 +420,12 @@ def try_parse(sexp):
 
 
 def try_compile(sexp):
-    [body, handlers, orelse, finalbody, star] = try_parse(sexp)
+    [body, handlers, orelse, finalbody, star] = yield try_parse(sexp)
     return (ast.TryStar if star else ast.Try)(
-        body=stmt_list_compile(body),
+        body=(yield stmt_list_steps(body)),
         handlers=handlers,
-        orelse=stmt_list_compile(orelse),
-        finalbody=stmt_list_compile(finalbody),
+        orelse=(yield stmt_list_steps(orelse)),
+        finalbody=(yield stmt_list_steps(finalbody)),
         **sexp.position_info
     )
 
@@ -429,10 +442,10 @@ def with_items_parse(sexp, form):
                 raise form_error(elt, "has as without a context before it", form)
             if not q:
                 raise form_error(elt, "has as without a target after it", form)
-            rst[-1].optional_vars = trampoline(target_compile(q.popleft(), "assign"))
+            rst[-1].optional_vars = yield target_compile(q.popleft(), "assign")
             targeted = True
         else:
-            rst.append(ast.withitem(context_expr=expr_compile(elt)))
+            rst.append(ast.withitem(context_expr=(yield expr_steps(elt))))
             targeted = False
     return rst
 
@@ -447,8 +460,8 @@ def with_compile(sexp, async_p=False):
     if not body:
         raise form_error(sexp, "needs a body")
     return (ast.AsyncWith if async_p else ast.With)(
-        items=with_items_parse(items, form),
-        body=stmt_list_compile(body),
+        items=(yield with_items_parse(items, form)),
+        body=(yield stmt_list_steps(body)),
         **sexp.position_info
     )
 
@@ -481,7 +494,7 @@ def literal_pattern_expr(sexp):
     elif constant_p(sexp) and atom_text(sexp) not in SPECIAL_CONSTANTS:
         expr = number_pattern_expr(sexp.value, sexp)
     else:
-        return expr_compile(sexp)
+        return (yield expr_steps(sexp))
     if expr is None:
         raise form_error(sexp, f"can sign only a number literal, got {sexp}", "pattern")
     return expr
@@ -507,7 +520,7 @@ def value_pattern_expr(sexp, kind):
     if dotted_name_p(sexp) and name_or_attr_p(sexp):
         return name_compile(sexp, ast.Load)
     if literal_pattern_p(sexp):
-        return literal_pattern_expr(sexp)
+        return (yield literal_pattern_expr(sexp))
     if kind == "mapping pattern":
         raise form_error(
             sexp, f"expects a literal or dotted name as a key, got {sexp}", kind
@@ -521,7 +534,7 @@ def match_sequence_parse(sexp):
     starred = False
     for elt in sexp.list:
         if not starred_p(elt):
-            patterns.append(pattern_parse(elt))
+            patterns.append((yield pattern_parse(elt)))
             continue
         if starred:
             raise form_error(
@@ -564,8 +577,12 @@ def match_mapping_parse(sexp):
             f"has key {items[-1]} without a pattern after it",
             "mapping pattern",
         )
-    rst["keys"] = [value_pattern_expr(key, "mapping pattern") for key in items[::2]]
-    rst["patterns"] = list(map(pattern_parse, items[1::2]))
+    rst["keys"] = []
+    for key in items[::2]:
+        rst["keys"].append((yield value_pattern_expr(key, "mapping pattern")))
+    rst["patterns"] = []
+    for pattern in items[1::2]:
+        rst["patterns"].append((yield pattern_parse(pattern)))
     return rst
 
 
@@ -592,11 +609,11 @@ def match_class_parse(sexp):
                     "class pattern",
                 )
             kwd_attrs.append(symbol_name(arg.value, ast.Store))
-            kwd_patterns.append(pattern_parse(q.popleft()))
+            kwd_patterns.append((yield pattern_parse(q.popleft())))
         elif kwd_attrs:
             raise form_error(arg, f"has {arg} after a keyword pattern", "class pattern")
         else:
-            patterns.append(pattern_parse(arg))
+            patterns.append((yield pattern_parse(arg)))
     return {
         "cls": name_compile(cls, ast.Load),
         "patterns": patterns,
@@ -628,27 +645,32 @@ def pattern_parse(sexp):
     if atom_text(sexp) in ("True", "False", "None") and constant_p(sexp):
         return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
     if bracket_p(sexp):
-        return ast.MatchSequence(**match_sequence_parse(sexp), **position_info)
+        return ast.MatchSequence(
+            **(yield match_sequence_parse(sexp)), **position_info
+        )
     if brace_p(sexp):
-        return ast.MatchMapping(**match_mapping_parse(sexp), **position_info)
+        return ast.MatchMapping(**(yield match_mapping_parse(sexp)), **position_info)
     if paren_p(sexp) and sexp.op == "|":
         if len(sexp.operands) < 2:
             raise form_error(sexp, "needs at least two patterns", "|")
-        return ast.MatchOr(
-            patterns=list(map(pattern_parse, sexp.operands)), **position_info
-        )
+        patterns = []
+        for pattern in sexp.operands:
+            patterns.append((yield pattern_parse(pattern)))
+        return ast.MatchOr(patterns=patterns, **position_info)
     if paren_p(sexp) and not signed_number_p(sexp):
         if not call_form_p(sexp):
             raise form_error(sexp, f"expected, got {sexp}", "pattern")
-        return ast.MatchClass(**match_class_parse(sexp), **position_info)
-    return ast.MatchValue(value=value_pattern_expr(sexp, "pattern"), **position_info)
+        return ast.MatchClass(**(yield match_class_parse(sexp)), **position_info)
+    return ast.MatchValue(
+        value=(yield value_pattern_expr(sexp, "pattern")), **position_info
+    )
 
 
 def case_parse(case):
     """``(case pattern [as name] [if guard] body...)``; the case is checked
     in match_compile, the parts here, each refusal at the case."""
     [[pattern_expr], body] = form_parts(case, ("pattern",))
-    pattern = pattern_parse(pattern_expr)
+    pattern = yield pattern_parse(pattern_expr)
     if len(body) and body[0] == "as":
         if len(body) < 2:
             raise form_error(case, "has as without a name after it")
@@ -668,7 +690,7 @@ def case_parse(case):
     if len(body) and body[0] == "if":
         if len(body) < 2:
             raise form_error(case, "has if without a guard after it")
-        guard_dict = {"guard": expr_compile(body[1])}
+        guard_dict = {"guard": (yield expr_steps(body[1]))}
         body = body[2:]
         if len(body) and body[0] == "as":
             raise form_error(
@@ -676,7 +698,9 @@ def case_parse(case):
             )
     if not body:
         raise form_error(case, "needs a body")
-    return ast.match_case(pattern=pattern, **guard_dict, body=stmt_list_compile(body))
+    return ast.match_case(
+        pattern=pattern, **guard_dict, body=(yield stmt_list_steps(body))
+    )
 
 
 def match_compile(sexp):
@@ -686,8 +710,12 @@ def match_compile(sexp):
     for case in cases:
         if not clause_p(case, ("case",)):
             raise form_error(case, f"expects (case ...) clauses, got {case}", "match")
-    cases = list(map(case_parse, cases))
-    return ast.Match(subject=expr_compile(subject), cases=cases, **sexp.position_info)
+    case_nodes = []
+    for case in cases:
+        case_nodes.append((yield case_parse(case)))
+    return ast.Match(
+        subject=(yield expr_steps(subject)), cases=case_nodes, **sexp.position_info
+    )
 
 
 def type_params_parse(glued):
@@ -722,7 +750,7 @@ def type_params_parse(glued):
             bound = q.popleft()
             if kind != "TypeVar":
                 raise LispyCompileError(f"cannot use bound with {kind}", bound)
-            fields["bound"] = expr_compile(bound.value)
+            fields["bound"] = yield expr_steps(bound.value)
             last = bound
         if has_default:
             require("type-param-default", param)
@@ -731,7 +759,7 @@ def type_params_parse(glued):
                     f"type parameter {symbol.value} needs a default value", param
                 )
             last = q.popleft()
-            fields["default_value"] = expr_compile(last)
+            fields["default_value"] = yield expr_steps(last)
         # As in ast.parse, the node spans its name through any bound and default.
         span = {
             **target.position_info,
@@ -754,7 +782,7 @@ def def_name_parse(name, form):
             )
         return [
             symbol_name(name.head, ast.Store),
-            {"type_params": type_params_parse(name)},
+            {"type_params": (yield type_params_parse(name))},
         ]
     if not plain_name_p(name):
         raise form_error(name, f"expects a name, got {name}", form)
@@ -778,14 +806,14 @@ def type_alias_compile(sexp):
     require("type-alias", sexp)
     [_, name, value] = sexp.list
     [head, type_params] = (
-        [name.head, type_params_parse(name)]
+        [name.head, (yield type_params_parse(name))]
         if isinstance(name, GluedHead)
         else [name, []]
     )
     return ast.TypeAlias(
         name=name_compile(head, ast.Store),
         type_params=type_params,
-        value=expr_compile(value),
+        value=(yield expr_steps(value)),
         **sexp.position_info
     )
 
@@ -807,8 +835,10 @@ def deco_compile(sexp, decorator_list):
             "deco",
         )
     new_deco_list = decorator.list if isinstance(decorator, Bracket) else [decorator]
-    return stmt_compile(
-        def_statement, (decorator_list if decorator_list else []) + new_deco_list
+    return (
+        yield stmt_steps(
+            def_statement, (decorator_list if decorator_list else []) + new_deco_list
+        )
     )
 
 
@@ -829,7 +859,7 @@ def definition_parts(sexp, header):
 
 def functiondef_compile(sexp, decorator_list, async_p=False):
     [fnname, args, body] = definition_parts(sexp, "args")
-    [name, type_params] = def_name_parse(fnname, str(sexp.op))
+    [name, type_params] = yield def_name_parse(fnname, str(sexp.op))
     if body and isinstance(body[0], Annotation):
         [ann, *body] = body
     else:
@@ -837,12 +867,14 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
     return (ast.AsyncFunctionDef if async_p else ast.FunctionDef)(
         name=name,
         **type_params,
-        args=trampoline(def_args_parse(args)),
-        body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
-        decorator_list=list(map(expr_compile, decorator_list))
-        if decorator_list
-        else [],
-        returns=expr_compile(ann.value) if ann else None,
+        args=(yield def_args_parse(args)),
+        body=(
+            (yield stmt_list_steps(body)) if body else [ast.Pass(**sexp.position_info)]
+        ),
+        decorator_list=(
+            (yield expr_list_steps(decorator_list)) if decorator_list else []
+        ),
+        returns=(yield expr_steps(ann.value)) if ann else None,
         **sexp.position_info
     )
 
@@ -855,7 +887,7 @@ def return_compile(sexp):
     # An empty [] or {} node is falsy (Expression.__len__): test presence by length.
     if len(sexp) > 2:
         raise LispyCompileError("(return ...) takes at most one value", sexp)
-    value = expr_compile(sexp[1]) if len(sexp) > 1 else None
+    value = (yield expr_steps(sexp[1])) if len(sexp) > 1 else None
     return ast.Return(value=value, **sexp.position_info)
 
 
@@ -887,97 +919,109 @@ def classdef_p(sexp):
 
 def classdef_compile(sexp, decorator_list):
     [clsname, args, body] = definition_parts(sexp, "bases")
-    [name, type_params] = def_name_parse(clsname, str(sexp.op))
+    [name, type_params] = yield def_name_parse(clsname, str(sexp.op))
     # Bases are a call's arguments, as in Python: class A(B, *bs, m=M, **kw).
-    [bases, keywords] = trampoline(call_args_parse(args))
+    [bases, keywords] = yield call_args_parse(args)
     return ast.ClassDef(
         name=name,
         **type_params,
         bases=bases,
         keywords=keywords,
-        body=stmt_list_compile(body) if body else [ast.Pass(**sexp.position_info)],
-        decorator_list=list(map(expr_compile, decorator_list))
-        if decorator_list
-        else [],
+        body=(
+            (yield stmt_list_steps(body)) if body else [ast.Pass(**sexp.position_info)]
+        ),
+        decorator_list=(
+            (yield expr_list_steps(decorator_list)) if decorator_list else []
+        ),
         **sexp.position_info
     )
 
 
+def stmt_steps(sexp, decorator_list=None):
+    """The steps compiling one statement: its form's generator, or the node
+    (or list of nodes) itself for a statement with no sub-form (see expr.py's
+    module docstring)."""
+    return (
+        expr_wrapper(sexp)
+        if not paren_p(sexp) or not len(sexp)
+        else do_compile(sexp)
+        if do_p(sexp)
+        else assign_compile(sexp)
+        if assign_p(sexp)
+        else augassign_compile(sexp)
+        if augassign_p(sexp)
+        else del_compile(sexp)
+        if atom_text(sexp.op) == "del"
+        else ast.Pass(**sexp.position_info)
+        if atom_text(sexp.op) == "pass"
+        else import_compile(sexp)
+        if atom_text(sexp.op) == "import"
+        else importfrom_compile(sexp)
+        if atom_text(sexp.op) == "from"
+        else import_compile(sexp, lazy=True)
+        if atom_text(sexp.op) == "lazy-import"
+        else importfrom_compile(sexp, lazy=True)
+        if atom_text(sexp.op) == "lazy-from"
+        else if_stmt_compile(sexp)
+        if if_p(sexp)
+        else while_compile(sexp)
+        if while_p(sexp)
+        else for_compile(sexp)
+        if for_p(sexp)
+        else ast.Break(**sexp.position_info)
+        if atom_text(sexp.op) == "break"
+        else ast.Continue(**sexp.position_info)
+        if atom_text(sexp.op) == "continue"
+        else raise_compile(sexp)
+        if atom_text(sexp.op) == "raise"
+        else assert_compile(sexp)
+        if atom_text(sexp.op) == "assert"
+        else try_compile(sexp)
+        if atom_text(sexp.op) == "try"
+        else with_compile(sexp)
+        if atom_text(sexp.op) == "with"
+        else match_compile(sexp)
+        if atom_text(sexp.op) == "match"
+        else deco_compile(sexp, decorator_list)
+        if deco_p(sexp)
+        else functiondef_compile(sexp, decorator_list)
+        if functiondef_p(sexp)
+        else return_compile(sexp)
+        if return_p(sexp)
+        else global_compile(sexp)
+        if atom_text(sexp.op) == "global"
+        else nonlocal_compile(sexp)
+        if atom_text(sexp.op) == "nonlocal"
+        else classdef_compile(sexp, decorator_list)
+        if classdef_p(sexp)
+        else functiondef_compile(sexp, decorator_list, async_p=True)
+        if atom_text(sexp.op) == "async-def"
+        else for_compile(sexp, async_p=True)
+        if atom_text(sexp.op) == "async-for"
+        else with_compile(sexp, async_p=True)
+        if atom_text(sexp.op) == "async-with"
+        else type_alias_compile(sexp)
+        if type_alias_p(sexp)
+        else expr_wrapper(sexp)
+    )
+
+
+def stmt_list_steps(sexp_list):
+    """The statements of ``sexp_list``, compiled in order; a form compiling to
+    several (do, from) contributes them all."""
+    stmts = []
+    for sexp in sexp_list:
+        stmt = yield stmt_steps(sexp)
+        if isinstance(stmt, list):
+            stmts.extend(stmt)
+        else:
+            stmts.append(stmt)
+    return stmts
+
+
 def stmt_compile(sexp, decorator_list=None):
-    try:
-        return (
-            expr_wrapper(sexp)
-            if not paren_p(sexp) or not len(sexp)
-            else do_compile(sexp)
-            if do_p(sexp)
-            else assign_compile(sexp)
-            if assign_p(sexp)
-            else augassign_compile(sexp)
-            if augassign_p(sexp)
-            else del_compile(sexp)
-            if atom_text(sexp.op) == "del"
-            else ast.Pass(**sexp.position_info)
-            if atom_text(sexp.op) == "pass"
-            else import_compile(sexp)
-            if atom_text(sexp.op) == "import"
-            else importfrom_compile(sexp)
-            if atom_text(sexp.op) == "from"
-            else import_compile(sexp, lazy=True)
-            if atom_text(sexp.op) == "lazy-import"
-            else importfrom_compile(sexp, lazy=True)
-            if atom_text(sexp.op) == "lazy-from"
-            else if_stmt_compile(sexp)
-            if if_p(sexp)
-            else while_compile(sexp)
-            if while_p(sexp)
-            else for_compile(sexp)
-            if for_p(sexp)
-            else ast.Break(**sexp.position_info)
-            if atom_text(sexp.op) == "break"
-            else ast.Continue(**sexp.position_info)
-            if atom_text(sexp.op) == "continue"
-            else raise_compile(sexp)
-            if atom_text(sexp.op) == "raise"
-            else assert_compile(sexp)
-            if atom_text(sexp.op) == "assert"
-            else try_compile(sexp)
-            if atom_text(sexp.op) == "try"
-            else with_compile(sexp)
-            if atom_text(sexp.op) == "with"
-            else match_compile(sexp)
-            if atom_text(sexp.op) == "match"
-            else deco_compile(sexp, decorator_list)
-            if deco_p(sexp)
-            else functiondef_compile(sexp, decorator_list)
-            if functiondef_p(sexp)
-            else return_compile(sexp)
-            if return_p(sexp)
-            else global_compile(sexp)
-            if atom_text(sexp.op) == "global"
-            else nonlocal_compile(sexp)
-            if atom_text(sexp.op) == "nonlocal"
-            else classdef_compile(sexp, decorator_list)
-            if classdef_p(sexp)
-            else functiondef_compile(sexp, decorator_list, async_p=True)
-            if atom_text(sexp.op) == "async-def"
-            else for_compile(sexp, async_p=True)
-            if atom_text(sexp.op) == "async-for"
-            else with_compile(sexp, async_p=True)
-            if atom_text(sexp.op) == "async-with"
-            else type_alias_compile(sexp)
-            if type_alias_p(sexp)
-            else expr_wrapper(sexp)
-        )
-    except RecursionError:
-        # As in expr_compile: a form nested past Python's recursion limit.
-        # A handler that hits the limit again building the error leaves it to
-        # the next level's, which retries a level up.
-        raise nesting_error(sexp) from None
+    return trampoline(stmt_steps(sexp, decorator_list))
 
 
 def stmt_list_compile(sexp_list):
-    return reduce(
-        lambda x, y: x + (y if isinstance(y, list) else [y]),
-        map(stmt_compile, sexp_list),
-        [],
-    )
+    return trampoline(stmt_list_steps(sexp_list))

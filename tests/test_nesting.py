@@ -369,14 +369,15 @@ EXPRESSION_DEPTHS = [
 ]
 
 
-def assert_compiles_at_depth(form, cls, compiles, scope):
+def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
     """``form`` (source, or a function building it as nodes) compiles to an
     AST with DEPTH ``cls`` nodes, which compile() takes when ``compiles``;
     where compile() is bound by the recursion limit (3.11) it is refused as
-    too deep, positioned on line 3. Asserts on plain values only: a failing
+    too deep, positioned on line 3, unless the AST is ``flat`` (do, deco
+    nest in lispython only). Asserts on plain values only: a failing
     comparison would repr a deep node or AST after the timer stopped."""
     forms = [form()] if callable(form) else parse("\n\n" + form)
-    if COMPILE_BOUND:
+    if COMPILE_BOUND and not flat:
         with pytest.raises(LispyCompileError) as info:
             macroexpand_then_compile(forms, scope)
         assert info.value.msg == NESTING_MESSAGE
@@ -396,6 +397,110 @@ def assert_compiles_at_depth(form, cls, compiles, scope):
 )
 def test_expressions_nest_past_the_recursion_limit(form, cls, compiles, scope):
     assert_compiles_at_depth(form, cls, compiles, scope)
+
+
+TYPE_PARAMS = (
+    tuple(features.running_version())[:2]
+    >= features.FEATURES["type-params"].min_version
+)
+
+# As EXPRESSION_DEPTHS, and whether the AST is flat. compile() is skipped
+# for nested loop, with and try blocks (CPython refuses over 20), nested
+# scopes (def, class: seconds) and nested match (3.12/3.13 refuse it).
+STATEMENT_DEPTHS = [
+    ("do", "(do (f) " * DEPTH + ")" * DEPTH, ast.Call, True, True),
+    ("if-then", "(if c " * DEPTH + "(f)" + ")" * DEPTH, ast.If, True, False),
+    ("if-else", "(if c (f) " * DEPTH + "(f)" + ")" * DEPTH, ast.If, True, False),
+    ("while-body", "(while c " * DEPTH + "(f)" + ")" * DEPTH, ast.While, False, False),
+    ("for-body", "(for x in xs " * DEPTH + "(f)" + ")" * DEPTH, ast.For, False, False),
+    ("with-body", "(with [a] " * DEPTH + "(f)" + ")" * DEPTH, ast.With, False, False),
+    (
+        "try-body",
+        "(try " * DEPTH + "(f)" + " (finally (g)))" * DEPTH,
+        ast.Try,
+        False,
+        False,
+    ),
+    (
+        "def-body",
+        "(def f [] " * DEPTH + "(g)" + ")" * DEPTH,
+        ast.FunctionDef,
+        False,
+        False,
+    ),
+    (
+        "class-body",
+        "(class C [] " * DEPTH + "(g)" + ")" * DEPTH,
+        ast.ClassDef,
+        False,
+        False,
+    ),
+    ("deco", "(deco d " * DEPTH + "(def f [] 1)" + ")" * DEPTH, ast.Name, True, True),
+    (
+        "case-body",
+        "(match x (case 1 " * DEPTH + "(f)" + "))" * DEPTH,
+        ast.Match,
+        False,
+        False,
+    ),
+    (
+        "sequence-pattern",
+        "(match x (case " + "[" * DEPTH + "a" + "]" * DEPTH + " 1))",
+        ast.MatchSequence,
+        True,
+        False,
+    ),
+    (
+        "class-pattern",
+        "(match x (case " + "(C " * DEPTH + "a" + ")" * DEPTH + " 1))",
+        ast.MatchClass,
+        True,
+        False,
+    ),
+    (
+        "mapping-pattern",
+        "(match x (case " + "{1 " * DEPTH + "a" + "}" * DEPTH + " 1))",
+        ast.MatchMapping,
+        True,
+        False,
+    ),
+    (
+        "or-pattern",
+        "(match x (case " + "(| 1 " * DEPTH + "2" + ")" * DEPTH + " 1))",
+        ast.MatchOr,
+        True,
+        False,
+    ),
+    (
+        "case-as",
+        "(match x (case " + "[" * DEPTH + "a" + "]" * DEPTH + " as y 1))",
+        ast.MatchSequence,
+        True,
+        False,
+    ),
+    pytest.param(
+        "(def f[T ^" + "[" * DEPTH + "int" + "]" * DEPTH + "] [] 1)",
+        ast.List,
+        True,
+        False,
+        id="type-param-bound",
+        marks=pytest.mark.skipif(not TYPE_PARAMS, reason="type params are 3.12+"),
+    ),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "form, cls, compiles, flat",
+    [
+        pytest.param(*case[1:], id=case[0]) if type(case) is tuple else case
+        for case in STATEMENT_DEPTHS
+    ],
+)
+def test_statements_and_patterns_nest_past_the_recursion_limit(
+    form, cls, compiles, flat, scope
+):
+    assert_compiles_at_depth(form, cls, compiles, scope, flat)
 
 
 @pytest.mark.parametrize(
