@@ -140,6 +140,9 @@ def attribute_p(sexp):
 
 def attribute_compile(sexp, ctx):
     [_, value, *attrs] = sexp.list
+    if not attrs:
+        # (. x) is x itself: its target context must reach the name home.
+        return expr_compile(value, ctx)
     rst = expr_compile(value, ast.Load)
     position_info = {**sexp.position_info}
     for [i, attr] in enumerate(attrs):

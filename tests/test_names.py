@@ -126,6 +126,13 @@ def assert_refused(src, msg, at):
         ("(= (. a __debug__) 1)", ASSIGN_DEBUG, "__debug__"),
         ("(del a.__debug__)", "cannot delete __debug__", "a.__debug__"),
         ("(del __debug__)", "cannot delete __debug__", "__debug__"),
+        ("(:= (. __debug__) 1)", ASSIGN_DEBUG, "__debug__"),
+        ("(:= (. (. __debug__)) 1)", ASSIGN_DEBUG, "__debug__"),
+        ("(= (. __debug__) 1)", ASSIGN_DEBUG, "__debug__"),
+        ("(del (. __debug__))", "cannot delete __debug__", "__debug__"),
+        ("(for (. __debug__) in x 1)", ASSIGN_DEBUG, "__debug__"),
+        ("(+= (. __debug__) 1)", ASSIGN_DEBUG, "__debug__"),
+        ("(= (, (. __debug__) b) 1)", ASSIGN_DEBUG, "__debug__"),
         ("(import __debug__)", ASSIGN_DEBUG, "__debug__"),
         ("(import __debug__.a)", ASSIGN_DEBUG, "__debug__.a"),
         ("(import a.b as __debug__)", ASSIGN_DEBUG, "__debug__"),
@@ -232,6 +239,8 @@ def test_type_parameter_names(src, msg, at):
         ("(. a -)", "a._"),
         ("(f -)", "f(_)"),
         ("(:= (. a) 1)", "(a := 1)"),
+        ("(= (. a) 1)", "a = 1"),
+        ("(. a)", "a"),
     ],
 )
 def test_python_names_still_compile(src, python):
