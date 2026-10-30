@@ -1317,11 +1317,22 @@ GLUED_PREFIX_CHAINS = [
     ids=[case[0] for case in GLUED_PREFIX_CHAINS],
 )
 def test_a_prefix_chain_glued_to_a_bracket_past_the_recursion_limit_parses(
-    prefix, glued, wrappers
+    prefix, glued, wrappers, monkeypatch
 ):
+    # Closing the chain must set each wrapper's end once, not walk the
+    # chain below every wrapper again (quadratic, yet within the budget).
+    walked = []
+    update_dict = Wrapper.update_dict
+
+    def counting(self, key, value):
+        walked.append(len(chain(self)))
+        return update_dict(self, key, value)
+
+    monkeypatch.setattr(Wrapper, "update_dict", counting)
     repeat = DEPTH // len(prefix)
     src = "\n" + prefix * repeat + glued
     [form] = parse(src)
+    assert sum(walked) <= 2 * repeat
     found = []
     node = form
     while isinstance(node, Wrapper):
