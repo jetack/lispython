@@ -96,36 +96,14 @@ class Node:
     def get_source(self, indent=0):
         """The form's source text, its first line starting at column ``indent``.
 
-        Rendering is a trampoline, never recursion: each class's ``_source``
-        returns a leaf's text, or is a generator that asks for a child's text
-        with ``text = yield (child, child_indent)`` and returns its own. This
-        loop runs those generators on an explicit stack, so nesting depth costs
-        no Python frames (a form nested past the recursion limit still renders,
-        e.g. in a compile error message or macroexpand output).
+        Rendering is a trampoline (core/utils.py), never recursion: each
+        class's ``_source`` returns a leaf's text, or is a generator that asks
+        for a child's text with ``text = yield _source_of(child, child_indent)``
+        and returns its own, so nesting depth costs no Python frames (a form
+        nested past the recursion limit still renders, e.g. in a compile error
+        message or macroexpand output).
         """
-        result = self._source(indent)
-        if isinstance(result, str):
-            return result
-        stack = [result]
-        value = None
-        while True:
-            try:
-                [child, child_indent] = stack[-1].send(value)
-            except StopIteration as done:
-                stack.pop()
-                if not stack:
-                    return done.value
-                value = done.value
-                continue
-            if not isinstance(child, Node):
-                value = str(child)
-                continue
-            result = child._source(child_indent)
-            if isinstance(result, str):
-                value = result
-            else:
-                stack.append(result)
-                value = None
+        return trampoline(self._source(indent))
 
     def __str__(self):
         return self.get_source()
@@ -140,6 +118,14 @@ class Node:
             if "(" not in other and "[" not in other and "{" not in other:
                 return False
         return str(self) == other
+
+
+def _source_of(child, indent):
+    """A child's rendering as a trampoline step: its text if a leaf, else the
+    generator that renders it; ``str(child)`` for a non-node."""
+    if isinstance(child, Node):
+        return child._source(indent)
+    return str(child)
 
 
 def contains_unquote(node):
@@ -607,7 +593,7 @@ class Paren(Expression):
         # Elements render at indent 0, as str(e) always did.
         texts = []
         for e in self.list:
-            texts.append((yield (e, 0)))
+            texts.append((yield _source_of(e, 0)))
         return "(" + " ".join(texts) + ")"
 
 
@@ -627,7 +613,7 @@ def list_format(q, indent=0, col_max=10):
         else:
             rst += " "
             cur += 1
-        e_src = yield (e, cur)
+        e_src = yield _source_of(e, cur)
         rst += e_src
         if multiline_p(e_src) or cnt == col_max - 1:
             need_newline = True
@@ -639,13 +625,13 @@ def list_format(q, indent=0, col_max=10):
 
 
 def comprehension_format(q, org_indent=0):
-    rst = yield (q.popleft(), 0)
+    rst = yield _source_of(q.popleft(), 0)
     indent = org_indent
     cur = indent + len(rst)
     need_newline = False
     while q:
         e = q.popleft()
-        e_src = yield (e, cur)
+        e_src = yield _source_of(e, cur)
         if need_newline:
             need_newline = False
             rst += "\n" + " " * indent
@@ -684,7 +670,7 @@ class Bracket(Expression):
                 q.popleft()
                 rst += yield from list_format(q, indent)
             elif len(q) > 1 and atom_text(q[1]) in ("for", "async-for"):
-                e_src = yield (q.popleft(), indent)
+                e_src = yield _source_of(q.popleft(), indent)
                 rst += e_src
                 if multiline_p(e_src):
                     rst += "\n" + " " * indent
@@ -714,7 +700,7 @@ class Brace(Expression):
             if len(q) > 2 and atom_text(q[2]) in ("for", "async-for"):
                 any_multiline = False
                 for _ in range(2):
-                    e_src = yield (q.popleft(), indent)
+                    e_src = yield _source_of(q.popleft(), indent)
                     rst += e_src
                     if any_multiline or multiline_p(e_src):
                         any_multiline = True
@@ -733,7 +719,7 @@ class Brace(Expression):
                 while q:
                     any_multiline = False
                     for _ in range(2):
-                        e_src = yield (q.popleft(), indent)
+                        e_src = yield _source_of(q.popleft(), indent)
                         rst += e_src
                         if not q:
                             break
@@ -752,7 +738,7 @@ class Brace(Expression):
 def _prefixed_source(self, indent):
     """``_source`` of a wrapper or quote: its ``source_prefix`` (the one home of
     that prefix, shared with atom_text), then its value rendered at indent 0."""
-    return self.source_prefix + (yield (self.value, 0))
+    return self.source_prefix + (yield _source_of(self.value, 0))
 
 
 class Wrapper(Node):
@@ -785,7 +771,7 @@ class FStrExpr(Wrapper):
         return "FStrExpr(" + repr(self.value) + ")"
 
     def _source(self, indent):
-        return "(FStrExpr " + (yield (self.value, 0)) + ")"
+        return "(FStrExpr " + (yield _source_of(self.value, 0)) + ")"
 
     def _generator_steps(self, in_quasi):
         """Rebuild with conversion, format spec and expression text, so an
@@ -950,8 +936,8 @@ class GluedHead(Node):
 
     def _source(self, indent):
         # The params start where the head's text ends.
-        head = yield (self.head, indent)
-        return head + (yield (self.params, indent + len(head)))
+        head = yield _source_of(self.head, indent)
+        return head + (yield _source_of(self.params, indent + len(head)))
 
 
 class Literal(Node):
