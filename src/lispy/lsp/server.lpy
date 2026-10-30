@@ -34,7 +34,7 @@
 ;; error-message table), so hover and compile errors cannot drift apart. Only
 ;; the explanatory sentence is written here, keyed by FORM-USAGE key.
 (= FORM-PROSE
-  {"def"       "Define a function. Parameters are given in a bracket list. An optional docstring can follow the parameter list."
+  {"def"       "Define a function. Arguments are given in a bracket list. An optional docstring can follow the argument list."
    "async-def" "Define an async function (coroutine)."
    "class"     "Define a class. Bases are given in a bracket list."
    "if"        "Conditional statement. Compiles to Python `if/else`."
@@ -62,6 +62,11 @@
 (for op in augassignop-dict
   (= (sub FORM-PROSE op) f"Augmented assignment (`target {op} value`)."))
 
+;; Extra usage lines shown above the FORM_USAGE line, for a key that is also
+;; an ordinary call: `|` is the n-ary bitwise-OR operator as well as the
+;; or-pattern. Signature help uses the whole code block as its label.
+(= EXTRA-USAGE {"|" "(| a b ...)"})
+
 (def form-docs [usage prose]
   "Hover entries for the statement forms; raises if usage and prose disagree."
   (= usage-keys (set usage))
@@ -73,12 +78,13 @@
       (raise (RuntimeError f"FORM-PROSE out of sync with FORM_USAGE: no prose for {(sorted missing)}, no usage for {(sorted extra)}")))
   (= docs {})
   (for key in prose
-    (= (sub docs key) f"```\n{(sub usage key)}\n```\n\n{(sub prose key)}"))
+    (= lines (+ (ife (in key EXTRA-USAGE) [(sub EXTRA-USAGE key)] []) [(sub usage key)]))
+    (= (sub docs key) f"```\n{(.join "\n" lines)}\n```\n\n{(sub prose key)}"))
   (return docs))
 
 (= HAND-WRITTEN-DOCS
   {;; Forms outside FORM-USAGE
-   "defmacro"  "```\n(defmacro name [params] body...)\n```\n\nDefine a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression."
+   "defmacro"  "```\n(defmacro name [args] body...)\n```\n\nDefine a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression."
    "do"        "```\n(do body...)\n```\n\nA statement block grouping several statements where one statement is expected (e.g. an `if` branch); not an expression."
    "import"    "```\n(import module)\n(import module :as alias)\n```\n\nImport a module."
    "from"      "```\n(from module [names...])\n(from module [name :as alias ...])\n```\n\nImport specific names from a module."
@@ -91,13 +97,13 @@
    "yield"     "```\n(yield value)\n```\n\nYield a value from a generator."
    "yield-from" "```\n(yield-from iterable)\n```\n\nYield all values from a sub-generator."
    "await"     "```\n(await expr)\n```\n\nAwait a coroutine."
-   "lambda"    "```\n(lambda [params] body)\n```\n\nAnonymous function (lambda expression)."
+   "lambda"    "```\n(lambda [args] body)\n```\n\nAnonymous function (lambda expression)."
    ;; Expression forms
    "ife"       "```\n(ife condition then-expr else-expr)\n```\n\nTernary conditional expression (`then-expr if condition else else-expr`)."
    "."         "```\n(. obj attr)\n```\n\nAttribute access (`obj.attr`)."
    "sub"       "```\n(sub obj index)\n```\n\nSubscript access (`obj[index]`)."
    ","         "```\n(, a b c)\n```\n\nTuple literal."
-   "fn"        "```\n(fn [params] body)\n```\n\nLambda alias — same as `lambda`."
+   "fn"        "```\n(fn [args] body)\n```\n\nLambda alias — same as `lambda`."
    ;; Operators
    "+"  "Arithmetic addition / unary positive."
    "-"  "Arithmetic subtraction / unary negative."

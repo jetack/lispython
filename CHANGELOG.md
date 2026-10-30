@@ -32,7 +32,11 @@ follows [Semantic Versioning](https://semver.org/).
   line as the compiler's error messages (`(def name [args] body...)`,
   `(for target in iterable body...)`), and now cover the `except`,
   `except*`, `else`, `finally` and `case` clauses, augmented assignment
-  (`+=` and friends), and `|` as an or-pattern.
+  (`+=` and friends), and `|` as an or-pattern. For `|`, hover and signature
+  help show both the bitwise-OR operator and the or-pattern usage.
+  Completion now lists the augmented assignment operators and the `except`,
+  `except*`, `else`, `finally` and `case` clauses as special forms.
+  Hover text for `defmacro`, `lambda` and `fn` says `[args]`, matching `def`.
 - Code a macro builds (from a quasiquote template) takes the position of the
   macro call, so a traceback or compile error in it points at that call
   instead of line 0; arguments written by the user keep their own positions.

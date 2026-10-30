@@ -235,8 +235,10 @@ FORM_KEYS = sorted(k for k in FORM_USAGE if k not in PATTERN_KINDS)
 @pytest.mark.parametrize("key", FORM_KEYS)
 def test_form_hover_usage_is_the_compilers(key):
     doc = server.SPECIAL_FORM_DOCS[key]
-    assert doc.startswith("```\n" + FORM_USAGE[key] + "\n```\n\n")
-    assert re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1) == FORM_USAGE[key]
+    lines = re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1).split("\n")
+    assert lines.count(FORM_USAGE[key]) == 1
+    others = [line for line in lines if line != FORM_USAGE[key]]
+    assert others == ([server.EXTRA_USAGE[key]] if key in server.EXTRA_USAGE else [])
 
 
 def test_form_prose_must_match_form_usage():
@@ -253,4 +255,7 @@ def test_def_hover_shows_the_compilers_arguments():
 
 
 def test_or_operator_and_or_pattern_share_one_entry():
-    assert "or-pattern" in server.SPECIAL_FORM_DOCS["|"]
+    doc = server.SPECIAL_FORM_DOCS["|"]
+    block = re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1)
+    assert block == "(| a b ...)\n" + FORM_USAGE["|"]
+    assert "or-pattern" in doc
