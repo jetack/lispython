@@ -374,3 +374,8 @@ class TestNotCallableHead:
     )
     def test_callable_heads_compile(self, lispy, python):
         assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))
+
+
+def test_attribute_with_a_non_name_attr_is_refused_at_the_attr():
+    # Paren has no .name: this once escaped as an AttributeError.
+    assert_refused_at("(. a (b))", "expected a name, got (b)", "(b)")

@@ -344,13 +344,14 @@ def test_the_check_refuses_exactly_what_compile_rejects(make):
         [sys.executable, "-c", EXACT_BOUNDARY, make],
         capture_output=True,
         text=True,
-        check=True,
+        timeout=120,
     )
+    assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["RecursionError", "compiled", "refused"]
 
 
 @pytest.mark.parametrize("bound", [True, False])
-def test_the_check_follows_the_probe(bound, scope, monkeypatch):
+def test_the_check_follows_the_version_comparison(bound, scope, monkeypatch):
     monkeypatch.setattr(
         features, "compile_depth_follows_recursion_limit", lambda: bound
     )
@@ -471,3 +472,20 @@ def test_a_compound_node_equals_its_rendering():
     assert Keyword(Symbol("x")) == ":x"
     assert Paren(Symbol("a"), Symbol("b")) != "a"
     assert Paren(Symbol("for")) != "for"
+
+
+# Against a pattern rendered or re-walked at every level, depth 40 is 2**40
+# steps: only the alarm would end it.
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "[" * 40 + "a" + "]" * 40,
+        "(C " * 40 + "a" + ")" * 40,
+        "{1 " * 40 + "a" + "}" * 40,
+    ],
+    ids=["sequence", "class", "mapping"],
+)
+def test_nested_case_patterns_compile_in_linear_time(pattern, scope):
+    [stmt] = compile_src(f"(match x (case {pattern} 1))", scope)
+    assert isinstance(stmt, ast.Match)

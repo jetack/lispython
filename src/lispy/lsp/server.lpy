@@ -89,8 +89,9 @@
 ;; or-pattern. Signature help uses the whole code block as its label.
 (= EXTRA-USAGE {"|" "(| a b ...)"})
 
-(def form-docs [usage prose]
-  "Hover entries for the FORM-USAGE forms; raises if usage and prose disagree."
+(def form-docs [usage prose extras]
+  "Hover entries for the FORM-USAGE forms; raises if usage and prose disagree
+or an extra usage line names no usage key."
   (= usage-keys (set usage))
   (for kind in HEADLESS-FORMS
     (.discard usage-keys kind))
@@ -98,9 +99,12 @@
   (= extra (- (set prose) usage-keys))
   (if (or missing extra)
       (raise (RuntimeError f"FORM-PROSE out of sync with FORM_USAGE: no prose for {(sorted missing)}, no usage for {(sorted extra)}")))
+  (= orphans (- (set extras) (set usage)))
+  (if orphans
+      (raise (RuntimeError f"EXTRA-USAGE names keys with no FORM_USAGE entry: {(sorted orphans)}")))
   (= docs {})
   (for key in prose
-    (= lines (+ (ife (in key EXTRA-USAGE) [(sub EXTRA-USAGE key)] []) [(sub usage key)]))
+    (= lines (+ (ife (in key extras) [(sub extras key)] []) [(sub usage key)]))
     (= (sub docs key) f"```\n{(.join "\n" lines)}\n```\n\n{(sub prose key)}"))
   (return docs))
 
@@ -141,11 +145,15 @@
 
 ;; A hand-written entry sharing a key with FORM-USAGE would silently override
 ;; the derived one in the merge below, so it is refused here.
-(= shadowed (& (set HAND-WRITTEN-DOCS) (set FORM-USAGE)))
-(if shadowed
-    (raise (RuntimeError f"HAND-WRITTEN-DOCS shadows FORM_USAGE entries: {(sorted shadowed)}")))
+(def refuse-shadowing [hand-written usage]
+  "Raises if a hand-written entry shares a key with usage."
+  (= shadowed (& (set hand-written) (set usage)))
+  (if shadowed
+      (raise (RuntimeError f"HAND-WRITTEN-DOCS shadows FORM_USAGE entries: {(sorted shadowed)}"))))
 
-(= SPECIAL-FORM-DOCS {**(form-docs FORM-USAGE FORM-PROSE) **HAND-WRITTEN-DOCS})
+(refuse-shadowing HAND-WRITTEN-DOCS FORM-USAGE)
+
+(= SPECIAL-FORM-DOCS {**(form-docs FORM-USAGE FORM-PROSE EXTRA-USAGE) **HAND-WRITTEN-DOCS})
 
 ;; ---------------------------------------------------------------------------
 ;; Python builtins introspection

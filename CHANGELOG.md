@@ -258,9 +258,10 @@ follows [Semantic Versioning](https://semver.org/).
   Rendering a form and expanding macros no longer recurse, so a form nested
   past Python's recursion limit renders and expands, and compiling one is a
   positioned compile error, "form nested too deeply to compile", instead of
-  a `RecursionError`; the same holds for an AST too deep for CPython's
-  `compile()` (such as `(+ 1 1 ...)` with thousands of operands) or for
-  `ast.unparse` in `l2py`.
+  a `RecursionError`; the same holds for `ast.unparse` in `l2py`, and on
+  Python 3.11 for an AST too deep for CPython's `compile()` (such as
+  `(+ 1 1 ...)` with thousands of operands). On 3.12 and later `compile()`
+  still reports an AST deeper than its own limit as a `RecursionError`.
 
 ## [0.5.0]
 
