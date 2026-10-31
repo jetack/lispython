@@ -88,6 +88,12 @@ def test_diagnostics_still_report_the_error(buffer):
     assert diagnostic.range.start.line == 2
 
 
+def test_a_diagnostics_parse_warning_names_the_document_file():
+    with pytest.warns(SyntaxWarning) as rec:
+        server.compute_diagnostics('(print f"{(g \\"a\\")}")', URI)
+    assert [w.filename for w in rec] == ["/buffer.lpy"]
+
+
 def test_partial_parse_does_not_leak_into_strict_parse(monkeypatch):
     monkeypatch.setattr(features, "running_version", lambda: (3, 11, 13))
     parse(BUFFERS["t-string on an old Python"], partial=True)
@@ -221,7 +227,13 @@ class TestRequireSelection:
         assert "[]" in text and "none" in text
 
     @pytest.mark.parametrize(
-        "form", ["(require m foo)", "(require m [a] b)", '(require m "ab")', "(require m :as x)"]
+        "form",
+        [
+            "(require m foo)",
+            "(require m [a] b)",
+            '(require m "ab")',
+            "(require m :as x)",
+        ],
     )
     def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
         assert self._find(form + "\n(print 1)", "print") is None

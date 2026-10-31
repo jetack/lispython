@@ -224,6 +224,12 @@ f"Hello, {2 * name}!"
 ```
 Replacement fields follow Python's rules: `{{`/`}}` are literal braces,
 `!r`/`!s`/`!a` conversions, format specs with nested fields, and `{x=}`.
+A field is ordinary code, so a string in it is written with plain quotes as in
+Python 3.12+ (`f"{(.get d "k")}"`), on every supported Python. The old
+spelling with `\"` (`f"{(.get d \"k\")}"`) is deprecated: it still compiles,
+with a `SyntaxWarning` (shown by default, as for an invalid escape sequence
+in Python 3.12+), and a string opened with `\"` must be closed by
+`\"`.
 LisPy version
 ```python
 f"{{literal}} {x!r:>{width}} {x=}"

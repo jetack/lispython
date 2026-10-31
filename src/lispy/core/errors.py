@@ -8,8 +8,14 @@ into text.
 """
 
 import contextlib
+import contextvars
 import sys
+import warnings
 from types import SimpleNamespace
+
+# The file compile_errors is compiling, for compile_warning: warnings are
+# issued where they are found, so unlike errors they cannot get it afterwards.
+_COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default=None)
 
 
 class LispyCompileError(SyntaxError):
@@ -90,7 +96,9 @@ def compile_errors(filename, source):
     converted, keeping its positions, which come from the lispython source.
     Wrap parsing and compiling only, never running the code: a SyntaxError
     the program raises at run time is not a lispython compile error.
+    A compile_warning issued meanwhile names ``filename``.
     """
+    token = _COMPILING_FILENAME.set(filename)
     try:
         yield
     except LispyCompileError as err:
@@ -98,6 +106,31 @@ def compile_errors(filename, source):
     except SyntaxError as err:
         converted = LispyCompileError.from_syntax_error(err)
         raise attach_source(converted, filename, source) from err
+    finally:
+        _COMPILING_FILENAME.reset(token)
+
+
+def compile_warning(msg, category, position_info):
+    """Warn ``msg`` at a lispython source position, as CPython's compiler warns
+    (``_PyErr_EmitSyntaxWarning``).
+
+    The warning goes through warnings.warn_explicit at ``position_info``'s
+    line, naming the file compile_errors is compiling (``<unknown>`` outside
+    one), so filters select it as any other warning. Where a filter turns it
+    into an exception of ``category``, that exception becomes a
+    LispyCompileError with the same message at the whole position, as CPython
+    replaces it with a SyntaxError, so every entry point reports it as a
+    compile error; any other exception a filter or hook raises passes through.
+    """
+    filename = _COMPILING_FILENAME.get() or "<unknown>"
+    try:
+        warnings.warn_explicit(msg, category, filename, position_info["lineno"])
+    except category:
+        # ``from None`` hides the warning from the traceback, as CPython
+        # clears it before raising the SyntaxError.
+        raise LispyCompileError(
+            msg, SimpleNamespace(position_info=position_info)
+        ) from None
 
 
 def format_compile_error(err):
@@ -140,4 +173,3 @@ def nesting_error(at, *, recursion_limit, what="compile"):
     if recursion_limit:
         msg += f" (Python's recursion limit is {sys.getrecursionlimit()})"
     return LispyCompileError(msg, _positioned(at))
-
