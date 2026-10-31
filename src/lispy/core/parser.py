@@ -867,7 +867,7 @@ def _parse_into(src, rst):
                 raise extra
             if tktype == "deprecated":
                 if not _PARTIAL.get():
-                    compile_warning(t, DeprecationWarning, position_info)
+                    compile_warning(t, SyntaxWarning, position_info)
             elif tktype == "interpolated-start":
                 stack.append(string_parse(t, tktype, position_info, extra))
             else:

@@ -54,9 +54,12 @@ packages = ["src/lispy"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 # AST constructor misuse (unknown keywords, missing fields) warns on 3.13/3.14
-# and is a TypeError from 3.15: fail the suite on the warning.
+# and is a TypeError from 3.15: fail the suite on the warning. A SyntaxWarning
+# (the deprecated \" in an f-string field, as CPython's invalid escape
+# sequences) fails it too unless the test expects it.
 filterwarnings = [
     "error::DeprecationWarning",
+    "error::SyntaxWarning",
     # pygls (third-party) calls asyncio.iscoroutinefunction, deprecated in 3.14.
     "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
 ]

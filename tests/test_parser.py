@@ -545,7 +545,7 @@ class TestFieldsLexedInPlace:
         assert stmt.value.values[0].value == r'(g "say \"hi\"")='
 
     def test_an_echo_shows_an_escaped_quote_as_written(self):
-        with pytest.warns(DeprecationWarning, match=ESCAPED_QUOTE_DEPRECATED):
+        with pytest.warns(SyntaxWarning, match=ESCAPED_QUOTE_DEPRECATED):
             [stmt] = macroexpand_then_compile(parse(r'f"{(.get d \"k\")=}"'))
         assert stmt.value.values[0].value == r"(.get d \"k\")="
 
@@ -580,15 +580,15 @@ class TestFieldsLexedInPlace:
         ],
     )
     def test_an_escaped_string_is_deprecated_and_reads_as_plain(self, src, py, count):
-        with pytest.warns(DeprecationWarning, match=ESCAPED_QUOTE_DEPRECATED) as rec:
+        with pytest.warns(SyntaxWarning, match=ESCAPED_QUOTE_DEPRECATED) as rec:
             dump = stmt_to_dump(src)
         assert dump == ast.dump(ast.parse(py))
-        assert [w.category for w in rec] == [DeprecationWarning] * count
+        assert [w.category for w in rec] == [SyntaxWarning] * count
         assert all(str(w.message).startswith("f-string: ") for w in rec)
 
     @pytest.mark.skipif(not T_STRINGS, reason="t-strings need Python 3.14")
     def test_an_escaped_string_in_a_t_string_is_deprecated(self):
-        with pytest.warns(DeprecationWarning, match="^t-string: write a plain"):
+        with pytest.warns(SyntaxWarning, match="^t-string: write a plain"):
             [stmt] = macroexpand_then_compile(parse(r't"{(g \"a\")}"'))
         [interpolation] = stmt.value.values
         assert ast.dump(interpolation.value) == ast.dump(
@@ -599,19 +599,19 @@ class TestFieldsLexedInPlace:
 
     def test_the_deprecation_names_the_file_and_line_of_the_opener(self):
         src = '(print\n  f"{(g \\"a\\")}")'
-        with pytest.warns(DeprecationWarning) as rec:
+        with pytest.warns(SyntaxWarning) as rec:
             with compile_errors("demo.lpy", src):
                 parse(src)
         [w] = rec
-        assert re.search(ESCAPED_QUOTE_DEPRECATED, str(w.message))
+        assert re.fullmatch("f-string: " + ESCAPED_QUOTE_DEPRECATED, str(w.message))
         assert (w.filename, w.lineno) == ("demo.lpy", 2)
 
     def test_the_deprecation_outside_compile_errors_names_no_file(self):
         # compile_errors resets the file it set when it exits.
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(SyntaxWarning):
             with compile_errors("demo.lpy", r'f"{(g \"a\")}"'):
                 parse(r'f"{(g \"a\")}"')
-        with pytest.warns(DeprecationWarning) as rec:
+        with pytest.warns(SyntaxWarning) as rec:
             parse(r'f"{(g \"a\")}"')
         assert [w.filename for w in rec] == ["<unknown>"]
 
@@ -625,7 +625,7 @@ class TestFieldsLexedInPlace:
                 with compile_errors("demo.lpy", src):
                     parse(src)
         err = info.value
-        assert re.search(ESCAPED_QUOTE_DEPRECATED, err.msg)
+        assert re.fullmatch("f-string: " + ESCAPED_QUOTE_DEPRECATED, err.msg)
         assert (err.filename, err.lineno, err.offset) == ("demo.lpy", 1, 12)
         assert (err.end_lineno, err.end_offset) == (1, 14)
 

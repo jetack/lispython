@@ -32,6 +32,22 @@ def run_m(cwd: Path, **env_extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_escaped_quote_in_a_field_warns_under_default_filters(tmp_path: Path):
+    # A DeprecationWarning attributed to a .lpy module is hidden by Python's
+    # default filters; a SyntaxWarning is shown.
+    src = tmp_path / "esc.lpy"
+    src.write_text('(print "start")\n(print f"{(.get {"k" 1} \\"k\\")}")\n')
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTHONPATH", "PYTHONSAFEPATH", "PYTHONWARNINGS")
+    }
+    r = subprocess.run([str(LPY), str(src)], env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert f"{src}:2: SyntaxWarning: f-string: write a plain" in r.stderr
+    assert 'not \\"' in r.stderr
+
+
 def test_m_finds_python_module_in_cwd(tmp_path: Path):
     (tmp_path / "cwdmod.py").write_text("print('ran-from-cwd')\n")
     r = run_m(tmp_path)
