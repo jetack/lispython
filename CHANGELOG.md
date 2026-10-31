@@ -18,6 +18,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `\"` inside an f/t-string replacement field is a compile error. A string in
+  a field is written with plain quotes (`f"{(.get d "k")}"`), which works on
+  every supported Python. Code that wrote `f"{(.get d \"k\")}"` must be
+  rewritten.
 - An nREPL eval without `file` is named `<nrepl-N>` (a new N per eval)
   instead of `<nrepl>`, which can break a client that matches `<nrepl>` in
   error text.

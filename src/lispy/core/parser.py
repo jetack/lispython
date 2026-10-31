@@ -1,6 +1,6 @@
 import contextvars
 import re
-from bisect import bisect_left, bisect_right
+from bisect import bisect_right
 from collections import deque
 
 from lispy.core.compiler import features
@@ -58,12 +58,10 @@ _SYMBOL_STOP = _FORM_END + '\\"\\['
 def _token_patterns(in_field, field_level=False):
     """The token patterns, outside replacement fields or inside one.
 
-    Inside a field \\" opens an "escaped" string (it is how a "..." literal
-    holds a string in a field: f"{(.get d \\"H:M:S\\")}"; a token starting
-    with \\" is never valid Python, so the spelling is lispython's own) and
-    ends a symbol. A bare quote opens a string there too, scanned as at the
-    top level (scan_string_body). An escaped triple quote is three \\", never
-    a mix.
+    A field is ordinary code: a quote opens a string there as at the top
+    level (scan_string_body), as in f"{(.get d "k")}". Outside a string, a
+    field's \\" is a "field-escaped-quote" token, which the lexer refuses,
+    and a symbol stops before it (a\\"b), so the refusal is at the backslash.
 
     At the field's own level (``field_level``, outside its brackets) the
     expression ends at a delimiter (``:``, ``}``, or ``!`` not before ``=``):
@@ -76,11 +74,8 @@ def _token_patterns(in_field, field_level=False):
     symbol runs to the next "}", which in a spec chain f"{x:{x:{x:...}}}" is
     past every field, so each field would rescan the rest of the source.
     """
-    quote = '(?:\\\\"){3}|\\\\"|' if in_field else ""
     end = "$|:|!(?!=)" if field_level else "$"
-    stop_ahead = (
-        f'(?=[{_SYMBOL_STOP}]|\\\\"|{end})' if in_field else f"(?=[{_SYMBOL_STOP}]|$)"
-    )
+    stop_ahead = f"(?=[{_SYMBOL_STOP}]|{end})"
     # A symbol character (in a field), and a comment's. ⚠️ Their repeats are
     # possessive (++, *+): a plain + makes re keep a backtracking point per
     # character, hundreds of MB for a long symbol or comment.
@@ -94,7 +89,10 @@ def _token_patterns(in_field, field_level=False):
         ["[\\)\\}\\]]", "closing"],
         # Only the opening of a string (prefix and quote): scan_string_body,
         # the one scanner of string bodies, reads the rest.
-        [f'\\w*(?:{quote}"""|\'\'\'|")', "string"],
+        ['\\w*(?:"""|\'\'\'|")', "string"],
+        # Never matches at the top level, where \ is a symbol character; the
+        # entry is there too so that every pattern list has _TOKEN_LABELS.
+        ['\\\\"' if in_field else "(?!)", "field-escaped-quote"],
         # ' ` ~@ (any wrapper) with no form right after: refused by _parse. ~
         # alone is the invert operator, a symbol.
         [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|{end})", "dangling-quote"],
@@ -174,52 +172,21 @@ def _source_locator(src):
     return locate
 
 
-# The field-quote escape: \" written for " inside a string opened with \" in a
-# replacement field (an "escaped" string, see _token_patterns). ⚠️ It belongs
-# to that string alone, never to everything lexed inside a field: since PEP 701
-# a field also holds strings opened with a bare quote, and in those CPython's
-# own escapes apply (f"{g("say \"hi\"")}", f"{g("a\\")}").
-_FIELD_QUOTE_ESCAPE = re.compile('\\\\(?=")')
-
-
-def _unescape_field_quotes(text):
-    # An escaped string's text with each \" read as " (see above).
-    return text.replace('\\"', '"')
-
-
-def _quote_length(src, i, quote, escaped):
-    """Length of the source text at ``i`` that closes a ``quote`` string, or 0.
-
-    In an ``escaped`` string each " of the quote may be written \\".
-    """
-    if not escaped:
-        return len(quote) if src.startswith(quote, i) else 0
-    j = i
-    for _ in quote:
-        if src.startswith('"', j):
-            j += 1
-        elif src.startswith('\\"', j):
-            j += 2
-        else:
-            return 0
-    return j - i
-
-
-def scan_string_body(src, i, quote, raw, kind, escaped, spec=False):
+def scan_string_body(src, i, quote, raw, kind, spec=False):
     """The one scanner of string bodies: a plain string's whole body, and an
     f/t-string's literal text up to its next field, its end, or the end of a
     format spec.
 
     Scans ``src`` from ``i`` and returns ``[piece, stop, at]``: the
-    text read (source text, escapes unprocessed, ``{{``/``}}`` collapsed, and
-    in an ``escaped`` string \\" read as "), why it stopped, and where:
-    ``"quote"`` at the closing quote, ``"field"`` at a single ``{``,
-    ``"close"`` at a single ``}``, ``"eof"`` at the end of the source. For a
-    plain string (``kind`` "string") braces are ordinary characters. In a
-    format spec (``spec``) no brace is doubled, as in CPython: every ``{``
-    opens a field and the first ``}`` ends the spec. A string not ``escaped``
-    reads as Python reads it, wherever it stands: a backslash and the
-    character after it are one pair (raw too), so \\" never closes it.
+    text read (source text, escapes unprocessed, ``{{``/``}}`` collapsed),
+    why it stopped, and where: ``"quote"`` at the closing quote, ``"field"``
+    at a single ``{``, ``"close"`` at a single ``}``, ``"eof"`` at the end of
+    the source. For a plain string (``kind`` "string") braces are ordinary
+    characters. In a format spec (``spec``) no brace is doubled, as in
+    CPython: every ``{`` opens a field and the first ``}`` ends the spec. A
+    string reads as Python reads it, wherever it stands (a field included):
+    a backslash and the character after it are one pair (raw too), so \\"
+    never closes it.
     """
     interpolated = kind != "string"
     stops = _INTERPOLATED_BODY_STOP if interpolated else _PLAIN_BODY_STOP
@@ -234,33 +201,24 @@ def scan_string_body(src, i, quote, raw, kind, escaped, spec=False):
             buf.append(src[i : m.start()])
         i = m.start()
         c = src[i]
-        if c == "\\" and escaped and src.startswith('"', i + 1):
-            if _quote_length(src, i, quote, escaped):
-                return ["".join(buf), "quote", i]
-            buf.append('"')
-            i += 2
-        elif c == "\\":
+        if c == "\\":
             if i + 1 >= n:
                 buf.append(c)
                 i += 1
             elif not raw and src.startswith("N{", i + 1):
                 close = src.find("}", i + 3)
                 close = n - 1 if close < 0 else close
-                escape = src[i : close + 1]
-                buf.append(_unescape_field_quotes(escape) if escaped else escape)
+                buf.append(src[i : close + 1])
                 i = close + 1
             elif interpolated and src[i + 1] in "{}":
                 # A backslash never escapes a brace: it is a literal backslash.
                 buf.append("\\" if raw else "\\\\")
                 i += 1
-            elif escaped and src.startswith('\\"', i + 1):
-                buf.append('\\"')
-                i += 3
             else:
                 buf.append(src[i : i + 2])
                 i += 2
         elif c in "\"'":
-            if _quote_length(src, i, quote, escaped):
+            if src.startswith(quote, i):
                 return ["".join(buf), "quote", i]
             buf.append(c)
             i += 1
@@ -280,17 +238,15 @@ class _LiteralState:
         "kind",
         "raw",
         "quote",
-        "escaped",
         "start",
         "quote_start",
         "body",
     )
 
-    def __init__(self, kind, raw, quote, escaped, start, quote_start, body):
+    def __init__(self, kind, raw, quote, start, quote_start, body):
         self.kind = kind
         self.raw = raw
         self.quote = quote
-        self.escaped = escaped  # opened with \" in a field (_FIELD_QUOTE_ESCAPE)
         self.start = start  # of the prefix
         self.quote_start = quote_start
         self.body = body
@@ -346,9 +302,6 @@ class _Lexer:
         self.pos = 0
         self.previous = None  # the last token outside any field
         self.done = False
-        # Where each field-quote escape's backslash is, in source order: what
-        # a field's text (_FieldText) drops to read as the field means.
-        self.escapes = []
 
     def run(self):
         while not self.done:
@@ -361,14 +314,6 @@ class _Lexer:
 
     def _emit(self, text, tktype, i, j, extra=None):
         self.tokens.append([text, tktype, self.locate(i, j), extra])
-
-    def _note_escapes(self, i, j):
-        """Record the field-quote escapes in ``src[i:j]``, a span of an escaped
-        string (its quotes or a piece of its body). Spans come in source order,
-        so ``escapes`` stays sorted."""
-        self.escapes.extend(
-            m.start() for m in _FIELD_QUOTE_ESCAPE.finditer(self.src, i, j)
-        )
 
     def _error(self, msg, i, j):
         return LispyCompileError(msg, String('""', **self.locate(i, j)))
@@ -411,6 +356,15 @@ class _Lexer:
         if tktype == "string":
             self._string(start, tk)
             return
+        if tktype == "field-escaped-quote":
+            # lispython's own message, not CPython's: a hint for code that
+            # still opens a field's string with \".
+            msg = (
+                'write a plain " in a replacement field, not \\" '
+                "(a field is ordinary code)"
+            )
+            self._fail(self._error(f"{field.literal.kind}: {msg}", start, start + 1))
+            return
         context = field if field is not None else self
         if tktype == "comma":
             # A comma is whitespace, except right after "(" or "{": (, a b) is a
@@ -440,28 +394,22 @@ class _Lexer:
         string opens a literal, whose body is lexed next."""
         src = self.src
         prefix = _STRING_PREFIX_RE.match(opening).group()
-        quote_text = opening[len(prefix) :]
-        quote = _unescape_field_quotes(quote_text)
+        quote = opening[len(prefix) :]
         lowered = prefix.lower()
         raw = "r" in lowered
         kind = (
             "t-string" if "t" in lowered else "f-string" if "f" in lowered else "string"
         )
-        # Only a field's token pattern lets a quote start with \.
-        escaped = quote_text[0] == "\\"
         body = start + len(opening)
         if kind == "string":
-            [_, stop, at] = scan_string_body(src, body, quote, raw, kind, escaped)
+            [_, stop, at] = scan_string_body(src, body, quote, raw, kind)
             error = None
             if stop == "quote":
-                end = at + _quote_length(src, at, quote, escaped)
+                end = at + len(quote)
             else:
                 end = len(src)
-                error = self._eof_error(kind, quote, body - len(quote_text), body)
+                error = self._eof_error(kind, quote, body - len(quote), body)
             text = src[start:end]
-            if escaped:
-                text = _unescape_field_quotes(text)
-                self._note_escapes(start, end)
             # Plain strings are a single token, carrying any error: the parser
             # raises it after the prefix check.
             self._emit(text, quote, start, end, error)
@@ -472,12 +420,8 @@ class _Lexer:
             self.pos = end
             return
         self._emit(opening, "interpolated-start", start, body, prefix)
-        if escaped:
-            self._note_escapes(start, body)
         self.stack.append(
-            _LiteralState(
-                kind, raw, quote, escaped, start, body - len(quote_text), body
-            )
+            _LiteralState(kind, raw, quote, start, body - len(quote), body)
         )
         self.pos = body
 
@@ -544,15 +488,12 @@ class _Lexer:
             literal.quote,
             literal.raw,
             literal.kind,
-            literal.escaped,
             spec is not None,
         )
         if stop == "eof":
             self._fail(self._eof_error())
             return
         self._emit(piece, "interpolated-middle", self.pos, at)
-        if literal.escaped:
-            self._note_escapes(self.pos, at)
         kind = literal.kind
         if stop == "quote":
             if spec is not None:
@@ -561,10 +502,8 @@ class _Lexer:
                     self._error(f"{kind}: expecting '}}'", spec.open, spec.open + 1)
                 )
                 return
-            end = at + _quote_length(src, at, literal.quote, literal.escaped)
+            end = at + len(literal.quote)
             self._emit(src[at:end], "interpolated-end", at, end)
-            if literal.escaped:
-                self._note_escapes(at, end)
             self.stack.pop()
             context = self.stack[-1] if self.stack else self
             context.previous = [src[at:end], "interpolated-end"]
@@ -612,7 +551,6 @@ class _Lexer:
                 "end": at,
                 "debug": last - 1 if debug else None,  # the "=" of {x=}
                 "echo": self.locate(expr_start, at),
-                "escapes": self.escapes,  # shared, never copied (_FieldText)
             },
         )
         if src[at] == "}":
@@ -654,7 +592,7 @@ class _Lexer:
         if rest == len(src):
             self._end_in_expression()
             return None
-        if _quote_length(src, rest, field.literal.quote, field.literal.escaped):
+        if src.startswith(field.literal.quote, rest):
             # CPython's column: what follows the space after "!" (x! r"), else
             # the quote.
             at = name_start if name_start > bang + 1 else rest
@@ -1192,29 +1130,16 @@ class _FieldText:
     ⚠️ Never sliced up front: an outer field's text holds every field nested
     in it, so a copy per field is memory quadratic in the nesting. The node
     keeps the source (shared) and the span; the few readers (the {x=} echo,
-    Interpolation.str, a quasiquote's rebuild) slice what they need.
-
-    The text drops the backslash of each field-quote escape in it (``escapes``,
-    the lexer's sorted list of their indices), so (.get d \\"k\\") reads
-    (.get d "k"); a string opened with a bare quote keeps its \\" as written.
+    Interpolation.str, a quasiquote's rebuild) slice it when they need it.
     """
 
-    __slots__ = ("src", "start", "end", "escapes")
+    __slots__ = ("src", "start", "end")
 
-    def __init__(self, src, start, end, escapes):
+    def __init__(self, src, start, end):
         [self.src, self.start, self.end] = [src, start, end]
-        self.escapes = escapes
 
     def __str__(self):
-        [src, start, end, escapes] = [self.src, self.start, self.end, self.escapes]
-        lo = bisect_left(escapes, start)
-        hi = bisect_left(escapes, end, lo)
-        parts = []
-        for k in escapes[lo:hi]:
-            parts.append(src[start:k])
-            start = k + 1
-        parts.append(src[start:end])
-        return "".join(parts)
+        return self.src[self.start : self.end]
 
 
 class _Field:
@@ -1262,7 +1187,7 @@ class _Field:
         if data["debug"] is not None:
             [end, self.debug] = [data["debug"], src[data["debug"] : end]]
             self.echo = data["echo"]
-        self.expr_text = _FieldText(src, data["start"], end, data["escapes"])
+        self.expr_text = _FieldText(src, data["start"], end)
 
     def node(self, end):
         conversion = self.conversion

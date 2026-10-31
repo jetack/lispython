@@ -466,6 +466,17 @@ class TestFormatSpecChains:
         assert (info.value.lineno, info.value.offset) == (1, 3)
 
 
+def f_string_reference(expr):
+    """The AST of Python's f"{expr}". Python 3.11 refuses a quote or a
+    backslash in a field, so there ``expr`` is parsed alone and put in the
+    field of f"{_}"."""
+    if sys.version_info >= (3, 12):
+        return ast.parse(f'f"{{{expr}}}"')
+    tree = ast.parse('f"{_}"')
+    tree.body[0].value.values[0].value = ast.parse(expr, mode="eval").body
+    return tree
+
+
 class TestFieldsLexedInPlace:
     """A replacement field is lexed where it stands, as CPython 3.12+ lexes it."""
 
@@ -477,91 +488,74 @@ class TestFieldsLexedInPlace:
         assert repr(inner.list[2].value) == "Str('\"}\"')"
         assert inner.list[2].expr_text == '"}"'
 
-    def test_an_escaped_quote_in_a_field_is_a_quote_at_its_own_column(self):
-        [form] = parse('f"{(.get d \\"k\\")}"')
+    def test_a_string_in_a_field_is_at_its_own_column(self):
+        [form] = parse('f"{(.get d "k")}"')
         field = form.list[2]
         [_, _, key] = field.value.list
         assert repr(key) == "Str('\"k\"')"
         assert field.expr_text == '(.get d "k")'
-        # Columns are the source's: \"k\" is 5 characters wide.
-        assert (key.col_offset, key.end_col_offset) == (11, 16)
-        assert (field.value.end_col_offset, field.end_col_offset) == (17, 18)
+        assert (key.col_offset, key.end_col_offset) == (11, 14)
+        assert (field.value.end_col_offset, field.end_col_offset) == (15, 16)
 
     @pytest.mark.parametrize(
-        ["src", "py"],
+        ["src", "expr"],
         [
-            # Since PEP 701 a field holds strings opened with a bare quote, and
-            # CPython's escapes apply in them: \" is a quote, \\ a backslash.
-            # On 3.11 the reference is a spelling without a backslash in the
-            # field where one exists; a case with none is skipped there.
-            *[
-                pytest.param(
-                    src,
-                    py,
-                    marks=pytest.mark.skipif(
-                        sys.version_info < (3, 12),
-                        reason="3.11 refuses a backslash in a field: no reference AST",
-                    ),
-                    id=name,
-                )
-                for [name, src, py] in [
-                    ["escaped-backslash-closes", r'f"{(g "a\\")}"', r'f"{g("a\\")}"'],
-                    [
-                        "escaped-backslash-then-quote",
-                        r'f"{(g "a\\\"b")}"',
-                        r'f"{g("a\\\"b")}"',
-                    ],
-                    ["raw-escaped-quote", r'f"{(g r"a\"b")}"', r'f"{g(r"a\"b")}"'],
-                    ["raw-backslash-closes", r'f"{(g r"a\\")}"', r'f"{g(r"a\\")}"'],
-                    [
-                        "raw-triple-single-quoted-keeps-backslash",
-                        r"""f"{(g r'''a\"b''')}" """.strip(),
-                        r"""f"{g(r'''a\"b''')}" """.strip(),
-                    ],
-                ]
-            ],
+            # A field holds strings opened with a bare quote, and CPython's
+            # escapes apply in them: \" is a quote, \\ a backslash.
+            pytest.param(r'f"{(g "a\\")}"', r'g("a\\")', id="escaped-backslash-closes"),
             pytest.param(
-                r'f"{(g "say \"hi\"")}"',
-                r'f"{g("say \"hi\"")}"'
-                if sys.version_info >= (3, 12)
-                else """f'''{g('say "hi"')}'''""",
-                id="escaped-quote",
+                r'f"{(g "a\\\"b")}"', r'g("a\\\"b")', id="escaped-backslash-then-quote"
+            ),
+            pytest.param(r'f"{(g r"a\"b")}"', r'g(r"a\"b")', id="raw-escaped-quote"),
+            pytest.param(r'f"{(g r"a\\")}"', r'g(r"a\\")', id="raw-backslash-closes"),
+            pytest.param(
+                r"""f"{(g r'''a\"b''')}" """.strip(),
+                r"g(r'''a\"b''')",
+                id="raw-triple-single-quoted-keeps-backslash",
             ),
             pytest.param(
-                r'f"{f"x\"y"}"',
-                r'f"{f"x\"y"}"'
-                if sys.version_info >= (3, 12)
-                else """f'''{f'x"y'}'''""",
-                id="nested-f-string-escaped-quote",
-            ),
-            # A string opened with \" keeps lispython's field-quote escape.
-            pytest.param(
-                r'f"{(.get d \"k\")}"',
-                """f"{d.get('k')}\"""",
-                id="opened-with-escaped-quote",
+                r'f"{(g "say \"hi\"")}"', r'g("say \"hi\"")', id="escaped-quote"
             ),
             pytest.param(
-                r'f"{(g \"a\\"b\")}"',
-                """f'''{g('a"b')}'''""",
-                id="escaped-quote-in-opened-with-escaped-quote",
+                r'f"{f"x\"y"}"', r'f"x\"y"', id="nested-f-string-escaped-quote"
             ),
         ],
     )
-    def test_a_bare_quoted_string_in_a_field_reads_as_python(self, src, py):
-        assert stmt_to_dump(src) == ast.dump(ast.parse(py))
+    def test_a_bare_quoted_string_in_a_field_reads_as_python(self, src, expr):
+        assert stmt_to_dump(src) == ast.dump(f_string_reference(expr))
+
+    def test_an_echo_is_the_field_source_text(self):
+        [stmt] = macroexpand_then_compile(parse(r'f"{(g "say \"hi\"")=}"'))
+        assert stmt.value.values[0].value == r'(g "say \"hi\"")='
 
     @pytest.mark.parametrize(
-        ["src", "echo"],
+        ["src", "kind", "at"],
         [
-            (r'f"{(g "say \"hi\"")=}"', r'(g "say \"hi\"")='),
-            (r'f"{(.get d \"k\")=}"', '(.get d "k")='),
-            (r'f"{(g \"a\\"b\" "c\"d")=}"', r'(g "a\"b" "c\"d")='),
+            pytest.param(r'f"{(g \"a\")}"', "f", (1, 7), id="opens-a-string"),
+            pytest.param(r'f"{(.get d \"k\")}"', "f", (1, 12), id="after-a-symbol"),
+            pytest.param(r'f"{(g \"\"\"a\"\"\")}"', "f", (1, 7), id="triple"),
+            pytest.param(r'f"{x\"}"', "f", (1, 5), id="ends-a-symbol"),
+            pytest.param(r'f"{(g a\"b")}"', "f", (1, 8), id="inside-a-symbol"),
+            pytest.param(
+                r't"{(g \"a\")}"',
+                "t",
+                (1, 7),
+                marks=pytest.mark.skipif(not T_STRINGS, reason="needs Python 3.14"),
+                id="t-string",
+            ),
+            pytest.param(r'f"{x:{(g \"a\")}}"', "f", (1, 10), id="in-a-format-spec"),
         ],
-        ids=["bare-quoted-keeps-escape", "opened-with-escaped-quote", "both"],
     )
-    def test_an_echo_drops_only_the_field_quote_escapes(self, src, echo):
-        [stmt] = macroexpand_then_compile(parse(src))
-        assert stmt.value.values[0].value == echo
+    def test_an_escaped_quote_outside_a_string_in_a_field_is_refused(
+        self, src, kind, at
+    ):
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == (
+            f'{kind}-string: write a plain " in a replacement field, '
+            'not \\" (a field is ordinary code)'
+        )
+        assert (info.value.lineno, info.value.offset) == at
 
     @pytest.mark.parametrize(
         ["src", "form"],

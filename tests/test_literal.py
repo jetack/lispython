@@ -57,17 +57,16 @@ c"''')
         )
 
     def test_f_string_with_nested_quotes(self):
-        # F-string with nested double-quoted string inside braces
-        # Uses raw string to have literal backslash-quote as in .lpy files
+        # A string in a field uses the f-string's own quote, as in Python 3.12+.
         assert stmt_to_dump(
-            r'f"Started at {(.strftime (datetime.now) \"%Y-%m-%d %H:%M:%S\")}"'
+            'f"Started at {(.strftime (datetime.now) "%Y-%m-%d %H:%M:%S")}"'
         ) == ast.dump(
             ast.parse("f\"Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\"")
         )
 
     def test_f_string_with_colon_in_nested_string(self):
         # Colon inside nested string should not be treated as format spec
-        assert stmt_to_dump(r'f"time: {(.get d \"H:M:S\")}"') == ast.dump(
+        assert stmt_to_dump('f"time: {(.get d "H:M:S")}"') == ast.dump(
             ast.parse("f\"time: {d.get('H:M:S')}\"")
         )
 
