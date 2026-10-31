@@ -140,10 +140,7 @@ def import_name(sexp, form, dotted=True):
 def parse_names(names, form, from_p=False):
     """The aliases of an import's names: ``name`` or ``name as alias``.
 
-    Every part goes through the name model; the name the statement binds (the
-    alias, else the first part of an import's module, else the imported
-    name) as a binding, so ``import __debug__`` is refused and
-    ``import __debug__ as x`` is not.
+    Every part goes through the name model.
     """
     if names == "*":
         return [ast.alias(name="*", **names.position_info)]
@@ -152,16 +149,11 @@ def parse_names(names, form, from_p=False):
     while q:
         n = import_name(q.popleft(), form, dotted=not from_p)
         aliased = len(q) > 1 and q[0] == "as"
-        name_ctx = ast.Load if aliased else ast.Store
-        name = (
-            symbol_name(n, name_ctx) if from_p else module_path(n, name_ctx)[0]
-        )
+        name = symbol_name(n) if from_p else module_path(n)[0]
         alias = ast.alias(name=name, **n.position_info)
         if aliased:
             q.popleft()
-            alias.asname = symbol_name(
-                import_name(q.popleft(), form, dotted=False), ast.Store
-            )
+            alias.asname = symbol_name(import_name(q.popleft(), form, dotted=False))
         rst.append(alias)
     return rst
 
@@ -337,7 +329,7 @@ def except_types_parse(bracket, form):
             raise form_error(x, "has as without a name after it", form)
         if i != len(lst) - 2 or not plain_name_p(lst[-1]):
             raise form_error(x, "expects one name after as", form)
-        return [lst[:i], symbol_name(lst[-1], ast.Store)]
+        return [lst[:i], symbol_name(lst[-1])]
     if not len(lst):
         raise form_error(bracket, "has an empty [types] bracket", form)
     return [lst, None]
@@ -557,7 +549,7 @@ def match_sequence_parse(sexp):
             ast.MatchStar(
                 **{}
                 if atom_text(name) == "_"
-                else {"name": symbol_name(name, ast.Store)},
+                else {"name": symbol_name(name)},
                 **elt.position_info
             )
         )
@@ -574,7 +566,7 @@ def match_mapping_parse(sexp):
             raise form_error(
                 rest, f"expects a name after **, got {rest.value}", "mapping pattern"
             )
-        rst["rest"] = symbol_name(rest.value, ast.Store)
+        rst["rest"] = symbol_name(rest.value)
     for item in items:
         if doublestarred_p(item):
             raise form_error(item, f"has {item} before its end", "mapping pattern")
@@ -615,7 +607,7 @@ def match_class_parse(sexp):
                     f"expects an attribute name after :, got {arg.value}",
                     "class pattern",
                 )
-            kwd_attrs.append(symbol_name(arg.value, ast.Store))
+            kwd_attrs.append(symbol_name(arg.value))
             kwd_patterns.append((yield pattern_parse(q.popleft())))
         elif kwd_attrs:
             raise form_error(arg, f"has {arg} after a keyword pattern", "class pattern")
@@ -648,7 +640,7 @@ def pattern_parse(sexp):
     if type(sexp) is Symbol and atom_text(sexp) == "_":
         return ast.MatchAs(**position_info)
     if type(sexp) is Symbol and not dotted_name_p(sexp):
-        return ast.MatchAs(name=symbol_name(sexp, ast.Store), **position_info)
+        return ast.MatchAs(name=symbol_name(sexp), **position_info)
     if atom_text(sexp) in ("True", "False", "None") and constant_p(sexp):
         return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
     if bracket_p(sexp):
@@ -683,7 +675,7 @@ def case_parse(case):
             raise form_error(case, "has as without a name after it")
         if not plain_name_p(body[1]):
             raise form_error(body[1], f"expects a name after as, got {body[1]}", "case")
-        name = symbol_name(body[1], ast.Store)
+        name = symbol_name(body[1])
         if name == "_":
             # A wildcard captures nothing: CPython refuses `case 1 as _`.
             raise LispyCompileError("cannot use '_' as a target", body[1])
@@ -752,7 +744,7 @@ def type_params_parse(glued):
         )
         if type(symbol) is not Symbol or "." in symbol.value:
             raise LispyCompileError(f"invalid type parameter {param}", param)
-        fields = {"name": symbol_name(symbol, ast.Store)}
+        fields = {"name": symbol_name(symbol)}
         if q and isinstance(q[0], Annotation):
             bound = q.popleft()
             if kind != "TypeVar":
@@ -788,12 +780,12 @@ def def_name_parse(name, form):
                 f"{name.head} is not a valid name for a generic definition", name
             )
         return [
-            symbol_name(name.head, ast.Store),
+            symbol_name(name.head),
             {"type_params": (yield type_params_parse(name))},
         ]
     if not plain_name_p(name):
         raise form_error(name, f"expects a name, got {name}", form)
-    return [symbol_name(name, ast.Store), {}]
+    return [symbol_name(name), {}]
 
 
 def type_alias_p(sexp):
@@ -908,8 +900,7 @@ def scope_names(sexp):
             raise name.misuse_error()
         if not plain_name_p(name):
             raise form_error(name, f"expects a name, got {name}", str(sexp.op))
-    # global/nonlocal declare names, binding none: __debug__ is accepted.
-    return [symbol_name(name, ast.Load) for name in names]
+    return [symbol_name(name) for name in names]
 
 
 def global_compile(sexp):

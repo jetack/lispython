@@ -213,27 +213,15 @@ def string_compile(string):
 # ``is-not`` is ``is_not``) stays a legal name, as it always was.
 OPERATOR_TEXTS = frozenset([*unaryop_dict, *binop_dict, *compare_dict, *boolop_dict])
 
-# CPython refuses __debug__ wherever a name binds.
-_DEBUG_REFUSALS = {
-    ast.Store: "cannot assign to __debug__",
-    ast.Del: "cannot delete __debug__",
-}
-
-
 def identifier_p(name):
     """Whether the mangled text ``name`` is a Python name: an identifier that
     is no hard keyword. Soft keywords (match, case, type, _) are names."""
     return name.isidentifier() and not keyword.iskeyword(name)
 
 
-def python_name(name, node, ctx=ast.Load):
+def python_name(name, node):
     """``name`` (mangled text) as a Python name, else a LispyCompileError at
     ``node``: the one home every emitted identifier passes through.
-
-    ``ctx`` is ast.Store (or ast.Del) where the name binds: an assignment or
-    deletion, a def/class/parameter/type-parameter name, a keyword argument,
-    an import's bound name, a pattern capture, except-as. There __debug__ is
-    refused, with CPython's message; Load elsewhere.
     """
     text = atom_text(node) if isinstance(node, Node) else name
     if keyword.iskeyword(name):
@@ -247,19 +235,17 @@ def python_name(name, node, ctx=ast.Load):
             else f"{text} is not a valid Python name"
         )
         raise LispyCompileError(msg, node)
-    if name == "__debug__" and ctx in _DEBUG_REFUSALS:
-        raise LispyCompileError(_DEBUG_REFUSALS[ctx], node)
     return name
 
 
-def symbol_name(sexp, ctx=ast.Load):
+def symbol_name(sexp):
     """The Python name an undotted symbol stands for (python_name); anything
     else is a LispyCompileError at itself."""
     if isinstance(sexp, GluedHead):
         raise sexp.misuse_error()
     if type(sexp) is not Symbol:
         raise LispyCompileError(f"expected a name, got {sexp}", sexp)
-    return python_name(sexp.name, sexp, ctx)
+    return python_name(sexp.name, sexp)
 
 
 def method_name(method):
@@ -268,10 +254,9 @@ def method_name(method):
     return python_name(Symbol(atom_text(method)[1:]).name, method)
 
 
-def module_path(sexp, ctx=ast.Load, relative=False):
+def module_path(sexp, relative=False):
     """``[path, level]`` of a dotted module symbol, every part through
-    python_name. The first part takes ``ctx`` (``import a.b`` binds ``a``).
-    With ``relative``, leading dots are the level and the path may be empty
+    python_name. With ``relative``, leading dots are the level and the path may be empty
     (None), as in ``from . import x``."""
     name = sexp.name
     level = len(name) - len(name.lstrip(".")) if relative else 0
@@ -279,7 +264,7 @@ def module_path(sexp, ctx=ast.Load, relative=False):
     if level and not path:
         return [None, level]
     [first, *rest] = path.split(".")
-    python_name(first, sexp, ctx)
+    python_name(first, sexp)
     for part in rest:
         python_name(part, sexp)
     return [path, level]
@@ -289,7 +274,7 @@ def plain_name_p(sexp):
     """Whether ``sexp`` is shaped as a name: a symbol whose mangled text
     passes identifier_p (so no dot). A shape test for sites with their own
     form error; the name itself is still read through symbol_name, which also
-    refuses an operator and a bound __debug__."""
+    refuses an operator."""
     return type(sexp) is Symbol and identifier_p(sexp.name)
 
 
@@ -305,12 +290,12 @@ def name_or_attr_p(sexp):
 
 def name_compile(symbol, ctx):
     """A Name, or an Attribute chain for a dotted symbol, every part through
-    python_name. ``ctx`` is the undotted name's, else the last attribute's
-    (``a.__debug__`` loads but cannot be assigned); other parts load."""
+    python_name. ``ctx`` is the undotted name's, else the last attribute's;
+    other parts load."""
     [name, *attrs] = symbol.name.split(".")
-    python_name(name, symbol, ast.Load if attrs else ctx)
+    python_name(name, symbol)
     for [i, attr] in enumerate(attrs):
-        python_name(attr, symbol, ctx if i == len(attrs) - 1 else ast.Load)
+        python_name(attr, symbol)
     position_info = {**symbol.position_info}
     position_info["end_col_offset"] = position_info["col_offset"] + len(name)
     rst = ast.Name(id=name, ctx=ast.Load(), **position_info)
