@@ -413,6 +413,13 @@ class TestFormatSpecNestingLimit:
         )
         assert (info.value.lineno, info.value.offset) == (1, 5)
 
+    def test_a_literal_ending_right_after_the_exclamation_mark(self):
+        # CPython 3.12-3.15: no conversion is missing, a "}" is.
+        with pytest.raises(LispyCompileError) as info:
+            parse('f"{x!"')
+        assert info.value.msg == "f-string: expecting '}'"
+        assert (info.value.lineno, info.value.offset) == (1, 6)
+
     def test_an_earlier_literal_error_comes_first(self):
         with pytest.raises(LispyCompileError) as info:
             parse('f"}"\nf"{x:{x:{x:{x}}}}"')
@@ -447,8 +454,13 @@ class TestFieldsLexedInPlace:
 
     @pytest.mark.parametrize(
         ["src", "form"],
-        [('f"{x ;c}"', "x"), ('f"{(f x ;c\n y)}"', "(f x y)")],
-        ids=["before-the-closing-brace", "to-the-end-of-the-line"],
+        [
+            ('f"{x ;c}"', "x"),
+            ('f"{(f x ;c\n y)}"', "(f x y)"),
+            # Inside brackets a "}" does not end it (CPython reads # alike).
+            ('f"{(x ;c}\n)}"', "(x)"),
+        ],
+        ids=["before-the-closing-brace", "to-the-end-of-the-line", "in-brackets"],
     )
     def test_a_comment_in_a_field_ends_at_a_brace_or_the_line(self, src, form):
         assert str(parse(src)[0].list[2].value) == form

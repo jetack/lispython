@@ -6,6 +6,7 @@ import ast
 import importlib
 import sys
 import time
+import tracemalloc
 
 import pytest
 
@@ -39,7 +40,7 @@ from lispy.core.nodes import (
     atom_text,
     contains_unquote,
 )
-from lispy.core.parser import parse
+from lispy.core.parser import parse, tokenize
 from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
@@ -1112,6 +1113,24 @@ def test_nested_literals_cost_what_the_same_literals_side_by_side_do(nested, fla
     # Lexed in one pass, a character costs the same at any depth; re-lexing
     # each field's text made these 9x and 20x the flat cost.
     assert best_parse_time(nested, 5) < 3 * best_parse_time(flat, 5)
+
+
+def peak_memory(run):
+    """The most memory Python allocated while ``run()`` ran, in bytes."""
+    tracemalloc.start()
+    try:
+        run()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_tokens_hold_no_copy_of_a_field_s_text():
+    # tokenize() reads whole LSP buffers: a field's token marks where its
+    # expression is, so the 149 fields around a 200 KB string add no copies.
+    src = 'f"{' * 149 + '"' + "a" * 200_000 + '"' + '}"' * 149
+    assert peak_memory(lambda: tokenize(src)) < 5_000_000
 
 
 @pytest.mark.usefixtures("time_bound")

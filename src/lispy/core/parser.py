@@ -50,12 +50,14 @@ _META_INDICATOR = _META_CHARS + f"(?![{_FORM_END}]|$)"
 _SYMBOL_STOP = _FORM_END + '\\"\\['
 
 
-def _token_patterns(in_field):
+def _token_patterns(in_field, field_level=False):
     """The token patterns, outside replacement fields or inside one.
 
     Inside a field \\" stands for " (it is how a "..." literal holds a string
     in a field: f"{(.get d \\"H:M:S\\")}"), so there it opens a string and ends
-    a symbol; and a comment ends before a "}", which closes the field.
+    a symbol. At the field's own level (``field_level``, outside its brackets)
+    a comment ends before a "}", which closes the field; inside brackets it
+    runs to the end of the line, as anywhere else.
     """
     quote = '(?:\\\\"|")' if in_field else '"'
     stop_ahead = (
@@ -72,7 +74,7 @@ def _token_patterns(in_field):
         [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|$)", "dangling-quote"],
         [_WRAPPER + _META_INDICATOR, "meta-indicator"],
         [f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|{stop_ahead})", "bad-prefix"],
-        [";[^\\n}]*" if in_field else ";[^\\n]*", "comment"],
+        [";[^\\n}]*" if field_level else ";[^\\n]*", "comment"],
         [
             "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|$)",
             "number",
@@ -91,7 +93,12 @@ def _token_patterns(in_field):
 
 
 _TOKEN_RE = re.compile("|".join(f"({p})" for [p, _] in _token_patterns(False)))
-_FIELD_TOKEN_RE = re.compile("|".join(f"({p})" for [p, _] in _token_patterns(True)))
+_FIELD_TOKEN_RE = re.compile(
+    "|".join(f"({p})" for [p, _] in _token_patterns(True, field_level=True))
+)
+_BRACKETED_FIELD_TOKEN_RE = re.compile(
+    "|".join(f"({p})" for [p, _] in _token_patterns(True))
+)
 _TOKEN_LABELS = [label for [_, label] in _token_patterns(False)]
 _NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
 # What ends a replacement field's expression at the field's own bracket depth:
@@ -342,7 +349,13 @@ class _Lexer:
     def _token(self, field):
         """One token at the top level or in a field's expression."""
         src = self.src
-        regex = _FIELD_TOKEN_RE if field else _TOKEN_RE
+        regex = (
+            _TOKEN_RE
+            if field is None
+            else _FIELD_TOKEN_RE
+            if field.depth == 0
+            else _BRACKETED_FIELD_TOKEN_RE
+        )
         m = regex.search(src, self.pos)
         if m is None:
             if field is not None:
@@ -521,27 +534,38 @@ class _Lexer:
     def _delimiter(self, field, at):
         """The end of a field's expression, at a ``}``, ``:`` or ``!`` outside
         brackets: the expression's text (with a trailing ``=`` read as Python
-        reads ``{x=}``), then the conversion or format spec that follows."""
+        reads ``{x=}``), then the conversion or format spec that follows.
+
+        The token carries the expression's extent, never its text: an outer
+        field's text holds every field nested in it, so a copy per field made
+        the tokens quadratic in the nesting. The parser slices it once, for
+        the FStrExpr it builds.
+        """
         src = self.src
         kind = field.literal.kind
         expr_start = field.open + 1
-        text = src[expr_start:at]
-        expr_text = _unescape_field_quotes(text)
-        debug_text = None
-        delimiter = src[at]
-        stripped = expr_text.rstrip()
-        if stripped.endswith("=") and stripped[-2:-1] not in _DEBUG_BLOCKERS:
-            debug_text = expr_text
-            expr_text = stripped[:-1]
-            delimiter = "="
-            self._drop_debug_equals(field, expr_start + len(text.rstrip()) - 1)
-        echo = self.locate(expr_start, at)
+        last = at  # past the expression's last non-space character
+        while last > expr_start and src[last - 1].isspace():
+            last -= 1
+        # Python's {x=}: a final "=" not ending an operator (x==, x<=).
+        debug = (
+            last - 1 > expr_start
+            and src[last - 1] == "="
+            and src[last - 2] not in _DEBUG_BLOCKERS
+        )
+        if debug:
+            self._drop_debug_equals(field, last - 1)
         self._emit(
-            expr_text,
+            src[at],
             "field-expression-end",
             at,
             at,
-            {"delimiter": delimiter, "debug_text": debug_text, "echo": echo},
+            {
+                "start": expr_start,
+                "end": at,
+                "debug": debug,
+                "echo": self.locate(expr_start, at),
+            },
         )
         if src[at] == "}":
             self._close_field(field, at)
@@ -551,6 +575,12 @@ class _Lexer:
             while j < len(src) and (src[j].isalnum() or src[j] == "_"):
                 j += 1
             conversion = src[at + 1 : j]
+            if not conversion and _quote_length(
+                src, j, field.literal.quote, field.literal.in_field
+            ):
+                # The literal ends right after the "!", where CPython reports it.
+                self._fail(self._error(f"{kind}: expecting '}}'", j, j + 1))
+                return
             if not conversion:
                 msg = (
                     "conversion type must come right after the exclamation mark"
@@ -754,7 +784,7 @@ def _parse_into(src, rst):
             if tktype == "interpolated-start":
                 stack.append(string_parse(t, tktype, position_info, extra))
             else:
-                _interpolated_step(stack, t, tktype, position_info, extra)
+                _interpolated_step(src, stack, t, tktype, position_info, extra)
             continue
         [lineno, col_offset, end_lineno, end_col_offset] = position_info_into_list(
             position_info
@@ -1089,14 +1119,14 @@ class _Field:
     def append(self, node):
         self.list.append(node)
 
-    def end_expression(self, expr_text, data):
+    def end_expression(self, src, data):
         if len(self.list) != 1:
             position_info = {**self.position_info}
             end = self.record.get("end")
             if end is not None:
                 position_info["end_lineno"] = end["lineno"]
                 position_info["end_col_offset"] = end["col_offset"]
-            delimiter = data["delimiter"]
+            delimiter = "=" if data["debug"] else src[data["end"]]
             raise _interpolation_error(
                 self.owner.kind,
                 f"valid expression required before {delimiter!r}"
@@ -1105,10 +1135,13 @@ class _Field:
                 position_info,
             )
         [self.value] = self.list
-        self.expr_text = expr_text
-        self.debug_text = data["debug_text"]
-        if self.debug_text:
+        text = _unescape_field_quotes(src[data["start"] : data["end"]])
+        if data["debug"]:
+            self.debug_text = text
+            self.expr_text = text.rstrip()[:-1]
             self.echo = data["echo"]
+        else:
+            self.expr_text = text
 
     def node(self, end):
         conversion = self.conversion
@@ -1146,7 +1179,7 @@ def _field_on_top(stack):
     )
 
 
-def _interpolated_step(stack, t, tktype, position_info, extra):
+def _interpolated_step(src, stack, t, tktype, position_info, extra):
     """Apply one of an f/t-string's own tokens (other than its opening and
     closing quote) to the entries on the parser's stack."""
     if tktype == "interpolated-middle":
@@ -1154,7 +1187,7 @@ def _interpolated_step(stack, t, tktype, position_info, extra):
     elif tktype == "field-start":
         stack.append(_Field(stack[-1], position_info, extra))
     elif tktype == "field-expression-end":
-        _field_on_top(stack).end_expression(t, extra)
+        _field_on_top(stack).end_expression(src, extra)
     elif tktype == "field-conversion":
         stack[-1].conversion = extra
     elif tktype == "field-spec-start":
