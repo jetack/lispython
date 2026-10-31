@@ -603,6 +603,29 @@ class TestFieldsLexedInPlace:
         )
         assert (w.filename, w.lineno) == ("demo.lpy", 2)
 
+    def test_the_deprecation_outside_compile_errors_names_no_file(self):
+        # compile_errors resets the file it set when it exits.
+        with pytest.warns(DeprecationWarning):
+            with compile_errors("demo.lpy", r'f"{(g \"a\")}"'):
+                parse(r'f"{(g \"a\")}"')
+        with pytest.warns(DeprecationWarning) as rec:
+            parse(r'f"{(g \"a\")}"')
+        assert [w.filename for w in rec] == ["<unknown>"]
+
+    def test_the_deprecation_made_an_error_is_a_compile_error(self):
+        # As CPython turns a compile-time warning a filter makes an error
+        # into a SyntaxError at the warning, with the warning's message.
+        src = r'f"{(.get d \"k\")}"'
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(LispyCompileError) as info:
+                with compile_errors("demo.lpy", src):
+                    parse(src)
+        err = info.value
+        assert err.msg == 'f-string: write a plain " in a replacement field, not \\"'
+        assert (err.filename, err.lineno, err.offset) == ("demo.lpy", 1, 12)
+        assert (err.end_lineno, err.end_offset) == (1, 14)
+
     def test_a_partial_parse_never_warns(self):
         # The LSP's parse: a warning made an error would cut its forms short.
         with warnings.catch_warnings():
@@ -626,6 +649,7 @@ class TestFieldsLexedInPlace:
             pytest.param(r'f"{(g \"a)}"', "f", (1, 7), id="literal-quote-ends-it"),
             pytest.param(r'f"{(g \"a', "f", (1, 7), id="unterminated"),
             pytest.param(r'f"{f\"a{x}"}"', "f", (1, 5), id="nested-f-string"),
+            pytest.param(r'f"{f\"{x!"}"', "f", (1, 5), id="conversion-slot"),
             pytest.param(
                 r't"{(g \"a")}"',
                 "t",

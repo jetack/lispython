@@ -13,6 +13,7 @@
 (from pygls.lsp.server [LanguageServer])
 
 (from lispy.core.nodes *)
+(from lispy.core.errors [compile-errors])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [type-alias-p])
 (from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
@@ -465,9 +466,11 @@ or an extra usage line names no usage key."
 
 (def compute-diagnostics [source uri]
   (= diagnostics [])
-  ;; 1. Parse
+  ;; 1. Parse, in compile-errors so a warning the parse issues names the
+  ;; document's file.
   (try
-    (= tree (parse source))
+    (with [(compile-errors (uri-to-path uri) source)]
+      (= tree (parse source)))
     (except [Exception as exc]
       (= pos (extract-error-position exc source))
       (if (is pos None)

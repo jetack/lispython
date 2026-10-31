@@ -111,12 +111,26 @@ def compile_errors(filename, source):
 
 
 def compile_warning(msg, category, position_info):
-    """Warn at a lispython source position (``position_info``'s line), as
-    CPython's compiler warns: through warnings.warn_explicit, naming the file
-    compile_errors is compiling (``<unknown>`` outside one), so a filter
-    turning the warning into an error applies as to any other."""
+    """Warn ``msg`` at a lispython source position, as CPython's compiler warns
+    (``_PyErr_EmitSyntaxWarning``).
+
+    The warning goes through warnings.warn_explicit at ``position_info``'s
+    line, naming the file compile_errors is compiling (``<unknown>`` outside
+    one), so filters select it as any other warning. Where a filter turns it
+    into an exception of ``category``, that exception becomes a
+    LispyCompileError with the same message at the whole position, as CPython
+    replaces it with a SyntaxError, so every entry point reports it as a
+    compile error; any other exception a filter or hook raises passes through.
+    """
     filename = _COMPILING_FILENAME.get() or "<unknown>"
-    warnings.warn_explicit(msg, category, filename, position_info["lineno"])
+    try:
+        warnings.warn_explicit(msg, category, filename, position_info["lineno"])
+    except category:
+        # CPython clears the warning before raising the SyntaxError, so the
+        # error has no context either.
+        raise LispyCompileError(
+            msg, SimpleNamespace(position_info=position_info)
+        ) from None
 
 
 def format_compile_error(err):
