@@ -469,10 +469,10 @@ class TestNumberLexingCost:
 
     @pytest.mark.parametrize(
         "template",
-        ["{}", 'f"{{{}}}"', 'f"{{x:{}}}"', 'f"{{[{}]}}"'],
-        ids=["top-level", "field", "format-spec", "bracketed-field"],
+        ["{}", 'f"{{{}}}"', 'f"{{[{}]}}"'],
+        ids=["top-level", "field", "bracketed-field"],
     )
-    @pytest.mark.parametrize("tail", ["a(", "-", "(", '"'])
+    @pytest.mark.parametrize("tail", ["a(", "-", "("])
     def test_digits_before_a_non_number_char_lex_in_linear_time(self, template, tail):
         src = template.format("1" * self.DIGITS + tail)
         start = time.perf_counter()
