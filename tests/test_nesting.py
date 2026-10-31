@@ -5,6 +5,7 @@ RecursionError."""
 import ast
 import importlib
 import sys
+import time
 
 import pytest
 
@@ -1011,8 +1012,7 @@ def skip_without_t_strings(needs_t):
 NESTED_LITERAL_DEPTH = 200
 
 
-# No time_bound: each level rescans the rest of the text, so this takes
-# most of a second; the count of literals parsed is the cost guard.
+@pytest.mark.usefixtures("time_bound")
 @pytest.mark.parametrize("newline", ["", "\n"], ids=["one-line", "a-line-each"])
 @pytest.mark.parametrize(
     "openings, needs_t",
@@ -1064,21 +1064,64 @@ def test_nested_f_strings_parse_on_a_deep_stack(openings, needs_t):
 
 
 @pytest.mark.usefixtures("time_bound")
-def test_a_format_spec_chain_past_the_recursion_limit_parses():
-    # Rescanning makes each level cost the rest of the text: 1000 levels is
-    # past the old recursion limit and well inside the budget.
+def test_a_format_spec_chain_past_cpython_s_limit_is_refused_at_its_fourth_field():
     depth = 1000
-    [form] = parse('f"' + "{x:" * depth + "x" + "}" * depth + '"')
-    fields = []
-    node = form
-    while len(node.list) > 2:  # the literal, then each spec with a field
-        fields.append(node.list[2])
-        node = fields[-1].format_spec
-    assert len(fields) == depth
-    leaf = fields[-1].value
-    assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
-    # The innermost spec is the literal text x.
-    assert [atom_text(n) for n in node.list] == ["f-string", "'x'"]
+    with pytest.raises(LispyCompileError) as info:
+        parse('f"' + "{x:" * depth + "x" + "}" * depth + '"')
+    assert info.value.msg == "f-string: expressions nested too deeply"
+    # The fourth "{" is at column 11; CPython's offset is that column.
+    assert (info.value.lineno, info.value.offset) == (1, 11)
+
+
+def best_parse_time(src, repeats):
+    """The fastest of ``repeats`` parses of ``src``, in seconds."""
+    times = []
+    for _ in range(repeats):
+        start = time.perf_counter()
+        parse(src)
+        times.append(time.perf_counter() - start)
+    return min(times)
+
+
+# (id, the most nesting CPython takes, a flat source with as many literals,
+# fields and tokens). CPython's own limits bound both: 149 nested literals,
+# 3 open fields per literal, and 200 open brackets of any kind, fields included
+# (so at most 66 literals of 3-field spec chains).
+PAYLOAD = "[" + " 1," * 300 + "]"
+NESTED_AND_FLAT = [
+    (
+        "spec-chains",
+        'f"{x:{x:{' * 66 + "x" + '}}}"' * 66,
+        " ".join(['f"{x:{x:{x}}}"'] * 66),
+    ),
+    (
+        "payload-at-the-deepest-literal",
+        'f"{' * 149 + PAYLOAD + '}"' * 149,
+        'f"{' + PAYLOAD + '}"' + ' f"{x}"' * 148,
+    ),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "nested, flat",
+    [case[1:] for case in NESTED_AND_FLAT],
+    ids=[case[0] for case in NESTED_AND_FLAT],
+)
+def test_nested_literals_cost_what_the_same_literals_side_by_side_do(nested, flat):
+    # Lexed in one pass, a character costs the same at any depth; re-lexing
+    # each field's text made these 9x and 20x the flat cost.
+    assert best_parse_time(nested, 5) < 3 * best_parse_time(flat, 5)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_literal_with_many_fields_costs_what_as_many_literals_do():
+    # Positions come from line starts found once; counting lines from the
+    # literal's start for every piece made one literal quadratic.
+    fields = 6000
+    one = 'f"""' + "{x}\n" * fields + '"""'
+    separate = "\n".join(['f"{x}"'] * fields)
+    assert best_parse_time(one, 2) < best_parse_time(separate, 2)
 
 
 @pytest.mark.usefixtures("time_bound")

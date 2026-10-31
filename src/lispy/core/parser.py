@@ -1,5 +1,6 @@
 import contextvars
 import re
+from bisect import bisect_right
 from collections import deque
 
 from lispy.core.compiler.features import require
@@ -13,7 +14,6 @@ from lispy.core.nodes import (
     FStrExpr,
     GluedHead,
     MetaIndicator,
-    Node,
     Paren,
     String,
     Symbol,
@@ -21,7 +21,7 @@ from lispy.core.nodes import (
     UnquoteSplice,
     Wrapper,
 )
-from lispy.core.utils import augassignop_dict, trampoline
+from lispy.core.utils import augassignop_dict
 
 _INT = r"\d+[\dA-Za-z]*(?:_[\dA-Za-z]+)*"
 _FLOATS = [
@@ -48,49 +48,82 @@ _FORM_END = "\\s\\)\\}\\],;"
 _META_INDICATOR = _META_CHARS + f"(?![{_FORM_END}]|$)"
 # What ends a symbol token.
 _SYMBOL_STOP = _FORM_END + '\\"\\['
-_TOKEN_PATTERNS = [
-    [_WRAPPER + _OPENING, "opening"],
-    ["[\\)\\}\\]]", "closing"],
-    # Only the opening of a string (prefix and quote): scan_interpolated, the
-    # one scanner of string bodies, finds where it ends.
-    ["\\w*(?:\"\"\"|'''|\")", "string"],
-    # ' ` ~@ (any wrapper) with no form right after: refused by _parse. ~
-    # alone is the invert operator, a symbol.
-    [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|$)", "dangling-quote"],
-    [_WRAPPER + _META_INDICATOR, "meta-indicator"],
-    [
-        f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|(?=[{_SYMBOL_STOP}]|$))",
-        "bad-prefix",
-    ],
-    [";[^\\n]*", "comment"],
-    [
-        "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|$)",
-        "number",
-    ],
-    [",", "comma"],
-    # "[" ends a symbol so that f[T] is a symbol glued to a bracket.
-    [f"[^{_SYMBOL_STOP}]+", "symbol"],
-    ["\\n", "new-line"],
-    [" +", "spaces"],
-]
-_TOKEN_RE = re.compile("|".join(f"({p})" for [p, _] in _TOKEN_PATTERNS))
-_TOKEN_LABELS = [label for [_, label] in _TOKEN_PATTERNS]
+
+
+def _token_patterns(in_field):
+    """The token patterns, outside replacement fields or inside one.
+
+    Inside a field \\" stands for " (it is how a "..." literal holds a string
+    in a field: f"{(.get d \\"H:M:S\\")}"), so there it opens a string and ends
+    a symbol; and a comment ends before a "}", which closes the field.
+    """
+    quote = '(?:\\\\"|")' if in_field else '"'
+    stop_ahead = (
+        f'(?=[{_SYMBOL_STOP}]|\\\\"|$)' if in_field else f"(?=[{_SYMBOL_STOP}]|$)"
+    )
+    return [
+        [_WRAPPER + _OPENING, "opening"],
+        ["[\\)\\}\\]]", "closing"],
+        # Only the opening of a string (prefix and quote): scan_string_body,
+        # the one scanner of string bodies, reads the rest.
+        [f"\\w*(?:{quote}{{3}}|'''|{quote})", "string"],
+        # ' ` ~@ (any wrapper) with no form right after: refused by _parse. ~
+        # alone is the invert operator, a symbol.
+        [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|$)", "dangling-quote"],
+        [_WRAPPER + _META_INDICATOR, "meta-indicator"],
+        [f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|{stop_ahead})", "bad-prefix"],
+        [";[^\\n}]*" if in_field else ";[^\\n]*", "comment"],
+        [
+            "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|$)",
+            "number",
+        ],
+        [",", "comma"],
+        # "[" ends a symbol so that f[T] is a symbol glued to a bracket.
+        [
+            f'(?:[^{_SYMBOL_STOP}\\\\]|\\\\(?!"))+'
+            if in_field
+            else f"[^{_SYMBOL_STOP}]+",
+            "symbol",
+        ],
+        ["\\n", "new-line"],
+        [" +", "spaces"],
+    ]
+
+
+_TOKEN_RE = re.compile("|".join(f"({p})" for [p, _] in _token_patterns(False)))
+_FIELD_TOKEN_RE = re.compile("|".join(f"({p})" for [p, _] in _token_patterns(True)))
+_TOKEN_LABELS = [label for [_, label] in _token_patterns(False)]
 _NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
-
-
-def _advance(text, lineno, col_offset):
-    """Position after ``text`` when it starts at (lineno, col_offset)."""
-    newlines = text.count("\n")
-    if newlines:
-        return [lineno + newlines, len(text) - text.rfind("\n") - 1]
-    return [lineno, col_offset + len(text)]
+# What ends a replacement field's expression at the field's own bracket depth:
+# its closing "}", the ":" of a format spec, the "!" of a conversion.
+_FIELD_DELIMITER_RE = re.compile("[:}]|!(?!=)")
+_STRING_PREFIX_RE = re.compile("\\w*")
+# Where a string body scan has to look: an escape, a quote, and (in an f/t
+# string) a brace. Everything between is copied as one slice.
+_INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
+_PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 
 
 def _source_locator(src):
-    """locate(i, j) -> position_info of src[i:j]."""
+    """locate(i, j) -> position_info of src[i:j], in any order of calls.
+
+    The line starts are found once, so a position costs at most a bisection,
+    never a count from the start of the source (or of a token): counting made
+    a literal with many fields quadratic.
+    """
+    line_starts = [0]
+    line_starts.extend(m.end() for m in re.finditer("\n", src))
+    line_starts.append(len(src) + 1)
+    # [line, its start, the next line's start] of the last position: tokens
+    # come in order, so most lookups stay on that line.
+    last = [1, 0, line_starts[1]]
 
     def position(i):
-        return [src.count("\n", 0, i) + 1, i - src.rfind("\n", 0, i) - 1]
+        if last[1] <= i < last[2]:
+            return [last[0], i - last[1]]
+        line = bisect_right(line_starts, i)
+        last[:] = [line, line_starts[line - 1], line_starts[line]]
+        return [line, i - last[1]]
 
     def locate(i, j=None):
         [lineno, col_offset] = position(i)
@@ -105,63 +138,490 @@ def _source_locator(src):
     return locate
 
 
-def _string_token(src, start, opening):
-    """Extent of the string opening at ``start``: [token, quote, error].
+# CPython's lexer refuses to open a replacement field while this many fields
+# of the same literal are open (MAX_EXPR_NESTING in CPython's Parser/lexer):
+# f"{x:{x:{x}}}" is the deepest format-spec chain. Brackets inside a field's
+# expression are not fields, and a nested literal counts its own fields.
+FSTRING_FIELD_NESTING_LIMIT = 3
 
-    A malformed literal is not reported here: it runs to the end of the
-    source and carries its error, which string_parse raises after the prefix
-    check and the t-string version gate, so an old interpreter hears about the
-    version first.
+
+def _unescape_field_quotes(text):
+    # Inside a replacement field \" stands for " (see _token_patterns).
+    return text.replace('\\"', '"')
+
+
+def _quote_length(src, i, quote, in_field):
+    """Length of the source text at ``i`` that closes a ``quote`` string, or 0.
+
+    Inside a replacement field each " of the quote may be written \\".
     """
-    prefix = opening.rstrip("\"'").lower()
-    quote = opening[len(prefix) :]
-    raw = "r" in prefix
-    kind = "t-string" if "t" in prefix else "f-string" if "f" in prefix else "string"
-    try:
-        [_, end] = scan_interpolated(
-            src, start + len(opening), None, quote, raw, kind, _source_locator(src)
+    if not in_field or quote[0] == "'":
+        return len(quote) if src.startswith(quote, i) else 0
+    j = i
+    for _ in quote:
+        if src.startswith('"', j):
+            j += 1
+        elif src.startswith('\\"', j):
+            j += 2
+        else:
+            return 0
+    return j - i
+
+
+def scan_string_body(src, i, quote, raw, kind, in_field, spec=False, braces=0):
+    """The one scanner of string bodies: a plain string's whole body, and an
+    f/t-string's literal text up to its next field, its end, or the end of a
+    format spec.
+
+    Scans ``src`` from ``i`` and returns ``[piece, stop, at, braces]``: the
+    text read (source text, escapes unprocessed, ``{{``/``}}`` collapsed, and
+    \\" read as " ``in_field``), why it stopped, and where: ``"quote"`` at the
+    closing quote, ``"field"`` at a single ``{``, ``"close"`` at a single
+    ``}``, ``"eof"`` at the end of the source. For a plain string (``kind``
+    "string") braces are ordinary characters. In a format spec (``spec``)
+    ``{{`` is a literal brace, ``braces`` counts those still open, and ``}}``
+    closes one of them (else its first ``}`` ends the spec).
+    """
+    interpolated = kind != "string"
+    stops = _INTERPOLATED_BODY_STOP if interpolated else _PLAIN_BODY_STOP
+    n = len(src)
+    buf = []
+    while True:
+        m = stops.search(src, i)
+        if m is None:
+            buf.append(src[i:])
+            return ["".join(buf), "eof", n, braces]
+        if m.start() > i:
+            buf.append(src[i : m.start()])
+        i = m.start()
+        c = src[i]
+        if c == "\\" and in_field and src.startswith('"', i + 1):
+            if _quote_length(src, i, quote, in_field):
+                return ["".join(buf), "quote", i, braces]
+            buf.append('"')
+            i += 2
+        elif c == "\\":
+            if i + 1 >= n:
+                buf.append(c)
+                i += 1
+            elif not raw and src.startswith("N{", i + 1):
+                close = src.find("}", i + 3)
+                close = n - 1 if close < 0 else close
+                escape = src[i : close + 1]
+                buf.append(_unescape_field_quotes(escape) if in_field else escape)
+                i = close + 1
+            elif interpolated and src[i + 1] in "{}":
+                # A backslash never escapes a brace: it is a literal backslash.
+                buf.append("\\" if raw else "\\\\")
+                i += 1
+            elif in_field and src.startswith('\\"', i + 1):
+                buf.append('\\"')
+                i += 3
+            else:
+                buf.append(src[i : i + 2])
+                i += 2
+        elif c in "\"'":
+            if _quote_length(src, i, quote, in_field):
+                return ["".join(buf), "quote", i, braces]
+            buf.append(c)
+            i += 1
+        elif src.startswith(c, i + 1):
+            if spec and c == "{":
+                braces += 1
+            elif spec:
+                if not braces:
+                    return ["".join(buf), "close", i, braces]
+                braces -= 1
+            buf.append(c)
+            i += 2
+        else:
+            return ["".join(buf), "field" if c == "{" else "close", i, braces]
+
+
+class _LiteralState:
+    """An f/t-string literal the lexer is inside."""
+
+    __slots__ = (
+        "kind",
+        "raw",
+        "quote",
+        "in_field",
+        "quote_start",
+        "body",
+        "open_fields",
+    )
+
+    def __init__(self, kind, raw, quote, in_field, quote_start, body):
+        self.kind = kind
+        self.raw = raw
+        self.quote = quote
+        self.in_field = in_field  # opened inside a field: \" is a quote
+        self.quote_start = quote_start
+        self.body = body
+        self.open_fields = 0  # its fields now open (FSTRING_FIELD_NESTING_LIMIT)
+
+
+class _FieldState:
+    """A replacement field the lexer is inside: in its expression, or (once
+    ``spec`` is set) in its format spec."""
+
+    __slots__ = (
+        "literal",
+        "open",
+        "depth",
+        "spec",
+        "braces",
+        "previous",
+        "tail",
+        "record",
+    )
+
+    def __init__(self, literal, open_brace, record):
+        self.literal = literal
+        self.open = open_brace
+        self.depth = 0  # brackets open in the expression
+        self.spec = False
+        self.braces = 0  # {{ open in the format spec
+        self.previous = None  # for the comma rule, as at the top level
+        # [first token index, start, end, type] of the last token at depth 0,
+        # with the quotes glued before it ('x): what {x=} takes the = off.
+        self.tail = None
+        self.record = record  # shared with the parser through the token
+
+
+class _Lexer:
+    """The tokens of a source, in one pass over it.
+
+    Outside f/t-strings a token is what ``_TOKEN_RE`` matches. An f/t-string
+    is lexed in place, CPython-style, over a mode stack of the literals and
+    fields open (``_LiteralState``/``_FieldState``): its opening, each piece of
+    literal text, each field's ``{``, the tokens of its expression (lexed like
+    any others, with bracket depth tracked so ``!``, ``:`` and ``}`` delimit it
+    only outside brackets), its conversion and format spec (itself literal text
+    and fields), its ``}``, and the closing quote. So no character is read more
+    than a bounded number of times however deep literals and fields nest, and
+    every position is already absolute. A malformed literal is an "error"
+    token where it is found, and lexing stops there: the parser raises it when
+    it gets there, so errors come in source order.
+    """
+
+    def __init__(self, src):
+        self.src = src
+        self.locate = _source_locator(src)
+        self.tokens = []
+        self.stack = []  # _LiteralState / _FieldState, innermost last
+        self.pos = 0
+        self.previous = None  # the last token outside any field
+        self.done = False
+
+    def run(self):
+        while not self.done:
+            top = self.stack[-1] if self.stack else None
+            if top is None or (isinstance(top, _FieldState) and not top.spec):
+                self._token(top)
+            else:
+                self._body(top)
+        return self.tokens
+
+    def _emit(self, text, tktype, i, j, extra=None):
+        self.tokens.append([text, tktype, self.locate(i, j), extra])
+
+    def _error(self, msg, i, j):
+        return LispyCompileError(msg, String('""', **self.locate(i, j)))
+
+    def _fail(self, error):
+        position_info = {
+            "lineno": error.lineno,
+            "col_offset": error.offset - 1,
+            "end_lineno": error.end_lineno,
+            "end_col_offset": error.end_offset - 1,
+        }
+        self.tokens.append([error.msg, "error", position_info, error])
+        self.done = True
+
+    def _token(self, field):
+        """One token at the top level or in a field's expression."""
+        src = self.src
+        regex = _FIELD_TOKEN_RE if field else _TOKEN_RE
+        m = regex.search(src, self.pos)
+        if m is None:
+            if field is not None:
+                self._fail(self._eof_error())
+            self.done = True
+            return
+        start = m.start()
+        if field is not None and field.depth == 0:
+            c = src[start]
+            if c in ":}" or (c == "!" and not src.startswith("=", start + 1)):
+                self._delimiter(field, start)
+                return
+            m = self._cut_at_delimiter(regex, m)
+        tk = m.group()
+        tktype = _TOKEN_LABELS[m.lastindex - 1]
+        end = m.end()
+        if tktype == "string":
+            self._string(start, tk)
+            return
+        context = field if field is not None else self
+        if tktype == "comma":
+            # A comma is whitespace, except right after "(" or "{": (, a b) is a
+            # tuple and {, a b} a set.
+            previous = context.previous
+            kept = previous is not None and previous[1] == "opening"
+            tktype = "symbol" if kept and previous[0][-1] in "({" else "spaces"
+        if field is not None:
+            if tktype == "opening" or (tktype == "bad-prefix" and tk[-1] in "([{"):
+                field.depth += 1
+            elif tktype == "closing" and field.depth:
+                field.depth -= 1
+        if tktype not in ("new-line", "spaces"):
+            context.previous = [tk, tktype]
+        if tktype not in ("new-line", "spaces", "comment"):
+            self._emit(tk, tktype, start, end)
+            if field is not None and field.depth == 0:
+                tail = field.tail
+                glued = tail is not None and tail[2] == start
+                glued = glued and tail[3] == "meta-indicator"
+                first = tail[:2] if glued else [len(self.tokens) - 1, start]
+                field.tail = [*first, end, tktype]
+        self.pos = end
+
+    def _cut_at_delimiter(self, regex, m):
+        """``m`` as if the field's expression ended at the delimiter inside it
+        or right after it (``x:>4``, ``x!r``), where the expression's text
+        ends: a lookahead there sees the end."""
+        end = m.end()
+        delimiter = _FIELD_DELIMITER_RE.search(
+            self.src, m.start() + 1, min(end + 2, len(self.src))
         )
-    except LispyCompileError as err:
-        return [src[start:], quote, err]
-    return [src[start:end], quote, None]
+        if delimiter is None or delimiter.start() > end:
+            return m
+        return regex.match(self.src, m.start(), delimiter.start()) or m
+
+    def _string(self, start, opening):
+        """A string opening at ``start``: a plain string is one token; an f/t
+        string opens a literal, whose body is lexed next."""
+        src = self.src
+        prefix = _STRING_PREFIX_RE.match(opening).group()
+        quote_text = opening[len(prefix) :]
+        quote = _unescape_field_quotes(quote_text)
+        lowered = prefix.lower()
+        raw = "r" in lowered
+        kind = (
+            "t-string" if "t" in lowered else "f-string" if "f" in lowered else "string"
+        )
+        in_field = bool(self.stack)
+        body = start + len(opening)
+        if kind == "string":
+            [_, stop, at, _] = scan_string_body(src, body, quote, raw, kind, in_field)
+            error = None
+            if stop == "quote":
+                end = at + _quote_length(src, at, quote, in_field)
+            else:
+                end = len(src)
+                error = self._eof_error(kind, quote, body - len(quote_text), body)
+            text = src[start:end]
+            text = _unescape_field_quotes(text) if in_field else text
+            # Plain strings are a single token, carrying any error: the parser
+            # raises it after the prefix check.
+            self._emit(text, quote, start, end, error)
+            if error is not None:
+                self.done = True
+                return
+            (self.stack[-1] if in_field else self).previous = [text, quote]
+            self.pos = end
+            return
+        self._emit(opening, "interpolated-start", start, body, prefix)
+        self.stack.append(
+            _LiteralState(kind, raw, quote, in_field, body - len(quote_text), body)
+        )
+        self.pos = body
+
+    def _eof_error(self, kind=None, quote=None, quote_start=None, body=None):
+        """The source ends inside a field (``expecting '}'`` at the innermost
+        one's ``{``) or else inside a literal (unterminated, at its quote)."""
+        for entry in reversed(self.stack):
+            if isinstance(entry, _FieldState):
+                return self._error(
+                    f"{entry.literal.kind}: expecting '}}'", entry.open, entry.open + 1
+                )
+        if kind is None:
+            literal = self.stack[-1]
+            [kind, quote] = [literal.kind, literal.quote]
+            [quote_start, body] = [literal.quote_start, literal.body]
+        triple = "triple-quoted " if len(quote) == 3 else ""
+        # At the opening quote, as CPython reports it.
+        return self._error(f"unterminated {triple}{kind} literal", quote_start, body)
+
+    def _body(self, top):
+        """Literal text of an f/t-string, or of a field's format spec, up to
+        what ends it."""
+        [literal, spec] = (
+            [top, None] if isinstance(top, _LiteralState) else [top.literal, top]
+        )
+        src = self.src
+        [piece, stop, at, braces] = scan_string_body(
+            src,
+            self.pos,
+            literal.quote,
+            literal.raw,
+            literal.kind,
+            literal.in_field,
+            spec is not None,
+            spec.braces if spec is not None else 0,
+        )
+        if stop == "eof":
+            self._fail(self._eof_error())
+            return
+        if spec is not None:
+            spec.braces = braces
+        self._emit(piece, "interpolated-middle", self.pos, at)
+        kind = literal.kind
+        if stop == "quote":
+            if spec is not None:
+                # The literal ends inside a format spec.
+                self._fail(
+                    self._error(f"{kind}: expecting '}}'", spec.open, spec.open + 1)
+                )
+                return
+            end = at + _quote_length(src, at, literal.quote, literal.in_field)
+            self._emit(src[at:end], "interpolated-end", at, end)
+            self.stack.pop()
+            context = self.stack[-1] if self.stack else self
+            context.previous = [src[at:end], "interpolated-end"]
+            self.pos = end
+        elif stop == "field":
+            if literal.open_fields >= FSTRING_FIELD_NESTING_LIMIT:
+                brace = self.locate(at)
+                [lineno, col_offset] = [brace["lineno"], brace["col_offset"]]
+                # CPython reports it one column before the "{", zero-width.
+                position = {
+                    "lineno": lineno,
+                    "col_offset": col_offset - 1,
+                    "end_lineno": lineno,
+                    "end_col_offset": col_offset - 1,
+                }
+                self._fail(
+                    LispyCompileError(
+                        f"{kind}: expressions nested too deeply",
+                        String('""', **position),
+                    )
+                )
+                return
+            literal.open_fields += 1
+            record = {}
+            self._emit("{", "field-start", at, at + 1, record)
+            self.stack.append(_FieldState(literal, at, record))
+            self.pos = at + 1
+        elif spec is None or spec.braces:
+            self._fail(self._error(f"{kind}: single '}}' is not allowed", at, at + 1))
+        else:
+            self._close_field(spec, at)
+
+    def _delimiter(self, field, at):
+        """The end of a field's expression, at a ``}``, ``:`` or ``!`` outside
+        brackets: the expression's text (with a trailing ``=`` read as Python
+        reads ``{x=}``), then the conversion or format spec that follows."""
+        src = self.src
+        kind = field.literal.kind
+        expr_start = field.open + 1
+        text = src[expr_start:at]
+        expr_text = _unescape_field_quotes(text)
+        debug_text = None
+        delimiter = src[at]
+        stripped = expr_text.rstrip()
+        if stripped.endswith("=") and stripped[-2:-1] not in _DEBUG_BLOCKERS:
+            debug_text = expr_text
+            expr_text = stripped[:-1]
+            delimiter = "="
+            self._drop_debug_equals(field, expr_start + len(text.rstrip()) - 1)
+        echo = self.locate(expr_start, at)
+        self._emit(
+            expr_text,
+            "field-expression-end",
+            at,
+            at,
+            {"delimiter": delimiter, "debug_text": debug_text, "echo": echo},
+        )
+        if src[at] == "}":
+            self._close_field(field, at)
+            return
+        if src[at] == "!":
+            j = at + 1
+            while j < len(src) and (src[j].isalnum() or src[j] == "_"):
+                j += 1
+            conversion = src[at + 1 : j]
+            if not conversion:
+                msg = (
+                    "conversion type must come right after the exclamation mark"
+                    if j < len(src) and src[j].isspace()
+                    else "missing conversion character"
+                )
+                self._fail(self._error(f"{kind}: {msg}", at, at + 1))
+                return
+            if conversion not in conversion_dict:
+                self._fail(
+                    self._error(
+                        f"{kind}: invalid conversion character {conversion!r}: "
+                        "expected 's', 'r', or 'a'",
+                        at,
+                        j,
+                    )
+                )
+                return
+            self._emit(src[at:j], "field-conversion", at, j, conversion)
+            at = j
+            while at < len(src) and src[at].isspace():
+                at += 1
+            if at == len(src):
+                self._fail(self._eof_error())
+                return
+            if src[at] == "}":
+                self._close_field(field, at)
+                return
+            if src[at] != ":":
+                self._fail(self._error(f"{kind}: expecting '}}'", at, at + 1))
+                return
+        self._emit(":", "field-spec-start", at, at + 1)
+        field.spec = True
+        self.pos = at + 1
+
+    def _drop_debug_equals(self, field, equals):
+        """Take the ``=`` of ``{x=}`` at ``equals`` off the expression's last
+        token (a symbol ending there), lexing the text before it again with
+        any quotes glued to it, as the expression's own text would lex."""
+        tail = field.tail
+        if tail is None or tail[2] != equals + 1 or tail[3] != "symbol":
+            return
+        [index, start, _, _] = tail
+        del self.tokens[index:]
+        pos = start
+        while pos < equals:
+            m = _FIELD_TOKEN_RE.search(self.src, pos, equals)
+            if m is None:
+                break
+            tktype = _TOKEN_LABELS[m.lastindex - 1]
+            if tktype not in ("new-line", "spaces", "comment"):
+                self._emit(m.group(), tktype, m.start(), m.end())
+            pos = m.end()
+
+    def _close_field(self, field, at):
+        self._emit("}", "field-end", at, at + 1)
+        field.record["end"] = self.locate(at + 1)
+        field.literal.open_fields -= 1
+        self.stack.pop()
+        self.pos = at + 1
 
 
 def tokenize(src):
-    """Tokens as [text, type, position_info, error]; error is set only on a
-    malformed f/t-string (see _interpolated_token)."""
-    tokens = deque([])
-    [lineno, col_offset] = [1, 0]
-    pos = 0
-    previous = None
-    while True:
-        m = _TOKEN_RE.search(src, pos)
-        if m is None:
-            break
-        [lineno, col_offset] = _advance(src[pos : m.start()], lineno, col_offset)
-        tk = m.group()
-        tktype = _TOKEN_LABELS[m.lastindex - 1]
-        error = None
-        if tktype == "string":
-            [tk, tktype, error] = _string_token(src, m.start(), tk)
-        elif tktype == "comma":
-            # A comma is whitespace, except right after "(" or "{": (, a b) is a
-            # tuple and {, a b} a set.
-            kept = previous is not None and previous[1] == "opening"
-            tktype = "symbol" if kept and previous[0][-1] in "({" else "spaces"
-        [end_lineno, end_col_offset] = _advance(tk, lineno, col_offset)
-        if tktype not in ("new-line", "spaces"):
-            previous = [tk, tktype]
-        if tktype not in ("new-line", "spaces", "comment"):
-            position_info = {
-                "lineno": lineno,
-                "col_offset": col_offset,
-                "end_lineno": end_lineno,
-                "end_col_offset": end_col_offset,
-            }
-            tokens.append([tk, tktype, position_info, error])
-        [lineno, col_offset] = [end_lineno, end_col_offset]
-        pos = m.start() + len(tk)
-    return tokens
+    """Tokens as [text, type, position_info, extra], in one pass (_Lexer).
+
+    ``extra`` is the error of a malformed plain string, the data of an f/t
+    string's own tokens, else None. An "error" token (placed at the error,
+    which is its ``extra``) ends the tokens of a source the lexer cannot read
+    on.
+    """
+    return deque(_Lexer(src).run())
 
 
 def position_info_into_list(position_info):
@@ -194,17 +654,15 @@ def _glue_target(container, lineno, col_offset):
     items = container if isinstance(container, list) else container.list
     node = items[-1] if items else None
     prefixes = []
-    while isinstance(node, (Wrapper, MetaIndicator)) and not isinstance(
-        node, FStrExpr
-    ):
+    while isinstance(node, (Wrapper, MetaIndicator)) and not isinstance(node, FStrExpr):
         if _unquoted_symbol_p(node):
             break
         prefixes.append(node)
         node = node.value
-    glued = (
-        (type(node) is Symbol or _unquoted_symbol_p(node))
-        and (node.end_lineno, node.end_col_offset) == (lineno, col_offset)
-    )
+    glued = (type(node) is Symbol or _unquoted_symbol_p(node)) and (
+        node.end_lineno,
+        node.end_col_offset,
+    ) == (lineno, col_offset)
     return [prefixes, node] if glued else None
 
 
@@ -266,11 +724,11 @@ def parse(src, partial=False):
     form.  The LSP's diagnostics still use the strict parse to report it.
     """
     if not partial:
-        return trampoline(_parse_steps(src, [], 0))
+        return _parse_into(src, [])
     rst = []
     token = _PARTIAL.set(True)
     try:
-        trampoline(_parse_steps(src, rst, 0))
+        _parse_into(src, rst)
     except Exception:
         pass
     finally:
@@ -278,18 +736,26 @@ def parse(src, partial=False):
     return rst
 
 
-def _parse_steps(src, rst, nesting):
-    """Parse ``src`` into ``rst`` as a trampoline step (core/utils.py).
+def _parse_into(src, rst):
+    """Parse ``src`` into ``rst``, one token at a time on an explicit stack.
 
-    ``nesting`` is the number of f/t-string literals enclosing ``src`` (it is
-    a replacement field's text when nonzero). An f/t-string's fields are parsed
-    by asking for their steps with ``yield``, never by calling parse(), so a
-    nested f-string costs no Python frame per level.
+    Every open form is a stack entry, never a Python frame: a bracket's node,
+    a pending prefix, and an f/t-string's literal, fields and format specs
+    (``_Interpolated``/``_Field``), which the lexer's tokens build in place,
+    so any nesting parses in one pass with no recursion.
     """
     tokens = tokenize(src)
     stack = []
     while tokens:
-        [t, tktype, position_info, error] = tokens.popleft()
+        [t, tktype, position_info, extra] = tokens.popleft()
+        if tktype in _LEXER_ONLY_TOKENS:
+            if tktype == "error":
+                raise extra
+            if tktype == "interpolated-start":
+                stack.append(string_parse(t, tktype, position_info, extra))
+            else:
+                _interpolated_step(stack, t, tktype, position_info, extra)
+            continue
         [lineno, col_offset, end_lineno, end_col_offset] = position_info_into_list(
             position_info
         )
@@ -297,7 +763,7 @@ def _parse_steps(src, rst, nesting):
             wrapper = t[:-1]
             opening = t[-1]
             container = stack[-1] if stack else rst
-            glueable = isinstance(container, (list, Expression))
+            glueable = isinstance(container, (list, Expression, _Field))
             target = (
                 _glue_target(container, lineno, col_offset)
                 if opening == "[" and not wrapper and glueable
@@ -364,8 +830,10 @@ def _parse_steps(src, rst, nesting):
                 e = stack.pop()
                 e.update_dict("end_lineno", end_lineno)
                 e.update_dict("end_col_offset", end_col_offset)
+            elif tktype == "interpolated-end":
+                e = stack.pop().close(end_lineno, end_col_offset)
             elif tktype in _STRING_TYPES:
-                e = yield string_parse(t, tktype, position_info, error, nesting)
+                e = string_parse(t, tktype, position_info, extra)
             else:
                 e = token_parse(t, tktype, position_info)
             closed = 0
@@ -492,11 +960,17 @@ def _unary_op_wrap(signs, operand, position_info):
     return node
 
 
-def string_parse(token, tktype, position_info, error, nesting):
-    """A string token's node: the String itself for a plain literal (a leaf,
-    no generator), else the steps building its f/t-string. ``nesting`` is the
-    number of f/t-string literals around the token."""
-    [prefix, *contents, _] = token.split(tktype)
+def string_parse(token, tktype, position_info, extra):
+    """A plain string token's node, or the stack entry an f/t-string opening
+    (``tktype`` "interpolated-start", ``extra`` its prefix) starts."""
+    if tktype != "interpolated-start":
+        [prefix, *_] = token.split(tktype)
+        node = String(token, **position_info)
+        interpolated_kind(prefix, node)
+        if extra is not None:
+            raise extra
+        return node
+    prefix = extra
     node = String(token, **position_info)
     kind = interpolated_kind(prefix, node)
     if kind == "t-string":
@@ -504,17 +978,7 @@ def string_parse(token, tktype, position_info, error, nesting):
         # version before any complaint about the literal's contents.
         if not _PARTIAL.get():
             require("t-string", node)
-    locate = _token_locator(token, position_info)
-    start = len(prefix) + len(tktype)
-    if error is not None:
-        raise error
-    if not kind:
-        return node
-    raw = "r" in prefix.lower()
-    [pieces, _] = scan_interpolated(token, start, None, tktype, raw, kind, locate)
-    return interpolated_node(
-        kind, kind, token, pieces, raw, locate, position_info, nesting + 1
-    )
+    return _Interpolated(kind, kind, "r" in prefix.lower(), position_info)
 
 
 def interpolated_kind(prefix, node):
@@ -542,319 +1006,184 @@ def interpolated_kind(prefix, node):
 
 conversion_dict = {"s": 115, "r": 114, "a": 97}
 
-
-def _token_locator(token, position_info):
-    """locate(i, j) -> position_info of token[i:j], from the token's position."""
-
-    def position(i):
-        newline = token.rfind("\n", 0, i)
-        if newline < 0:
-            return [position_info["lineno"], position_info["col_offset"] + i]
-        return [position_info["lineno"] + token.count("\n", 0, i), i - newline - 1]
-
-    def locate(i, j=None):
-        [lineno, col_offset] = position(i)
-        [end_lineno, end_col_offset] = position(i if j is None else j)
-        return {
-            "lineno": lineno,
-            "col_offset": col_offset,
-            "end_lineno": end_lineno,
-            "end_col_offset": end_col_offset,
-        }
-
-    return locate
-
-
-def _interpolation_error(kind, msg, locate, i, j=None):
-    return LispyCompileError(f"{kind}: {msg}", String('""', **locate(i, j)))
-
-
-def scan_interpolated(text, start, end, quote, raw, kind, locate):
-    """The one scanner of string bodies: the tokenizer uses it for every
-    string literal's extent, the parser for an f/t-string's pieces.  For a
-    plain string (``kind`` "string") braces are ordinary characters.
-
-    Scans ``text`` from ``start`` to the closing ``quote`` (or to ``end`` for a
-    format spec, which has no quote) and returns ``[pieces, after]``: pieces
-    alternate ``[literal, start, end]`` and ``[field, start, end]``, beginning
-    and ending with a literal.  Literals are source text (escapes unprocessed)
-    with ``{{``/``}}`` collapsed; a field spans its braces and ``field`` is the
-    text between them.  ``after`` is the index past the closing quote.
-    """
-    end = len(text) if end is None else end
-    interpolated = kind != "string"
-    pieces = []
-    buf = []
-    literal_start = i = start
-    while i < end:
-        if quote is not None and text.startswith(quote, i):
-            pieces.append(["".join(buf), literal_start, i])
-            return [pieces, i + len(quote)]
-        c = text[i]
-        if c == "\\" and i + 1 < end:
-            nxt = text[i + 1]
-            if not raw and text.startswith("N{", i + 1):
-                close = text.find("}", i + 3, end)
-                close = end - 1 if close < 0 else close
-                buf.append(text[i : close + 1])
-                i = close + 1
-            elif nxt in "{}" and interpolated:
-                # A backslash never escapes a brace: it is a literal backslash.
-                buf.append("\\" if raw else "\\\\")
-                i += 1
-            else:
-                buf.append(text[i : i + 2])
-                i += 2
-        elif not interpolated or c not in "{}":
-            buf.append(c)
-            i += 1
-        elif text.startswith(c, i + 1):
-            buf.append(c)
-            i += 2
-        elif c == "{":
-            close = _field_end(text, i + 1, end, kind, locate)
-            pieces.append(["".join(buf), literal_start, i])
-            pieces.append([text[i + 1 : close], i, close + 1])
-            buf = []
-            literal_start = i = close + 1
-        elif c == "}":
-            raise _interpolation_error(
-                kind, "single '}' is not allowed", locate, i, i + 1
-            )
-        else:
-            buf.append(c)
-            i += 1
-    if quote is not None:
-        triple = "triple-quoted " if len(quote) == 3 else ""
-        raise LispyCompileError(
-            f"unterminated {triple}{kind} literal",
-            # At the opening quote, as CPython reports it.
-            String('""', **locate(start - len(quote), start)),
-        )
-    pieces.append(["".join(buf), literal_start, end])
-    return [pieces, end]
-
-
-def _field_chars(text, i, end):
-    """(index, char, depth) for a replacement field's characters outside
-    nested strings; depth counts the brackets open around the char."""
-    depth = 0
-    quote = None
-    while i < end:
-        if quote:
-            if text.startswith(quote, i):
-                i += len(quote)
-                quote = None
-            else:
-                i += 2 if text[i] == "\\" else 1
-            continue
-        # \" is the escape for a quote inside braces; a bare " also opens one.
-        opener = '\\"' if text.startswith('\\"', i) else '"' if text[i] == '"' else None
-        if opener:
-            quote = opener
-            i += len(opener)
-            continue
-        c = text[i]
-        if c in ")]}":
-            depth -= 1
-        yield [i, c, depth]
-        if c in "([{":
-            depth += 1
-        i += 1
-
-
-def _field_end(text, start, end, kind, locate):
-    """Index of the ``}`` closing the replacement field that starts at ``start``."""
-    for [i, c, depth] in _field_chars(text, start, end):
-        if c == "}" and depth < 0:
-            return i
-    raise _interpolation_error(kind, "expecting '}'", locate, start - 1, start)
-
-
 # A trailing "=" after one of these is part of an operator symbol, not a
 # self-documenting "=" (``{x=}``).
 _DEBUG_BLOCKERS = "=!<>:+-*/%&|^@~"
 
 
-def _relocate(node, locate, origin):
-    """Move a node parsed from a field's text to where that text sits.
-
-    An explicit stack in the order a recursive walk would take: a node or list
-    reached by several paths is moved once per path, as it always was.
-    """
-    start = locate(origin)
-    pending = [node]
-    while pending:
-        node = pending.pop()
-        if isinstance(node, list):
-            pending.extend(reversed(node))
-            continue
-        if not isinstance(node, Node):
-            continue
-        if node.lineno:
-            [line, col] = [node.lineno, node.col_offset]
-            [end_line, end_col] = [node.end_lineno, node.end_col_offset]
-            # Set this node only: a wrapper's update_dict would also overwrite
-            # the position of the node it wraps, which is relocated on its own.
-            node.__dict__.update(
-                lineno=start["lineno"] + line - 1,
-                col_offset=col + (start["col_offset"] if line == 1 else 0),
-                end_lineno=start["lineno"] + end_line - 1,
-                end_col_offset=end_col + (start["col_offset"] if end_line == 1 else 0),
-            )
-        children = [v for v in vars(node).values() if isinstance(v, (Node, list))]
-        pending.extend(reversed(children))
+def _interpolation_error(kind, msg, position_info):
+    return LispyCompileError(f"{kind}: {msg}", String('""', **position_info))
 
 
-def _relocate_error(err, start):
-    """Move an error raised parsing a field's text to where that text sits."""
-    for [line_attr, col_attr] in [["lineno", "offset"], ["end_lineno", "end_offset"]]:
-        line = getattr(err, line_attr)
-        if line:
-            if line == 1 and getattr(err, col_attr):
-                setattr(err, col_attr, getattr(err, col_attr) + start["col_offset"])
-            setattr(err, line_attr, line + start["lineno"] - 1)
+class _Interpolated:
+    """``(f-string lit field lit ... lit)`` (or ``t-string``) being built on
+    the parser's stack from the lexer's tokens: an f/t-string literal, or a
+    field's format spec (always an ``f-string`` body; ``kind`` names the
+    literal in error messages)."""
 
+    def __init__(self, symbol, kind, raw, position_info):
+        self.symbol = symbol
+        self.kind = kind
+        self.raw = raw
+        self.start = [position_info["lineno"], position_info["col_offset"]]
+        self.parts = []
+        self.pending = None  # [value, position_info] of the literal text last read
 
-def field_parse(text, field, kind, raw, locate, nesting):
-    """The steps parsing one replacement field into ``[FStrExpr, debug_text]``.
-
-    ``field`` is ``[_, open_brace, after_close_brace]`` from scan_interpolated.
-    Follows Python: ``expr[=][!conv][:spec]``; whitespace around ``expr`` is
-    part of its text; ``=`` echoes the text before it (and implies ``!r``
-    unless a conversion or spec is given); the spec is itself an f-string body.
-    ``nesting`` counts the f/t-string literals around the field, its own
-    included; a literal in the spec's fields counts the same ones.
-    """
-    [_, open_brace, after] = field
-    [start, close] = [open_brace + 1, after - 1]
-    expr_end = close
-    delimiter = "}"
-    conversion = None
-    spec_start = None
-    for [i, c, depth] in _field_chars(text, start, close):
-        if depth != 0:
-            continue
-        if c == "!" and not text.startswith("!=", i):
-            [expr_end, delimiter] = [i, "!"]
-            j = i + 1
-            while j < close and (text[j].isalnum() or text[j] == "_"):
-                j += 1
-            conversion = text[i + 1 : j]
-            if not conversion:
-                msg = (
-                    "conversion type must come right after the exclamation mark"
-                    if j < close and text[j].isspace()
-                    else "missing conversion character"
-                )
-                raise _interpolation_error(kind, msg, locate, i, i + 1)
-            if conversion not in conversion_dict:
-                raise _interpolation_error(
-                    kind,
-                    f"invalid conversion character {conversion!r}: "
-                    "expected 's', 'r', or 'a'",
-                    locate,
-                    i,
-                    j,
-                )
-            rest = j + len(text[j:close]) - len(text[j:close].lstrip())
-            if rest < close and text[rest] == ":":
-                spec_start = rest + 1
-            elif rest < close:
-                raise _interpolation_error(
-                    kind, "expecting '}'", locate, rest, rest + 1
-                )
-            break
-        if c == ":":
-            [expr_end, delimiter, spec_start] = [i, ":", i + 1]
-            break
-
-    expr_text = text[start:expr_end].replace('\\"', '"')
-    debug_text = ""
-    stripped = expr_text.rstrip()
-    if stripped.endswith("=") and stripped[-2:-1] not in _DEBUG_BLOCKERS:
-        debug_text = expr_text
-        expr_text = stripped[:-1]
-        delimiter = "="
-        if conversion is None and spec_start is None:
-            conversion = "r"
-    # Asks for _parse_steps with yield, never calls parse(), so a nested
-    # f-string costs no Python frame per level.
-    try:
-        forms = (
-            (yield _parse_steps(expr_text, [], nesting)) if expr_text.strip() else []
+    def literal(self, text, position_info):
+        value = string_literal_value(
+            "r" if self.raw else "", text, String('""', **position_info)
         )
-    except LispyCompileError as err:
-        _relocate_error(err, locate(start))
-        raise
-    if len(forms) != 1:
-        raise _interpolation_error(
-            kind,
-            f"valid expression required before {delimiter!r}"
-            if not forms
-            else "expecting a single expression in a replacement field",
-            locate,
-            open_brace,
-            after,
-        )
-    _relocate(forms[0], locate, start)
-    format_spec = None
-    if spec_start is not None:
-        [pieces, _] = scan_interpolated(
-            text, spec_start, close, None, raw, kind, locate
-        )
-        # As in CPython, the spec's JoinedStr starts at the ":".
-        spec_position = locate(spec_start - 1, close)
-        format_spec = yield interpolated_node(
-            "f-string", kind, text, pieces, raw, locate, spec_position, nesting
-        )
-    return [
-        FStrExpr(
-            forms[0],
-            conversion=conversion_dict.get(conversion, -1),
-            format_spec=format_spec,
-            expr_text=expr_text,
-            debug=debug_text[len(expr_text) :] if debug_text else None,
-            **locate(open_brace, after),
-        ),
-        debug_text,
-    ]
+        self.pending = [value, position_info]
 
-
-def interpolated_node(symbol, kind, text, pieces, raw, locate, position_info, nesting):
-    """The steps building ``(f-string lit field lit ... lit)`` (or
-    ``t-string``) from scanned pieces.
-
-    ``kind`` names the literal in error messages; a format spec is always an
-    f-string body, even inside a t-string. Each field's steps are asked for
-    with ``yield`` (field_parse), as its nested parse is.
-    """
-    literals = [
-        [
-            string_literal_value(
-                "r" if raw else "", p[0], String('""', **locate(p[1], p[2]))
-            ),
-            p[1],
-            p[2],
-        ]
-        for p in pieces[0::2]
-    ]
-    fields = []
-    for [k, field] in enumerate(pieces[1::2]):
-        [fstr_expr, debug_text] = yield field_parse(
-            text, field, kind, raw, locate, nesting
-        )
-        if debug_text:
+    def field(self, fstr_expr, echo):
+        [value, position_info] = self.pending
+        if echo is not None:
             # The echoed {expr=} text joins the literal before it; CPython
             # places that constant over the echoed text.
-            echo_start = field[1] + 1
-            if not literals[k][0]:
-                literals[k][1] = echo_start
-            literals[k][2] = echo_start + len(debug_text)
-        fields.append(fstr_expr)
-    processed = []
-    for [k, [value, start, end]] in enumerate(literals):
-        processed.append(String(repr(value), **locate(start, end)))
-        if k < len(fields):
-            processed.append(fields[k])
-    return Paren(Symbol(symbol, **position_info), *processed, **position_info)
+            position_info = {
+                **position_info,
+                "end_lineno": echo["end_lineno"],
+                "end_col_offset": echo["end_col_offset"],
+            }
+            if not value:
+                position_info["lineno"] = echo["lineno"]
+                position_info["col_offset"] = echo["col_offset"]
+        self.parts.append(String(repr(value), **position_info))
+        self.parts.append(fstr_expr)
+        self.pending = None
+
+    def close(self, end_lineno, end_col_offset):
+        [value, position_info] = self.pending
+        self.parts.append(String(repr(value), **position_info))
+        position_info = {
+            "lineno": self.start[0],
+            "col_offset": self.start[1],
+            "end_lineno": end_lineno,
+            "end_col_offset": end_col_offset,
+        }
+        return Paren(Symbol(self.symbol, **position_info), *self.parts, **position_info)
+
+
+class _Field:
+    """A replacement field being built on the parser's stack.
+
+    Follows Python: ``expr[=][!conv][:spec]``; whitespace around ``expr`` is
+    part of its text; ``=`` echoes the text before it (and implies ``!r``
+    unless a conversion or spec is given); the spec is itself an f-string
+    body. ``list`` takes the expression's forms as a Paren's list takes its
+    elements (so ``x[0]`` glues there too); there must be exactly one.
+    """
+
+    def __init__(self, owner, position_info, record):
+        self.owner = owner
+        self.position_info = position_info  # of the "{"
+        self.record = record  # the lexer's: where the field ends
+        self.list = []
+        self.value = None
+        self.expr_text = None
+        self.debug_text = None
+        self.echo = None
+        self.conversion = None
+        self.format_spec = None
+
+    def append(self, node):
+        self.list.append(node)
+
+    def end_expression(self, expr_text, data):
+        if len(self.list) != 1:
+            position_info = {**self.position_info}
+            end = self.record.get("end")
+            if end is not None:
+                position_info["end_lineno"] = end["lineno"]
+                position_info["end_col_offset"] = end["col_offset"]
+            delimiter = data["delimiter"]
+            raise _interpolation_error(
+                self.owner.kind,
+                f"valid expression required before {delimiter!r}"
+                if not self.list
+                else "expecting a single expression in a replacement field",
+                position_info,
+            )
+        [self.value] = self.list
+        self.expr_text = expr_text
+        self.debug_text = data["debug_text"]
+        if self.debug_text:
+            self.echo = data["echo"]
+
+    def node(self, end):
+        conversion = self.conversion
+        if self.debug_text and conversion is None and self.format_spec is None:
+            conversion = "r"
+        return FStrExpr(
+            self.value,
+            conversion=conversion_dict.get(conversion, -1),
+            format_spec=self.format_spec,
+            expr_text=self.expr_text,
+            debug=self.debug_text[len(self.expr_text) :] if self.debug_text else None,
+            lineno=self.position_info["lineno"],
+            col_offset=self.position_info["col_offset"],
+            end_lineno=end["end_lineno"],
+            end_col_offset=end["end_col_offset"],
+        )
+
+
+def _field_on_top(stack):
+    """The field whose expression just ended, refusing forms left open in it.
+
+    The lexer ends an expression only outside its brackets, and a quote
+    glued to nothing there is a dangling-quote token, so this is a guard.
+    """
+    if isinstance(stack[-1], _Field):
+        return stack[-1]
+    at = len(stack) - 1
+    while not isinstance(stack[at], _Field):
+        at -= 1
+    _check_all_closed(stack[at + 1 :])
+    raise _interpolation_error(
+        stack[at].owner.kind,
+        "expecting a single expression in a replacement field",
+        stack[at].position_info,
+    )
+
+
+def _interpolated_step(stack, t, tktype, position_info, extra):
+    """Apply one of an f/t-string's own tokens (other than its opening and
+    closing quote) to the entries on the parser's stack."""
+    if tktype == "interpolated-middle":
+        stack[-1].literal(t, position_info)
+    elif tktype == "field-start":
+        stack.append(_Field(stack[-1], position_info, extra))
+    elif tktype == "field-expression-end":
+        _field_on_top(stack).end_expression(t, extra)
+    elif tktype == "field-conversion":
+        stack[-1].conversion = extra
+    elif tktype == "field-spec-start":
+        owner = stack[-1].owner
+        # As in CPython, the spec's JoinedStr starts at the ":".
+        stack.append(_Interpolated("f-string", owner.kind, owner.raw, position_info))
+    else:  # field-end
+        if isinstance(stack[-1], _Interpolated):
+            spec = stack.pop()
+            # ... and ends at the "}".
+            stack[-1].format_spec = spec.close(
+                position_info["lineno"], position_info["col_offset"]
+            )
+        field = stack.pop()
+        stack[-1].field(field.node(position_info), field.echo)
+
+
+# Token types the parse loop hands off before reading positions: the lexer's
+# error, and an f/t-string's own tokens but its closing quote (which ends a form
+# as a closing bracket does).
+_LEXER_ONLY_TOKENS = frozenset(
+    [
+        "error",
+        "interpolated-start",
+        "interpolated-middle",
+        "field-start",
+        "field-expression-end",
+        "field-conversion",
+        "field-spec-start",
+        "field-end",
+    ]
+)
