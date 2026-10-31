@@ -198,7 +198,7 @@ def attribute_compile(sexp, ctx):
     attrs = [first_attr, *more_attrs]
     rst = yield expr_steps(value, ast.Load)
     position_info = {**sexp.position_info}
-    for [i, attr] in enumerate(attrs):
+    for attr in attrs:
         # One identifier per slot: (. a b.c) is refused, not read as a chain.
         name = symbol_name(attr)
         position_info["end_lineno"] = attr.position_info["end_lineno"]

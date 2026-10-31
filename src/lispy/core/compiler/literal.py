@@ -202,7 +202,7 @@ def string_compile(string):
 # the data-level mangling macros read at expansion time and the compiler
 # reads for non-name purposes (operator heads, gensym prefixes, macro
 # registry keys, import paths); whether a text is a valid name depends on
-# the slot (dotted or not, binding or not, after a method's dot), which a
+# the slot (dotted or not, after a method's dot), which a
 # node does not know; and a refusal is a compiler concern, a
 # LispyCompileError positioned at the symbol. A pin test keeps expr.py,
 # stmt.py, compiler/utils.py and features.py from reading a symbol's mangled
@@ -212,6 +212,7 @@ def string_compile(string):
 # wording: an operator whose mangled text is a name (``-`` is ``_``,
 # ``is-not`` is ``is_not``) stays a legal name, as it always was.
 OPERATOR_TEXTS = frozenset([*unaryop_dict, *binop_dict, *compare_dict, *boolop_dict])
+
 
 def identifier_p(name):
     """Whether the mangled text ``name`` is a Python name: an identifier that
@@ -294,7 +295,7 @@ def name_compile(symbol, ctx):
     other parts load."""
     [name, *attrs] = symbol.name.split(".")
     python_name(name, symbol)
-    for [i, attr] in enumerate(attrs):
+    for attr in attrs:
         python_name(attr, symbol)
     position_info = {**symbol.position_info}
     position_info["end_col_offset"] = position_info["col_offset"] + len(name)
