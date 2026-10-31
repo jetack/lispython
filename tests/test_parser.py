@@ -408,9 +408,8 @@ class TestFormatSpecChains:
         [
             ('f"{x:{x:{x:{x}}}} }"', "f-string: single '}' is not allowed", (1, 19)),
             ('f"{x:{x:{x:{x}}}} {"', "f-string: expecting '}'", (1, 19)),
-            ('f"{x:{x:{x:{x', "f-string: expecting '}'", (1, 12)),
         ],
-        ids=["single-brace", "open-field", "unterminated"],
+        ids=["single-brace", "open-field"],
     )
     def test_an_error_after_a_deep_chain_is_reported_where_it_is(self, src, msg, at):
         with pytest.raises(LispyCompileError) as info:
@@ -439,11 +438,6 @@ class TestFormatSpecChains:
             # CPython 3.12's reading (3.15 checks the name first).
             ('f"{x!z"', "f-string: expecting '}'", (1, 7)),
             ('f"{x!\n"', "f-string: expecting '}'", (2, 1)),
-            # The source ends: as for f"{x" and f"{x!r", at the "{" (CPython:
-            # "'{' was never closed" there).
-            ('f"{x!', "f-string: expecting '}'", (1, 3)),
-            ('f"{x! ', "f-string: expecting '}'", (1, 3)),
-            ('f"{x!z ', "f-string: expecting '}'", (1, 3)),
             # Not the closing quote: a string where the name should be.
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
             ('f"""{x!""', "f-string: invalid conversion character", (1, 8)),
@@ -455,9 +449,6 @@ class TestFormatSpecChains:
             "name-space-quote",
             "bad-name-quote",
             "newline-quote",
-            "end",
-            "space-end",
-            "bad-name-space-end",
             "string-in-triple",
             "quotes-in-triple",
         ],
@@ -572,12 +563,6 @@ class TestFieldsLexedInPlace:
         [stmt] = macroexpand_then_compile(parse(src))
         assert stmt.value.values[0].value == echo
 
-    def test_an_unterminated_bare_string_in_a_field_is_an_error(self):
-        # \" does not close the string, so it swallows the field's )} and the
-        # f-string's closing quote, and the field is never closed.
-        with pytest.raises(LispyCompileError):
-            parse(r'f"{(g "a\")}"')
-
     @pytest.mark.parametrize(
         ["src", "form"],
         [
@@ -590,6 +575,169 @@ class TestFieldsLexedInPlace:
     )
     def test_a_comment_in_a_field_ends_at_a_brace_or_the_line(self, src, form):
         assert str(parse(src)[0].list[2].value) == form
+
+
+def error_position(read, src):
+    with pytest.raises(SyntaxError) as info:
+        read(src)
+    return (info.value.msg, info.value.lineno, info.value.offset)
+
+
+def python_error_position(src):
+    return error_position(lambda s: compile(s, "<s>", "exec"), src)
+
+
+IN_PLACE = features.fstring_fields_are_tokens()
+
+
+class TestSourceEndingInAFieldExpression:
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            # The bare-quoted string takes \" as an escape, so it swallows )}
+            # and the closing quote. (g, ...) keeps the "(" in lispython's
+            # column; 3.11 lexes that Python text as other tokens.
+            pytest.param(
+                r'f"{(g "a\")}"',
+                r'f"{(g, "a\")}"',
+                marks=pytest.mark.skipif(
+                    not IN_PLACE, reason="3.11 reads the Python text differently"
+                ),
+            ),
+            ('f"{(', None),
+            ('f"{x', None),
+            ('(f"{x', None),
+            ('f"{x:{(', None),
+            ('f"{x} {y', None),
+            ('f"{x!r', None),
+            ('f"{x!', None),
+            ('f"{x! ', None),
+            ('f"""\n{\n[\n(x', None),
+            ('f"{x\n\n', None),
+            ('f"ab\\\n{x\n', None),
+            # 3.11's line rules: a final \n starts no line, a final \r\n does;
+            # a backslash escapes a whole \r\n, and escapes in a raw string too.
+            ('f"""{(\n x\n', None),
+            ('f"""{x\r\n y\r\n', None),
+            ('f"ab\\\r\n{x', None),
+            ('rf"a\\\n{x\n', None),
+            pytest.param(
+                'f"{f"{(',
+                None,
+                marks=pytest.mark.skipif(
+                    not IN_PLACE, reason="3.11 ends the string at the inner quote"
+                ),
+            ),
+            pytest.param(
+                't"{(',
+                None,
+                marks=pytest.mark.skipif(not T_STRINGS, reason="needs Python 3.14"),
+            ),
+        ],
+        ids=[
+            "bare-string-swallows-the-field",
+            "innermost-bracket",
+            "field-brace",
+            "inside-a-bracket",
+            "spec-field",
+            "second-field",
+            "conversion",
+            "exclamation-mark",
+            "space-after-the-exclamation-mark",
+            "triple-multiline",
+            "single-newline",
+            "backslash-newline",
+            "final-lf",
+            "final-crlf",
+            "backslash-crlf",
+            "raw-backslash-newline",
+            "nested-literal",
+            "t-string",
+        ],
+    )
+    def test_the_error_is_cpython_s(self, lpy, py):
+        assert error_position(parse, lpy) == python_error_position(py or lpy)
+
+    @pytest.mark.parametrize(
+        ["src", "in_place", "whole_literal"],
+        [
+            # CPython 3.12+ refuses the chain as nested too deeply; lispython
+            # adds no nesting limit of its own.
+            ('f"{x:{x:{x:{x', (1, 12), (1, 1)),
+            # 3.12-3.14's reading; 3.15 checks the conversion name first (a
+            # separate card).
+            ('f"{x!z ', (1, 3), (1, 1)),
+        ],
+        ids=["past-the-nesting-limit", "bad-conversion-name"],
+    )
+    def test_where_cpython_differs_the_field_rule_still_holds(
+        self, src, in_place, whole_literal
+    ):
+        expected = (
+            ("'{' was never closed", *in_place)
+            if IN_PLACE
+            else ("unterminated string literal (detected at line 1)", *whole_literal)
+        )
+        assert error_position(parse, src) == expected
+
+    @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
+    @pytest.mark.parametrize(
+        ["src", "errors"],
+        [
+            (
+                '(f"{x',
+                {
+                    True: ("'{' was never closed", 1, 4),
+                    False: ("unterminated string literal (detected at line 1)", 1, 2),
+                },
+            ),
+            (
+                'f"""{(\n x\n',
+                {
+                    True: ("'(' was never closed", 1, 6),
+                    False: (
+                        "unterminated triple-quoted string literal "
+                        "(detected at line 2)",
+                        1,
+                        1,
+                    ),
+                },
+            ),
+            (
+                'f"""{x\r\n y\r\n',
+                {
+                    True: ("'{' was never closed", 1, 5),
+                    False: (
+                        "unterminated triple-quoted string literal "
+                        "(detected at line 3)",
+                        1,
+                        1,
+                    ),
+                },
+            ),
+            (
+                'f"ab\\\r\n{x',
+                {
+                    True: ("'{' was never closed", 2, 1),
+                    False: ("unterminated string literal (detected at line 2)", 1, 1),
+                },
+            ),
+            (
+                'rf"a\\\n{x\n',
+                {
+                    True: ("'{' was never closed", 2, 1),
+                    False: ("unterminated string literal (detected at line 2)", 1, 1),
+                },
+            ),
+        ],
+        ids=["single", "triple-final-lf", "final-crlf", "backslash-crlf", "raw"],
+    )
+    def test_each_tokenizer_s_error_is_produced(
+        self, monkeypatch, in_place, src, errors
+    ):
+        # Both branches on every interpreter: CPython's measured messages.
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: in_place)
+        assert error_position(parse, src) == errors[in_place]
 
 
 class TestNumberLexingCost:
