@@ -126,19 +126,14 @@ def keyword_value(keyword, q):
 def call_args_parse(given):
     """``[args, keywords]`` of a call's (or a class's bases') operands:
     ``:name value`` and ``**mapping`` are keywords, the rest positional.
-    A keyword name given twice is refused at its second ``:name``, with
-    CPython's message, compared as the Python name (``:a-b`` is ``:a_b``)."""
+    A keyword name given twice is left to compile(), which refuses it."""
     q = deque(given)
     args = []
     keywords = []
-    seen = set()
     while q:
         arg = q.popleft()
         if keyword_arg_p(arg):
             name = symbol_name(arg.value)
-            if name in seen:
-                raise LispyCompileError(f"keyword argument repeated: {name}", arg)
-            seen.add(name)
             keywords.append(
                 ast.keyword(
                     arg=name,

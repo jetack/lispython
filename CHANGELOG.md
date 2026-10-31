@@ -46,8 +46,7 @@ follows [Semantic Versioning](https://semver.org/).
   `else is a Python keyword and cannot be used as a name`, at the keyword,
   instead of `else is a Python keyword and cannot be called` at the form.
 - Forms that compiled to something other than what they say are compile
-  errors: a repeated keyword argument (`(f :a 1 :a 2)`, class keywords
-  too), `(ife a b c d)` (dropped `d`), `(yield a b)`, a comprehension clause
+  errors: `(ife a b c d)` (dropped `d`), `(yield a b)`, a comprehension clause
   with a stray or dangling operand (`[x for y in z if]`, `(x for y in z if a
   b)`), and a parameter list CPython refuses: a misplaced
   or repeated `/`, `*` or `**kw` (`[a / /]` dropped `a`, `[*a *b]` made `b`

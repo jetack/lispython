@@ -311,22 +311,8 @@ class TestExpressionFormArity:
         assert stmt_to_dump(lispy) == ast.dump(ast.parse(python))
 
 
-class TestRepeatedKeywordArgument:
-    """A keyword argument given twice is refused at the second, in CPython's
-    words, compared as the Python name."""
-
-    @pytest.mark.parametrize(
-        ("src", "name", "at"),
-        [
-            ("(f :a 1 :a 2)", "a", ":a@2"),
-            ("(f :a 1 **k :a 2)", "a", ":a@2"),
-            ("(.m x :a 1 :a 2)", "a", ":a@2"),
-            ("(f :a-b 1 :a_b 2)", "a_b", ":a_b"),
-        ],
-    )
-    def test_refused_at_the_second(self, src, name, at):
-        assert_refused_at(src, f"keyword argument repeated: {name}", at)
-
+class TestDistinctKeywordArguments:
+    # A keyword given twice is CPython's to refuse (tests/test_names.py).
     def test_distinct_keywords_compile(self):
         assert stmt_to_dump("(f :a 1 **k :b 2)") == ast.dump(
             ast.parse("f(a=1, **k, b=2)")

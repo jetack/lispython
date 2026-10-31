@@ -271,6 +271,11 @@ CPYTHON_REFUSALS = [
     ("(def f [a / a] 1)", "def f(a, /, a): 1"),
     ("(def f [* a :a 1] 1)", "def f(*, a, a=1): 1"),
     ("(lambda [x x] 1)", "lambda x, x: 1"),
+    ("(f :a 1 :a 2)", "f(a=1, a=2)"),
+    ("(f :a 1 **k :a 2)", "f(a=1, **k, a=2)"),
+    ("(.m x :a 1 :a 2)", "x.m(a=1, a=2)"),
+    ("(f :a-b 1 :a_b 2)", "f(a_b=1, a_b=2)"),
+    ("(class A [:metaclass M :metaclass N] 1)", "class A(metaclass=M, metaclass=N): 1"),
     ("(async-def f [x x] 1)", "async def f(x, x): 1"),
 ]
 
