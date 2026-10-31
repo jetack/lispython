@@ -21,7 +21,7 @@ from lispy.core.nodes import (
     UnquoteSplice,
     Wrapper,
 )
-from lispy.core.utils import augassignop_dict
+from lispy.core.utils import augassignop_dict, trampoline
 
 _INT = r"\d+[\dA-Za-z]*(?:_[\dA-Za-z]+)*"
 _FLOATS = [
@@ -266,11 +266,11 @@ def parse(src, partial=False):
     form.  The LSP's diagnostics still use the strict parse to report it.
     """
     if not partial:
-        return _parse(src, [])
+        return trampoline(_parse_steps(src, [], 0))
     rst = []
     token = _PARTIAL.set(True)
     try:
-        _parse(src, rst)
+        trampoline(_parse_steps(src, rst, 0))
     except Exception:
         pass
     finally:
@@ -278,7 +278,14 @@ def parse(src, partial=False):
     return rst
 
 
-def _parse(src, rst):
+def _parse_steps(src, rst, nesting):
+    """Parse ``src`` into ``rst`` as a trampoline step (core/utils.py).
+
+    ``nesting`` is the number of f/t-string literals enclosing ``src`` (it is
+    a replacement field's text when nonzero). An f/t-string's fields are parsed
+    by asking for their steps with ``yield``, never by calling parse(), so a
+    nested f-string costs no Python frame per level.
+    """
     tokens = tokenize(src)
     stack = []
     while tokens:
@@ -357,18 +364,28 @@ def _parse(src, rst):
                 e = stack.pop()
                 e.update_dict("end_lineno", end_lineno)
                 e.update_dict("end_col_offset", end_col_offset)
-            elif error is not None:
-                e = string_parse(t, tktype, position_info, error)
+            elif tktype in _STRING_TYPES:
+                e = yield string_parse(t, tktype, position_info, error, nesting)
             else:
                 e = token_parse(t, tktype, position_info)
+            closed = 0
             while stack and isinstance(stack[-1], (MetaIndicator, Wrapper, GluedHead)):
                 popped = stack.pop()
                 if isinstance(popped, GluedHead):
                     popped.params = e
                 else:
                     popped.value = e
-                popped.update_dict("end_lineno", end_lineno)
-                popped.update_dict("end_col_offset", end_col_offset)
+                if closed:
+                    # e already carries these ends down its whole chain (set
+                    # when it was popped), so a wrapper's update_dict would
+                    # only set them again: setting this node alone keeps a
+                    # chain of N prefixes linear rather than quadratic.
+                    popped.__dict__["end_lineno"] = end_lineno
+                    popped.__dict__["end_col_offset"] = end_col_offset
+                else:
+                    popped.update_dict("end_lineno", end_lineno)
+                    popped.update_dict("end_col_offset", end_col_offset)
+                closed += 1
                 e = popped
             (stack[-1] if stack else rst).append(e)
     _check_all_closed(stack)
@@ -383,29 +400,62 @@ def _split_bad_prefix(token):
 
 special_literals = ("True", "False", "None", "...")
 
+_STRING_TYPES = ("'''", '"""', '"')
+
 
 def token_parse(token, tktype, position_info):
-    return (
-        Symbol(token, **position_info)
-        if token in augassignop_dict
-        else Constant(token, **position_info)
-        if token in special_literals
-        else Constant(token, **position_info)
-        if tktype == "number" and (token[0] not in "+-" or _signed_complex_p(token))
-        else string_parse(token, tktype, position_info)
-        if tktype in ["'''", '"""', '"']
-        else Symbol(token, **position_info)
-        if len(token) < 2
-        else annotation_token_parse(token, tktype, position_info)
-        if token[0] == "^"
-        else keyword_token_parse(token, tktype, position_info)
-        if token[0] == ":"
-        else star_token_parse(token, tktype, position_info)
-        if token[0] == "*"
-        else unary_op_parse(token, tktype, position_info)
-        if token[0] in "+-" and (lambda rest: rest and (rest[0].isalnum() or rest[0] in "_."))(token.lstrip("+-"))
-        else Symbol(token, **position_info)
-    )
+    """The node of a symbol or number token (strings go to string_parse).
+
+    A prefix (``^``, ``:``, ``*``, ``**``, or a run of signs before a name or
+    number) wraps the rest of the token, which may carry another. One loop
+    peels them outside in, then the leaf is wrapped inside out, so a chain of
+    prefixes costs no Python frame per prefix.
+    """
+    # Outermost first: [wrapper class, position] or ["signs", position, signs].
+    prefixes = []
+    while True:
+        if token in augassignop_dict:
+            node = Symbol(token, **position_info)
+            break
+        if token in special_literals:
+            node = Constant(token, **position_info)
+            break
+        if tktype == "number" and (token[0] not in "+-" or _signed_complex_p(token)):
+            node = Constant(token, **position_info)
+            break
+        if len(token) < 2:
+            node = Symbol(token, **position_info)
+            break
+        if token[0] in "^:*":
+            width = 2 if token.startswith("**") else 1
+            wrapper = (
+                Annotation
+                if token[0] == "^"
+                else Keyword
+                if token[0] == ":"
+                else wrapper_dict["*" * width]
+            )
+            prefixes.append([wrapper, position_info])
+            position_info = {**position_info}
+            position_info["col_offset"] += width
+            token = token[width:]
+            tktype = _operand_type(token, tktype)
+            continue
+        rest = token.lstrip("+-")
+        if token[0] in "+-" and rest and (rest[0].isalnum() or rest[0] in "_."):
+            signs = token[: len(token) - len(rest)]
+            prefixes.append(["signs", position_info, signs])
+            position_info = {**position_info}
+            position_info["col_offset"] += len(signs)
+            token = rest
+            continue
+        node = Symbol(token, **position_info)
+        break
+    for [wrapper, outer, *signs] in reversed(prefixes):
+        node = (
+            _unary_op_wrap(signs[0], node, outer) if signs else wrapper(node, **outer)
+        )
+    return node
 
 
 def _signed_complex_p(token):
@@ -422,62 +472,34 @@ def _operand_type(operand, tktype):
     return "number" if _NUMBER_TOKEN_RE.match(operand) else tktype
 
 
-def annotation_token_parse(token, tktype, position_info):
-    inner_position = {**position_info}
-    inner_position["col_offset"] += 1
-    return Annotation(
-        token_parse(token[1:], _operand_type(token[1:], tktype), inner_position),
-        **position_info,
-    )
-
-
-def keyword_token_parse(token, tktype, position_info):
-    inner_position = {**position_info}
-    inner_position["col_offset"] += 1
-    return Keyword(
-        token_parse(token[1:], _operand_type(token[1:], tktype), inner_position),
-        **position_info,
-    )
-
-
-def star_token_parse(token, tktype, position_info):
-    num_star = 2 if token[1] == "*" else 1
-    inner_position = {**position_info}
-    inner_position["col_offset"] += num_star
-    operand = token[num_star:]
-    return wrapper_dict["*" * num_star](
-        token_parse(operand, _operand_type(operand, tktype), inner_position),
-        **position_info,
-    )
-
-
-def unary_op_parse(token, tktype, position_info):
-    stack = []
-    idx = 0
+def _unary_op_wrap(signs, operand, position_info):
+    """``(- (+ operand))`` for the signs ``-+`` starting at ``position_info``:
+    each sign's Paren starts at that sign and ends where the token ends."""
     lineno = position_info["lineno"]
     col_offset = position_info["col_offset"]
-    while token[idx] in "+-":
-        stack.append(
-            Symbol(
-                token[idx],
-                **{
-                    "lineno": lineno,
-                    "end_lineno": lineno,
-                    "col_offset": col_offset + idx,
-                    "end_col_offset": col_offset + idx + 1,
-                },
-            )
+    node = operand
+    for idx in reversed(range(len(signs))):
+        sign = Symbol(
+            signs[idx],
+            **{
+                "lineno": lineno,
+                "end_lineno": lineno,
+                "col_offset": col_offset + idx,
+                "end_col_offset": col_offset + idx + 1,
+            },
         )
-        idx += 1
-    position_info["col_offset"] += idx
-    rst = token_parse(token[slice(idx, None)], tktype, {**position_info})
-    while stack:
-        position_info["col_offset"] -= 1
-        rst = Paren(stack.pop(), rst, **position_info)
-    return rst
+        node = Paren(sign, node, **{**position_info, "col_offset": col_offset + idx})
+    return node
 
 
-def string_parse(token, tktype, position_info, error=None):
+# CPython's lexer refuses the 150th nested f/t-string literal (MAXFSTRINGLEVEL).
+FSTRING_NESTING_LIMIT = 150
+
+
+def string_parse(token, tktype, position_info, error, nesting):
+    """A string token's node: the String itself for a plain literal (a leaf,
+    no generator), else the steps building its f/t-string. ``nesting`` is the
+    number of f/t-string literals around the token."""
     [prefix, *contents, _] = token.split(tktype)
     node = String(token, **position_info)
     kind = interpolated_kind(prefix, node)
@@ -486,15 +508,23 @@ def string_parse(token, tktype, position_info, error=None):
         # version before any complaint about the literal's contents.
         if not _PARTIAL.get():
             require("t-string", node)
+    locate = _token_locator(token, position_info)
+    start = len(prefix) + len(tktype)
+    if kind and nesting + 1 >= FSTRING_NESTING_LIMIT:
+        # At the opening's last character, where CPython reports it.
+        raise LispyCompileError(
+            "too many nested f-strings or t-strings",
+            String('""', **locate(start - 1, start)),
+        )
     if error is not None:
         raise error
     if not kind:
         return node
-    locate = _token_locator(token, position_info)
     raw = "r" in prefix.lower()
-    start = len(prefix) + len(tktype)
     [pieces, _] = scan_interpolated(token, start, None, tktype, raw, kind, locate)
-    return interpolated_node(kind, kind, token, pieces, raw, locate, position_info)
+    return interpolated_node(
+        kind, kind, token, pieces, raw, locate, position_info, nesting + 1
+    )
 
 
 def interpolated_kind(prefix, node):
@@ -657,28 +687,33 @@ _DEBUG_BLOCKERS = "=!<>:+-*/%&|^@~"
 
 
 def _relocate(node, locate, origin):
-    """Move a node parsed from a field's text to where that text sits."""
-    if isinstance(node, list):
-        for item in node:
-            _relocate(item, locate, origin)
-        return
-    if not isinstance(node, Node):
-        return
-    if node.lineno:
-        [line, col] = [node.lineno, node.col_offset]
-        [end_line, end_col] = [node.end_lineno, node.end_col_offset]
-        start = locate(origin)
-        # Set this node only: a wrapper's update_dict would also overwrite the
-        # position of the node it wraps, which is relocated on its own below.
-        node.__dict__.update(
-            lineno=start["lineno"] + line - 1,
-            col_offset=col + (start["col_offset"] if line == 1 else 0),
-            end_lineno=start["lineno"] + end_line - 1,
-            end_col_offset=end_col + (start["col_offset"] if end_line == 1 else 0),
-        )
-    for value in list(vars(node).values()):
-        if isinstance(value, (Node, list)):
-            _relocate(value, locate, origin)
+    """Move a node parsed from a field's text to where that text sits.
+
+    An explicit stack in the order a recursive walk would take: a node or list
+    reached by several paths is moved once per path, as it always was.
+    """
+    start = locate(origin)
+    pending = [node]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, list):
+            pending.extend(reversed(node))
+            continue
+        if not isinstance(node, Node):
+            continue
+        if node.lineno:
+            [line, col] = [node.lineno, node.col_offset]
+            [end_line, end_col] = [node.end_lineno, node.end_col_offset]
+            # Set this node only: a wrapper's update_dict would also overwrite
+            # the position of the node it wraps, which is relocated on its own.
+            node.__dict__.update(
+                lineno=start["lineno"] + line - 1,
+                col_offset=col + (start["col_offset"] if line == 1 else 0),
+                end_lineno=start["lineno"] + end_line - 1,
+                end_col_offset=end_col + (start["col_offset"] if end_line == 1 else 0),
+            )
+        children = [v for v in vars(node).values() if isinstance(v, (Node, list))]
+        pending.extend(reversed(children))
 
 
 def _relocate_error(err, start):
@@ -691,13 +726,15 @@ def _relocate_error(err, start):
             setattr(err, line_attr, line + start["lineno"] - 1)
 
 
-def field_parse(text, field, kind, raw, locate):
-    """Parse one replacement field into ``[FStrExpr, debug_text]``.
+def field_parse(text, field, kind, raw, locate, nesting):
+    """The steps parsing one replacement field into ``[FStrExpr, debug_text]``.
 
     ``field`` is ``[_, open_brace, after_close_brace]`` from scan_interpolated.
     Follows Python: ``expr[=][!conv][:spec]``; whitespace around ``expr`` is
     part of its text; ``=`` echoes the text before it (and implies ``!r``
     unless a conversion or spec is given); the spec is itself an f-string body.
+    ``nesting`` counts the f/t-string literals around the field, its own
+    included; a literal in the spec's fields counts the same ones.
     """
     [_, open_brace, after] = field
     [start, close] = [open_brace + 1, after - 1]
@@ -751,8 +788,12 @@ def field_parse(text, field, kind, raw, locate):
         delimiter = "="
         if conversion is None and spec_start is None:
             conversion = "r"
+    # Asks for _parse_steps with yield, never calls parse(), so a nested
+    # f-string costs no Python frame per level.
     try:
-        forms = parse(expr_text) if expr_text.strip() else []
+        forms = (
+            (yield _parse_steps(expr_text, [], nesting)) if expr_text.strip() else []
+        )
     except LispyCompileError as err:
         _relocate_error(err, locate(start))
         raise
@@ -774,8 +815,8 @@ def field_parse(text, field, kind, raw, locate):
         )
         # As in CPython, the spec's JoinedStr starts at the ":".
         spec_position = locate(spec_start - 1, close)
-        format_spec = interpolated_node(
-            "f-string", kind, text, pieces, raw, locate, spec_position
+        format_spec = yield interpolated_node(
+            "f-string", kind, text, pieces, raw, locate, spec_position, nesting
         )
     return [
         FStrExpr(
@@ -790,11 +831,13 @@ def field_parse(text, field, kind, raw, locate):
     ]
 
 
-def interpolated_node(symbol, kind, text, pieces, raw, locate, position_info):
-    """``(f-string lit field lit ... lit)`` (or ``t-string``) from scanned pieces.
+def interpolated_node(symbol, kind, text, pieces, raw, locate, position_info, nesting):
+    """The steps building ``(f-string lit field lit ... lit)`` (or
+    ``t-string``) from scanned pieces.
 
     ``kind`` names the literal in error messages; a format spec is always an
-    f-string body, even inside a t-string.
+    f-string body, even inside a t-string. Each field's steps are asked for
+    with ``yield`` (field_parse), as its nested parse is.
     """
     literals = [
         [
@@ -808,7 +851,9 @@ def interpolated_node(symbol, kind, text, pieces, raw, locate, position_info):
     ]
     fields = []
     for [k, field] in enumerate(pieces[1::2]):
-        [fstr_expr, debug_text] = field_parse(text, field, kind, raw, locate)
+        [fstr_expr, debug_text] = yield field_parse(
+            text, field, kind, raw, locate, nesting
+        )
         if debug_text:
             # The echoed {expr=} text joins the literal before it; CPython
             # places that constant over the echoed text.

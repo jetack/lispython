@@ -1,3 +1,4 @@
+import contextvars
 from ast import literal_eval as _literal_eval
 from collections import deque
 from math import copysign as _copysign
@@ -80,7 +81,14 @@ class Node:
         for a child's with ``form = yield child._generator_steps(in_quasi)``,
         so nesting depth costs no Python frames.
         """
-        return trampoline(self._generator_steps(in_quasi))
+        # The outermost run owns the unquote memo. Its ids stay valid because
+        # each entry holds the node or list it answers for, keeping it alive.
+        memo = _UNQUOTE_MEMO.set({}) if _UNQUOTE_MEMO.get() is None else None
+        try:
+            return trampoline(self._generator_steps(in_quasi))
+        finally:
+            if memo is not None:
+                _UNQUOTE_MEMO.reset(memo)
 
     def _generator_steps(self, in_quasi):
         return self._classname_call((yield self.operands_generate(in_quasi)))
@@ -143,6 +151,57 @@ def contains_unquote(node):
         seen.add(id(node))
         pending.extend(vars(node).values() if isinstance(node, Node) else node)
     return False
+
+
+# id -> (node or list, whether an Unquote occurs in it), for the outermost
+# generator_expression run: an f-string field asks contains_unquote at every
+# level of a nest, so each subtree's answer is computed once, not per level.
+_UNQUOTE_MEMO = contextvars.ContextVar("lispy_unquote_memo", default=None)
+
+
+def _form_children(node):
+    """What contains_unquote walks into from ``node``: its attributes' or
+    items' nodes and lists."""
+    values = vars(node).values() if isinstance(node, Node) else node
+    return [v for v in values if isinstance(v, (Node, list))]
+
+
+def _contains_unquote_memoized(node):
+    """``contains_unquote(node)``, through the memo of the generator_expression
+    run (one iterative post-order walk that records every subtree's answer).
+    A cycle makes the answers on it depend on each other: its walk's entries
+    are dropped and the plain walk answers instead."""
+    memo = _UNQUOTE_MEMO.get()
+    if memo is None or not isinstance(node, (Node, list)):
+        return contains_unquote(node)
+    if id(node) in memo:
+        return memo[id(node)][1]
+    added = []
+    active = set()
+    # (node, its children once expanded): children are answered first.
+    pending = [(node, None)]
+    while pending:
+        [item, children] = pending.pop()
+        key = id(item)
+        if children is not None:
+            active.discard(key)
+            memo[key] = (item, any(memo[id(c)][1] for c in children))
+            added.append(key)
+        elif key in memo:
+            continue
+        elif isinstance(item, Unquote):
+            memo[key] = (item, True)
+            added.append(key)
+        elif key in active:
+            for walked in added:
+                del memo[walked]
+            return contains_unquote(node)
+        else:
+            active.add(key)
+            children = _form_children(item)
+            pending.append((item, children))
+            pending.extend((c, None) for c in children)
+    return memo[id(node)][1]
 
 
 _POSITION_KEYS = ("lineno", "col_offset", "end_lineno", "end_col_offset")
@@ -747,6 +806,18 @@ class Wrapper(Node):
     def operands_generate(self, in_quasi):
         return self.value._generator_steps(in_quasi)
 
+    def update_dict(self, key, value):
+        """Set ``key`` on this wrapper and on everything it wraps, down to
+        the first value that is not such a wrapper, which sets it its own way.
+        A loop, so a long chain of wrappers costs no frame per wrapper."""
+        node = self
+        while (
+            isinstance(node, Wrapper) and type(node).update_dict is Wrapper.update_dict
+        ):
+            node.__dict__[key] = value
+            node = node.value
+        return node.update_dict(key, value)
+
 
 class FStrExpr(Wrapper):
     """A replacement field of an f/t-string.
@@ -780,7 +851,7 @@ class FStrExpr(Wrapper):
         format_spec = getattr(self, "format_spec", None)
         debug = getattr(self, "debug", None)
         text = self.expr_text
-        if in_quasi and contains_unquote(self.value):
+        if in_quasi and _contains_unquote_memoized(self.value):
             # The text is only known once the unquote is expanded.
             lead = text[: len(text) - len(text.lstrip())]
             trail = text[len(text.rstrip()) :]
@@ -810,10 +881,6 @@ class FStrExpr(Wrapper):
     def name(self):
         return self.value.name
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class Annotation(Wrapper):
     source_prefix = "^"
@@ -833,10 +900,6 @@ class Annotation(Wrapper):
     def name(self):
         return self.value.name
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class Keyword(Wrapper):
     source_prefix = ":"
@@ -853,10 +916,6 @@ class Keyword(Wrapper):
     def name(self):
         return self.value.name
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class Starred(Wrapper):
     source_prefix = "*"
@@ -872,10 +931,6 @@ class Starred(Wrapper):
     def append(self, e):
         return self.value.append(e)
 
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
-
 
 class DoubleStarred(Wrapper):
     source_prefix = "**"
@@ -890,10 +945,6 @@ class DoubleStarred(Wrapper):
 
     def append(self, e):
         return self.value.append(e)
-
-    def update_dict(self, key, value):
-        self.__dict__[key] = value
-        return self.value.update_dict(key, value)
 
 
 class GluedHead(Node):

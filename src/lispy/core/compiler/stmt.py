@@ -9,6 +9,7 @@ convention is stated in expr.py's module docstring). ``stmt_compile`` and
 import ast
 from collections import deque
 from functools import reduce
+from itertools import islice
 
 from lispy.core.compiler import features
 from lispy.core.compiler.expr import (
@@ -43,6 +44,12 @@ def expr_wrapper(sexp):
 
 def do_p(sexp):
     return atom_text(sexp.op) == "do"
+
+
+def do_form_p(sexp):
+    """Whether stmt_steps compiles ``sexp`` with do_compile (stmt_list_steps
+    inlines exactly these)."""
+    return paren_p(sexp) and len(sexp) > 0 and do_p(sexp)
 
 
 def do_compile(sexp):
@@ -942,10 +949,10 @@ def stmt_steps(sexp, decorator_list=None):
     (or list of nodes) itself for a statement with no sub-form (see expr.py's
     module docstring)."""
     return (
-        expr_wrapper(sexp)
+        do_compile(sexp)
+        if do_form_p(sexp)
+        else expr_wrapper(sexp)
         if not paren_p(sexp) or not len(sexp)
-        else do_compile(sexp)
-        if do_p(sexp)
         else assign_compile(sexp)
         if assign_p(sexp)
         else augassign_compile(sexp)
@@ -1006,11 +1013,29 @@ def stmt_steps(sexp, decorator_list=None):
     )
 
 
+# The end of an operand iterator in stmt_list_steps.
+_DONE = object()
+
+
 def stmt_list_steps(sexp_list):
     """The statements of ``sexp_list``, compiled in order; a form compiling to
-    several (do, from) contributes them all."""
+    several (do, from) contributes them all.
+
+    A ``do`` that stmt_steps would give to do_compile (do_form_p) is inlined
+    from a worklist of operand iterators instead: a nest of them would
+    otherwise copy each level's whole statement list into the level above,
+    quadratic in the nesting.
+    """
     stmts = []
-    for sexp in sexp_list:
+    pending = [iter(sexp_list)]
+    while pending:
+        sexp = next(pending[-1], _DONE)
+        if sexp is _DONE:
+            pending.pop()
+            continue
+        if do_form_p(sexp):
+            pending.append(islice(sexp.list, 1, None))
+            continue
         stmt = yield stmt_steps(sexp)
         if isinstance(stmt, list):
             stmts.extend(stmt)

@@ -9,8 +9,11 @@ import sys
 
 import pytest
 
+import lispy.core.parser as parser_module
 import lispy.tools as tools
+from lispy.core import nodes
 from lispy.core.compiler import features
+from lispy.core.compiler import stmt as stmt_module
 from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
 from lispy.core.errors import BLOCK_OVERFLOW_MESSAGE, LispyCompileError
 from lispy.core.macro import macroexpand, macroexpand_then_compile
@@ -23,6 +26,7 @@ from lispy.core.nodes import (
     FStrExpr,
     GluedHead,
     Keyword,
+    Node,
     Paren,
     QuasiQuote,
     Quote,
@@ -31,10 +35,11 @@ from lispy.core.nodes import (
     Symbol,
     Unquote,
     UnquoteSplice,
+    Wrapper,
     atom_text,
     contains_unquote,
 )
-from lispy.core.parser import parse
+from lispy.core.parser import FSTRING_NESTING_LIMIT, parse
 from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
@@ -532,7 +537,8 @@ EXPRESSION_DEPTHS = [
         ast.Await,
         True,
     ),
-    # The parser recurses into a nested f-string's fields, so these are nodes.
+    # The parser refuses f-strings nested past CPython's limit, so these are
+    # nodes.
     (
         "fstring-field",
         lambda: nest(lambda e: fstring(field(e)), DEPTH, Symbol("x", **LINE_3)),
@@ -1128,3 +1134,316 @@ def test_the_trampoline_runs_steps_as_recursion_would():
     with pytest.raises(ValueError):
         trampoline(failing(DEPTH))
     assert log == list(range(DEPTH + 1))
+
+
+T_STRINGS = (
+    tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
+)
+NESTED_LITERAL_MESSAGE = "too many nested f-strings or t-strings"
+
+
+def nested_literals(openings, depth, newline=""):
+    """``depth`` f/t-string literals nested in each other's single field,
+    cycling through ``openings`` from the outside; each opening is 3
+    characters, then ``newline``."""
+    heads = [openings[k % len(openings)] for k in range(depth)]
+    return "".join(h + newline for h in heads) + "x" + '}"' * depth
+
+
+def literal_depth(node):
+    """How many f/t-strings nest through their single field, with the
+    innermost field's value."""
+    depth = 0
+    while isinstance(node, Paren) and atom_text(node.list[0]) in (
+        "f-string",
+        "t-string",
+    ):
+        node = node.list[2].value
+        depth += 1
+    return depth, node
+
+
+# (id, openings, needs t-strings): every literal is counted, f or t alike.
+NESTED_LITERALS = [
+    ("f-strings", ['f"{'], False),
+    ("t-strings", ['t"{'], True),
+    ("mixed", ['f"{', 't"{'], True),
+]
+
+
+def skip_without_t_strings(needs_t):
+    if needs_t and not T_STRINGS:
+        pytest.skip("t-strings need Python 3.14")
+
+
+# No time_bound: each level rescans the rest of the text, so this takes
+# most of a second, and the limit bounds it; the count of literals parsed
+# is the cost guard.
+@pytest.mark.parametrize("newline", ["", "\n"], ids=["one-line", "a-line-each"])
+@pytest.mark.parametrize(
+    "openings, needs_t",
+    [case[1:] for case in NESTED_LITERALS],
+    ids=[case[0] for case in NESTED_LITERALS],
+)
+def test_nested_f_strings_past_cpython_s_limit_are_refused(
+    openings, needs_t, newline, monkeypatch
+):
+    # CPython 3.14+ refuses the 150th literal at its quote: offset 449 on one
+    # line, column 2 of line 150 with a line each.
+    skip_without_t_strings(needs_t)
+    literals = []
+    string_parse = parser_module.string_parse
+
+    def counting(*args):
+        literals.append(None)
+        return string_parse(*args)
+
+    monkeypatch.setattr(parser_module, "string_parse", counting)
+    with pytest.raises(LispyCompileError) as info:
+        parse(nested_literals(openings, DEPTH, newline))
+    assert len(literals) == FSTRING_NESTING_LIMIT
+    assert info.value.msg == NESTED_LITERAL_MESSAGE
+    position = (info.value.lineno, info.value.offset)
+    assert position == ((150, 2) if newline else (1, 449))
+
+
+@pytest.mark.parametrize(
+    "openings, needs_t",
+    [case[1:] for case in NESTED_LITERALS],
+    ids=[case[0] for case in NESTED_LITERALS],
+)
+def test_the_most_nested_f_strings_cpython_takes_parse_on_a_deep_stack(
+    openings, needs_t
+):
+    # A frame per literal would not fit in the room the caller leaves.
+    skip_without_t_strings(needs_t)
+    depth = FSTRING_NESTING_LIMIT - 1
+    src = nested_literals(openings, depth)
+
+    def at_depth(frames):
+        return at_depth(frames - 1) if frames else parse(src)
+
+    [form] = at_depth(sys.getrecursionlimit() - 200)
+    [found, leaf] = literal_depth(form)
+    assert found == depth
+    assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_a_format_spec_chain_past_the_recursion_limit_parses():
+    # Rescanning makes each level cost the rest of the text: 1000 levels is
+    # past the old recursion limit and well inside the budget.
+    depth = 1000
+    [form] = parse('f"' + "{x:" * depth + "x" + "}" * depth + '"')
+    fields = []
+    node = form
+    while len(node.list) > 2:  # the literal, then each spec with a field
+        fields.append(node.list[2])
+        node = fields[-1].format_spec
+    assert len(fields) == depth
+    leaf = fields[-1].value
+    assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
+    # The innermost spec is the literal text x.
+    assert [atom_text(n) for n in node.list] == ["f-string", "'x'"]
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_brackets_nested_past_the_recursion_limit_in_one_field_parse():
+    [form] = parse('\nf"{' + "[" * DEPTH + "x" + "]" * DEPTH + '}"')
+    node = form.list[2].value
+    depth = 0
+    while isinstance(node, Bracket):
+        [node] = node.list
+        depth += 1
+    assert depth == DEPTH
+    position = (node.lineno, node.col_offset, node.end_col_offset)
+    assert (type(node), atom_text(node), position) == (
+        Symbol,
+        "x",
+        (2, 3 + DEPTH, 4 + DEPTH),
+    )
+
+
+# (id, the prefixes repeated, the wrappers they make in order).
+PREFIX_CHAINS = [
+    ("annotation", "^", ["Annotation"]),
+    ("keyword", ":", ["Keyword"]),
+    ("star", "**", ["DoubleStarred"]),
+    ("annotation-star", "^*", ["Annotation", "Starred"]),
+    ("keyword-star-annotation", ":*^", ["Keyword", "Starred", "Annotation"]),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "prefix, wrappers",
+    [case[1:] for case in PREFIX_CHAINS],
+    ids=[case[0] for case in PREFIX_CHAINS],
+)
+def test_a_prefix_chain_past_the_recursion_limit_parses(prefix, wrappers, scope):
+    repeat = DEPTH // len(prefix)
+    src = prefix * repeat + "x"
+    [form] = parse(src)
+    found = []
+    node = form
+    while isinstance(node, Wrapper):
+        found.append((type(node).__name__, node.col_offset))
+        node = node.value
+    widths = [2 if name == "DoubleStarred" else 1 for name in wrappers] * repeat
+    assert [name for [name, _] in found] == wrappers * repeat
+    # Each wrapper starts where its prefix does; the leaf after the last.
+    assert [col for [_, col] in found] == running_sums(widths)
+    assert (type(node), atom_text(node), node.col_offset) == (Symbol, "x", len(src) - 1)
+    assert str(form) == src
+    try:
+        macroexpand_then_compile([form], scope)
+    except LispyCompileError:
+        pass  # a refusal is fine; a RecursionError is not
+
+
+# (id, prefixes repeated, the glued form after them, the wrappers they make):
+# the prefixes close over the GluedHead the bracket makes.
+GLUED_PREFIX_CHAINS = [
+    ("annotation", "^", "a[int]", ["Annotation"]),
+    ("keyword", ":", "a[0]", ["Keyword"]),
+    ("star", "**", "a[0]", ["DoubleStarred"]),
+]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "prefix, glued, wrappers",
+    [case[1:] for case in GLUED_PREFIX_CHAINS],
+    ids=[case[0] for case in GLUED_PREFIX_CHAINS],
+)
+def test_a_prefix_chain_glued_to_a_bracket_past_the_recursion_limit_parses(
+    prefix, glued, wrappers, monkeypatch
+):
+    # Closing the chain must set each wrapper's end once, not walk the
+    # chain below every wrapper again (quadratic, yet within the budget).
+    # The GluedHead closes first and sets only itself, so no wrapper here
+    # needs to walk the chain at all.
+    walked = []
+    update_dict = Wrapper.update_dict
+
+    def counting(self, key, value):
+        walked.append(len(chain(self)))
+        return update_dict(self, key, value)
+
+    monkeypatch.setattr(Wrapper, "update_dict", counting)
+    repeat = DEPTH // len(prefix)
+    src = "\n" + prefix * repeat + glued
+    [form] = parse(src)
+    assert walked == []
+    found = []
+    node = form
+    while isinstance(node, Wrapper):
+        found.append(type(node).__name__)
+        node = node.value
+    assert found == wrappers * repeat
+    # Every wrapper ends with the bracket; each starts at its prefix.
+    ends = {(n.end_lineno, n.end_col_offset) for n in chain(form)}
+    assert ends == {(2, DEPTH + len(glued))}
+    assert [n.col_offset for n in chain(form)] == list(range(0, DEPTH, len(prefix)))
+    assert type(node) is GluedHead
+    assert (atom_text(node.head), node.head.col_offset) == ("a", DEPTH)
+    assert str(form) == src[1:]
+
+
+def chain(node):
+    """The wrappers from ``node`` down, without recursion."""
+    nodes = []
+    while isinstance(node, Wrapper):
+        nodes.append(node)
+        node = node.value
+    return nodes
+
+
+def running_sums(widths):
+    sums = []
+    total = 0
+    for width in widths:
+        sums.append(total)
+        total += width
+    return sums
+
+
+@pytest.mark.usefixtures("time_bound")
+def test_quasiquoted_nested_fields_check_for_an_unquote_once_each():
+    # Asking contains_unquote afresh at each field walks the rest of the
+    # nest: 4000 levels took about 15 s.
+    depth = 4000
+    quoted = nest(lambda e: fstring(field(e)), depth, Unquote(Symbol("x")))
+    rebuilt = quoted.generator_expression(True)
+    # Every field rebuilds its text from the unquote's expansion.
+    padded = 0
+    pending = [rebuilt]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, list):
+            pending.extend(node)
+        elif isinstance(node, Node):
+            padded += atom_text(node) == ":expr-padding"
+            pending.extend(vars(node).values())
+    assert padded == depth
+
+
+def shared_and_cyclic_forms():
+    """(id, form, the node to ask about first, then the form itself)."""
+    leaf = Unquote(Symbol("x"))
+    dag = nest(lambda e: Paren(e, e), 60, leaf)
+    plain_dag = nest(lambda e: Paren(e, e), 60, Symbol("x"))
+    # The unquote hangs off the cycle's entry: asked from inside the cycle
+    # first, a walk that cut the back edge would answer False.
+    inner = Paren(Symbol("a"))
+    entry = Paren(inner, leaf)
+    inner.list.append(entry)
+    plain_inner = Paren(Symbol("a"))
+    plain_entry = Paren(plain_inner, Symbol("b"))
+    plain_inner.list.append(plain_entry)
+    return [
+        ("dag", dag, dag.list[0]),
+        ("plain-dag", plain_dag, plain_dag.list[0]),
+        ("cycle", entry, inner),
+        ("plain-cycle", plain_entry, plain_inner),
+    ]
+
+
+@pytest.mark.usefixtures("time_bound")
+@pytest.mark.parametrize(
+    "form, first",
+    [case[1:] for case in shared_and_cyclic_forms()],
+    ids=[case[0] for case in shared_and_cyclic_forms()],
+)
+def test_the_memoized_unquote_check_answers_as_contains_unquote(form, first):
+    memo = nodes._UNQUOTE_MEMO.set({})
+    try:
+        answers = [nodes._contains_unquote_memoized(n) for n in [first, form]]
+    finally:
+        nodes._UNQUOTE_MEMO.reset(memo)
+    assert answers == [contains_unquote(first), contains_unquote(form)]
+
+
+def test_nested_do_collects_each_statement_once(monkeypatch):
+    # Inlining each level's statement list into the level above copies the
+    # rest of the nest at every level: about DEPTH**2 / 2 statements.
+    collected = []
+    steps = stmt_module.stmt_list_steps
+
+    def counting(sexp_list):
+        stmts = yield steps(sexp_list)
+        collected.append(len(stmts))
+        return stmts
+
+    monkeypatch.setattr(stmt_module, "stmt_list_steps", counting)
+    src = "".join(f"(do {k} " for k in range(DEPTH)) + "(do) end (do 1 (do 2 3) 4)"
+    stmts = stmt_module.stmt_list_compile(parse(src + ")" * DEPTH))
+    values = [s.value.value if k != DEPTH else s.value.id for k, s in enumerate(stmts)]
+    assert values == [*range(DEPTH), "end", 1, 2, 3, 4]
+    assert sum(collected) == len(stmts)
+
+
+def test_a_do_compiled_on_its_own_is_its_statements():
+    [form] = parse("(do 1 (do 2) 3)")
+    stmts = stmt_module.stmt_compile(form)
+    assert [s.value.value for s in stmts] == [1, 2, 3]
