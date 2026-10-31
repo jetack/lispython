@@ -800,7 +800,7 @@ class TestParameterLists:
 
 
 class TestClassBases:
-    """Class bases are call arguments: the same keyword check, ** too."""
+    """Class bases are call arguments: keywords and ** too."""
 
     @pytest.mark.parametrize(
         ("lispy", "python"),
