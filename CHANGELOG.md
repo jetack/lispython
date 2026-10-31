@@ -61,9 +61,6 @@ follows [Semantic Versioning](https://semver.org/).
   printed as `lambda a: int: 1`) is refused too.
 - Class bases are read as call arguments: `(class A [**kw])` compiles to
   `class A(**kw)`.
-- lispython no longer refuses comprehension nesting, f-string nesting or
-  non-callable call heads ahead of Python: the installed Python's own error,
-  warning or crash applies, as for the same Python source.
 
 ### Fixed
 
