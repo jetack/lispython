@@ -38,7 +38,7 @@ from lispy.core.nodes import (
     atom_text,
     contains_unquote,
 )
-from lispy.core.parser import FSTRING_NESTING_LIMIT, parse
+from lispy.core.parser import parse
 from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
@@ -529,8 +529,7 @@ EXPRESSION_DEPTHS = [
         ast.Await,
         True,
     ),
-    # The parser refuses f-strings nested past CPython's limit, so these are
-    # nodes.
+    # Nodes: parsing an f-string nest costs the rest of the text per level.
     (
         "fstring-field",
         lambda: nest(lambda e: fstring(field(e)), DEPTH, Symbol("x", **LINE_3)),
@@ -971,7 +970,6 @@ def test_the_trampoline_runs_steps_as_recursion_would():
 T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
 )
-NESTED_LITERAL_MESSAGE = "too many nested f-strings or t-strings"
 
 
 def nested_literals(openings, depth, newline=""):
@@ -1008,20 +1006,22 @@ def skip_without_t_strings(needs_t):
         pytest.skip("t-strings need Python 3.14")
 
 
+# Past the 149 literals CPython's lexer takes in Python source: the AST has
+# no such limit, and lispython leaves it to CPython.
+NESTED_LITERAL_DEPTH = 200
+
+
 # No time_bound: each level rescans the rest of the text, so this takes
-# most of a second, and the limit bounds it; the count of literals parsed
-# is the cost guard.
+# most of a second; the count of literals parsed is the cost guard.
 @pytest.mark.parametrize("newline", ["", "\n"], ids=["one-line", "a-line-each"])
 @pytest.mark.parametrize(
     "openings, needs_t",
     [case[1:] for case in NESTED_LITERALS],
     ids=[case[0] for case in NESTED_LITERALS],
 )
-def test_nested_f_strings_past_cpython_s_limit_are_refused(
-    openings, needs_t, newline, monkeypatch
+def test_nested_f_strings_past_cpython_s_lexer_limit_compile(
+    openings, needs_t, newline, scope, monkeypatch
 ):
-    # CPython 3.14+ refuses the 150th literal at its quote: offset 449 on one
-    # line, column 2 of line 150 with a line each.
     skip_without_t_strings(needs_t)
     literals = []
     string_parse = parser_module.string_parse
@@ -1031,12 +1031,16 @@ def test_nested_f_strings_past_cpython_s_limit_are_refused(
         return string_parse(*args)
 
     monkeypatch.setattr(parser_module, "string_parse", counting)
-    with pytest.raises(LispyCompileError) as info:
-        parse(nested_literals(openings, DEPTH, newline))
-    assert len(literals) == FSTRING_NESTING_LIMIT
-    assert info.value.msg == NESTED_LITERAL_MESSAGE
-    position = (info.value.lineno, info.value.offset)
-    assert position == ((150, 2) if newline else (1, 449))
+    [form] = parse(nested_literals(openings, NESTED_LITERAL_DEPTH, newline))
+    assert len(literals) == NESTED_LITERAL_DEPTH
+    assert literal_depth(form)[0] == NESTED_LITERAL_DEPTH
+    [stmt] = macroexpand_then_compile([form], scope)
+    code = compile(ast.Expression(stmt.value), "<nesting>", "eval")
+    # Only a pure f-string nest is run: an f-string formats a t-string
+    # through its repr, which escapes every inner level again, so a mixed
+    # nest's text grows exponentially with its depth.
+    if not needs_t:
+        assert eval(code, {"x": "v"}) == "v"
 
 
 @pytest.mark.parametrize(
@@ -1044,12 +1048,10 @@ def test_nested_f_strings_past_cpython_s_limit_are_refused(
     [case[1:] for case in NESTED_LITERALS],
     ids=[case[0] for case in NESTED_LITERALS],
 )
-def test_the_most_nested_f_strings_cpython_takes_parse_on_a_deep_stack(
-    openings, needs_t
-):
+def test_nested_f_strings_parse_on_a_deep_stack(openings, needs_t):
     # A frame per literal would not fit in the room the caller leaves.
     skip_without_t_strings(needs_t)
-    depth = FSTRING_NESTING_LIMIT - 1
+    depth = NESTED_LITERAL_DEPTH
     src = nested_literals(openings, depth)
 
     def at_depth(frames):
