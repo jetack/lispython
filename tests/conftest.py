@@ -4,12 +4,11 @@ import signal
 
 import pytest
 
-# Seconds. A runaway grows memory about 120 MB/s, so this also caps what a
-# regression can take before the timer stops it. The slowest guarded test
-# (test_nesting's fstring-format-spec case, 5000 levels at ~0.3 ms each, linear
-# in depth) takes 1.3 s on 3.12 and 1.55 s on 3.11 on an idle box; the budget
-# is ~4x that, so a loaded box (it failed at 2.0 s under merge load) does not
-# trip it while a runaway or quadratic regression still does.
+# Seconds: ~4x the slowest guarded test (test_nesting's fstring-format-spec
+# case, roughly linear in DEPTH, ~1.6 s on 3.11 idle), so a loaded box does
+# not trip it while a runaway or quadratic regression still does. It also
+# caps a runaway's memory (see time_bound) at about 720 MB; raising it
+# raises that cap.
 SELF_REFERENCE_BUDGET = 6.0
 
 
