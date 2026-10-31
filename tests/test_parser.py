@@ -1,3 +1,5 @@
+import ast
+import sys
 import time
 
 import pytest
@@ -6,6 +8,7 @@ from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import FStrExpr, Paren, Symbol, atom_text
 from lispy.core.parser import parse, tokenize
+from tests.utils import stmt_to_dump
 
 T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
@@ -351,6 +354,53 @@ class TestFormatSpecChains:
     def test_braces_inside_an_expression_are_not_fields(self):
         [form] = parse('f"{ {1 {2 {3 {4 5}}}} }"')
         assert type(form.list[2].value).__name__ == "Brace"
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ('f"{x:{{}}}"', None),
+            ('f"{x:{{}} }"', None),
+            ('f"{x:a{{}}b}"', None),
+            pytest.param(
+                'f"{x:{x:{{}}}}"',
+                None,
+                marks=pytest.mark.skipif(
+                    sys.version_info < (3, 12),
+                    reason="3.11's parser refuses this nesting depth: no reference AST",
+                ),
+            ),
+            ('f"{x:}}}"', None),
+            ('f"{x:{{1 2}}}"', 'f"{x:{ {1: 2} }}"'),
+            pytest.param(
+                't"{x:{{}}}"',
+                None,
+                marks=pytest.mark.skipif(not T_STRINGS, reason="needs Python 3.14"),
+            ),
+        ],
+        ids=[
+            "empty-dict",
+            "empty-dict-space",
+            "text-around",
+            "nested",
+            "close-then-literal",
+            "dict-pairs",
+            "t-string",
+        ],
+    )
+    def test_no_brace_is_doubled_in_a_format_spec(self, lpy, py):
+        # CPython has no {{ or }} escape in a spec: { opens a field, } ends it.
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py or lpy))
+
+    @pytest.mark.parametrize("src", ['f"{x:{{"', 'f"{x:{{}"'])
+    def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self, src):
+        with pytest.raises(LispyCompileError, match="f-string: expecting '}'"):
+            parse(src)
+
+    def test_a_chain_of_empty_dicts_past_cpython_s_nesting_limit_parses(self):
+        # CPython's tokenizer refuses this as "nested too deeply"; lispython
+        # adds no limit of its own, as with the chains above.
+        [form] = parse('f"{x:{x:{x:{{}}}}}"')
+        assert len(spec_chain(form)[0]) == 4
 
     @pytest.mark.parametrize(
         ["src", "msg", "at"],
