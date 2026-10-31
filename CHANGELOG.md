@@ -16,13 +16,21 @@ follows [Semantic Versioning](https://semver.org/).
 - `(raise)` compiles to a bare `raise`, re-raising the exception being
   handled.
 
+### Deprecated
+
+- Writing a string in an f/t-string replacement field with `\"`
+  (`f"{(.get d \"k\")}"`) is deprecated: each such string emits a
+  `DeprecationWarning` at its opening `\"`. Write plain quotes
+  (`f"{(.get d "k")}"`), which works on every supported Python.
+
 ### Changed
 
-- A `\"` that opens a string in an f/t-string replacement field (outside any
-  string there) is a compile error. A string in a field is written with plain
-  quotes (`f"{(.get d "k")}"`), which works on every supported Python. Code
-  that wrote `f"{(.get d \"k\")}"` must be rewritten; a `\"` inside a string
-  in a field is still an escape.
+- A string opened with `\"` in an f/t-string replacement field must be closed
+  by `\"` (`\"\"\"` for `\"\"\"`): a bare `"` in it, as its close or its
+  content, is a compile error at the opener, where it was accepted before
+  (`f"{(g \"a")}"`). Its `{x=}` echo (and a t-string's expression text) now
+  shows the source as written: `f"{(.get d \"k\")=}"` echoes
+  `(.get d \"k\")=`, where it echoed `(.get d "k")=`.
 - An nREPL eval without `file` is named `<nrepl-N>` (a new N per eval)
   instead of `<nrepl>`, which can break a client that matches `<nrepl>` in
   error text.

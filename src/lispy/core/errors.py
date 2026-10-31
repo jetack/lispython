@@ -8,8 +8,14 @@ into text.
 """
 
 import contextlib
+import contextvars
 import sys
+import warnings
 from types import SimpleNamespace
+
+# The file compile_errors is compiling, for compile_warning: warnings are
+# issued where they are found, so unlike errors they cannot get it afterwards.
+_COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default=None)
 
 
 class LispyCompileError(SyntaxError):
@@ -90,7 +96,9 @@ def compile_errors(filename, source):
     converted, keeping its positions, which come from the lispython source.
     Wrap parsing and compiling only, never running the code: a SyntaxError
     the program raises at run time is not a lispython compile error.
+    A compile_warning issued meanwhile names ``filename``.
     """
+    token = _COMPILING_FILENAME.set(filename)
     try:
         yield
     except LispyCompileError as err:
@@ -98,6 +106,17 @@ def compile_errors(filename, source):
     except SyntaxError as err:
         converted = LispyCompileError.from_syntax_error(err)
         raise attach_source(converted, filename, source) from err
+    finally:
+        _COMPILING_FILENAME.reset(token)
+
+
+def compile_warning(msg, category, position_info):
+    """Warn at a lispython source position (``position_info``'s line), as
+    CPython's compiler warns: through warnings.warn_explicit, naming the file
+    compile_errors is compiling (``<unknown>`` outside one), so a filter
+    turning the warning into an error applies as to any other."""
+    filename = _COMPILING_FILENAME.get() or "<unknown>"
+    warnings.warn_explicit(msg, category, filename, position_info["lineno"])
 
 
 def format_compile_error(err):
@@ -140,4 +159,3 @@ def nesting_error(at, *, recursion_limit, what="compile"):
     if recursion_limit:
         msg += f" (Python's recursion limit is {sys.getrecursionlimit()})"
     return LispyCompileError(msg, _positioned(at))
-
