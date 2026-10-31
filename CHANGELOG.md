@@ -87,10 +87,11 @@ follows [Semantic Versioning](https://semver.org/).
 - Nesting past compile()'s own limit is the positioned "form nested too
   deeply to compile" error from `lpy`, imports, the REPL, nREPL and
   `defmacro`, instead of a `RecursionError` traceback, at the bottom of the
-  deepest path in what compile() was given (the whole module for `lpy` files
-  and imports; in the REPL and nREPL, the statement compile() fails on). Its message names Python's recursion limit
-  only where that is the limit hit (3.11, and `l2py`), since raising it does
-  not move compile()'s limit on 3.12+. A macro's own runaway recursion still
+  deepest path in what compile() was given: the whole module for `lpy` files
+  and imports, the whole form for `defmacro` and `require`, and the statement
+  compile() fails on for `lpy -c`, the REPL and nREPL. Its message names
+  Python's recursion limit only where that is the limit hit (3.11, and
+  `l2py`), since raising it does not move compile()'s limit on 3.12+. A macro's own runaway recursion still
   raises `RecursionError`.
 - Data a macro puts in its expansion, spliced with `~x` or placed in a
   form's list, that holds the same Python list or tuple in many places is
@@ -281,11 +282,7 @@ follows [Semantic Versioning](https://semver.org/).
   (`[[[...]]]`, also inside a macro call such as `when`) was exponential (20
   levels took seconds) and a form in head position (`((((f))))`) quadratic.
   Rendering a form and expanding macros no longer recurse, so a form nested
-  past Python's recursion limit renders and expands, and compiling one is a
-  positioned compile error, "form nested too deeply to compile", instead of
-  a `RecursionError`; the same holds for `ast.unparse` in `l2py`, and for
-  the `RecursionError` CPython's own `compile()` raises on an AST deeper
-  than it takes (such as `(+ 1 1 ...)` with thousands of operands).
+  past Python's recursion limit renders and expands.
 
 ## [0.5.0]
 
