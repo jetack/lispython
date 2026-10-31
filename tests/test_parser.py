@@ -557,6 +557,12 @@ class TestFieldsLexedInPlace:
         )
         assert (info.value.lineno, info.value.offset) == at
 
+    def test_a_bad_prefix_before_an_escaped_quote_in_a_field_is_reported_first(self):
+        with pytest.raises(LispyCompileError) as info:
+            parse(r'f"{^*\"}"')
+        assert info.value.msg == "^* has no meaning on its own"
+        assert (info.value.lineno, info.value.offset) == (1, 4)
+
     @pytest.mark.parametrize(
         ["src", "form"],
         [

@@ -75,7 +75,13 @@ def _token_patterns(in_field, field_level=False):
     past every field, so each field would rescan the rest of the source.
     """
     end = "$|:|!(?!=)" if field_level else "$"
-    stop_ahead = f"(?=[{_SYMBOL_STOP}]|{end})"
+    # In a field a symbol also stops before \\" (see above), so ^* before it
+    # is a bad prefix, reported ahead of the refusal of the \\".
+    stop_ahead = (
+        f'(?=[{_SYMBOL_STOP}]|\\\\"|{end})'
+        if in_field
+        else f"(?=[{_SYMBOL_STOP}]|{end})"
+    )
     # A symbol character (in a field), and a comment's. ⚠️ Their repeats are
     # possessive (++, *+): a plain + makes re keep a backtracking point per
     # character, hundreds of MB for a long symbol or comment.
