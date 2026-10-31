@@ -51,33 +51,27 @@ follows [Semantic Versioning](https://semver.org/).
   `else is a Python keyword and cannot be used as a name`, at the keyword,
   instead of `else is a Python keyword and cannot be called` at the form.
 - Forms that compiled to something other than what they say are compile
-  errors: a call whose head is a literal, collection or comprehension
-  (`(1)`, `(None x)`, `("s")`, `([1] 2)`, `((, 1) 2)`; CPython only warns
-  and the call fails at run time), a repeated keyword argument (`(f :a 1 :a
-  2)`, class keywords too), `(ife a b c d)` (dropped `d`), `(yield a b)`, a
-  comprehension clause with a stray or dangling operand (`[x for y in z
-  if]`, `(x for y in z if a b)`), and a parameter list CPython refuses: a
-  duplicate name, a misplaced or repeated `/`, `*` or `**kw` (`[a / /]`
-  dropped `a`, `[*a *b]` made `b` keyword-only), a bare `*` with no
-  keyword-only parameter, and `[a :b 1 c]`, which compiled to `def f(a, b,
-  c=1)`. An annotated lambda parameter (`(lambda [a ^int] 1)`, which `l2py`
+  errors: a repeated keyword argument (`(f :a 1 :a 2)`, class keywords
+  too), `(ife a b c d)` (dropped `d`), `(yield a b)`, a comprehension clause
+  with a stray or dangling operand (`[x for y in z if]`, `(x for y in z if a
+  b)`), and a parameter list CPython refuses: a duplicate name, a misplaced
+  or repeated `/`, `*` or `**kw` (`[a / /]` dropped `a`, `[*a *b]` made `b`
+  keyword-only), a bare `*` with no keyword-only parameter, and `[a :b 1
+  c]`, which compiled to `def f(a, b, c=1)`. An annotated lambda parameter (`(lambda [a ^int] 1)`, which `l2py`
   printed as `lambda a: int: 1`) is refused too.
 - Class bases are read as call arguments: `(class A [**kw])` compiles to
   `class A(**kw)`.
-- An f-string or t-string nested in the replacement fields of 149 others
-  (the 150th literal, f and t counted together) is refused with CPython's
-  "too many nested f-strings or t-strings", at the quote where CPython
-  reports it; it used to compile. An error found scanning an enclosing
-  literal (an unterminated literal inside it, a stray `}`) is still reported
-  first, where CPython reports the nesting.
+- lispython no longer refuses comprehension nesting, f-string nesting or
+  non-callable call heads ahead of Python: the installed Python's own error,
+  warning or crash applies, as for the same Python source.
 
 ### Fixed
 
 - Parsing no longer spends Python frames per nesting level, so these parse
   at any depth and from a deep caller stack instead of raising
-  `RecursionError`: f/t-strings nested in each other's fields (up to the 149
-  CPython takes), format specs nested in format specs, brackets nested deep
-  inside one replacement field, and long prefix chains on one token
+  `RecursionError`: f/t-strings nested in each other's fields, format specs
+  nested in format specs, brackets nested deep inside one replacement
+  field, and long prefix chains on one token
   (`^^^x`, `:::x`, `***x`, `^*^*x`), also glued to a bracket (`^^^a[int]`).
 - Quasiquoting f-strings nested in each other's fields checks each field for
   an unquote once, linear instead of quadratic in the nesting (4,000 levels
@@ -90,25 +84,16 @@ follows [Semantic Versioning](https://semver.org/).
   Python AST levels on 3.12/3.13, more on 3.14+; forms that cost two AST
   levels per lispython level, such as keyword arguments, starred arguments
   and method calls, stop near half that). On 3.11 compile() itself still
-  stops near the recursion limit, and the positioned error remains. `l2py`
+  stops near the recursion limit, with the positioned error below. `l2py`
   still stops at a few hundred levels, because `ast.unparse` recurses: that
   is the positioned error "form nested too deeply to translate".
-- Nesting past compile()'s own limit on 3.12+ is the positioned "form
-  nested too deeply to compile" error from `lpy`, imports, the REPL, nREPL
-  and `defmacro`, instead of a `RecursionError` traceback, at the first
+- Nesting past compile()'s own limit is the positioned "form nested too
+  deeply to compile" error from `lpy`, imports, the REPL, nREPL and
+  `defmacro`, instead of a `RecursionError` traceback, at the first
   statement compile() fails on. Its message names Python's recursion limit
   only where that is the limit hit (3.11, and `l2py`), since raising it does
   not move compile()'s limit on 3.12+. A macro's own runaway recursion still
   raises `RecursionError`.
-- Deeply nested list, set and dict comprehensions (more than 21 static
-  blocks in one function, counting the enclosing loops, `with` and `try`
-  blocks and comprehensions) are the positioned compile error "too many
-  statically nested blocks", at the comprehension that passes the limit,
-  instead of crashing the interpreter, on every CPython 3.12+
-  ([gh-156091](https://github.com/python/cpython/issues/156091)). So is an
-  `await` or `async-for` clause at that limit inside a generator expression,
-  which crashes even the releases that fix gh-156091 (3.13.16, 3.14.8,
-  3.15.1).
 - Data a macro puts in its expansion, spliced with `~x` or placed in a
   form's list, that holds the same Python list or tuple in many places is
   converted to nodes in time linear in the distinct data, instead of
