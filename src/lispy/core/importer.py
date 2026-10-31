@@ -26,8 +26,9 @@ def _lpy_code(source, path, compile_module):
 
     compile() takes the module whole and names no line when it gives up, so
     the nesting error is placed by compiling the statements one by one: the
-    first that fails alone is where compile() stopped (or, failing earlier
-    alone for want of module context, the nearest error CPython reports).
+    first that fails alone is where compile() stopped (or, if an earlier
+    statement raises its own error alone, which compiling the whole module
+    never reached, that error).
     """
     with compile_errors(os.fsdecode(path), source):
         tree = ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
