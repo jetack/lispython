@@ -31,9 +31,12 @@ throwaway, every f/t-string literal (a format spec is a JoinedStr too), and
 memoizes the text of each value (``visit`` on a fresh instance) and of each
 format spec (the part writer on a JoinedStr, keyed by its arguments, which
 rendering the spec's parent fills through the stdlib's own call path): each
-level then finds the one inside it written. The memos are class
-attributes of a subclass made per ``unparse`` call, the one way to reach the
-instances the stdlib creates without module state; they die with the call.
+level then finds the one inside it written. An entry is dropped when it
+is read: in a tree each is read once, and keeping them would hold every
+level's text at once, quadratic in the depth. A node in two places (a DAG)
+is then rendered again, with the same text. The memos are class attributes
+of a subclass made per ``unparse`` call, the one way to reach the instances
+the stdlib creates without module state; they die with the call.
 
 What still recurses is a chunk: it needs a few hundred frames of room, and a
 caller with less gets the RecursionError to report (``ast-to-python`` in
@@ -106,10 +109,10 @@ class _Chunked(_Stdlib):
             self._source = [text]
             return text
         # A fresh instance: the stdlib's nested one for an interpolation value.
-        memo = self._interpolations
-        if node not in memo:
-            memo[node] = _render(self, node)
-        return memo[node]
+        text = self._interpolations.pop(node, None)
+        if text is None:
+            text = self._interpolations[node] = _render(self, node)
+        return text
 
     def visit_Interpolation(self, node):
         # The compiler sets Interpolation.str to the lispython text, which is
@@ -128,11 +131,12 @@ def _write_part(self, node, *args, **kwargs):
         return write(self, node, *args, **kwargs)
     memo = self._format_specs
     key = (node, args, tuple(sorted(kwargs.items())))
-    if key not in memo:
+    text = memo.pop(key, None)
+    if text is None:
         with self.buffered() as buffer:
             write(self, node, *args, **kwargs)
-        memo[key] = "".join(buffer)
-    self.write(memo[key])
+        text = memo[key] = "".join(buffer)
+    self.write(text)
 
 
 setattr(_Chunked, _PART_WRITER, _write_part)

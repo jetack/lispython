@@ -908,6 +908,9 @@ UNPARSE_SEAMS = [
         "exec",
     ),
     ((3, 11), "f'{a!r:>{w}.{p}} {b:{c}} {x=} {y!s} {z!a:^10} {{}} {q:%Y}'\n", "exec"),
+    # 3.11 writes a nested f-string whole through the part writer, avoiding
+    # backslashes.
+    ((3, 11), 'f\'{f"{x!r:>{w}}"} {f"{y:{z}} "!s:^9}\'\n', "exec"),
     ((3, 12), "f'{b:{c:{d}}}'\n", "exec"),  # 3.11 parses two levels of spec
     (
         (3, 11),
@@ -1024,6 +1027,55 @@ def test_l2py_translates_format_specs_nested_past_ast_unparse(prefix, needs_t):
     src = prefix + '"' + "{x:" * depth + "}" * depth + '"'
     pysrc = tools.l2py_s(src, fresh_scope=True, format=False, no_lispy=True)
     assert pysrc == prefix + "'" + "{x:" * depth + "}" * depth + "'"
+
+
+def spec_ast_chain(depth):
+    """``f"{x:{x:...}}"``, ``depth`` format specs nested, built as an AST."""
+    spec = None
+    for _ in range(depth):
+        spec = ast.JoinedStr([ast.FormattedValue(ast.Name("x"), -1, spec)])
+    return ast.Expression(spec)
+
+
+def value_ast_chain(depth):
+    """``f"{f"{...}"}"``, ``depth`` f-strings nested in values, as an AST."""
+    node = ast.Name("x")
+    for _ in range(depth):
+        node = ast.JoinedStr([ast.FormattedValue(node, -1, None)])
+    return ast.Expression(node)
+
+
+CHAIN_DEPTH = 2000
+
+
+# (build, the counts of f, x and { in its text)
+@pytest.mark.parametrize(
+    "build, fields",
+    [
+        (spec_ast_chain, (1, CHAIN_DEPTH, CHAIN_DEPTH)),
+        pytest.param(
+            value_ast_chain,
+            (CHAIN_DEPTH, 1, CHAIN_DEPTH),
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 12),
+                reason="3.11 cannot nest same-quote f-strings",
+            ),
+        ),
+    ],
+    ids=["format-specs", "values"],
+)
+def test_nested_f_strings_unparse_in_memory_linear_in_the_depth(build, fields):
+    # Each level's memoized text holds every level inside it: kept past its
+    # one read, the memos hold about depth / 2 times the output at once.
+    tree = build(CHAIN_DEPTH)
+    tracemalloc.start()
+    try:
+        text = unparse_module.unparse(tree)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert (text.count("f"), text.count("x"), text.count("{")) == fields
+    assert peak < 50 * len(text)
 
 
 def test_translating_on_a_stack_with_no_room_is_a_positioned_error(scope):
