@@ -135,8 +135,9 @@ _STRING_PREFIX_RE = re.compile("\\w*")
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 # A single-quoted body up to its first newline no backslash escapes (3.11's
-# "detected at line"); possessive, so linear.
-_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\n]++|\\.)*+", re.DOTALL)
+# "detected at line"): a backslash escapes the next character, or a whole
+# \r\n (3.11 continues the line there). Possessive, so linear.
+_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\n]++|\\\r\n|\\.)*+", re.DOTALL)
 
 
 def _source_locator(src):
@@ -499,8 +500,8 @@ class _Lexer:
         if len(outer.quote) == 1:
             # A backslash pairs with the next character, raw or not.
             end = _UNESCAPED_LINE_END_RE.match(src, outer.body).end()
-        if end == len(src) and src.endswith("\n"):
-            end -= 1  # a final newline starts no line
+        if end == len(src) and src.endswith("\n") and not src.endswith("\r\n"):
+            end -= 1  # 3.11: a final \n starts no line, a final \r\n does
         line = self.locate(end)["lineno"]
         triple = "triple-quoted " if len(outer.quote) == 3 else ""
         self._fail(
@@ -630,10 +631,12 @@ class _Lexer:
 
     def _conversion(self, field, bang):
         """The ``!conv`` at ``bang``: emits its token and returns the index of
-        the ``}`` or ``:`` after it, or fails and returns None.
+        the ``}`` or ``:`` after it, or stops (failing or not) and returns
+        None.
 
-        As CPython 3.12 reads it: a literal or source ending before the ``}``
-        or ``:`` is "expecting '}'" whatever came between, and the name is
+        As CPython 3.12 reads it: a literal ending before the ``}`` or ``:`` is
+        "expecting '}'" whatever came between, the source ending there is the
+        end of a field's expression (``_end_in_expression``), and the name is
         checked only once one of them follows it.
         """
         src = self.src

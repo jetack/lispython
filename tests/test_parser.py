@@ -615,6 +615,12 @@ class TestSourceEndingInAFieldExpression:
             ('f"""\n{\n[\n(x', None),
             ('f"{x\n\n', None),
             ('f"ab\\\n{x\n', None),
+            # 3.11's line rules: a final \n starts no line, a final \r\n does;
+            # a backslash escapes a whole \r\n, and escapes in a raw string too.
+            ('f"""{(\n x\n', None),
+            ('f"""{x\r\n y\r\n', None),
+            ('f"ab\\\r\n{x', None),
+            ('rf"a\\\n{x\n', None),
             pytest.param(
                 'f"{f"{(',
                 None,
@@ -641,6 +647,10 @@ class TestSourceEndingInAFieldExpression:
             "triple-multiline",
             "single-newline",
             "backslash-newline",
+            "final-lf",
+            "final-crlf",
+            "backslash-crlf",
+            "raw-backslash-newline",
             "nested-literal",
             "t-string",
         ],
@@ -682,7 +692,7 @@ class TestSourceEndingInAFieldExpression:
                 },
             ),
             (
-                'f"""{(\n x',
+                'f"""{(\n x\n',
                 {
                     True: ("'(' was never closed", 1, 6),
                     False: (
@@ -693,8 +703,34 @@ class TestSourceEndingInAFieldExpression:
                     ),
                 },
             ),
+            (
+                'f"""{x\r\n y\r\n',
+                {
+                    True: ("'{' was never closed", 1, 5),
+                    False: (
+                        "unterminated triple-quoted string literal "
+                        "(detected at line 3)",
+                        1,
+                        1,
+                    ),
+                },
+            ),
+            (
+                'f"ab\\\r\n{x',
+                {
+                    True: ("'{' was never closed", 2, 1),
+                    False: ("unterminated string literal (detected at line 2)", 1, 1),
+                },
+            ),
+            (
+                'rf"a\\\n{x\n',
+                {
+                    True: ("'{' was never closed", 2, 1),
+                    False: ("unterminated string literal (detected at line 2)", 1, 1),
+                },
+            ),
         ],
-        ids=["single", "triple"],
+        ids=["single", "triple-final-lf", "final-crlf", "backslash-crlf", "raw"],
     )
     def test_each_tokenizer_s_error_is_produced(
         self, monkeypatch, in_place, src, errors
