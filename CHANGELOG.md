@@ -20,11 +20,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 - Writing a string in an f/t-string replacement field with `\"`
   (`f"{(.get d \"k\")}"`) is deprecated: each such string emits a
-  `SyntaxWarning` at its opening `\"`, shown by default (as CPython's invalid
-  escape sequences are). Write plain quotes (`f"{(.get d "k")}"`), which
-  works on every supported Python. A warnings filter that turns it into an
-  error (`PYTHONWARNINGS=error::SyntaxWarning`) makes it a compile error at
-  the opener.
+  `SyntaxWarning` at its opening `\"`, shown by default (as CPython
+  3.12+'s invalid escape sequences are). Write plain quotes
+  (`f"{(.get d "k")}"`), which works on every supported Python. A
+  warnings filter that turns it into an error
+  (`PYTHONWARNINGS=error::SyntaxWarning`) makes it a compile error at the
+  opener.
 
 ### Changed
 

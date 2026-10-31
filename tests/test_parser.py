@@ -588,7 +588,9 @@ class TestFieldsLexedInPlace:
 
     @pytest.mark.skipif(not T_STRINGS, reason="t-strings need Python 3.14")
     def test_an_escaped_string_in_a_t_string_is_deprecated(self):
-        with pytest.warns(SyntaxWarning, match="^t-string: write a plain"):
+        with pytest.warns(
+            SyntaxWarning, match="^t-string: " + ESCAPED_QUOTE_DEPRECATED + "$"
+        ):
             [stmt] = macroexpand_then_compile(parse(r't"{(g \"a\")}"'))
         [interpolation] = stmt.value.values
         assert ast.dump(interpolation.value) == ast.dump(

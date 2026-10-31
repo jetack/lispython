@@ -40,7 +40,7 @@ def test_escaped_quote_in_a_field_warns_under_default_filters(tmp_path: Path):
     env = {
         k: v
         for k, v in os.environ.items()
-        if k not in ("PYTHONPATH", "PYTHONSAFEPATH", "PYTHONWARNINGS")
+        if k not in ("PYTHONPATH", "PYTHONSAFEPATH", "PYTHONWARNINGS", "PYTHONDEVMODE")
     }
     r = subprocess.run([str(LPY), str(src)], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

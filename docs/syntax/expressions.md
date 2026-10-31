@@ -228,7 +228,7 @@ A field is ordinary code, so a string in it is written with plain quotes as in
 Python 3.12+ (`f"{(.get d "k")}"`), on every supported Python. The old
 spelling with `\"` (`f"{(.get d \"k\")}"`) is deprecated: it still compiles,
 with a `SyntaxWarning` (shown by default, as for an invalid escape sequence
-in Python), and a string opened with `\"` must be closed by
+in Python 3.12+), and a string opened with `\"` must be closed by
 `\"`.
 LisPy version
 ```python
