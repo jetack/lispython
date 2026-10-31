@@ -187,19 +187,19 @@ def _quote_length(src, i, quote, in_field):
     return j - i
 
 
-def scan_string_body(src, i, quote, raw, kind, in_field, spec=False, braces=0):
+def scan_string_body(src, i, quote, raw, kind, in_field, spec=False):
     """The one scanner of string bodies: a plain string's whole body, and an
     f/t-string's literal text up to its next field, its end, or the end of a
     format spec.
 
-    Scans ``src`` from ``i`` and returns ``[piece, stop, at, braces]``: the
+    Scans ``src`` from ``i`` and returns ``[piece, stop, at]``: the
     text read (source text, escapes unprocessed, ``{{``/``}}`` collapsed, and
     \\" read as " ``in_field``), why it stopped, and where: ``"quote"`` at the
     closing quote, ``"field"`` at a single ``{``, ``"close"`` at a single
     ``}``, ``"eof"`` at the end of the source. For a plain string (``kind``
     "string") braces are ordinary characters. In a format spec (``spec``)
-    ``{{`` is a literal brace, ``braces`` counts those still open, and ``}}``
-    closes one of them (else its first ``}`` ends the spec).
+    no brace is doubled, as in CPython: every ``{`` opens a field and the first
+    ``}`` ends the spec.
     """
     interpolated = kind != "string"
     stops = _INTERPOLATED_BODY_STOP if interpolated else _PLAIN_BODY_STOP
@@ -209,14 +209,14 @@ def scan_string_body(src, i, quote, raw, kind, in_field, spec=False, braces=0):
         m = stops.search(src, i)
         if m is None:
             buf.append(src[i:])
-            return ["".join(buf), "eof", n, braces]
+            return ["".join(buf), "eof", n]
         if m.start() > i:
             buf.append(src[i : m.start()])
         i = m.start()
         c = src[i]
         if c == "\\" and in_field and src.startswith('"', i + 1):
             if _quote_length(src, i, quote, in_field):
-                return ["".join(buf), "quote", i, braces]
+                return ["".join(buf), "quote", i]
             buf.append('"')
             i += 2
         elif c == "\\":
@@ -241,20 +241,16 @@ def scan_string_body(src, i, quote, raw, kind, in_field, spec=False, braces=0):
                 i += 2
         elif c in "\"'":
             if _quote_length(src, i, quote, in_field):
-                return ["".join(buf), "quote", i, braces]
+                return ["".join(buf), "quote", i]
             buf.append(c)
             i += 1
         elif src.startswith(c, i + 1):
-            if spec and c == "{":
-                braces += 1
-            elif spec:
-                if not braces:
-                    return ["".join(buf), "close", i, braces]
-                braces -= 1
+            if spec:
+                return ["".join(buf), "field" if c == "{" else "close", i]
             buf.append(c)
             i += 2
         else:
-            return ["".join(buf), "field" if c == "{" else "close", i, braces]
+            return ["".join(buf), "field" if c == "{" else "close", i]
 
 
 class _LiteralState:
@@ -287,7 +283,6 @@ class _FieldState:
         "open",
         "depth",
         "spec",
-        "braces",
         "previous",
         "tail",
         "record",
@@ -298,7 +293,6 @@ class _FieldState:
         self.open = open_brace
         self.depth = 0  # brackets open in the expression
         self.spec = False
-        self.braces = 0  # {{ open in the format spec
         self.previous = None  # for the comma rule, as at the top level
         # [first token index, start, end, type] of the last token at depth 0,
         # with the quotes glued before it ('x): what {x=} takes the = off.
@@ -423,7 +417,7 @@ class _Lexer:
         in_field = bool(self.stack)
         body = start + len(opening)
         if kind == "string":
-            [_, stop, at, _] = scan_string_body(src, body, quote, raw, kind, in_field)
+            [_, stop, at] = scan_string_body(src, body, quote, raw, kind, in_field)
             error = None
             if stop == "quote":
                 end = at + _quote_length(src, at, quote, in_field)
@@ -470,7 +464,7 @@ class _Lexer:
             [top, None] if isinstance(top, _LiteralState) else [top.literal, top]
         )
         src = self.src
-        [piece, stop, at, braces] = scan_string_body(
+        [piece, stop, at] = scan_string_body(
             src,
             self.pos,
             literal.quote,
@@ -478,13 +472,10 @@ class _Lexer:
             literal.kind,
             literal.in_field,
             spec is not None,
-            spec.braces if spec is not None else 0,
         )
         if stop == "eof":
             self._fail(self._eof_error())
             return
-        if spec is not None:
-            spec.braces = braces
         self._emit(piece, "interpolated-middle", self.pos, at)
         kind = literal.kind
         if stop == "quote":
@@ -505,7 +496,7 @@ class _Lexer:
             self._emit("{", "field-start", at, at + 1, record)
             self.stack.append(_FieldState(literal, at, record))
             self.pos = at + 1
-        elif spec is None or spec.braces:
+        elif spec is None:
             self._fail(self._error(f"{kind}: single '}}' is not allowed", at, at + 1))
         else:
             self._close_field(spec, at)
