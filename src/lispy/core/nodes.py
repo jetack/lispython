@@ -826,6 +826,10 @@ class FStrExpr(Wrapper):
     the ``{expr=}`` echo, which is ``expr_text + debug``).  Built from a
     quasiquote with an unquote inside, the text is that of the expanded
     expression, padded as written: what the user would have typed.
+
+    ``expr_text`` may also be given as a lazy text, whose str() is the text:
+    the parser's span of the source, read only when asked for, as a copy of
+    every nested field's text costs memory quadratic in the nesting.
     """
 
     def __init__(self, value, expr_text=None, expr_padding=("", ""), **kwargs):
@@ -837,6 +841,14 @@ class FStrExpr(Wrapper):
             else expr_text
         )
         self.classname = "FStrExpr"
+
+    @property
+    def expr_text(self):
+        return str(self._expr_text)
+
+    @expr_text.setter
+    def expr_text(self, text):
+        self._expr_text = text
 
     def __repr__(self):
         return "FStrExpr(" + repr(self.value) + ")"

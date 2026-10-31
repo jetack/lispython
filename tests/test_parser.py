@@ -1,8 +1,13 @@
 import pytest
 
+from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError
-from lispy.core.nodes import Paren, Symbol
+from lispy.core.nodes import FStrExpr, Paren, Symbol, atom_text
 from lispy.core.parser import parse, tokenize
+
+T_STRINGS = (
+    tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
+)
 
 
 class TestParser:
@@ -286,3 +291,167 @@ class TestNestedFStrings:
 
     def test_a_nest_in_a_format_spec_parses(self):
         assert len(parse('f"{x:{' + nested('f"{', self.DEPTH) + '}}"')) == 1
+
+
+def spec_chain(form):
+    """The fields of a format-spec chain, outermost first, each as (its
+    columns, its spec's columns or None), with the innermost value."""
+    fields = []
+    node = form
+    while len(node.list) > 2:  # the literal, then a field
+        field = node.list[2]
+        assert isinstance(field, FStrExpr)
+        spec = field.format_spec
+        fields.append(
+            (
+                (field.col_offset, field.end_col_offset),
+                None if spec is None else (spec.col_offset, spec.end_col_offset),
+            )
+        )
+        if spec is None:
+            return fields, field.value
+        node = spec
+    raise AssertionError("no innermost field")
+
+
+class TestFormatSpecChains:
+    """A format spec holds fields, whose specs hold fields, to any depth:
+    lispython adds no limit of its own (compile() applies the compiler's)."""
+
+    def test_a_spec_chain_parses(self):
+        [form] = parse('f"{x:{x:{x}}}"')
+        assert atom_text(form.list[0]) == "f-string"
+        [fields, leaf] = spec_chain(form)
+        # Each spec runs from its ":" to the "}" closing its field.
+        assert fields == [((2, 13), (4, 12)), ((5, 12), (7, 11)), ((8, 11), None)]
+        assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 9)
+
+    @pytest.mark.parametrize(
+        ["src", "depth"],
+        [
+            ('f"{x:{x:{x:{x}}}}"', 4),
+            ('f"{x:{x:{x}{x:{x}}}}"', 3),
+            ('rf"{x:{x:{x:{x}}}}"', 4),
+            ('f"""{x:{x:{x:\n\nab{x}}}}"""', 4),
+        ],
+        ids=["chain", "after-a-sibling", "raw", "lines-below"],
+    )
+    def test_a_chain_past_cpython_s_three_fields_parses(self, src, depth):
+        [form] = parse(src)
+        assert len(spec_chain(form)[0]) == depth
+
+    @pytest.mark.skipif(not T_STRINGS, reason="t-strings need Python 3.14")
+    def test_a_t_string_chain_parses(self):
+        [form] = parse('t"{x:{x:{x:{x}}}}"')
+        assert atom_text(form.list[0]) == "t-string"
+        assert len(spec_chain(form)[0]) == 4
+
+    def test_braces_inside_an_expression_are_not_fields(self):
+        [form] = parse('f"{ {1 {2 {3 {4 5}}}} }"')
+        assert type(form.list[2].value).__name__ == "Brace"
+
+    @pytest.mark.parametrize(
+        ["src", "msg", "at"],
+        [
+            ('f"{x:{x:{x:{x}}}} }"', "f-string: single '}' is not allowed", (1, 19)),
+            ('f"{x:{x:{x:{x}}}} {"', "f-string: expecting '}'", (1, 19)),
+            ('f"{x:{x:{x:{x', "f-string: expecting '}'", (1, 12)),
+        ],
+        ids=["single-brace", "open-field", "unterminated"],
+    )
+    def test_an_error_after_a_deep_chain_is_reported_where_it_is(self, src, msg, at):
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == at
+
+    def test_the_first_of_two_errors_is_reported(self):
+        # CPython's message; lispython places it at the "!", CPython one
+        # column later.
+        with pytest.raises(LispyCompileError) as info:
+            parse('f"{x!z} {x:{x:{x:{x}}} }"')
+        assert info.value.msg == (
+            "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'"
+        )
+        assert (info.value.lineno, info.value.offset) == (1, 5)
+
+    @pytest.mark.parametrize(
+        ["src", "msg", "at"],
+        [
+            # CPython 3.12 and 3.15: no conversion is missing, a "}" is.
+            ('f"{x!"', "f-string: expecting '}'", (1, 6)),
+            ('f"{x! "', "f-string: expecting '}'", (1, 7)),
+            ('f"{x! r"', "f-string: expecting '}'", (1, 7)),
+            ('f"{x!r "', "f-string: expecting '}'", (1, 8)),
+            # CPython 3.12's reading (3.15 checks the name first).
+            ('f"{x!z"', "f-string: expecting '}'", (1, 7)),
+            ('f"{x!\n"', "f-string: expecting '}'", (2, 1)),
+            # The source ends: as for f"{x" and f"{x!r", at the "{" (CPython:
+            # "'{' was never closed" there).
+            ('f"{x!', "f-string: expecting '}'", (1, 3)),
+            ('f"{x! ', "f-string: expecting '}'", (1, 3)),
+            ('f"{x!z ', "f-string: expecting '}'", (1, 3)),
+            # Not the closing quote: a string where the name should be.
+            ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
+            ('f"""{x!""', "f-string: invalid conversion character", (1, 8)),
+        ],
+        ids=[
+            "quote",
+            "space-quote",
+            "space-name-quote",
+            "name-space-quote",
+            "bad-name-quote",
+            "newline-quote",
+            "end",
+            "space-end",
+            "bad-name-space-end",
+            "string-in-triple",
+            "quotes-in-triple",
+        ],
+    )
+    def test_a_literal_ending_after_the_exclamation_mark(self, src, msg, at):
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == at
+
+    def test_an_earlier_literal_error_comes_first(self):
+        with pytest.raises(LispyCompileError) as info:
+            parse('f"}"\nf"{x:{x:{x:{x}}}}"')
+        assert info.value.msg == "f-string: single '}' is not allowed"
+        assert (info.value.lineno, info.value.offset) == (1, 3)
+
+
+class TestFieldsLexedInPlace:
+    """A replacement field is lexed where it stands, as CPython 3.12+ lexes it."""
+
+    def test_a_quote_in_a_field_opens_a_string(self):
+        # CPython 3.12+ reads f"{f"{"}"}"}" as two literals around "}".
+        [form] = parse('f"{f"{"}"}"}"')
+        inner = form.list[2].value
+        assert atom_text(inner.list[0]) == "f-string"
+        assert repr(inner.list[2].value) == "Str('\"}\"')"
+        assert inner.list[2].expr_text == '"}"'
+
+    def test_an_escaped_quote_in_a_field_is_a_quote_at_its_own_column(self):
+        [form] = parse('f"{(.get d \\"k\\")}"')
+        field = form.list[2]
+        [_, _, key] = field.value.list
+        assert repr(key) == "Str('\"k\"')"
+        assert field.expr_text == '(.get d "k")'
+        # Columns are the source's: \"k\" is 5 characters wide.
+        assert (key.col_offset, key.end_col_offset) == (11, 16)
+        assert (field.value.end_col_offset, field.end_col_offset) == (17, 18)
+
+    @pytest.mark.parametrize(
+        ["src", "form"],
+        [
+            ('f"{x ;c}"', "x"),
+            ('f"{(f x ;c\n y)}"', "(f x y)"),
+            # Inside brackets a "}" does not end it (CPython reads # alike).
+            ('f"{(x ;c}\n)}"', "(x)"),
+        ],
+        ids=["before-the-closing-brace", "to-the-end-of-the-line", "in-brackets"],
+    )
+    def test_a_comment_in_a_field_ends_at_a_brace_or_the_line(self, src, form):
+        assert str(parse(src)[0].list[2].value) == form
