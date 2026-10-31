@@ -413,12 +413,45 @@ class TestFormatSpecNestingLimit:
         )
         assert (info.value.lineno, info.value.offset) == (1, 5)
 
-    def test_a_literal_ending_right_after_the_exclamation_mark(self):
-        # CPython 3.12-3.15: no conversion is missing, a "}" is.
+    @pytest.mark.parametrize(
+        ["src", "msg", "at"],
+        [
+            # CPython 3.12 and 3.15: no conversion is missing, a "}" is.
+            ('f"{x!"', "f-string: expecting '}'", (1, 6)),
+            ('f"{x! "', "f-string: expecting '}'", (1, 7)),
+            ('f"{x! r"', "f-string: expecting '}'", (1, 7)),
+            ('f"{x!r "', "f-string: expecting '}'", (1, 8)),
+            # CPython 3.12's reading (3.15 checks the name first).
+            ('f"{x!z"', "f-string: expecting '}'", (1, 7)),
+            ('f"{x!\n"', "f-string: expecting '}'", (2, 1)),
+            # The source ends: as for f"{x" and f"{x!r", at the "{" (CPython:
+            # "'{' was never closed" there).
+            ('f"{x!', "f-string: expecting '}'", (1, 3)),
+            ('f"{x! ', "f-string: expecting '}'", (1, 3)),
+            ('f"{x!z ', "f-string: expecting '}'", (1, 3)),
+            # Not the closing quote: a string where the name should be.
+            ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
+            ('f"""{x!""', "f-string: invalid conversion character", (1, 8)),
+        ],
+        ids=[
+            "quote",
+            "space-quote",
+            "space-name-quote",
+            "name-space-quote",
+            "bad-name-quote",
+            "newline-quote",
+            "end",
+            "space-end",
+            "bad-name-space-end",
+            "string-in-triple",
+            "quotes-in-triple",
+        ],
+    )
+    def test_a_literal_ending_after_the_exclamation_mark(self, src, msg, at):
         with pytest.raises(LispyCompileError) as info:
-            parse('f"{x!"')
-        assert info.value.msg == "f-string: expecting '}'"
-        assert (info.value.lineno, info.value.offset) == (1, 6)
+            parse(src)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == at
 
     def test_an_earlier_literal_error_comes_first(self):
         with pytest.raises(LispyCompileError) as info:

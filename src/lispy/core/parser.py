@@ -80,9 +80,11 @@ def _token_patterns(in_field, field_level=False):
             "number",
         ],
         [",", "comma"],
-        # "[" ends a symbol so that f[T] is a symbol glued to a bracket.
+        # "[" ends a symbol so that f[T] is a symbol glued to a bracket. The
+        # field's group is possessive (++): a plain + makes re keep a
+        # backtracking point per character, hundreds of MB for a long symbol.
         [
-            f'(?:[^{_SYMBOL_STOP}\\\\]|\\\\(?!"))+'
+            f'(?:[^{_SYMBOL_STOP}\\\\]|\\\\(?!"))++'
             if in_field
             else f"[^{_SYMBOL_STOP}]+",
             "symbol",
@@ -542,7 +544,6 @@ class _Lexer:
         the FStrExpr it builds.
         """
         src = self.src
-        kind = field.literal.kind
         expr_start = field.open + 1
         last = at  # past the expression's last non-space character
         while last > expr_start and src[last - 1].isspace():
@@ -571,50 +572,74 @@ class _Lexer:
             self._close_field(field, at)
             return
         if src[at] == "!":
-            j = at + 1
-            while j < len(src) and (src[j].isalnum() or src[j] == "_"):
-                j += 1
-            conversion = src[at + 1 : j]
-            if not conversion and _quote_length(
-                src, j, field.literal.quote, field.literal.in_field
-            ):
-                # The literal ends right after the "!", where CPython reports it.
-                self._fail(self._error(f"{kind}: expecting '}}'", j, j + 1))
-                return
-            if not conversion:
-                msg = (
-                    "conversion type must come right after the exclamation mark"
-                    if j < len(src) and src[j].isspace()
-                    else "missing conversion character"
-                )
-                self._fail(self._error(f"{kind}: {msg}", at, at + 1))
-                return
-            if conversion not in conversion_dict:
-                self._fail(
-                    self._error(
-                        f"{kind}: invalid conversion character {conversion!r}: "
-                        "expected 's', 'r', or 'a'",
-                        at,
-                        j,
-                    )
-                )
-                return
-            self._emit(src[at:j], "field-conversion", at, j, conversion)
-            at = j
-            while at < len(src) and src[at].isspace():
-                at += 1
-            if at == len(src):
-                self._fail(self._eof_error())
+            at = self._conversion(field, at)
+            if at is None:
                 return
             if src[at] == "}":
                 self._close_field(field, at)
                 return
-            if src[at] != ":":
-                self._fail(self._error(f"{kind}: expecting '}}'", at, at + 1))
-                return
         self._emit(":", "field-spec-start", at, at + 1)
         field.spec = True
         self.pos = at + 1
+
+    def _conversion(self, field, bang):
+        """The ``!conv`` at ``bang``: emits its token and returns the index of
+        the ``}`` or ``:`` after it, or fails and returns None.
+
+        As CPython 3.12 reads it: a literal or source ending before the ``}``
+        or ``:`` is "expecting '}'" whatever came between, and the name is
+        checked only once one of them follows it.
+        """
+        src = self.src
+        kind = field.literal.kind
+        name_start = bang + 1
+        while name_start < len(src) and src[name_start].isspace():
+            name_start += 1
+        name_end = name_start
+        while name_end < len(src) and (src[name_end].isalnum() or src[name_end] == "_"):
+            name_end += 1
+        rest = name_end
+        while rest < len(src) and src[rest].isspace():
+            rest += 1
+        conversion = src[name_start:name_end]
+        if rest == len(src):
+            self._fail(self._eof_error())
+            return None
+        if _quote_length(src, rest, field.literal.quote, field.literal.in_field):
+            # CPython's column: what follows the space after "!" (x! r"), else
+            # the quote.
+            at = name_start if name_start > bang + 1 else rest
+            self._fail(self._error(f"{kind}: expecting '}}'", at, at + 1))
+            return None
+        if conversion and conversion not in conversion_dict:
+            msg = (
+                f"invalid conversion character {conversion!r}: "
+                "expected 's', 'r', or 'a'"
+            )
+            self._fail(self._error(f"{kind}: {msg}", bang, name_end))
+            return None
+        if src[rest] not in "}:":
+            # CPython: a conversion that is no name at all (f"""{x!" """).
+            self._fail(
+                self._error(
+                    f"{kind}: expecting '}}'"
+                    if conversion
+                    else f"{kind}: invalid conversion character",
+                    rest,
+                    rest + 1,
+                )
+            )
+            return None
+        if not conversion or name_start > bang + 1:
+            msg = (
+                "conversion type must come right after the exclamation mark"
+                if conversion
+                else "missing conversion character"
+            )
+            self._fail(self._error(f"{kind}: {msg}", bang, bang + 1))
+            return None
+        self._emit(src[bang:name_end], "field-conversion", bang, name_end, conversion)
+        return rest
 
     def _drop_debug_equals(self, field, equals):
         """Take the ``=`` of ``{x=}`` at ``equals`` off the expression's last

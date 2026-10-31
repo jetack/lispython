@@ -1134,6 +1134,14 @@ def test_tokens_hold_no_copy_of_a_field_s_text():
 
 
 @pytest.mark.usefixtures("time_bound")
+def test_a_long_symbol_in_a_field_lexes_in_constant_memory():
+    # The field's symbol pattern is a repeated alternation: unless it is
+    # possessive, re keeps a backtracking point per character (100 MB here).
+    src = 'f"{' + "x" * 200_000 + '}"'
+    assert peak_memory(lambda: tokenize(src)) < 5_000_000
+
+
+@pytest.mark.usefixtures("time_bound")
 def test_a_literal_with_many_fields_costs_what_as_many_literals_do():
     # Positions come from line starts found once; counting lines from the
     # literal's start for every piece made one literal quadratic.
