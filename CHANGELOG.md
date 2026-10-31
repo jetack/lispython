@@ -85,14 +85,14 @@ follows [Semantic Versioning](https://semver.org/).
   still stops at a few hundred levels, because `ast.unparse` recurses: that
   is the positioned error "form nested too deeply to translate".
 - Nesting past compile()'s own limit is the positioned "form nested too
-  deeply to compile" error from `lpy`, imports, the REPL, nREPL and
-  `defmacro`, instead of a `RecursionError` traceback, at the bottom of the
+  deeply to compile" error from `lpy`, imports, the REPL, nREPL, `defmacro`
+  and `require`, instead of a `RecursionError` traceback, at the bottom of the
   deepest path in what compile() was given: the whole module for `lpy` files
   and imports, the whole form for `defmacro` and `require`, and the statement
   compile() fails on for `lpy -c`, the REPL and nREPL. Its message names
   Python's recursion limit only where that is the limit hit (3.11, and
-  `l2py`), since raising it does not move compile()'s limit on 3.12+. A macro's own runaway recursion still
-  raises `RecursionError`.
+  `l2py`), since raising it does not move compile()'s limit on 3.12+. A
+  macro's own runaway recursion still raises `RecursionError`.
 - Data a macro puts in its expansion, spliced with `~x` or placed in a
   form's list, that holds the same Python list or tuple in many places is
   converted to nodes in time linear in the distinct data, instead of
