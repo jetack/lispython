@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from lispy.core.compiler import features
@@ -455,3 +457,43 @@ class TestFieldsLexedInPlace:
     )
     def test_a_comment_in_a_field_ends_at_a_brace_or_the_line(self, src, form):
         assert str(parse(src)[0].list[2].value) == form
+
+
+class TestNumberLexingCost:
+    """A long digit run that is not a number costs time linear in its length."""
+
+    # Quadratic, 8000 digits take ~5 s; linear, a few ms. One run, with a
+    # budget two orders above the linear cost.
+    DIGITS = 8000
+    BUDGET = 1.0
+
+    @pytest.mark.parametrize(
+        "template",
+        ["{}", 'f"{{{}}}"', 'f"{{[{}]}}"'],
+        ids=["top-level", "field", "bracketed-field"],
+    )
+    @pytest.mark.parametrize("tail", ["a(", "-", "("])
+    def test_digits_before_a_non_number_char_lex_in_linear_time(self, template, tail):
+        src = template.format("1" * self.DIGITS + tail)
+        start = time.perf_counter()
+        tokenize(src)  # only the lexing cost is measured, not validity
+        assert time.perf_counter() - start < self.BUDGET
+
+    @pytest.mark.parametrize(
+        "src, kind",
+        [
+            ("1" * 50 + "a", "number"),
+            ("1__2", "symbol"),
+            ("1_000", "number"),
+            ("1e5", "number"),
+            ("1j", "number"),
+            ("1e5j", "number"),
+            ("1_0.5e-3+2_0j", "number"),
+            ("0xFF", "number"),
+            ("1x_2", "number"),
+            ("1.5a", "symbol"),
+        ],
+    )
+    def test_digit_tokens_keep_their_kind(self, src, kind):
+        [[text, token_kind, *_]] = tokenize(src)
+        assert (token_kind, text) == (kind, src)

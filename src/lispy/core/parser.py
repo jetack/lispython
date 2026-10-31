@@ -23,7 +23,12 @@ from lispy.core.nodes import (
 )
 from lispy.core.utils import augassignop_dict
 
-_INT = r"\d+[\dA-Za-z]*(?:_[\dA-Za-z]+)*"
+# ⚠️ One leading digit, not \d+: \d+ and the [\dA-Za-z]* after it match the
+# same digits, so a long digit run before a char that fails the number's stop
+# lookahead was tried at every split of the two (quadratic). The token set is
+# unchanged. The repeat cannot be possessive: a complex's [jJ] and a
+# scientific's [eE] need the letters given back.
+_INT = r"\d[\dA-Za-z]*(?:_[\dA-Za-z]+)*"
 _FLOATS = [
     "\\d+(?:_\\d+)*\\.\\d+(?:_\\d+)*",
     "\\d+(?:_\\d+)*\\.\\d*",
