@@ -23,7 +23,8 @@ follows [Semantic Versioning](https://semver.org/).
   `SyntaxWarning` at its opening `\"`, shown by default (as CPython's invalid
   escape sequences are). Write plain quotes (`f"{(.get d "k")}"`), which
   works on every supported Python. A warnings filter that turns it into an
-  error (`-W error::SyntaxWarning`) makes it a compile error at the opener.
+  error (`PYTHONWARNINGS=error::SyntaxWarning`) makes it a compile error at
+  the opener.
 
 ### Changed
 
