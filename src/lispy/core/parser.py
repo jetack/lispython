@@ -3,6 +3,7 @@ import re
 from bisect import bisect_left, bisect_right
 from collections import deque
 
+from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import number_parts, string_literal_value
 from lispy.core.errors import LispyCompileError
@@ -133,6 +134,9 @@ _STRING_PREFIX_RE = re.compile("\\w*")
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
+# A single-quoted body up to its first newline no backslash escapes (3.11's
+# "detected at line"); possessive, so linear.
+_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\n]++|\\.)*+", re.DOTALL)
 
 
 def _source_locator(src):
@@ -276,15 +280,17 @@ class _LiteralState:
         "raw",
         "quote",
         "escaped",
+        "start",
         "quote_start",
         "body",
     )
 
-    def __init__(self, kind, raw, quote, escaped, quote_start, body):
+    def __init__(self, kind, raw, quote, escaped, start, quote_start, body):
         self.kind = kind
         self.raw = raw
         self.quote = quote
         self.escaped = escaped  # opened with \" in a field (_FIELD_QUOTE_ESCAPE)
+        self.start = start  # of the prefix
         self.quote_start = quote_start
         self.body = body
 
@@ -389,7 +395,7 @@ class _Lexer:
         m = regex.search(src, self.pos)
         if m is None:
             if field is not None:
-                self._fail(self._eof_error())
+                self._end_in_expression()
             self.done = True
             return
         start = m.start()
@@ -468,13 +474,49 @@ class _Lexer:
         if escaped:
             self._note_escapes(start, body)
         self.stack.append(
-            _LiteralState(kind, raw, quote, escaped, body - len(quote_text), body)
+            _LiteralState(
+                kind, raw, quote, escaped, start, body - len(quote_text), body
+            )
         )
         self.pos = body
 
+    def _end_in_expression(self):
+        """The source ends inside a field's expression (or its conversion).
+
+        Where the tokenizer lexes fields in place (3.12+), the field's ``{`` is
+        on CPython's bracket stack: the lexer just stops, and the parser's
+        ``_check_all_closed`` reports the innermost bracket or field still open
+        as never closed. On 3.11 the whole f-string is one string token, so it
+        is unterminated at the outermost literal's prefix, detected at the
+        first newline its quote cannot span (or the source's last line).
+        """
+        self.done = True
+        if features.fstring_fields_are_tokens():
+            return
+        outer = self.stack[0]
+        src = self.src
+        end = len(src)
+        if len(outer.quote) == 1:
+            # A backslash pairs with the next character, raw or not.
+            end = _UNESCAPED_LINE_END_RE.match(src, outer.body).end()
+        if end == len(src) and src.endswith("\n"):
+            end -= 1  # a final newline starts no line
+        line = self.locate(end)["lineno"]
+        triple = "triple-quoted " if len(outer.quote) == 3 else ""
+        self._fail(
+            self._error(
+                f"unterminated {triple}string literal (detected at line {line})",
+                outer.start,
+                outer.body,
+            )
+        )
+
     def _eof_error(self, kind=None, quote=None, quote_start=None, body=None):
-        """The source ends inside a field (``expecting '}'`` at the innermost
-        one's ``{``) or else inside a literal (unterminated, at its quote)."""
+        """The source ends inside a plain string (``kind`` and the rest given)
+        or inside literal text (a literal's body or a format spec's): with a
+        field open, ``expecting '}'`` at the innermost one's ``{``; else
+        unterminated, at the quote. A field's expression is
+        ``_end_in_expression``'s."""
         for entry in reversed(self.stack):
             if isinstance(entry, _FieldState):
                 return self._error(
@@ -607,7 +649,7 @@ class _Lexer:
             rest += 1
         conversion = src[name_start:name_end]
         if rest == len(src):
-            self._fail(self._eof_error())
+            self._end_in_expression()
             return None
         if _quote_length(src, rest, field.literal.quote, field.literal.escaped):
             # CPython's column: what follows the space after "!" (x! r"), else
@@ -755,18 +797,35 @@ def _check_closing(stack, closing, position_info):
 
 
 def _check_all_closed(stack):
-    unclosed = [node for node in stack if type(node) in _OPENERS]
-    if unclosed:
-        opener = unclosed[-1]
+    """CPython's error for the innermost bracket left open on ``stack``.
+
+    An open ``_Field`` counts as a ``{`` at its brace: CPython 3.12+ keeps the
+    field's brace on its bracket stack. One is left open only where the lexer
+    stops in a field's expression without an error (``_end_in_expression``).
+    """
+    for node in reversed(stack):
+        if type(node) in _OPENERS:
+            [opening, lineno, col_offset] = [
+                _OPENERS[type(node)],
+                node.lineno,
+                node.col_offset,
+            ]
+        elif isinstance(node, _Field):
+            [opening, lineno, col_offset] = [
+                "{",
+                node.position_info["lineno"],
+                node.position_info["col_offset"],
+            ]
+        else:
+            continue
         position_info = {
-            "lineno": opener.lineno,
-            "col_offset": opener.col_offset,
-            "end_lineno": opener.lineno,
-            "end_col_offset": opener.col_offset + 1,
+            "lineno": lineno,
+            "col_offset": col_offset,
+            "end_lineno": lineno,
+            "end_col_offset": col_offset + 1,
         }
         raise LispyCompileError(
-            f"'{_OPENERS[type(opener)]}' was never closed",
-            Symbol(_OPENERS[type(opener)], **position_info),
+            f"'{opening}' was never closed", Symbol(opening, **position_info)
         )
 
 

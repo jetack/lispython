@@ -9,8 +9,8 @@ must fail here with a lispython error, never as a CPython traceback or a
 silent mistranslation.
 
 AST shapes: where releases build the same form differently, a named
-capability probe below asks the running ``ast`` module instead of comparing
-version numbers, so a backported change is followed automatically.  The
+capability probe below asks the running ``ast`` (or ``token``) module instead
+of comparing version numbers, so a backported change is followed automatically.  The
 exception is ``compile_depth_follows_recursion_limit``, a version comparison
 through ``running_version()``: probing it would overflow the C stack.  The
 compiler calls the probes through
@@ -25,6 +25,7 @@ than a form or an AST shape, and runs before any lispython code is compiled.
 import ast
 import functools
 import sys
+import token
 from dataclasses import dataclass
 
 from lispy.core.errors import LispyCompileError
@@ -64,6 +65,19 @@ def interpolation_keeps_trailing_whitespace():
     """
     probe = ast.parse('t"{x }"', mode="eval").body
     return probe.values[0].str == "x "
+
+
+@functools.cache
+def fstring_fields_are_tokens():
+    """Whether the tokenizer lexes f-string fields in place (PEP 701, 3.12).
+
+    Decides the error for a source ending inside a field's expression: where
+    True, the field's ``{`` is on the tokenizer's bracket stack, so it is
+    "'X' was never closed" at the innermost bracket still open, the ``{``
+    counting as one; where False (3.11), the whole f-string is one string
+    token, so it is "unterminated string literal" at the outermost one.
+    """
+    return hasattr(token, "FSTRING_START")
 
 
 def compile_depth_follows_recursion_limit():
