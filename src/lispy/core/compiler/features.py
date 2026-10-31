@@ -99,14 +99,14 @@ def compile_depth_follows_recursion_limit():
 
 
 @functools.cache
-def fstring_classes():
-    """The ast classes of an f- or t-string literal: ``ast.JoinedStr``, and
-    ``ast.TemplateStr`` from 3.14."""
-    return tuple(
-        getattr(ast, name)
-        for name in ("JoinedStr", "TemplateStr")
-        if hasattr(ast, name)
-    )
+def fstring_kinds():
+    """Each string literal with replacement fields, as (literal class, field
+    class): ``(ast.JoinedStr, ast.FormattedValue)``, and from 3.14
+    ``(ast.TemplateStr, ast.Interpolation)``."""
+    kinds = [(ast.JoinedStr, ast.FormattedValue)]
+    if hasattr(ast, "TemplateStr"):
+        kinds.append((ast.TemplateStr, ast.Interpolation))
+    return tuple(kinds)
 
 
 @functools.cache
@@ -118,6 +118,17 @@ def stdlib_unparser():
     except ImportError:
         return ast._Unparser
     return Unparser
+
+
+@functools.cache
+def stdlib_fstring_part_writer():
+    """The name of the stdlib unparser's method that writes one part of an
+    f/t-string, and a format spec's parts by calling itself:
+    ``_write_ftstring_inner`` from 3.14, ``_write_fstring_inner`` before."""
+    for name in ("_write_ftstring_inner", "_write_fstring_inner"):
+        if hasattr(stdlib_unparser(), name):
+            return name
+    raise AssertionError("the stdlib unparser has no f-string part writer")
 
 
 def import_has_is_lazy():

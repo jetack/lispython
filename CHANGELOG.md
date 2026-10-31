@@ -172,10 +172,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `l2py` translates as deep as `compile()` takes, with the text `ast.unparse`
-  would write, instead of stopping at a few hundred levels (about 250 nested
-  statements, 100 nested f-strings) with "form nested too deeply to
-  translate".
+- `l2py` translates as deep as `compile()` takes (statements, expressions,
+  match patterns, nested f-strings and format specs), with the text
+  `ast.unparse` would write, instead of stopping at a few hundred levels
+  (about 250 nested statements, patterns or format specs, 100 nested
+  f-strings) with "form nested too deeply to translate". That error remains
+  only for a caller whose own stack is already near the recursion limit.
 - A body that compiles to no statement, such as `(when test)` or
   `(if x (do))`, is a compile error at the form (`(if ...) needs a body`)
   for `if`, `while`, `for`, `with`, `try`, `except`, `else`, `finally` and

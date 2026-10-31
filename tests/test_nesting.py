@@ -873,6 +873,90 @@ def test_l2py_translates_as_deep_as_compile_takes(plus_limit):
 # ast.arguments would write as `lambda : None`.
 UNPARSE_CORPUS = [features.stdlib_unparser(), typing, functools, types, dataclasses]
 
+# (oldest Python that parses it, source, ast.parse mode): the seams between
+# chunks, every kind of node a cut can sit next to.
+UNPARSE_SEAMS = [
+    (
+        (3, 11),
+        "match x:\n"
+        "    case 1 | 2:\n        pass\n"
+        "    case None | True:\n        pass\n"
+        "    case [a, *rest] | (a, b):\n        pass\n"
+        "    case {'k': v, **kw}:\n        pass\n"
+        "    case C(1, y=[2, *_]) as z if z:\n        pass\n"
+        "    case -1j | a.b:\n        pass\n"
+        "    case _:\n        pass\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "try:\n    a\nexcept* E as e:\n    b\nexcept* (F, G):\n    pass\n"
+        "else:\n    c\nfinally:\n    d\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "def f(a):\n    # type: (int) -> int\n    return a\n"
+        "x = 1  # type: int\ny = 2  # type: ignore[foo]\n"
+        "for i in j:  # type: int\n    pass  # type: ignore\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "lambda: None\nf(lambda x=1, *a, y=2, **k: x)\nlambda *, k: k\n"
+        "lambda: (yield)\n",
+        "exec",
+    ),
+    ((3, 11), "f'{a!r:>{w}.{p}} {b:{c}} {x=} {y!s} {z!a:^10} {{}} {q:%Y}'\n", "exec"),
+    ((3, 12), "f'{b:{c:{d}}}'\n", "exec"),  # 3.11 parses two levels of spec
+    (
+        (3, 11),
+        "async def g():\n    await x\n    (y := await z)\n"
+        "    async with a as b, c:\n        async for i in j:\n            pass\n"
+        "def h():\n    x = yield\n    yield from y\n    return (yield a), w\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "'''module doc'''\n@d\n@e.f(1)\nclass A(B, C, metaclass=M, **kw):\n"
+        "    '''class doc'''\n    def m(self, /, a, *, b):\n        '''m doc'''\n"
+        "def f():\n    global a\n    def g():\n        nonlocal b\n",
+        "exec",
+    ),
+    ((3, 11), "if x:\n    y\nelse:\n    z\n", "single"),
+    ((3, 11), "a = 1; b", "single"),
+    ((3, 11), "a if b else (c, *d)", "eval"),
+    ((3, 12), "class A[T: int, *Ts, **P]:\n    type X[U] = list[U]\n", "exec"),
+    ((3, 12), "f'{f'{f'{x!r:>{w}}'}'}'\n", "exec"),
+    ((3, 14), "t'{a!r:>{w}} {b:{c:{d}}} { x = } {t'{y}'}'\n", "exec"),
+]
+
+
+def seam_trees():
+    for since, src, mode in UNPARSE_SEAMS:
+        if sys.version_info >= since:
+            yield ast.parse(src, mode=mode, type_comments=True)
+    yield ast.Interactive(body=ast.parse("a = 1\nif x:\n    y\nb").body)
+    # A node in two places, read where the second does not set its
+    # precedence: the stdlib writes the first place's, f((a + b)).
+    shared = ast.BinOp(ast.Name("a"), ast.Add(), ast.Name("b"))
+    yield ast.Module(
+        [
+            ast.Expr(ast.BinOp(shared, ast.Mult(), ast.Name("c"))),
+            ast.Expr(ast.Call(ast.Name("f"), [shared], [])),
+        ],
+        type_ignores=[],
+    )
+
+
+def python_interpolations(tree):
+    """``tree`` with every Interpolation.str None: unparse always writes the
+    Python text, which is what ast.unparse writes for None."""
+    for node in ast.walk(tree):
+        if type(node).__name__ == "Interpolation":
+            node.str = None
+    return tree
+
 
 def corpus_trees():
     for source in UNPARSE_CORPUS:
@@ -881,13 +965,15 @@ def corpus_trees():
     sugar = pathlib.Path(tools.__file__).parent / "macros" / "sugar.lpy"
     body = macroexpand_then_compile(parse(sugar.read_text(encoding="utf-8")), {})
     yield ast.Module(body, type_ignores=[])
+    yield from seam_trees()
 
 
-@pytest.mark.parametrize("chunk_depth", [1, 2])
+@pytest.mark.parametrize("chunk_depth", [1, 2, 5, unparse_module.CHUNK_DEPTH])
 def test_unparse_writes_what_ast_unparse_writes(chunk_depth, monkeypatch):
-    # Depth 1 makes every expression and statement a chunk of its own.
+    # Depth 1 makes every expression, statement and pattern a chunk.
     monkeypatch.setattr(unparse_module, "CHUNK_DEPTH", chunk_depth)
     for tree in corpus_trees():
+        tree = python_interpolations(tree)
         assert unparse_module.unparse(tree) == ast.unparse(tree)
 
 
@@ -902,6 +988,42 @@ def test_l2py_translates_statements_nested_past_ast_unparse(scope):
     assert (
         pysrc == "import lispy\n\n" + "\n".join(lines) + "\n" + " " * 4 * depth + "pass"
     )
+
+
+# (id, lispython opening, leaf, closing, the Python text at a depth)
+NESTED_PATTERNS = [
+    ("sequence", "[", "a", "]", lambda d: "[" * d + "a" + "]" * d),
+    ("or", "(| 1 ", "2", ")", lambda d: "1 | (" * (d - 1) + "1 | 2" + ")" * (d - 1)),
+    ("class", "(C ", "a", ")", lambda d: "C(" * d + "a" + ")" * d),
+]
+
+
+@pytest.mark.parametrize(
+    "opening, leaf, closing, python",
+    [case[1:] for case in NESTED_PATTERNS],
+    ids=[case[0] for case in NESTED_PATTERNS],
+)
+def test_l2py_translates_patterns_nested_past_ast_unparse(
+    opening, leaf, closing, python
+):
+    # Plain ast.unparse fails near 250 nested patterns.
+    depth = 400
+    pattern = opening * depth + leaf + closing * depth
+    pysrc = tools.l2py_s(
+        f"(match x (case {pattern} 1))", fresh_scope=True, format=False
+    )
+    assert pysrc == f"import lispy\n\nmatch x:\n    case {python(depth)}:\n        1"
+
+
+@pytest.mark.parametrize("prefix, needs_t", [("f", False), ("t", True)])
+def test_l2py_translates_format_specs_nested_past_ast_unparse(prefix, needs_t):
+    # Plain ast.unparse fails near 250 nested format specs, which the stdlib
+    # writes calling itself, outside any chunk.
+    skip_without_t_strings(needs_t)
+    depth = 400
+    src = prefix + '"' + "{x:" * depth + "}" * depth + '"'
+    pysrc = tools.l2py_s(src, fresh_scope=True, format=False, no_lispy=True)
+    assert pysrc == prefix + "'" + "{x:" * depth + "}" * depth + "'"
 
 
 def test_translating_on_a_stack_with_no_room_is_a_positioned_error(scope):

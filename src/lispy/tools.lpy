@@ -67,10 +67,9 @@
 (= SCOPE (main-scope))
 
 (def ast-to-python [st]
-  ;; unparse writes any depth compile() takes, on a bounded stack per chunk.
-  ;; It still recurses when the caller's stack is already near the limit, and
-  ;; inside the stdlib where no chunk can cut (f-strings nested in format
-  ;; specs): that is the nesting error, at st.
+  ;; unparse writes any depth compile() takes, on a bounded stack per chunk;
+  ;; a caller whose stack leaves less room than a chunk needs gets its
+  ;; RecursionError, which is the nesting error, at st.
   (try
     (return (unparse st))
     (except [RecursionError]
