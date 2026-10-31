@@ -274,6 +274,20 @@ TWO_TOO_DEEP = "\n" + attribute_chain(55_000) + "\n" + attribute_chain(56_000)
 
 
 @pytest.mark.usefixtures("time_bound")
+def test_importing_reports_the_first_too_deep_statement(tmp_path, monkeypatch):
+    module = tmp_path / "lpy_two_too_deep_module.lpy"
+    module.write_text("(= x 1)" + TWO_TOO_DEEP)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    try:
+        with pytest.raises(LispyCompileError) as info:
+            importlib.import_module("lpy_two_too_deep_module")
+    finally:
+        sys.modules.pop("lpy_two_too_deep_module", None)
+    err = info.value
+    assert (err.msg, err.lineno, err.filename) == (NESTING_MESSAGE, 2, str(module))
+
+
+@pytest.mark.usefixtures("time_bound")
 def test_the_repl_reports_the_first_too_deep_statement():
     with pytest.raises(LispyCompileError) as info:
         tools.eval_and_print(TWO_TOO_DEEP, {}, filename="<repl>")
@@ -637,7 +651,7 @@ def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
     body = macroexpand_then_compile(forms, scope)
     module = ast.Module(body, type_ignores=[])
     assert sum(1 for node in ast.walk(module) if matches(node)) == DEPTH
-    if not compiles:
+    if not compiles and not (COMPILE_BOUND and not flat):
         return
     if COMPILE_BOUND and not flat:
         with pytest.raises(LispyCompileError) as info:

@@ -23,11 +23,22 @@ def _lpy_code(source, path, compile_module):
     lispython refuses, and the SyntaxErrors CPython's compiler raises on the
     AST (e.g. a lazy import inside a def), whose positions are already ours,
     and the AST nested past what compile() takes (compile_nesting_errors).
+
+    compile() takes the module whole and names no line when it gives up, so
+    the nesting error is placed by compiling the statements one by one: the
+    first that fails alone is where compile() stopped.
     """
     with compile_errors(os.fsdecode(path), source):
         tree = ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
-        with compile_nesting_errors(tree.body):
+        try:
             return compile_module(tree)
+        except RecursionError:
+            for stmt in tree.body:
+                with compile_nesting_errors([stmt]):
+                    compile_module(ast.Module([stmt], type_ignores=[]))
+            # Each fits alone: report the deepest path of the module.
+            with compile_nesting_errors(tree.body):
+                raise
 
 
 # # importlib.machinery.SourceFileLoader.source_to_code injection
