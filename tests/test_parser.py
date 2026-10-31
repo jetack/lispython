@@ -383,9 +383,10 @@ class TestFormatSpecChains:
         # CPython has no {{ or }} escape in a spec: { opens a field, } ends it.
         assert stmt_to_dump(lpy) == ast.dump(ast.parse(py or lpy))
 
-    def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self):
+    @pytest.mark.parametrize("src", ['f"{x:{{"', 'f"{x:{{}"'])
+    def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self, src):
         with pytest.raises(LispyCompileError, match="f-string: expecting '}'"):
-            parse('f"{x:{{"')
+            parse(src)
 
     def test_a_chain_of_empty_dicts_past_cpython_s_nesting_limit_parses(self):
         # CPython's tokenizer refuses this as "nested too deeply"; lispython
