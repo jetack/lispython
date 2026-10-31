@@ -3,7 +3,7 @@ import pytest
 from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import FStrExpr, Paren, Symbol, atom_text
-from lispy.core.parser import FSTRING_FIELD_NESTING_LIMIT, parse, tokenize
+from lispy.core.parser import parse, tokenize
 
 T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
@@ -314,17 +314,11 @@ def spec_chain(form):
     raise AssertionError("no innermost field")
 
 
-class TestFormatSpecNestingLimit:
-    """CPython's lexer refuses a replacement field opened while three fields
-    of the same literal are open (MAX_EXPR_NESTING); positions are CPython
-    3.12-3.15's (lineno, offset, end_lineno, end_offset) for the same text."""
+class TestFormatSpecChains:
+    """A format spec holds fields, whose specs hold fields, to any depth:
+    lispython adds no limit of its own (compile() applies the compiler's)."""
 
-    MESSAGE = "f-string: expressions nested too deeply"
-
-    def test_the_limit_is_cpython_s(self):
-        assert FSTRING_FIELD_NESTING_LIMIT == 3
-
-    def test_the_deepest_spec_chain_parses(self):
+    def test_a_spec_chain_parses(self):
         [form] = parse('f"{x:{x:{x}}}"')
         assert atom_text(form.list[0]) == "f-string"
         [fields, leaf] = spec_chain(form)
@@ -333,81 +327,49 @@ class TestFormatSpecNestingLimit:
         assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 9)
 
     @pytest.mark.parametrize(
-        ["src", "at"],
+        ["src", "depth"],
         [
-            ('f"{x:{x:{x:{x}}}}"', (1, 11)),
-            # The count is of fields open: a closed sibling is not counted.
-            ('f"{x:{x:{x}{x:{x}}}}"', (1, 14)),
-            ('f"{x:{x:{x:abc{x}}}}"', (1, 14)),
-            ('rf"{x:{x:{x:{x}}}}"', (1, 12)),
-            ('f"{f"{x:{x:{x:{x}}}}"}"', (1, 14)),
-            ('f"""{x:{x:{x:\n\nab{x}}}}"""', (3, 2)),
-            # A "{" at column 0: CPython's offset is then 0.
-            ('f"""{x:{x:{x:\n{x}}}}"""', (2, 0)),
-            ('f"{x:{x:{f"{y:{z:{w:{v}}}}"}}}"', (1, 20)),
+            ('f"{x:{x:{x:{x}}}}"', 4),
+            ('f"{x:{x:{x}{x:{x}}}}"', 3),
+            ('rf"{x:{x:{x:{x}}}}"', 4),
+            ('f"""{x:{x:{x:\n\nab{x}}}}"""', 4),
         ],
-        ids=[
-            "chain",
-            "after-a-sibling",
-            "after-text",
-            "raw",
-            "nested-literal",
-            "lines-below",
-            "column-0",
-            "inner-literal",
-        ],
+        ids=["chain", "after-a-sibling", "raw", "lines-below"],
     )
-    def test_one_more_field_is_refused_where_cpython_refuses_it(self, src, at):
-        with pytest.raises(LispyCompileError) as info:
-            parse(src)
-        error = info.value
-        assert error.msg == self.MESSAGE
-        position = (error.lineno, error.offset, error.end_lineno, error.end_offset)
-        assert position == (*at, *at)
+    def test_a_chain_past_cpython_s_three_fields_parses(self, src, depth):
+        [form] = parse(src)
+        assert len(spec_chain(form)[0]) == depth
 
     @pytest.mark.skipif(not T_STRINGS, reason="t-strings need Python 3.14")
-    def test_a_t_string_is_refused_by_its_own_name(self):
-        [form] = parse('t"{x:{x:{x}}}"')
-        assert len(spec_chain(form)[0]) == 3
-        with pytest.raises(LispyCompileError) as info:
-            parse('t"{x:{x:{x:{x}}}}"')
-        assert info.value.msg == "t-string: expressions nested too deeply"
-        assert (info.value.lineno, info.value.offset) == (1, 11)
+    def test_a_t_string_chain_parses(self):
+        [form] = parse('t"{x:{x:{x:{x}}}}"')
+        assert atom_text(form.list[0]) == "t-string"
+        assert len(spec_chain(form)[0]) == 4
 
     def test_braces_inside_an_expression_are_not_fields(self):
         [form] = parse('f"{ {1 {2 {3 {4 5}}}} }"')
         assert type(form.list[2].value).__name__ == "Brace"
 
     @pytest.mark.parametrize(
-        "src",
-        ['f"{x:{f"{y:{z:{w}}}"}}"', 'f"{x:{x:{f"{y:{z:{w}}}"}}}"'],
-        ids=["in-the-second-field", "in-the-third-field"],
-    )
-    def test_a_nested_literal_counts_its_own_fields(self, src):
-        assert len(parse(src)) == 1
-
-    @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "at"],
         [
-            'f"{x:{x:{x:{x}}}} }"',
-            'f"{x:{x:{x:{x}}}} {"',
-            'f"{x:{x:{x:{x}}}} {x!z}"',
-            'f"{x:{x:{x:{x',
-            'f"{x:{x:{x:{x}}}}"\nf"}"',
+            ('f"{x:{x:{x:{x}}}} }"', "f-string: single '}' is not allowed", (1, 19)),
+            ('f"{x:{x:{x:{x}}}} {"', "f-string: expecting '}'", (1, 19)),
+            ('f"{x:{x:{x:{x', "f-string: expecting '}'", (1, 12)),
         ],
-        ids=["single-brace", "open-field", "conversion", "unterminated", "next-line"],
+        ids=["single-brace", "open-field", "unterminated"],
     )
-    def test_the_refusal_comes_before_any_later_error(self, src):
+    def test_an_error_after_a_deep_chain_is_reported_where_it_is(self, src, msg, at):
         with pytest.raises(LispyCompileError) as info:
             parse(src)
-        assert info.value.msg == self.MESSAGE
-        assert (info.value.lineno, info.value.offset) == (1, 11)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == at
 
-    def test_an_earlier_conversion_error_comes_first(self):
+    def test_the_first_of_two_errors_is_reported(self):
         # CPython's message; lispython places it at the "!", CPython one
         # column later.
         with pytest.raises(LispyCompileError) as info:
-            parse('f"{x!z} {x:{x:{x:{x}}}}"')
+            parse('f"{x!z} {x:{x:{x:{x}}} }"')
         assert info.value.msg == (
             "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'"
         )
@@ -458,10 +420,6 @@ class TestFormatSpecNestingLimit:
             parse('f"}"\nf"{x:{x:{x:{x}}}}"')
         assert info.value.msg == "f-string: single '}' is not allowed"
         assert (info.value.lineno, info.value.offset) == (1, 3)
-
-    def test_partial_parse_keeps_the_forms_before_the_refusal(self):
-        forms = parse('a f"{x:{x:{x:{x}}}}" b', partial=True)
-        assert [str(form) for form in forms] == ["a"]
 
 
 class TestFieldsLexedInPlace:

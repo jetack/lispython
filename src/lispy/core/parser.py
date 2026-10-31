@@ -45,7 +45,6 @@ _META_CHARS = "(?:'|`|~@|~)"
 # (so a comment needs no space before it: a;c is the symbol a), a quote
 # followed by it quotes nothing, and ~ followed by it is the symbol ~.
 _FORM_END = "\\s\\)\\}\\],;"
-_META_INDICATOR = _META_CHARS + f"(?![{_FORM_END}]|$)"
 # What ends a symbol token.
 _SYMBOL_STOP = _FORM_END + '\\"\\['
 
@@ -56,13 +55,29 @@ def _token_patterns(in_field, field_level=False):
     Inside a field \\" stands for " (it is how a "..." literal holds a string
     in a field: f"{(.get d \\"H:M:S\\")}"), so there it opens a string and ends
     a symbol. At the field's own level (``field_level``, outside its brackets)
-    a comment ends before a "}", which closes the field; inside brackets it
-    runs to the end of the line, as anywhere else.
+    the expression ends at a delimiter (``:``, ``}``, or ``!`` not before
+    ``=``): no token runs past one, and a lookahead for the end of the source
+    takes it for that end (so x:>4 is the symbol x, 1!r the number 1). A
+    comment there ends at one too; inside brackets it runs to the end of the
+    line, as anywhere else.
+
+    ⚠️ Never let a token run past the delimiter and cut it back there: a
+    symbol runs to the next "}", which in a spec chain f"{x:{x:{x:...}}}" is
+    past every field, so each field would rescan the rest of the source.
     """
     quote = '(?:\\\\"|")' if in_field else '"'
+    end = "$|:|!(?!=)" if field_level else "$"
     stop_ahead = (
-        f'(?=[{_SYMBOL_STOP}]|\\\\"|$)' if in_field else f"(?=[{_SYMBOL_STOP}]|$)"
+        f'(?=[{_SYMBOL_STOP}]|\\\\"|{end})' if in_field else f"(?=[{_SYMBOL_STOP}]|$)"
     )
+    # A symbol character (in a field), and a comment's. ⚠️ Their repeats are
+    # possessive (++, *+): a plain + makes re keep a backtracking point per
+    # character, hundreds of MB for a long symbol or comment.
+    if field_level:
+        char = f"[^{_SYMBOL_STOP}\\\\:!]|!(?==)"
+        comment_char = "[^\\n}:!]|!(?==)"
+    else:
+        [char, comment_char] = [f"[^{_SYMBOL_STOP}\\\\]", "[^\\n]"]
     return [
         [_WRAPPER + _OPENING, "opening"],
         ["[\\)\\}\\]]", "closing"],
@@ -71,20 +86,20 @@ def _token_patterns(in_field, field_level=False):
         [f"\\w*(?:{quote}{{3}}|'''|{quote})", "string"],
         # ' ` ~@ (any wrapper) with no form right after: refused by _parse. ~
         # alone is the invert operator, a symbol.
-        [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|$)", "dangling-quote"],
-        [_WRAPPER + _META_INDICATOR, "meta-indicator"],
+        [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|{end})", "dangling-quote"],
+        [_WRAPPER + _META_CHARS + f"(?![{_FORM_END}]|{end})", "meta-indicator"],
         [f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|{stop_ahead})", "bad-prefix"],
-        [";[^\\n}]*" if field_level else ";[^\\n]*", "comment"],
+        [f";(?:{comment_char})*+", "comment"],
         [
-            "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|$)",
+            "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|{end})",
             "number",
         ],
         [",", "comma"],
-        # "[" ends a symbol so that f[T] is a symbol glued to a bracket. The
-        # field's group is possessive (++): a plain + makes re keep a
-        # backtracking point per character, hundreds of MB for a long symbol.
+        # "[" ends a symbol so that f[T] is a symbol glued to a bracket. At a
+        # field's own level a lone ":" or "!" matches too, so the lexer sees
+        # the delimiter where a token starts.
         [
-            f'(?:[^{_SYMBOL_STOP}\\\\]|\\\\(?!"))++'
+            f'(?:{char}|\\\\(?!"))++' + ("|[:!]" if field_level else "")
             if in_field
             else f"[^{_SYMBOL_STOP}]+",
             "symbol",
@@ -103,9 +118,6 @@ _BRACKETED_FIELD_TOKEN_RE = re.compile(
 )
 _TOKEN_LABELS = [label for [_, label] in _token_patterns(False)]
 _NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
-# What ends a replacement field's expression at the field's own bracket depth:
-# its closing "}", the ":" of a format spec, the "!" of a conversion.
-_FIELD_DELIMITER_RE = re.compile("[:}]|!(?!=)")
 _STRING_PREFIX_RE = re.compile("\\w*")
 # Where a string body scan has to look: an escape, a quote, and (in an f/t
 # string) a brace. Everything between is copied as one slice.
@@ -145,13 +157,6 @@ def _source_locator(src):
         }
 
     return locate
-
-
-# CPython's lexer refuses to open a replacement field while this many fields
-# of the same literal are open (MAX_EXPR_NESTING in CPython's Parser/lexer):
-# f"{x:{x:{x}}}" is the deepest format-spec chain. Brackets inside a field's
-# expression are not fields, and a nested literal counts its own fields.
-FSTRING_FIELD_NESTING_LIMIT = 3
 
 
 def _unescape_field_quotes(text):
@@ -257,7 +262,6 @@ class _LiteralState:
         "in_field",
         "quote_start",
         "body",
-        "open_fields",
     )
 
     def __init__(self, kind, raw, quote, in_field, quote_start, body):
@@ -267,7 +271,6 @@ class _LiteralState:
         self.in_field = in_field  # opened inside a field: \" is a quote
         self.quote_start = quote_start
         self.body = body
-        self.open_fields = 0  # its fields now open (FSTRING_FIELD_NESTING_LIMIT)
 
 
 class _FieldState:
@@ -370,7 +373,6 @@ class _Lexer:
             if c in ":}" or (c == "!" and not src.startswith("=", start + 1)):
                 self._delimiter(field, start)
                 return
-            m = self._cut_at_delimiter(regex, m)
         tk = m.group()
         tktype = _TOKEN_LABELS[m.lastindex - 1]
         end = m.end()
@@ -400,18 +402,6 @@ class _Lexer:
                 first = tail[:2] if glued else [len(self.tokens) - 1, start]
                 field.tail = [*first, end, tktype]
         self.pos = end
-
-    def _cut_at_delimiter(self, regex, m):
-        """``m`` as if the field's expression ended at the delimiter inside it
-        or right after it (``x:>4``, ``x!r``), where the expression's text
-        ends: a lookahead there sees the end."""
-        end = m.end()
-        delimiter = _FIELD_DELIMITER_RE.search(
-            self.src, m.start() + 1, min(end + 2, len(self.src))
-        )
-        if delimiter is None or delimiter.start() > end:
-            return m
-        return regex.match(self.src, m.start(), delimiter.start()) or m
 
     def _string(self, start, opening):
         """A string opening at ``start``: a plain string is one token; an f/t
@@ -506,24 +496,6 @@ class _Lexer:
             context.previous = [src[at:end], "interpolated-end"]
             self.pos = end
         elif stop == "field":
-            if literal.open_fields >= FSTRING_FIELD_NESTING_LIMIT:
-                brace = self.locate(at)
-                [lineno, col_offset] = [brace["lineno"], brace["col_offset"]]
-                # CPython reports it one column before the "{", zero-width.
-                position = {
-                    "lineno": lineno,
-                    "col_offset": col_offset - 1,
-                    "end_lineno": lineno,
-                    "end_col_offset": col_offset - 1,
-                }
-                self._fail(
-                    LispyCompileError(
-                        f"{kind}: expressions nested too deeply",
-                        String('""', **position),
-                    )
-                )
-                return
-            literal.open_fields += 1
             record = {}
             self._emit("{", "field-start", at, at + 1, record)
             self.stack.append(_FieldState(literal, at, record))
@@ -539,9 +511,9 @@ class _Lexer:
         reads ``{x=}``), then the conversion or format spec that follows.
 
         The token carries the expression's extent, never its text: an outer
-        field's text holds every field nested in it, so a copy per field made
-        the tokens quadratic in the nesting. The parser slices it once, for
-        the FStrExpr it builds.
+        field's text holds every field nested in it, so a copy per field is
+        memory quadratic in the nesting. The FStrExpr keeps the extent too
+        (_FieldText).
         """
         src = self.src
         expr_start = field.open + 1
@@ -564,7 +536,7 @@ class _Lexer:
             {
                 "start": expr_start,
                 "end": at,
-                "debug": debug,
+                "debug": last - 1 if debug else None,  # the "=" of {x=}
                 "echo": self.locate(expr_start, at),
             },
         )
@@ -663,7 +635,6 @@ class _Lexer:
     def _close_field(self, field, at):
         self._emit("}", "field-end", at, at + 1)
         field.record["end"] = self.locate(at + 1)
-        field.literal.open_fields -= 1
         self.stack.pop()
         self.pos = at + 1
 
@@ -674,7 +645,9 @@ def tokenize(src):
     ``extra`` is the error of a malformed plain string, the data of an f/t
     string's own tokens, else None. An "error" token (placed at the error,
     which is its ``extra``) ends the tokens of a source the lexer cannot read
-    on.
+    on; otherwise they run to the end of the source, however deep f/t-strings
+    and their fields nest (the lexer has no limit of its own), in time and
+    memory linear in its length.
     """
     return deque(_Lexer(src).run())
 
@@ -1119,6 +1092,24 @@ class _Interpolated:
         return Paren(Symbol(self.symbol, **position_info), *self.parts, **position_info)
 
 
+class _FieldText:
+    """A field expression's source text, read only when asked for (str()).
+
+    ⚠️ Never sliced up front: an outer field's text holds every field nested
+    in it, so a copy per field is memory quadratic in the nesting. The node
+    keeps the source (shared) and the span; the few readers (the {x=} echo,
+    Interpolation.str, a quasiquote's rebuild) slice what they need.
+    """
+
+    __slots__ = ("src", "start", "end")
+
+    def __init__(self, src, start, end):
+        [self.src, self.start, self.end] = [src, start, end]
+
+    def __str__(self):
+        return _unescape_field_quotes(self.src[self.start : self.end])
+
+
 class _Field:
     """A replacement field being built on the parser's stack.
 
@@ -1136,7 +1127,7 @@ class _Field:
         self.list = []
         self.value = None
         self.expr_text = None
-        self.debug_text = None
+        self.debug = None  # {x=}: the "=" and the spaces after it
         self.echo = None
         self.conversion = None
         self.format_spec = None
@@ -1151,7 +1142,7 @@ class _Field:
             if end is not None:
                 position_info["end_lineno"] = end["lineno"]
                 position_info["end_col_offset"] = end["col_offset"]
-            delimiter = "=" if data["debug"] else src[data["end"]]
+            delimiter = "=" if data["debug"] is not None else src[data["end"]]
             raise _interpolation_error(
                 self.owner.kind,
                 f"valid expression required before {delimiter!r}"
@@ -1160,24 +1151,22 @@ class _Field:
                 position_info,
             )
         [self.value] = self.list
-        text = _unescape_field_quotes(src[data["start"] : data["end"]])
-        if data["debug"]:
-            self.debug_text = text
-            self.expr_text = text.rstrip()[:-1]
+        end = data["end"]
+        if data["debug"] is not None:
+            [end, self.debug] = [data["debug"], src[data["debug"] : end]]
             self.echo = data["echo"]
-        else:
-            self.expr_text = text
+        self.expr_text = _FieldText(src, data["start"], end)
 
     def node(self, end):
         conversion = self.conversion
-        if self.debug_text and conversion is None and self.format_spec is None:
+        if self.debug and conversion is None and self.format_spec is None:
             conversion = "r"
         return FStrExpr(
             self.value,
             conversion=conversion_dict.get(conversion, -1),
             format_spec=self.format_spec,
             expr_text=self.expr_text,
-            debug=self.debug_text[len(self.expr_text) :] if self.debug_text else None,
+            debug=self.debug,
             lineno=self.position_info["lineno"],
             col_offset=self.position_info["col_offset"],
             end_lineno=end["end_lineno"],
