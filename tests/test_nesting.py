@@ -438,7 +438,8 @@ def field(value, spec=None):
 # (id, source nesting DEPTH levels on its line, or a function building that
 # form as nodes; the AST class one level adds exactly once; whether to
 # compile() the AST too). Sources are built by repetition, never recursion.
-# compile() is skipped where CPython 3.12+ cannot take the AST at this depth
+# Where compile() is not bound by the recursion limit (3.12+) it is skipped
+# where CPython cannot take the AST at this depth
 # (two AST levels per level pass its ~10000 limit on 3.12/3.13,
 # comprehensions nested in an iterable), takes over a second (nested scopes,
 # genexps, tuple constant folding, ife), or can crash: list/set/dict
@@ -678,8 +679,8 @@ TYPE_PARAMS = (
     >= features.FEATURES["type-params"].min_version
 )
 
-# As EXPRESSION_DEPTHS, and whether the AST is flat. compile() is skipped
-# for nested loop, with and try blocks (CPython refuses over 20), nested
+# As EXPRESSION_DEPTHS, and whether the AST is flat. Where compile() is not
+# recursion-bound (3.12+) it is skipped for nested loop, with and try blocks (CPython refuses over 20), nested
 # scopes (def, class: seconds) and nested match (3.12/3.13 refuse it).
 STATEMENT_DEPTHS = [
     ("do", "(do (f) " * DEPTH + ")" * DEPTH, ast.Call, True, True),
