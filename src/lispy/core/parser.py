@@ -644,16 +644,6 @@ class _Lexer:
         if rest == len(src):
             self._end_in_expression()
             return None
-        literal = field.literal
-        if literal.escaped_in is not None and src.startswith('"', rest):
-            # A bare quote in an escaped literal, as in its body and format
-            # spec (scan_string_body's "mixed"): the error is at its opener.
-            self._fail(
-                self._escaped_error(
-                    literal.escaped_in, literal.quote_start, literal.body
-                )
-            )
-            return None
         if src.startswith(field.literal.quote, rest):
             # CPython's column: what follows the space after "!" (x! r"), else
             # the quote.

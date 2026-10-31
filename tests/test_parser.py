@@ -1,4 +1,5 @@
 import ast
+import re
 import sys
 import time
 import warnings
@@ -442,6 +443,9 @@ class TestFormatSpecChains:
             # Not the closing quote: a string where the name should be.
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
             ('f"""{x!""', "f-string: invalid conversion character", (1, 8)),
+            # The conversion slot is no body text: a closed escaped literal
+            # with a string there is the same error, not the quote mix.
+            (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
         ],
         ids=[
             "quote",
@@ -452,6 +456,7 @@ class TestFormatSpecChains:
             "newline-quote",
             "string-in-triple",
             "quotes-in-triple",
+            "escaped-literal-string",
         ],
     )
     def test_a_literal_ending_after_the_exclamation_mark(self, src, msg, at):
@@ -598,9 +603,7 @@ class TestFieldsLexedInPlace:
             with compile_errors("demo.lpy", src):
                 parse(src)
         [w] = rec
-        assert str(w.message) == (
-            'f-string: write a plain " in a replacement field, not \\"'
-        )
+        assert re.search(ESCAPED_QUOTE_DEPRECATED, str(w.message))
         assert (w.filename, w.lineno) == ("demo.lpy", 2)
 
     def test_the_deprecation_outside_compile_errors_names_no_file(self):
@@ -622,7 +625,7 @@ class TestFieldsLexedInPlace:
                 with compile_errors("demo.lpy", src):
                     parse(src)
         err = info.value
-        assert err.msg == 'f-string: write a plain " in a replacement field, not \\"'
+        assert re.search(ESCAPED_QUOTE_DEPRECATED, err.msg)
         assert (err.filename, err.lineno, err.offset) == ("demo.lpy", 1, 12)
         assert (err.end_lineno, err.end_offset) == (1, 14)
 
@@ -649,7 +652,6 @@ class TestFieldsLexedInPlace:
             pytest.param(r'f"{(g \"a)}"', "f", (1, 7), id="literal-quote-ends-it"),
             pytest.param(r'f"{(g \"a', "f", (1, 7), id="unterminated"),
             pytest.param(r'f"{f\"a{x}"}"', "f", (1, 5), id="nested-f-string"),
-            pytest.param(r'f"{f\"{x!"}"', "f", (1, 5), id="conversion-slot"),
             pytest.param(
                 r't"{(g \"a")}"',
                 "t",

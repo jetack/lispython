@@ -126,8 +126,8 @@ def compile_warning(msg, category, position_info):
     try:
         warnings.warn_explicit(msg, category, filename, position_info["lineno"])
     except category:
-        # CPython clears the warning before raising the SyntaxError, so the
-        # error has no context either.
+        # ``from None`` hides the warning from the traceback, as CPython
+        # clears it before raising the SyntaxError.
         raise LispyCompileError(
             msg, SimpleNamespace(position_info=position_info)
         ) from None
