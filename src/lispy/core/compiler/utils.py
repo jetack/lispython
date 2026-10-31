@@ -1,6 +1,5 @@
 import ast
 import contextlib
-import sys
 from collections import deque
 
 from lispy.core.compiler import features
@@ -189,23 +188,8 @@ def form_parts(sexp, header, form=None):
     return [parts, list(q)]
 
 
-# Frames from refuse_deep_ast up to the earliest frame that can compile() its
-# result: macroexpand_then_compile, then that function's caller.
-CHECK_TO_COMPILE_FRAMES = 2
-
-
 # Leaf singletons compile() does not recurse into: they cost it no depth.
 _DEPTH_FREE_NODES = (ast.expr_context, ast.operator, ast.cmpop, ast.unaryop, ast.boolop)
-
-
-def _stack_depth():
-    """Frames on the stack, the caller's included (a module's code is 1)."""
-    depth = 0
-    frame = sys._getframe(1)
-    while frame is not None:
-        depth += 1
-        frame = frame.f_back
-    return depth
 
 
 def _ast_depths(stmts):
@@ -232,38 +216,6 @@ def _ast_depths(stmts):
             )
 
 
-def refuse_deep_ast(stmts):
-    """Raise ``nesting_error`` if a statement in ``stmts`` is nested deeper
-    than CPython's compile() takes, where that depth follows the recursion
-    limit (``features.compile_depth_follows_recursion_limit``); return
-    ``stmts``.
-
-    There (3.11) compile() called from a frame at stack depth C accepts an
-    AST whose deepest path, counted from the statement as 1, has at most
-    ``limit - C - 1`` nodes (measured: 996 nodes from depth 3 at limit 1000,
-    2494 from depth 505 at limit 3000), and raises a RecursionError naming
-    no line beyond. The earliest frame that can compile the result is
-    CHECK_TO_COMPILE_FRAMES above this one, and only ASTs that frame's
-    compile() would reject are refused, never one it accepts; trivial code is
-    refused only where compile() would fail on it too. The count errs only
-    the permissive way: C-level calls on the stack spend recursion depth too
-    but have no frame, and an entry point may compile one frame deeper (a
-    comprehension), so a few levels past it can still reach compile(), whose
-    RecursionError ``compile_nesting_errors`` turns into the same error.
-
-    The error is at the node at the refused depth on the first (leftmost)
-    too-deep path, or its nearest positioned ancestor (``_ast_depths``).
-    """
-    if not features.compile_depth_follows_recursion_limit():
-        return stmts
-    compile_frame = _stack_depth() - CHECK_TO_COMPILE_FRAMES
-    refused = sys.getrecursionlimit() - compile_frame
-    for depth, positioned in _ast_depths(stmts):
-        if depth >= refused:
-            raise nesting_error(positioned, recursion_limit=True)
-    return stmts
-
-
 @contextlib.contextmanager
 def compile_nesting_errors(stmts):
     """Run the block, which compile()s the statements ``stmts`` lispython
@@ -272,10 +224,10 @@ def compile_nesting_errors(stmts):
     ancestor (``_ast_depths``).
 
     CPython's compile() recurses over the AST and gives up past its own
-    limit with a RecursionError that names no line: on 3.12+ a fixed C limit
-    or the C stack (``features.compile_depth_follows_recursion_limit`` has
-    the measurements), on 3.11 the few levels ``refuse_deep_ast`` lets
-    through. So it applies on every version. Wrap compile() alone, never
+    limit with a RecursionError that names no line: on 3.11 near the Python
+    recursion limit, on 3.12+ a fixed C limit or the C stack
+    (``features.compile_depth_follows_recursion_limit`` has the
+    measurements). Wrap compile() alone, never
     macroexpansion: a RecursionError while a macro runs is that macro's own
     runaway recursion, the user's bug, and must keep its traceback into the
     macro. compile() runs no user code, so a RecursionError from it is

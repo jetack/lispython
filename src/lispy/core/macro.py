@@ -4,7 +4,7 @@ from typing import Callable, Dict
 
 from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import constant_compile, string_node_value
-from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
+from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
@@ -146,9 +146,6 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
 
 
 def macroexpand_then_compile(sexp_list, scope=globals(), include_meta=True):
-    # Every entry point gets its AST here, so this is where an AST too deep
-    # for CPython's compile() is refused at a lispython position.
-    # refuse_deep_ast must be called from this frame (CHECK_TO_COMPILE_FRAMES).
-    return refuse_deep_ast(
-        stmt_list_compile(sexp_list_expand(sexp_list, scope, include_meta=include_meta))
+    return stmt_list_compile(
+        sexp_list_expand(sexp_list, scope, include_meta=include_meta)
     )
