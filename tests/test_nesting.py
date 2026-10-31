@@ -4,7 +4,6 @@ RecursionError."""
 
 import ast
 import importlib
-import subprocess
 import sys
 
 import pytest
@@ -14,8 +13,8 @@ import lispy.tools as tools
 from lispy.core import nodes
 from lispy.core.compiler import features
 from lispy.core.compiler import stmt as stmt_module
-from lispy.core.compiler.utils import compile_nesting_errors, refuse_deep_ast
-from lispy.core.errors import BLOCK_OVERFLOW_MESSAGE, LispyCompileError
+from lispy.core.compiler.utils import compile_nesting_errors
+from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand, macroexpand_then_compile
 from lispy.core.nodes import (
     Annotation,
@@ -39,7 +38,7 @@ from lispy.core.nodes import (
     atom_text,
     contains_unquote,
 )
-from lispy.core.parser import FSTRING_NESTING_LIMIT, parse
+from lispy.core.parser import parse
 from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
@@ -71,8 +70,10 @@ def nest(make, depth, leaf):
 
 
 def compile_src(src, scope):
+    """Expand, build and compile() ``src``, as the entry points do."""
     body = macroexpand_then_compile(parse(src), scope)
-    compile(ast.Module(body, type_ignores=[]), "<nesting>", "exec")
+    with compile_nesting_errors(body):
+        compile(ast.Module(body, type_ignores=[]), "<nesting>", "exec")
     return body
 
 
@@ -138,14 +139,9 @@ def counting(cls, bound):
     ],
     ids=["bracket", "paren-arg", "paren-op", "brace-set", "comprehension"],
 )
-def test_leaf_text_is_produced_o_depth_times(
-    make, leaf_class, leaf_text, scope, monkeypatch
-):
-    # 30 nested comprehensions pass CPython's static block limit; this counts
-    # renders and never compile()s, so the block check is off.
-    monkeypatch.setattr(
-        features, "inlined_comprehensions_overflow_block_stack", lambda: False
-    )
+def test_leaf_text_is_produced_o_depth_times(make, leaf_class, leaf_text, scope):
+    # Counts renders and never compile()s: 30 nested comprehensions pass
+    # CPython's static block limit, where compile() can crash.
     depth = 30
     bound = 4 * depth
     [cls, renders] = counting(leaf_class, bound)
@@ -207,9 +203,6 @@ NESTING_MESSAGE = RECURSION_LIMIT_MESSAGE if COMPILE_BOUND else C_LIMIT_MESSAGE
 needs_bound_compile = pytest.mark.skipif(
     not COMPILE_BOUND, reason="compile() depth does not follow the recursion limit"
 )
-needs_unbound_compile = pytest.mark.skipif(
-    COMPILE_BOUND, reason="compile() depth follows the recursion limit"
-)
 
 
 def run_cli(argv, monkeypatch, capsys):
@@ -227,9 +220,9 @@ def attribute_chain(names):
     return "(. a" + " b" * names + ")"
 
 
-# On line 2, past compile()'s own limit on every version: 3.11 refuses it
-# first (refuse_deep_ast); 3.12+ compile() raises RecursionError past 9995
-# levels (3.12/3.13), 47370 (3.14) and 26067 (3.15).
+# On line 2, past compile()'s own limit on every version: 3.11 compile()
+# raises RecursionError near the recursion limit, 3.12+ past 9995 levels
+# (3.12/3.13), 47370 (3.14) and 26067 (3.15).
 TOO_DEEP = "\n" + attribute_chain(100_000)
 
 
@@ -428,14 +421,13 @@ def field(value, spec=None):
 
 # (id, source nesting DEPTH levels on its line, or a function building that
 # form as nodes; the AST class one level adds exactly once; whether to
-# compile() the AST too, or BLOCKS). Sources are built by repetition, never
-# recursion. compile() is skipped where CPython 3.12+ cannot take the AST at
-# this depth (two AST levels per level pass its ~10000 limit on 3.12/3.13,
-# comprehensions nested in an iterable) or takes over a second (nested
-# scopes, genexps, tuple constant folding, ife). BLOCKS: list/set/dict
-# comprehensions nested in the element pass CPython's static block limit on
-# 3.12+, refused as too many blocks (test_comprehension_blocks.py).
-BLOCKS = "blocks"
+# compile() the AST too). Sources are built by repetition, never recursion.
+# compile() is skipped where CPython 3.12+ cannot take the AST at this depth
+# (two AST levels per level pass its ~10000 limit on 3.12/3.13,
+# comprehensions nested in an iterable), takes over a second (nested scopes,
+# genexps, tuple constant folding, ife), or can crash: list/set/dict
+# comprehensions nested in the element pass CPython's static block limit,
+# which lispython leaves to CPython.
 EXPRESSION_DEPTHS = [
     ("bracket", "[" * DEPTH + "1" + "]" * DEPTH, ast.List, True),
     ("call-argument", "(f " * DEPTH + "1" + ")" * DEPTH, ast.Call, True),
@@ -475,7 +467,7 @@ EXPRESSION_DEPTHS = [
         "listcomp-element",
         "[" * DEPTH + "x" + " for x in xs]" * DEPTH,
         ast.ListComp,
-        BLOCKS,
+        False,
     ),
     (
         "listcomp-iterable",
@@ -487,7 +479,7 @@ EXPRESSION_DEPTHS = [
         "setcomp-element",
         "{, " * DEPTH + "x" + " for x in xs}" * DEPTH,
         ast.SetComp,
-        BLOCKS,
+        False,
     ),
     (
         "setcomp-iterable",
@@ -499,7 +491,7 @@ EXPRESSION_DEPTHS = [
         "dictcomp-value",
         "{k " * DEPTH + "v" + " for x in xs}" * DEPTH,
         ast.DictComp,
-        BLOCKS,
+        False,
     ),
     (
         "dictcomp-iterable",
@@ -537,8 +529,7 @@ EXPRESSION_DEPTHS = [
         ast.Await,
         True,
     ),
-    # The parser refuses f-strings nested past CPython's limit, so these are
-    # nodes.
+    # Nodes: parsing an f-string nest costs the rest of the text per level.
     (
         "fstring-field",
         lambda: nest(lambda e: fstring(field(e)), DEPTH, Symbol("x", **LINE_3)),
@@ -633,48 +624,27 @@ def test_quoted_nodes_nest_past_the_recursion_limit(make, name, compiles, scope)
 def assert_compiles_at_depth(form, cls, compiles, scope, flat=False):
     """``form`` (source, or a function building it as nodes) compiles to an
     AST with DEPTH ``cls`` nodes (an AST class, or a predicate on a node),
-    which compile() takes when ``compiles``;
-    where compile() is bound by the recursion limit (3.11) the compiler
-    still builds it with the check off, and ``refuse_deep_ast`` refuses it as
-    too deep, positioned on line 3, unless the AST is ``flat`` (do, deco
-    nest in lispython only). Asserts on plain values only: a failing
-    comparison would repr a deep node or AST after the timer stopped."""
+    which compile() takes when ``compiles``; where compile() is bound by the
+    recursion limit (3.11) it refuses that AST, a nesting error on line 3
+    through ``compile_nesting_errors``, unless the AST is ``flat`` (do, deco
+    nest in lispython only). The compiler itself takes the depth on every
+    version. Asserts on plain values only: a failing comparison would repr a
+    deep node or AST after the timer stopped."""
     forms = [form()] if callable(form) else parse("\n\n" + form)
     matches = (lambda node: isinstance(node, cls)) if isinstance(cls, type) else cls
-    refused = COMPILE_BOUND and not flat
-    # Where the AST is refused, build it with the checks off, then check it:
-    # the compiler itself must take the depth on every version.
-    with pytest.MonkeyPatch.context() as patch:
-        if refused:
-            patch.setattr(
-                features, "compile_depth_follows_recursion_limit", lambda: False
-            )
-        if compiles == BLOCKS:
-            patch.setattr(
-                features, "inlined_comprehensions_overflow_block_stack", lambda: False
-            )
-        body = macroexpand_then_compile(forms, scope)
+    body = macroexpand_then_compile(forms, scope)
     module = ast.Module(body, type_ignores=[])
     assert sum(1 for node in ast.walk(module) if matches(node)) == DEPTH
-    if refused:
+    if not compiles:
+        return
+    if COMPILE_BOUND and not flat:
         with pytest.raises(LispyCompileError) as info:
-            refuse_deep_ast(body)
+            with compile_nesting_errors(body):
+                compile(module, "<nesting>", "exec")
         assert info.value.msg == NESTING_MESSAGE
         assert info.value.lineno == 3
-    elif compiles == BLOCKS:
-        assert_too_many_blocks(form, scope)
-    elif compiles:
+    else:
         compile(module, "<nesting>", "exec")
-
-
-def assert_too_many_blocks(form, scope):
-    """``form`` (source) has more static blocks than CPython 3.12+ takes:
-    refused on line 3 before compile(), never compile()d here, since every
-    3.12+ release can crash on such ASTs (test_comprehension_blocks.py)."""
-    assert features.inlined_comprehensions_overflow_block_stack()
-    with pytest.raises(LispyCompileError) as info:
-        macroexpand_then_compile(parse("\n\n" + form), scope)
-    assert (info.value.msg, info.value.lineno) == (BLOCK_OVERFLOW_MESSAGE, 3)
 
 
 @pytest.mark.usefixtures("time_bound")
@@ -810,145 +780,6 @@ def test_an_ast_too_deep_for_cpython_is_a_positioned_error(scope):
     err = info.value
     assert err.msg == NESTING_MESSAGE
     assert err.lineno == 2 and err.offset >= 1
-
-
-@needs_unbound_compile
-def test_a_deep_ast_compiles_where_compile_is_not_bound(scope):
-    [stmt] = compile_src(plus(3000), scope)
-    code = compile(ast.Expression(stmt.value), "<nesting>", "eval")
-    assert eval(code) == 3000
-
-
-def compile_in_this_frame(src, scope):
-    """Expand, compile to AST and compile() in one frame, as define_macro does
-    (the earliest frame refuse_deep_ast allows for)."""
-    body = macroexpand_then_compile(parse(src), scope)
-    compile(ast.Module(body, type_ignores=[]), "<nesting>", "exec")
-
-
-@needs_bound_compile
-@pytest.mark.parametrize(
-    "make",
-    [
-        plus,
-        lambda n: "(+" + " a" * n + ")",
-        lambda n: "(. a" + " b" * n + ")",
-    ],
-    ids=["constant-leaves", "name-leaves", "attribute-chain"],
-)
-def test_the_check_never_refuses_what_compile_takes(make, scope, monkeypatch):
-    # Every attempt runs at the same stack depth, through this one helper.
-    def outcome(operands):
-        try:
-            compile_in_this_frame(make(operands), scope)
-            return "compiled"
-        except LispyCompileError:
-            return "refused"
-        except RecursionError:
-            return "RecursionError"
-
-    # The deepest sum compile() itself takes, with the check off.
-    with monkeypatch.context() as patch:
-        patch.setattr(features, "compile_depth_follows_recursion_limit", lambda: False)
-        [low, high] = [1, 3000]
-        while low < high:
-            mid = (low + high + 1) // 2
-            compiled = outcome(mid) == "compiled"
-            [low, high] = [mid, high] if compiled else [low, mid - 1]
-        assert outcome(low + 1) == "RecursionError"
-    assert 900 < low < 1000
-    # The check never refuses it. It counts Python frames, and C-level calls
-    # on the stack (pytest has some) also spend recursion depth, so a few
-    # levels past it can still meet compile()'s RecursionError; well past
-    # it, the check refuses.
-    assert outcome(low) == "compiled"
-    assert outcome(low + 20) == "refused"
-
-
-# Run in a fresh interpreter, whose stack has no C-level calls: there the
-# frame count is exact, so the check refuses exactly what compile() rejects.
-EXACT_BOUNDARY = """
-import ast, sys
-from lispy.core.compiler import features
-from lispy.core.errors import LispyCompileError
-from lispy.core.macro import macroexpand_then_compile
-from lispy.core.parser import parse
-from lispy.core.utils import trampoline
-
-def outcome(src):
-    try:
-        body = macroexpand_then_compile(parse(src), {})
-        compile(ast.Module(body, type_ignores=[]), "<n>", "exec")
-        return "compiled"
-    except LispyCompileError:
-        return "refused"
-    except RecursionError:
-        return "RecursionError"
-
-make = eval(sys.argv[1])
-check = features.compile_depth_follows_recursion_limit
-features.compile_depth_follows_recursion_limit = lambda: False
-# A plain loop: a generator expression would run outcome a frame deeper.
-low = 900
-while low < 2000 and outcome(make(low + 1)) == "compiled":
-    low += 1
-off = outcome(make(low + 1))
-features.compile_depth_follows_recursion_limit = check
-print(off, outcome(make(low)), outcome(make(low + 1)))
-"""
-
-
-@needs_bound_compile
-@pytest.mark.parametrize(
-    "make",
-    [
-        'lambda n: "(+" + " 1" * n + ")"',
-        'lambda n: "(+" + " a" * n + ")"',
-        'lambda n: "(. a" + " b" * n + ")"',
-    ],
-    ids=["constant-leaves", "name-leaves", "attribute-chain"],
-)
-def test_the_check_refuses_exactly_what_compile_rejects(make):
-    result = subprocess.run(
-        [sys.executable, "-c", EXACT_BOUNDARY, make],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["RecursionError", "compiled", "refused"]
-
-
-@pytest.mark.parametrize("bound", [True, False])
-def test_the_check_follows_the_version_comparison(bound, scope, monkeypatch):
-    monkeypatch.setattr(
-        features, "compile_depth_follows_recursion_limit", lambda: bound
-    )
-    if bound:
-        with pytest.raises(LispyCompileError):
-            macroexpand_then_compile(parse(plus(3000)), scope)
-    else:
-        assert len(macroexpand_then_compile(parse(plus(3000)), scope)) == 1
-
-
-def test_the_check_reports_the_first_too_deep_path(scope, monkeypatch):
-    monkeypatch.setattr(features, "compile_depth_follows_recursion_limit", lambda: True)
-    src = f"(f\n  {plus(3000)}\n  {plus(3000)})"
-    with pytest.raises(LispyCompileError) as info:
-        macroexpand_then_compile(parse(src), scope)
-    assert (info.value.lineno, info.value.offset) == (2, 3)
-
-
-def test_trivial_code_compiles_with_a_deep_caller_stack(scope):
-    # The budget shrinks with the caller's stack; a shallow statement must
-    # still compile as long as the stack leaves room for compile() itself.
-    def at_depth(frames):
-        if frames:
-            return at_depth(frames - 1)
-        compile_in_this_frame("(= x (+ 1 2))", scope)
-        return True
-
-    assert at_depth(sys.getrecursionlimit() - 200)
 
 
 def test_a_deep_ast_within_the_limit_compiles(scope):
@@ -1139,7 +970,6 @@ def test_the_trampoline_runs_steps_as_recursion_would():
 T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
 )
-NESTED_LITERAL_MESSAGE = "too many nested f-strings or t-strings"
 
 
 def nested_literals(openings, depth, newline=""):
@@ -1176,20 +1006,22 @@ def skip_without_t_strings(needs_t):
         pytest.skip("t-strings need Python 3.14")
 
 
+# Past the 149 literals CPython's lexer takes in Python source: the AST has
+# no such limit, and lispython leaves it to CPython.
+NESTED_LITERAL_DEPTH = 200
+
+
 # No time_bound: each level rescans the rest of the text, so this takes
-# most of a second, and the limit bounds it; the count of literals parsed
-# is the cost guard.
+# most of a second; the count of literals parsed is the cost guard.
 @pytest.mark.parametrize("newline", ["", "\n"], ids=["one-line", "a-line-each"])
 @pytest.mark.parametrize(
     "openings, needs_t",
     [case[1:] for case in NESTED_LITERALS],
     ids=[case[0] for case in NESTED_LITERALS],
 )
-def test_nested_f_strings_past_cpython_s_limit_are_refused(
-    openings, needs_t, newline, monkeypatch
+def test_nested_f_strings_past_cpython_s_lexer_limit_compile(
+    openings, needs_t, newline, scope, monkeypatch
 ):
-    # CPython 3.14+ refuses the 150th literal at its quote: offset 449 on one
-    # line, column 2 of line 150 with a line each.
     skip_without_t_strings(needs_t)
     literals = []
     string_parse = parser_module.string_parse
@@ -1199,12 +1031,16 @@ def test_nested_f_strings_past_cpython_s_limit_are_refused(
         return string_parse(*args)
 
     monkeypatch.setattr(parser_module, "string_parse", counting)
-    with pytest.raises(LispyCompileError) as info:
-        parse(nested_literals(openings, DEPTH, newline))
-    assert len(literals) == FSTRING_NESTING_LIMIT
-    assert info.value.msg == NESTED_LITERAL_MESSAGE
-    position = (info.value.lineno, info.value.offset)
-    assert position == ((150, 2) if newline else (1, 449))
+    [form] = parse(nested_literals(openings, NESTED_LITERAL_DEPTH, newline))
+    assert len(literals) == NESTED_LITERAL_DEPTH
+    assert literal_depth(form)[0] == NESTED_LITERAL_DEPTH
+    [stmt] = macroexpand_then_compile([form], scope)
+    code = compile(ast.Expression(stmt.value), "<nesting>", "eval")
+    # Only a pure f-string nest is run: an f-string formats a t-string
+    # through its repr, which escapes every inner level again, so a mixed
+    # nest's text grows exponentially with its depth.
+    if not needs_t:
+        assert eval(code, {"x": "v"}) == "v"
 
 
 @pytest.mark.parametrize(
@@ -1212,12 +1048,10 @@ def test_nested_f_strings_past_cpython_s_limit_are_refused(
     [case[1:] for case in NESTED_LITERALS],
     ids=[case[0] for case in NESTED_LITERALS],
 )
-def test_the_most_nested_f_strings_cpython_takes_parse_on_a_deep_stack(
-    openings, needs_t
-):
+def test_nested_f_strings_parse_on_a_deep_stack(openings, needs_t):
     # A frame per literal would not fit in the room the caller leaves.
     skip_without_t_strings(needs_t)
-    depth = FSTRING_NESTING_LIMIT - 1
+    depth = NESTED_LITERAL_DEPTH
     src = nested_literals(openings, depth)
 
     def at_depth(frames):

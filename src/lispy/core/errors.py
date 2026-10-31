@@ -141,14 +141,3 @@ def nesting_error(at, *, recursion_limit, what="compile"):
         msg += f" (Python's recursion limit is {sys.getrecursionlimit()})"
     return LispyCompileError(msg, _positioned(at))
 
-
-# CPython's own message, so releases that refuse the AST themselves and
-# releases where lispython refuses it first report the same text.
-BLOCK_OVERFLOW_MESSAGE = "too many statically nested blocks"
-
-
-def block_overflow_error(at):
-    """The error for a form that pushes past CPython's static block limit
-    (``refuse_block_overflow`` in compiler/utils.py). ``at`` is a lispython
-    node or a positioned Python AST node, as for ``nesting_error``."""
-    return LispyCompileError(BLOCK_OVERFLOW_MESSAGE, _positioned(at))

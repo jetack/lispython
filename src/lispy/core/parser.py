@@ -492,10 +492,6 @@ def _unary_op_wrap(signs, operand, position_info):
     return node
 
 
-# CPython's lexer refuses the 150th nested f/t-string literal (MAXFSTRINGLEVEL).
-FSTRING_NESTING_LIMIT = 150
-
-
 def string_parse(token, tktype, position_info, error, nesting):
     """A string token's node: the String itself for a plain literal (a leaf,
     no generator), else the steps building its f/t-string. ``nesting`` is the
@@ -510,12 +506,6 @@ def string_parse(token, tktype, position_info, error, nesting):
             require("t-string", node)
     locate = _token_locator(token, position_info)
     start = len(prefix) + len(tktype)
-    if kind and nesting + 1 >= FSTRING_NESTING_LIMIT:
-        # At the opening's last character, where CPython reports it.
-        raise LispyCompileError(
-            "too many nested f-strings or t-strings",
-            String('""', **locate(start - 1, start)),
-        )
     if error is not None:
         raise error
     if not kind:
