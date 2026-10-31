@@ -75,8 +75,8 @@ def _token_patterns(in_field, field_level=False):
     past every field, so each field would rescan the rest of the source.
     """
     end = "$|:|!(?!=)" if field_level else "$"
-    # In a field a symbol also stops before \\" (see above), so ^* before it
-    # is a bad prefix, reported ahead of the refusal of the \\".
+    # In a field a symbol also stops before \" (see above), so ^* before it
+    # is a bad prefix, reported ahead of the refusal of the \".
     stop_ahead = (
         f'(?=[{_SYMBOL_STOP}]|\\\\"|{end})'
         if in_field
