@@ -4,7 +4,12 @@ import signal
 
 import pytest
 
-SELF_REFERENCE_BUDGET = 2.0  # seconds; a passing test takes milliseconds
+# Seconds: ~4x the slowest guarded test (test_nesting's fstring-format-spec
+# case, roughly linear in DEPTH, ~1.6 s on 3.11 idle), so a loaded box does
+# not trip it while a runaway or quadratic regression still does. It also
+# caps a runaway's memory (see time_bound) at about 720 MB; raising it
+# raises that cap.
+SELF_REFERENCE_BUDGET = 6.0
 
 
 @pytest.fixture
