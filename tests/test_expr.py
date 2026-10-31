@@ -3,7 +3,7 @@ import ast
 import pytest
 
 from lispy.core.errors import LispyCompileError
-from lispy.tools import parse, src_to_python_org
+from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 from tests.utils import stmt_to_dump
 
 
@@ -334,33 +334,29 @@ class TestRepeatedKeywordArgument:
 
 
 class TestNotCallableHead:
-    """A call whose head compiles to a value CPython knows is not callable is
-    refused at the head, as CPython's own compile-time check words it."""
+    """A call whose head is a value that is never callable compiles to the
+    call Python would build; CPython's own compile-time SyntaxWarning and the
+    run-time TypeError apply, as for the same Python source."""
 
     @pytest.mark.parametrize(
-        ("src", "kind", "head"),
+        ("src", "python", "kind"),
         [
-            ("(True)", "bool", "True"),
-            ("(None 1)", "NoneType", "None"),
-            ("(1)", "int", "1"),
-            ("(1.5)", "float", "1.5"),
-            ("(1j)", "complex", "1j"),
-            ('("s")', "str", '"s"'),
-            ('(b"s")', "bytes", 'b"s"'),
-            ('(f"s{x}")', "str", 'f"s{x}"'),
-            ("([1] 2)", "list", "[1]"),
-            ("([x for x in y])", "list", "[x for x in y]"),
-            ("({} 1)", "dict", "{}"),
-            ("({k v for k in d} 1)", "dict", "{k v for k in d}"),
-            ("({, 1} 2)", "set", "{, 1}"),
-            ("((, 1) 2)", "tuple", "(, 1)"),
-            ("((x for x in y))", "generator", "(x for x in y)"),
-            ("(...)", "ellipsis", "..."),
-            ("(... x)", "ellipsis", "..."),
+            ("(1)", "1()", "int"),
+            ('(f"s{x}")', "f's{x}'()", "str"),
+            ("([1] 2)", "[1](2)", "list"),
+            ("((, 1) 2)", "(1,)(2)", "tuple"),
+            ("((x for x in y))", "(x for x in y)()", "generator"),
+            ("(... x)", "...(x)", "ellipsis"),
         ],
     )
-    def test_refused_at_the_head(self, src, kind, head):
-        assert_refused_at(src, f"'{kind}' object is not callable", head)
+    def test_compiles_and_fails_as_python_does(self, src, python, kind):
+        body = macroexpand_then_compile(parse(src))
+        assert stmt_to_dump(src) == ast.dump(ast.parse(python))
+        message = f"'{kind}' object is not callable"
+        with pytest.warns(SyntaxWarning, match=message):
+            code = compile(ast.Module(body, type_ignores=[]), "<call>", "exec")
+        with pytest.raises(TypeError, match=message):
+            exec(code, {"x": 1, "y": []})
 
     @pytest.mark.parametrize(
         ("lispy", "python"),

@@ -155,36 +155,6 @@ def call_args_parse(given):
     return [args, keywords]
 
 
-# The callees CPython's compiler knows are not callable (its check_caller: a
-# SyntaxWarning there, a TypeError at run time), by AST node class, named as
-# its message names their type. A Constant is named by its value's type.
-NOT_CALLABLE_TYPES = {
-    "JoinedStr": "str",
-    "TemplateStr": "Template",
-    "Tuple": "tuple",
-    "List": "list",
-    "ListComp": "list",
-    "Dict": "dict",
-    "DictComp": "dict",
-    "Set": "set",
-    "SetComp": "set",
-    "GeneratorExp": "generator",
-}
-
-
-def refuse_not_callable(func, head):
-    """A call whose compiled callee ``func`` can never be called is refused at
-    ``head``, in CPython's words."""
-    kind = type(func).__name__
-    name = (
-        type(func.value).__name__
-        if kind == "Constant"
-        else NOT_CALLABLE_TYPES.get(kind)
-    )
-    if name is not None:
-        raise LispyCompileError(f"'{name}' object is not callable", head)
-
-
 def call_compile(sexp):
     [op, *operands] = sexp.list
     if isinstance(op, Symbol):
@@ -197,7 +167,6 @@ def call_compile(sexp):
                 sexp,
             )
     func = yield expr_steps(op)
-    refuse_not_callable(func, op)
     [args, keywords] = yield call_args_parse(operands)
     return ast.Call(func=func, args=args, keywords=keywords, **sexp.position_info)
 
