@@ -36,11 +36,6 @@ follows [Semantic Versioning](https://semver.org/).
   compiled such names from the AST, but no Python source spells them, so
   `l2py` printed code that does not parse. Operators that mangle to a name
   (`-` is `_`, `is-not` is `is_not`) are names as before.
-- Binding `__debug__` (assignment, `del`, a def/class/parameter name, a
-  keyword argument, an import, a match capture, `except ... as`) is a
-  compile error with CPython's message (`cannot assign to __debug__`);
-  reading it, `a.__debug__`, `(import __debug__ as x)` and
-  `(global __debug__)` still compile.
 - An attribute slot takes one name: `(. a b.c)` and `(.a.b x)` are compile
   errors; write `(. a b c)` and `(.b x.a)`.
 - `(. a)`, an attribute form with no attribute, is a compile error in every
@@ -54,7 +49,7 @@ follows [Semantic Versioning](https://semver.org/).
   errors: a repeated keyword argument (`(f :a 1 :a 2)`, class keywords
   too), `(ife a b c d)` (dropped `d`), `(yield a b)`, a comprehension clause
   with a stray or dangling operand (`[x for y in z if]`, `(x for y in z if a
-  b)`), and a parameter list CPython refuses: a duplicate name, a misplaced
+  b)`), and a parameter list CPython refuses: a misplaced
   or repeated `/`, `*` or `**kw` (`[a / /]` dropped `a`, `[*a *b]` made `b`
   keyword-only), a bare `*` with no keyword-only parameter, and `[a :b 1
   c]`, which compiled to `def f(a, b, c=1)`. An annotated lambda parameter (`(lambda [a ^int] 1)`, which `l2py`

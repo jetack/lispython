@@ -4,6 +4,7 @@ a name slot is a LispyCompileError at the symbol, never put in the AST, where
 CPython would compile it although no Python source spells it (``a.if``,
 ``f(if=1)``, ``Name("+")``)."""
 
+import ast
 import pathlib
 import re
 import sys
@@ -14,11 +15,10 @@ import lispy.core.compiler.expr as expr_module
 import lispy.core.compiler.features as features_module
 import lispy.core.compiler.stmt as stmt_module
 import lispy.core.compiler.utils as compiler_utils_module
-from lispy.core.errors import LispyCompileError
-from lispy.tools import src_to_python_org
+from lispy.core.errors import LispyCompileError, compile_errors
+from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 KEYWORD = "if is a Python keyword and cannot be used as a name"
-ASSIGN_DEBUG = "cannot assign to __debug__"
 
 
 def operator(text):
@@ -110,37 +110,6 @@ def assert_refused(src, msg, at):
         ("(def + [] 1)", "(def ...) expects a name, got +...", "+"),
         ("(class + [] 1)", "(class ...) expects a name, got +...", "+"),
         ("(def f [(g)] 1)", "expected a name, got (g)", "(g)"),
-        # __debug__ where a name binds.
-        ("(= __debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(:= __debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(+= __debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(for __debug__ in xs 1)", ASSIGN_DEBUG, "__debug__"),
-        ("[x for __debug__ in xs]", ASSIGN_DEBUG, "__debug__"),
-        ("(def __debug__ [] 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(def f [__debug__] 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(lambda [__debug__] 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(class __debug__ [] 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(class C [:__debug__ 1] 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(f :__debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(= a.__debug__ 1)", ASSIGN_DEBUG, "a.__debug__"),
-        ("(= (. a __debug__) 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(del a.__debug__)", "cannot delete __debug__", "a.__debug__"),
-        ("(del __debug__)", "cannot delete __debug__", "__debug__"),
-        ("(:= __debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(= __debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(for __debug__ in x 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(+= __debug__ 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(= (, __debug__ b) 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(import __debug__)", ASSIGN_DEBUG, "__debug__"),
-        ("(import __debug__.a)", ASSIGN_DEBUG, "__debug__.a"),
-        ("(import a.b as __debug__)", ASSIGN_DEBUG, "__debug__"),
-        ("(from a [__debug__])", ASSIGN_DEBUG, "__debug__"),
-        ("(match x (case __debug__ 1))", ASSIGN_DEBUG, "__debug__"),
-        ("(match x (case [*__debug__] 1))", ASSIGN_DEBUG, "__debug__"),
-        ("(match x (case {**__debug__} 1))", ASSIGN_DEBUG, "__debug__"),
-        ("(match x (case (P :__debug__ 1) 1))", ASSIGN_DEBUG, "__debug__"),
-        ("(match x (case 1 as __debug__ 1))", ASSIGN_DEBUG, "__debug__"),
-        ("(try 1 (except [E as __debug__] 1))", ASSIGN_DEBUG, "__debug__"),
         # Unquotes and targets that were a raw ValueError/TypeError.
         ("(f ~a)", "~ (unquote) is only allowed inside a quasiquote", "~a"),
         ("(f ~@a)", "~@ (unquote-splice) is only allowed inside a quasiquote", "~@a"),
@@ -182,8 +151,6 @@ needs_312 = pytest.mark.skipif(sys.version_info < (3, 12), reason="type params: 
     [
         ("(def f[if] [] 1)", KEYWORD, "if"),
         ("(type T[if] int)", KEYWORD, "if"),
-        ("(def f[__debug__] [] 1)", ASSIGN_DEBUG, "__debug__"),
-        ("(type __debug__ int)", ASSIGN_DEBUG, "__debug__"),
     ],
 )
 def test_type_parameter_names(src, msg, at):
@@ -275,3 +242,54 @@ def test_names_are_read_only_through_the_home(module):
         "through symbol_name/name_compile/module_path/method_name "
         "(compiler/literal.py) so every identifier is checked:\n" + "\n".join(hits)
     )
+
+
+# What CPython's own compile() refuses in an AST lispython built, not
+# lispython: the error passes through, positioned at the .lpy line. Each row
+# is the lispython form and the Python source CPython's message is read from
+# (its wording differs between versions).
+CPYTHON_REFUSALS = [
+    ("(= __debug__ 1)", "__debug__ = 1"),
+    ("(:= __debug__ 1)", "(__debug__ := 1)"),
+    ("(+= __debug__ 1)", "__debug__ += 1"),
+    ("(for __debug__ in xs 1)", "for __debug__ in xs: 1"),
+    ("(= a.__debug__ 1)", "a.__debug__ = 1"),
+    ("(del __debug__)", "del __debug__"),
+    ("(def __debug__ [] 1)", "def __debug__(): 1"),
+    ("(def f [__debug__] 1)", "def f(__debug__): 1"),
+    ("(lambda [__debug__] 1)", "lambda __debug__: 1"),
+    ("(class __debug__ [] 1)", "class __debug__: 1"),
+    ("(f :__debug__ 1)", "f(__debug__=1)"),
+    ("(import __debug__)", "import __debug__"),
+    ("(import a.b as __debug__)", "import a.b as __debug__"),
+    ("(from a [__debug__])", "from a import __debug__"),
+    ("(match x (case __debug__ 1))", "match x:\n case __debug__: 1"),
+    ("(try 1 (except [E as __debug__] 1))", "try: 1\nexcept E as __debug__: 1"),
+    ("(def f [a a] 1)", "def f(a, a): 1"),
+    ("(def f [a *a] 1)", "def f(a, *a): 1"),
+    ("(def f [a **a] 1)", "def f(a, **a): 1"),
+    ("(def f [a / a] 1)", "def f(a, /, a): 1"),
+    ("(def f [* a :a 1] 1)", "def f(*, a, a=1): 1"),
+    ("(lambda [x x] 1)", "lambda x, x: 1"),
+    ("(async-def f [x x] 1)", "async def f(x, x): 1"),
+]
+
+
+def cpython_message(python):
+    with pytest.raises(SyntaxError) as info:
+        compile(python, "<oracle>", "exec")
+    return info.value.msg
+
+
+@pytest.mark.parametrize(["src", "python"], CPYTHON_REFUSALS)
+def test_cpython_refusals_pass_through_at_the_lpy_line(src, python):
+    source = "(= a 1)\n  " + src + "\n"
+    with pytest.raises(LispyCompileError) as info:
+        with compile_errors("m.lpy", source):
+            body = macroexpand_then_compile(parse(source), {"__macro_namespace": {}})
+            compile(ast.Module(body, []), "m.lpy", "exec")
+    err = info.value
+    # Raised by compile() and converted, not refused by lispython first.
+    assert isinstance(err.__cause__, SyntaxError)
+    assert err.msg == cpython_message(python)
+    assert (err.filename, err.lineno, err.text) == ("m.lpy", 2, "  " + src)

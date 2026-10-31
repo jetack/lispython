@@ -135,7 +135,7 @@ def call_args_parse(given):
     while q:
         arg = q.popleft()
         if keyword_arg_p(arg):
-            name = symbol_name(arg.value, ast.Store)
+            name = symbol_name(arg.value)
             if name in seen:
                 raise LispyCompileError(f"keyword argument repeated: {name}", arg)
             seen.add(name)
@@ -198,9 +198,9 @@ def attribute_compile(sexp, ctx):
     attrs = [first_attr, *more_attrs]
     rst = yield expr_steps(value, ast.Load)
     position_info = {**sexp.position_info}
-    for [i, attr] in enumerate(attrs):
+    for attr in attrs:
         # One identifier per slot: (. a b.c) is refused, not read as a chain.
-        name = symbol_name(attr, ctx if i == len(attrs) - 1 else ast.Load)
+        name = symbol_name(attr)
         position_info["end_lineno"] = attr.position_info["end_lineno"]
         position_info["end_col_offset"] = attr.position_info["end_col_offset"]
         rst = ast.Attribute(value=rst, attr=name, ctx=ast.Load(), **position_info)
@@ -319,12 +319,9 @@ def target_compile(sexp, kind):
     "annotate" and "augassign" (a single name, attribute or subscript),
     "delete" (no starred) or "walrus" (a single name). A bad target is
     refused at itself, with CPython's message, instead of an AST that
-    compile() rejects. Each name in it comes from name_compile, which refuses
-    binding __debug__.
+    compile() rejects.
     """
     if kind == "walrus":
-        # Shape before name, as CPython: (:= a.__debug__ 1) is refused as an
-        # attribute target, not as an assignment to __debug__.
         check_target((yield expr_steps(sexp)), kind)
         return (yield expr_steps(sexp, ast.Store))
     node = yield expr_steps(sexp, ast.Del if kind == "delete" else ast.Store)
@@ -444,7 +441,7 @@ def param_name(arg):
     ``:name`` (default), ``*args`` or ``**kwargs`` wrapper."""
     if isinstance(arg, (Keyword, Starred, DoubleStarred)):
         arg = arg.value
-    return symbol_name(arg, ast.Store)
+    return symbol_name(arg)
 
 
 def def_args_parse(sexp, annotated=True):
@@ -454,7 +451,7 @@ def def_args_parse(sexp, annotated=True):
     positional-only), one ``*`` or ``*args``, keyword-only parameters, one
     ``**kwargs`` last. A parameter may be followed by its ``^annotation``;
     ``:name value`` gives it a default. What CPython refuses in a parameter
-    list (a duplicate name, a misplaced or repeated ``/``, ``*`` or ``**``, a
+    list (a misplaced or repeated ``/``, ``*`` or ``**``, a
     bare ``*`` with no keyword-only parameter after it, a positional
     parameter without a default after one with a default) is refused at the
     offending item with CPython's message: read as it stands, such a list
@@ -472,15 +469,9 @@ def def_args_parse(sexp, annotated=True):
     kwarg = None
     slash = None
     star = None
-    seen = set()
 
     def param(arg):
         name = param_name(arg)
-        if name in seen:
-            raise LispyCompileError(
-                f"duplicate parameter '{name}' in function definition", arg
-            )
-        seen.add(name)
         node = ast.arg(arg=name, **arg.position_info)
         if len(q) and isinstance(q[0], Annotation):
             if not annotated:

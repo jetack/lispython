@@ -754,12 +754,6 @@ class TestParameterLists:
     @pytest.mark.parametrize(
         ("form", "msg", "at"),
         [
-            ("(def f [a a] 1)", "duplicate parameter 'a' in function", "a@2"),
-            ("(def f [a *a] 1)", "duplicate parameter 'a' in function", "*a"),
-            ("(def f [a **a] 1)", "duplicate parameter 'a' in function", "**a"),
-            ("(def f [a / a] 1)", "duplicate parameter 'a' in function", "a@2"),
-            ("(def f [* a :a 1] 1)", "duplicate parameter 'a' in function", ":a"),
-            ("(lambda [x x] 1)", "duplicate parameter 'x' in function", "x@2"),
             (
                 "(def f [a :b 1 c] 1)",
                 "parameter without a default follows parameter with a default",
@@ -781,7 +775,6 @@ class TestParameterLists:
             ("(def f [* **k] 1)", "named parameters must follow bare *", "*"),
             ("(def f [**a b] 1)", "parameters cannot follow var-keyword", "b"),
             ("(def f [**a **b] 1)", "parameters cannot follow var-keyword", "**b"),
-            ("(async-def f [x x] 1)", "duplicate parameter 'x' in function", "x@2"),
         ],
     )
     def test_refused_at_the_offending_item(self, form, msg, at):
