@@ -60,9 +60,9 @@ def _token_patterns(in_field, field_level=False):
     Inside a field \\" opens an "escaped" string (it is how a "..." literal
     holds a string in a field: f"{(.get d \\"H:M:S\\")}"; a token starting
     with \\" is never valid Python, so the spelling is lispython's own) and
-    ends a symbol. A bare quote
-    opens a string there too, scanned as at the top level (scan_string_body).
-    An escaped triple quote is three \\", never a mix.
+    ends a symbol. A bare quote opens a string there too, scanned as at the
+    top level (scan_string_body). An escaped triple quote is three \\", never
+    a mix.
 
     At the field's own level (``field_level``, outside its brackets) the
     expression ends at a delimiter (``:``, ``}``, or ``!`` not before ``=``):

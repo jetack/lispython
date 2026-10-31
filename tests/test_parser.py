@@ -573,7 +573,8 @@ class TestFieldsLexedInPlace:
         assert stmt.value.values[0].value == echo
 
     def test_an_unterminated_bare_string_in_a_field_is_an_error(self):
-        # \" does not close it, so the source ends inside it.
+        # \" does not close the string, so it swallows the field's )} and the
+        # f-string's closing quote, and the field is never closed.
         with pytest.raises(LispyCompileError):
             parse(r'f"{(g "a\")}"')
 
