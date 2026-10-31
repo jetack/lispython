@@ -8,6 +8,7 @@ from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import FStrExpr, Paren, Symbol, atom_text
 from lispy.core.parser import parse, tokenize
+from lispy.tools import macroexpand_then_compile
 from tests.utils import stmt_to_dump
 
 T_STRINGS = (
@@ -494,6 +495,88 @@ class TestFieldsLexedInPlace:
         # Columns are the source's: \"k\" is 5 characters wide.
         assert (key.col_offset, key.end_col_offset) == (11, 16)
         assert (field.value.end_col_offset, field.end_col_offset) == (17, 18)
+
+    @pytest.mark.parametrize(
+        ["src", "py"],
+        [
+            # Since PEP 701 a field holds strings opened with a bare quote, and
+            # CPython's escapes apply in them: \" is a quote, \\ a backslash.
+            # On 3.11 the reference is a spelling without a backslash in the
+            # field where one exists; a case with none is skipped there.
+            *[
+                pytest.param(
+                    src,
+                    py,
+                    marks=pytest.mark.skipif(
+                        sys.version_info < (3, 12),
+                        reason="3.11 refuses a backslash in a field: no reference AST",
+                    ),
+                    id=name,
+                )
+                for [name, src, py] in [
+                    ["escaped-backslash-closes", r'f"{(g "a\\")}"', r'f"{g("a\\")}"'],
+                    [
+                        "escaped-backslash-then-quote",
+                        r'f"{(g "a\\\"b")}"',
+                        r'f"{g("a\\\"b")}"',
+                    ],
+                    ["raw-escaped-quote", r'f"{(g r"a\"b")}"', r'f"{g(r"a\"b")}"'],
+                    ["raw-backslash-closes", r'f"{(g r"a\\")}"', r'f"{g(r"a\\")}"'],
+                    [
+                        "raw-triple-single-quoted-keeps-backslash",
+                        r"""f"{(g r'''a\"b''')}" """.strip(),
+                        r"""f"{g(r'''a\"b''')}" """.strip(),
+                    ],
+                ]
+            ],
+            pytest.param(
+                r'f"{(g "say \"hi\"")}"',
+                r'f"{g("say \"hi\"")}"'
+                if sys.version_info >= (3, 12)
+                else """f'''{g('say "hi"')}'''""",
+                id="escaped-quote",
+            ),
+            pytest.param(
+                r'f"{f"x\"y"}"',
+                r'f"{f"x\"y"}"'
+                if sys.version_info >= (3, 12)
+                else """f'''{f'x"y'}'''""",
+                id="nested-f-string-escaped-quote",
+            ),
+            # A string opened with \" keeps lispython's field-quote escape.
+            pytest.param(
+                r'f"{(.get d \"k\")}"',
+                """f"{d.get('k')}\"""",
+                id="opened-with-escaped-quote",
+            ),
+            pytest.param(
+                r'f"{(g \"a\\"b\")}"',
+                """f'''{g('a"b')}'''""",
+                id="escaped-quote-in-opened-with-escaped-quote",
+            ),
+        ],
+    )
+    def test_a_bare_quoted_string_in_a_field_reads_as_python(self, src, py):
+        assert stmt_to_dump(src) == ast.dump(ast.parse(py))
+
+    @pytest.mark.parametrize(
+        ["src", "echo"],
+        [
+            (r'f"{(g "say \"hi\"")=}"', r'(g "say \"hi\"")='),
+            (r'f"{(.get d \"k\")=}"', '(.get d "k")='),
+            (r'f"{(g \"a\\"b\" "c\"d")=}"', r'(g "a\"b" "c\"d")='),
+        ],
+        ids=["bare-quoted-keeps-escape", "opened-with-escaped-quote", "both"],
+    )
+    def test_an_echo_drops_only_the_field_quote_escapes(self, src, echo):
+        [stmt] = macroexpand_then_compile(parse(src))
+        assert stmt.value.values[0].value == echo
+
+    def test_an_unterminated_bare_string_in_a_field_is_an_error(self):
+        # \" does not close the string, so it swallows the field's )} and the
+        # f-string's closing quote, and the field is never closed.
+        with pytest.raises(LispyCompileError):
+            parse(r'f"{(g "a\")}"')
 
     @pytest.mark.parametrize(
         ["src", "form"],
