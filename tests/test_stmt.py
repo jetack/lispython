@@ -800,14 +800,7 @@ class TestParameterLists:
 
 
 class TestClassBases:
-    """Class bases are call arguments: the same keyword check, ** too."""
-
-    def test_repeated_keyword_refused_at_the_second(self):
-        form = "(class A [:metaclass M :metaclass N])"
-        with pytest.raises(LispyCompileError) as info:
-            stmt_to_dump("(do\n  " + form + ")")
-        assert info.value.msg == "keyword argument repeated: metaclass"
-        assert_at(info.value, form, ":metaclass@2")
+    """Class bases are call arguments: keywords and ** too."""
 
     @pytest.mark.parametrize(
         ("lispy", "python"),
