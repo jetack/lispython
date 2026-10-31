@@ -1004,12 +1004,13 @@ class TestCapabilityProbes:
         assert compile_expr('t"{ x }"').body.values[0].str == text
 
     def test_no_version_checks_outside_features(self):
-        """features.py is the only compiler module that looks at the version or
-        probes the ast module's shape."""
+        """features.py is the only compiler module (or the unparser beside the
+        compiler) that looks at the version or probes the ast module's shape."""
         compiler = pathlib.Path(features.__file__).parent
+        modules = [*sorted(compiler.glob("*.py")), compiler.parent / "unparse.py"]
         offenders = [
             f"{path.name}: {pattern}"
-            for path in sorted(compiler.glob("*.py"))
+            for path in modules
             if path.name != "features.py"
             for pattern in ("version_info", "._fields", "hasattr(ast")
             if pattern in path.read_text(encoding="utf-8")

@@ -172,6 +172,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `l2py` translates as deep as `compile()` takes, with the text `ast.unparse`
+  would write, instead of stopping at a few hundred levels (about 250 nested
+  statements, 100 nested f-strings) with "form nested too deeply to
+  translate".
 - A body that compiles to no statement, such as `(when test)` or
   `(if x (do))`, is a compile error at the form (`(if ...) needs a body`)
   for `if`, `while`, `for`, `with`, `try`, `except`, `else`, `finally` and

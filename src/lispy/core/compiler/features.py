@@ -98,6 +98,28 @@ def compile_depth_follows_recursion_limit():
     return tuple(running_version())[:2] < (3, 12)
 
 
+@functools.cache
+def fstring_classes():
+    """The ast classes of an f- or t-string literal: ``ast.JoinedStr``, and
+    ``ast.TemplateStr`` from 3.14."""
+    return tuple(
+        getattr(ast, name)
+        for name in ("JoinedStr", "TemplateStr")
+        if hasattr(ast, name)
+    )
+
+
+@functools.cache
+def stdlib_unparser():
+    """The class ``ast.unparse`` renders with: ``_ast_unparse.Unparser`` from
+    3.14, ``ast._Unparser`` before."""
+    try:
+        from _ast_unparse import Unparser
+    except ImportError:
+        return ast._Unparser
+    return Unparser
+
+
 def import_has_is_lazy():
     """Whether Import/ImportFrom have ``is_lazy`` (3.15).
 

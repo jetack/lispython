@@ -3,14 +3,21 @@ what Python can compile is a positioned LispyCompileError, never a
 RecursionError."""
 
 import ast
+import dataclasses
+import functools
 import importlib
+import inspect
+import pathlib
 import sys
 import time
 import tracemalloc
+import types
+import typing
 
 import pytest
 
 import lispy.core.parser as parser_module
+import lispy.core.unparse as unparse_module
 import lispy.tools as tools
 from lispy.core import nodes
 from lispy.core.compiler import features
@@ -45,7 +52,7 @@ from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
 # The nesting error names the recursion limit only where it is what was hit:
-# compile() on 3.11 and ast.unparse everywhere, never compile() on 3.12+.
+# compile() on 3.11 and translating (l2py) everywhere, never compile() on 3.12+.
 C_LIMIT_MESSAGE = "form nested too deeply to compile"
 RECURSION_LIMIT_MESSAGE = (
     f"{C_LIMIT_MESSAGE} (Python's recursion limit is {sys.getrecursionlimit()})"
@@ -806,15 +813,109 @@ def test_a_deep_ast_within_the_limit_compiles(scope):
     assert eval(code) == 500
 
 
-def test_l2py_of_an_ast_unparse_cannot_write_is_a_positioned_error(scope):
-    # ast.unparse recurses several frames per level and gives up on an AST
-    # compile() still takes (the test above).
-    src = "(= x 1)\n" + plus(500)
+PLUS_BOUND = 60_000  # more operands than compile() takes on any release
+
+
+def stack_depth():
+    frame, depth = sys._getframe(1), 0
+    while frame is not None:
+        frame, depth = frame.f_back, depth + 1
+    return depth
+
+
+@pytest.fixture(scope="module")
+def plus_limit(scope):
+    """The most operands ``plus`` may have for compile() to take it here.
+
+    One compile of plus(PLUS_BOUND), the 3.11 depth check off so it is
+    built; each BinOp ``left`` down the chain is the tree of one operand
+    fewer, so compile() is bisected over those without compiling again.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(features, "compile_depth_follows_recursion_limit", lambda: False)
+        [stmt] = macroexpand_then_compile(parse(plus(PLUS_BOUND)), scope)
+    chains = [stmt.value]  # chains[k] is the tree of plus(PLUS_BOUND - k)
+    while isinstance(chains[-1], ast.BinOp):
+        chains.append(chains[-1].left)
+
+    def compiles(k):
+        expr = ast.Expr(
+            chains[k], lineno=1, col_offset=0, end_lineno=1, end_col_offset=1
+        )
+        try:
+            compile(ast.Module([expr], type_ignores=[]), "<nesting>", "exec")
+        except RecursionError:
+            return False
+        return True
+
+    refused, taken = 0, len(chains) - 1
+    assert not compiles(refused), "raise PLUS_BOUND past compile()'s limit"
+    while taken - refused > 1:
+        middle = (refused + taken) // 2
+        if compiles(middle):
+            taken = middle
+        else:
+            refused = middle
+    return PLUS_BOUND - taken
+
+
+# On 3.11 the limit follows the stack, which l2py enters a few frames deeper.
+L2PY_MARGIN = 16
+
+
+def test_l2py_translates_as_deep_as_compile_takes(plus_limit):
+    operands = plus_limit - L2PY_MARGIN
+    pysrc = tools.l2py_s(plus(operands), fresh_scope=True, format=False)
+    assert pysrc == "import lispy\n\n" + " + ".join(["1"] * operands)
+
+
+# Sources covering the grammar; types has the `lambda: None` a cut
+# ast.arguments would write as `lambda : None`.
+UNPARSE_CORPUS = [features.stdlib_unparser(), typing, functools, types, dataclasses]
+
+
+def corpus_trees():
+    for source in UNPARSE_CORPUS:
+        with open(inspect.getsourcefile(source), encoding="utf-8") as f:
+            yield ast.parse(f.read())
+    sugar = pathlib.Path(tools.__file__).parent / "macros" / "sugar.lpy"
+    body = macroexpand_then_compile(parse(sugar.read_text(encoding="utf-8")), {})
+    yield ast.Module(body, type_ignores=[])
+
+
+@pytest.mark.parametrize("chunk_depth", [1, 2])
+def test_unparse_writes_what_ast_unparse_writes(chunk_depth, monkeypatch):
+    # Depth 1 makes every expression and statement a chunk of its own.
+    monkeypatch.setattr(unparse_module, "CHUNK_DEPTH", chunk_depth)
+    for tree in corpus_trees():
+        assert unparse_module.unparse(tree) == ast.unparse(tree)
+
+
+def test_l2py_translates_statements_nested_past_ast_unparse(scope):
+    # Plain ast.unparse fails near 250 nested ifs. CPython's parser cannot
+    # read back 100 indent levels, so the text is checked exactly.
+    depth = 600
+    pysrc = tools.l2py_s(
+        "(if c " * depth + "(pass)" + ")" * depth, fresh_scope=True, format=False
+    )
+    lines = [" " * 4 * level + "if c:" for level in range(depth)]
+    assert (
+        pysrc == "import lispy\n\n" + "\n".join(lines) + "\n" + " " * 4 * depth + "pass"
+    )
+
+
+def test_translating_on_a_stack_with_no_room_is_a_positioned_error(scope):
+    # unparse needs a chunk's worth of frames, more than this caller leaves.
+    [stmt] = compile_src(plus(200), scope)
+
+    def at_depth(frames):
+        return at_depth(frames - 1) if frames else tools.ast_to_python(stmt)
+
     with pytest.raises(LispyCompileError) as info:
-        tools.l2py_s(src, fresh_scope=True, format=False)
+        at_depth(sys.getrecursionlimit() - stack_depth() - 40)
     err = info.value
     assert err.msg == TRANSLATE_MESSAGE
-    assert (err.lineno, err.offset) == (2, 1)
+    assert (err.lineno, err.offset) == (1, 1)
 
 
 WORDS = ["for", "in", "a", "(a b)", "[]", ":x", "", "(FStrExpr a)", "f[T]"]
@@ -1078,6 +1179,20 @@ def test_nested_f_strings_parse_on_a_deep_stack(openings, needs_t):
     [found, leaf] = literal_depth(form)
     assert found == depth
     assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="3.11 cannot nest same-quote f-strings"
+)
+def test_l2py_translates_nested_f_strings_past_cpython_s_lexer_limit():
+    # Each nested f-string costs the stdlib unparser frames no chunk bounds.
+    # Python's lexer reads back at most 149 levels, so that depth is run.
+    texts = {}
+    for depth in (149, NESTED_LITERAL_DEPTH):
+        src = nested_literals(['f"{'], depth)
+        texts[depth] = tools.l2py_s(src, fresh_scope=True, format=False, no_lispy=True)
+        assert texts[depth].count("f") == depth
+    assert eval(texts[149], {"x": "leaf"}) == "leaf"
 
 
 def spec_chain(depth):

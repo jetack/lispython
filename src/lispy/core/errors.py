@@ -182,7 +182,7 @@ def _positioned(at):
 
 def nesting_error(at, *, recursion_limit, what="compile"):
     """The one error for a form nested deeper than Python can ``what``
-    (compile, or translate for l2py's ``ast.unparse``).
+    (compile, or translate for l2py, ``core/unparse.py``).
 
     ``at`` is a lispython node, or a Python AST node (positioned by its own
     lineno/col_offset/end_lineno/end_col_offset). ``recursion_limit`` says

@@ -30,7 +30,8 @@
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
 (from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
-(from lispy.core.compiler.utils [compile-nesting-errors python-interpolations])
+(from lispy.core.compiler.utils [compile-nesting-errors])
+(from lispy.core.unparse [unparse])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
 
@@ -66,11 +67,12 @@
 (= SCOPE (main-scope))
 
 (def ast-to-python [st]
-  ;; ast.unparse recurses and gives up on a shallower AST than compile()
-  ;; takes, on every version at the recursion limit, so a statement it
-  ;; cannot write is the nesting error, at st.
+  ;; unparse writes any depth compile() takes, on a bounded stack per chunk.
+  ;; It still recurses when the caller's stack is already near the limit, and
+  ;; inside the stdlib where no chunk can cut (f-strings nested in format
+  ;; specs): that is the nesting error, at st.
   (try
-    (return (str (ast.unparse (python-interpolations st))))
+    (return (unparse st))
     (except [RecursionError]
       (raise (nesting-error st :recursion-limit True :what "translate")
              from None))))
