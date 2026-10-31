@@ -1,4 +1,5 @@
 import ast
+import sys
 import time
 
 import pytest
@@ -360,7 +361,14 @@ class TestFormatSpecChains:
             ('f"{x:{{}}}"', None),
             ('f"{x:{{}} }"', None),
             ('f"{x:a{{}}b}"', None),
-            ('f"{x:{x:{{}}}}"', None),
+            pytest.param(
+                'f"{x:{x:{{}}}}"',
+                None,
+                marks=pytest.mark.skipif(
+                    sys.version_info < (3, 12),
+                    reason="3.11's parser refuses this nesting depth: no reference AST",
+                ),
+            ),
             ('f"{x:}}}"', None),
             ('f"{x:{{1 2}}}"', 'f"{x:{ {1: 2} }}"'),
             pytest.param(
