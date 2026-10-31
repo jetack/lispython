@@ -86,8 +86,9 @@ follows [Semantic Versioning](https://semver.org/).
   is the positioned error "form nested too deeply to translate".
 - Nesting past compile()'s own limit is the positioned "form nested too
   deeply to compile" error from `lpy`, imports, the REPL, nREPL and
-  `defmacro`, instead of a `RecursionError` traceback, at the first
-  statement compile() fails on. Its message names Python's recursion limit
+  `defmacro`, instead of a `RecursionError` traceback, at the bottom of the
+  deepest path in what compile() was given (the whole module for `lpy` files
+  and imports; in the REPL and nREPL, the statement compile() fails on). Its message names Python's recursion limit
   only where that is the limit hit (3.11, and `l2py`), since raising it does
   not move compile()'s limit on 3.12+. A macro's own runaway recursion still
   raises `RecursionError`.
