@@ -16,6 +16,17 @@ from tests.utils import stmt_to_dump
 T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
 )
+IN_PLACE = features.fstring_fields_are_tokens()
+
+
+def error_position(read, src):
+    with pytest.raises(SyntaxError) as info:
+        read(src)
+    return (info.value.msg, info.value.lineno, info.value.offset)
+
+
+def python_error_position(src):
+    return error_position(lambda s: compile(s, "<s>", "exec"), src)
 
 
 class TestParser:
@@ -394,10 +405,11 @@ class TestFormatSpecChains:
         # CPython has no {{ or }} escape in a spec: { opens a field, } ends it.
         assert stmt_to_dump(lpy) == ast.dump(ast.parse(py or lpy))
 
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 ends the literal at the last quote")
     @pytest.mark.parametrize("src", ['f"{x:{{"', 'f"{x:{{}"'])
     def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self, src):
-        with pytest.raises(LispyCompileError, match="f-string: expecting '}'"):
-            parse(src)
+        # The quote is a string in the inner field's expression.
+        assert error_position(parse, src) == python_error_position(src)
 
     def test_a_chain_of_empty_dicts_past_cpython_s_nesting_limit_parses(self):
         # CPython's tokenizer refuses this as "nested too deeply"; lispython
@@ -409,9 +421,8 @@ class TestFormatSpecChains:
         ["src", "msg", "at"],
         [
             ('f"{x:{x:{x:{x}}}} }"', "f-string: single '}' is not allowed", (1, 19)),
-            ('f"{x:{x:{x:{x}}}} {"', "f-string: expecting '}'", (1, 19)),
         ],
-        ids=["single-brace", "open-field"],
+        ids=["single-brace"],
     )
     def test_an_error_after_a_deep_chain_is_reported_where_it_is(self, src, msg, at):
         with pytest.raises(LispyCompileError) as info:
@@ -419,27 +430,25 @@ class TestFormatSpecChains:
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == at
 
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 ends the literal at the last quote")
+    def test_a_string_after_a_deep_chain_is_read_where_it_is(self):
+        # CPython refuses the chain as nested too deeply, so the expected
+        # error is that of a field after one with no spec, at the quote.
+        [msg, _, _] = python_error_position('f"{x} {"')
+        assert error_position(parse, 'f"{x:{x:{x:{x}}}} {"') == (msg, 1, 20)
+
     def test_the_first_of_two_errors_is_reported(self):
-        # CPython's message; lispython places it at the "!", CPython one
-        # column later.
+        # CPython's message, at the name.
         with pytest.raises(LispyCompileError) as info:
             parse('f"{x!z} {x:{x:{x:{x}}} }"')
         assert info.value.msg == (
             "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'"
         )
-        assert (info.value.lineno, info.value.offset) == (1, 5)
+        assert (info.value.lineno, info.value.offset) == (1, 6)
 
     @pytest.mark.parametrize(
         ["src", "msg", "at"],
         [
-            # CPython 3.12 and 3.15: no conversion is missing, a "}" is.
-            ('f"{x!"', "f-string: expecting '}'", (1, 6)),
-            ('f"{x! "', "f-string: expecting '}'", (1, 7)),
-            ('f"{x! r"', "f-string: expecting '}'", (1, 7)),
-            ('f"{x!r "', "f-string: expecting '}'", (1, 8)),
-            # CPython 3.12's reading (3.15 checks the name first).
-            ('f"{x!z"', "f-string: expecting '}'", (1, 7)),
-            ('f"{x!\n"', "f-string: expecting '}'", (2, 1)),
             # Not the closing quote: a string where the name should be.
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
             ('f"""{x!""', "f-string: invalid conversion character", (1, 8)),
@@ -448,12 +457,6 @@ class TestFormatSpecChains:
             (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
         ],
         ids=[
-            "quote",
-            "space-quote",
-            "space-name-quote",
-            "name-space-quote",
-            "bad-name-quote",
-            "newline-quote",
             "string-in-triple",
             "quotes-in-triple",
             "escaped-literal-string",
@@ -691,19 +694,6 @@ class TestFieldsLexedInPlace:
         assert str(parse(src)[0].list[2].value) == form
 
 
-def error_position(read, src):
-    with pytest.raises(SyntaxError) as info:
-        read(src)
-    return (info.value.msg, info.value.lineno, info.value.offset)
-
-
-def python_error_position(src):
-    return error_position(lambda s: compile(s, "<s>", "exec"), src)
-
-
-IN_PLACE = features.fstring_fields_are_tokens()
-
-
 class TestSourceEndingInAFieldExpression:
     @pytest.mark.parametrize(
         ["lpy", "py"],
@@ -785,11 +775,8 @@ class TestSourceEndingInAFieldExpression:
             # CPython 3.12+ refuses the chain as nested too deeply; lispython
             # adds no nesting limit of its own.
             ('f"{x:{x:{x:{x', (1, 12), (1, 1)),
-            # 3.12-3.14's reading; 3.15 checks the conversion name first (a
-            # separate card).
-            ('f"{x!z ', (1, 3), (1, 1)),
         ],
-        ids=["past-the-nesting-limit", "bad-conversion-name"],
+        ids=["past-the-nesting-limit"],
     )
     def test_where_cpython_differs_the_field_rule_still_holds(
         self, src, in_place, whole_literal
@@ -858,6 +845,8 @@ class TestSourceEndingInAFieldExpression:
     ):
         # Both branches on every interpreter: CPython's measured messages.
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: in_place)
+        # 3.11, the one tokenizer counting a line after a final \r\n.
+        monkeypatch.setattr(features, "final_crlf_starts_a_line", lambda: not in_place)
         assert error_position(parse, src) == errors[in_place]
 
     def test_3_11_ends_an_unescaped_string_line_at_a_lone_cr(self, monkeypatch):
@@ -870,6 +859,254 @@ class TestSourceEndingInAFieldExpression:
             1,
             1,
         )
+
+
+def _read_on_3_12_plus(srcs):
+    """Sources 3.11 reads otherwise: it ends a literal at the first quote of
+    its own kind, so a same-quote string or literal in a field closes it,
+    and it lexes a whole literal before reading its fields."""
+    mark = pytest.mark.skipif(
+        not IN_PLACE, reason="3.11 ends a literal at its first same quote"
+    )
+    return [pytest.param(src, marks=mark) for src in srcs]
+
+
+def _python_error_position_spelled(src):
+    # 3.12 spells one message "exclamanation"; lispython keeps the corrected
+    # spelling CPython 3.13+ use.
+    [msg, *at] = python_error_position(src)
+    return (msg.replace("exclamanation", "exclamation"), *at)
+
+
+class TestSourceEndingInALiteral:
+    """The end of the source inside a literal, a format spec, a conversion
+    or a plain string: CPython's error on the running interpreter."""
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # A plain string, no literal open.
+            's = "abc',
+            's = b"abc',
+            's = "a\\\nb',
+            's = "a\\\n',
+            's = "a\\\r\n',
+            's = """a\r\nb\r\n',
+            's = """a\rb\r',
+            's = """a\\\r\n',
+            # A string in a field, of another quote than the literal's.
+            'f"""{("a',
+            'x = f"{(\nb"a',
+            'f"{x}{\n"a',
+            'f"{\n{x}{\n"a',
+            # A line break in a single-quoted literal's text.
+            'f"ab\n{x',
+            'f"ab\r{x',
+            'f"ab\r\n{x',
+            'f"ab\n',
+            'f"{x}ab\n',
+            'f"{x}ab\n{y',
+            'f"{x:{y}a\nb',
+            # ... or in a format spec.
+            'f"{x:abc\n',
+            'f"{x:abc\ny',
+            'f"{x:a\n{y}',
+            'f"{x:\n',
+            'f"{x:abc\n(',
+            'f"{x:abc\n\ny',
+            'f"{x:abc\n ',
+            'f"{x:abc\n{y',
+            'f"{x:a\\\nb',
+            'f"{x:\n\n{y}a\nb',
+            'f"{x:ab\n{y\n',
+            # Literal text.
+            's = f"abc',
+            's = rf"abc',
+            's = f"""abc\ny\n',
+            'x\ns = f"abc\n',
+            's = f"a\\\n',
+            'f"a\\\n',
+            'f"""a\\\n',
+            'f"""{f"abc',
+            'f"""{x:abc',
+            'f"""{x:',
+            'f"{x:{y}abc',
+            'f"{x:{y}',
+            'f"{x:{y:{z}a',
+            'f"{x\n}ab',
+            'f"{x!r}',
+            # A format spec's first segment.
+            'f"{x:abc',
+            'f"{x:',
+            'f"{x:{y:ab',
+            'f"{x!r:',
+            'f"{x!r:a\n',
+            # A conversion.
+            'f"{x!r',
+            'f"{x!r ',
+            'f"{x!r\n',
+            'f"{x!r\\',
+            'f"{x!r\\\n',
+            'f"{x!',
+            'f"{x!\\',
+            'f"{x! z',
+            'f"{x! z ',
+            'f"{x! z\n',
+            'f"{x! r\\\n',
+            'f"{x! r ',
+            'f"{x!z',
+            'f"{x!z ',
+            'f"{x!z\n',
+            'f"{x!zz',
+            'f"{x!z\\',
+            'f"{x!z:',
+            'f"{x!z:{y',
+            *_read_on_3_12_plus(
+                [
+                    'f"{(b"a',
+                    'f"{("""a',
+                    'f"""{("""a',
+                    'f"{(rb"a',
+                    'f"ab{x"',
+                    'f"{("a\nb',
+                    'f"a{(b"x\nc',
+                    'f"{f"abc',
+                    'f"{f"""abc',
+                    'f"{f"{f"abc',
+                    'f"{f"{x:ab',
+                    'f"{x!r"',
+                    'f"{x!b"',
+                    'f"{x!rb"',
+                    'f"{x!r "',
+                    'f"{x! r"',
+                    'f"{x!f"',
+                    'f"{x!f"a',
+                    'f"{x!t"',
+                    'f"{x!z"',
+                    'f"{x! z"',
+                    'f"{x! r "',
+                    'f"{x!"',
+                    'f"{x! "',
+                    'f"{x!\n"',
+                    'f"{x} {"',
+                    # 3.11 lexes the whole literal before its fields.
+                    'f"{x! z:',
+                    'f"{x!z}',
+                    'f"{x!r ;',
+                    'f"{x!r (',
+                    'f"{x!z (',
+                ]
+            ),
+            *[
+                pytest.param(
+                    src,
+                    marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
+                )
+                for src in ['t"{x:abc', 't"ab\n{x', 't"{(t"a', 't"{x!z']
+            ],
+        ],
+    )
+    def test_the_error_is_cpython_s(self, src):
+        assert error_position(parse, src) == _python_error_position_spelled(src)
+
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            'f"{x!z}"',
+            'f"{x!z:>3}"',
+            'f"{x!z:{y!q}}"',
+            'f"{x!r"a" }"',
+            'f"{x!r "a"}"',
+            'f"{x!z "a"}"',
+        ],
+    )
+    def test_a_closed_field_s_conversion_is_cpython_s(self, src):
+        assert error_position(parse, src) == _python_error_position_spelled(src)
+
+    NEWLINE_IN_SPEC = (
+        "f-string: newlines are not allowed in format specifiers for single "
+        "quoted f-strings"
+    )
+    NOT_CONVERSION = (
+        "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
+    )
+
+    @pytest.mark.parametrize(
+        ["probe", "src", "errors"],
+        [
+            (
+                "single_quoted_spec_refuses_newline",
+                'f"{x:abc',
+                {True: (NEWLINE_IN_SPEC, 1, 9), False: ("'{' was never closed", 1, 3)},
+            ),
+            (
+                "conversion_name_checked_first",
+                'f"{x!z:',
+                {
+                    True: (NOT_CONVERSION.format("z"), 1, 6),
+                    False: ("'{' was never closed", 1, 3),
+                },
+            ),
+            (
+                "conversion_name_checked_first",
+                'f"{x!z:{y!q}}"',
+                {
+                    True: (NOT_CONVERSION.format("z"), 1, 6),
+                    False: (NOT_CONVERSION.format("q"), 1, 11),
+                },
+            ),
+            (
+                "expecting_brace_names_its_line",
+                'x = f"{(\nb"a',
+                {
+                    True: ("f-string: expecting '}' to close '{' on line 1", 2, 1),
+                    False: ("f-string: expecting '}'", 2, 1),
+                },
+            ),
+            (
+                "final_crlf_starts_a_line",
+                's = """a\r\nb\r\n',
+                {
+                    True: (
+                        "unterminated triple-quoted string literal "
+                        "(detected at line 3)",
+                        1,
+                        5,
+                    ),
+                    False: (
+                        "unterminated triple-quoted string literal "
+                        "(detected at line 2)",
+                        1,
+                        5,
+                    ),
+                },
+            ),
+        ],
+        ids=[
+            "spec-newline",
+            "conversion-then-spec",
+            "conversion-in-spec",
+            "line",
+            "crlf",
+        ],
+    )
+    @pytest.mark.parametrize("value", [True, False])
+    def test_each_tokenizer_s_error_is_produced(
+        self, monkeypatch, probe, src, errors, value
+    ):
+        # Both branches on every interpreter, the other probes at 3.12's
+        # values: CPython's measured messages.
+        for name in [
+            "single_quoted_spec_refuses_newline",
+            "conversion_name_checked_first",
+            "expecting_brace_names_its_line",
+            "final_crlf_starts_a_line",
+        ]:
+            monkeypatch.setattr(features, name, lambda: False)
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
+        monkeypatch.setattr(features, probe, lambda: value)
+        assert error_position(parse, src) == errors[value]
 
 
 class TestNumberLexingCost:

@@ -109,7 +109,7 @@ class TestInterpolatedStringScanner:
             (
                 'f"{x!z}"',
                 "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
-                "!",
+                "z",
             ),
             (
                 'f"{x! r}"',
@@ -122,7 +122,6 @@ class TestInterpolatedStringScanner:
                 "{",
             ),
             ('f"a}b"', "f-string: single '}' is not allowed", "}"),
-            ('f"ab{x"', "f-string: expecting '}'", "{"),
             ('f"ab{x:{y}"', "f-string: expecting '}'", "{"),
             ('bf"x"', "invalid string prefix 'bf'", "b"),
         ],
@@ -386,15 +385,18 @@ class TestPlainStringExtent:
         assert scope["s"] == python["s"]
 
     @pytest.mark.parametrize(
-        ["lpy", "msg", "col"],
+        ["lpy", "py"],
         [
-            ('(= s "abc', "unterminated string literal", 6),
-            ('(= s """abc"', "unterminated triple-quoted string literal", 6),
-            ('(= s f"abc', "unterminated f-string literal", 7),
+            ('(= s "abc', 's = "abc'),
+            ('(= s """abc"', 's = """abc"'),
+            ('(= s f"abc', 's = f"abc'),
         ],
     )
-    def test_unterminated(self, lpy, msg, col):
+    def test_unterminated(self, lpy, py):
+        # CPython's message, at the string's prefix (column 6 here).
+        with pytest.raises(SyntaxError) as python:
+            compile(py, "<s>", "exec")
         with pytest.raises(LispyCompileError) as info:
             compile_lpy(lpy)
-        assert info.value.msg == msg
-        assert (info.value.lineno, info.value.offset) == (1, col)
+        assert info.value.msg == python.value.msg
+        assert (info.value.lineno, info.value.offset) == (1, 6)
