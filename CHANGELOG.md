@@ -75,6 +75,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A source ending inside a string, an f/t-string, a format spec or a
+  conversion reports the error `compile()` raises for that text on the
+  running Python: "unterminated ... literal (detected at line N)" at the
+  literal's prefix, "expecting '}'" for a string whose quote closes the
+  literal it is in, 3.13+'s "newlines are not allowed in format specifiers",
+  3.15's "expecting '}' to close '{' on line N", and 3.11's whole-literal
+  error. A name glued to a quote after `!` reads as a string prefix (`!r"`),
+  and an invalid conversion name is reported at the name, after any error in
+  its field's format spec where CPython checks it only once the field closes.
 - Error positions count a lone CR as a line break, as CPython does (CRLF is
   one break), so a source with CR line endings reports the same line as
   `compile()`.

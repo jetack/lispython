@@ -80,6 +80,66 @@ def fstring_fields_are_tokens():
     return hasattr(token, "FSTRING_START")
 
 
+def _compile_error(src):
+    """The SyntaxError compile() raises for ``src``, or None."""
+    try:
+        compile(src, "<probe>", "exec")
+    except SyntaxError as error:
+        return error
+    return None
+
+
+@functools.cache
+def single_quoted_spec_refuses_newline():
+    """Whether a line break in a single-quoted f-string's format spec is an
+    error of its own: "newlines are not allowed in format specifiers for
+    single quoted f-strings" (3.13+). 3.12 accepts one; there the text after
+    it is read as the field's code. (3.11 refuses the probe as an
+    unterminated string, hence the message check.)"""
+    error = _compile_error('f"{x:\n}"')
+    return error is not None and error.msg.startswith(
+        "f-string: newlines are not allowed"
+    )
+
+
+@functools.cache
+def conversion_name_checked_first():
+    """Whether an invalid conversion name is refused where it is read, before
+    the rest of its field (3.14.8 and 3.15, a backport): f"{x!z: is "invalid
+    conversion character 'z'". 3.12 and 3.13 check it only once the field
+    has closed, so an error or the end of the source in the field's format
+    spec comes first."""
+    error = _compile_error('f"{x!z:')
+    return error is not None and error.msg.startswith(
+        "f-string: invalid conversion character 'z'"
+    )
+
+
+@functools.cache
+def expecting_brace_names_its_line():
+    """Whether "expecting '}'" for a string closing the literal inside a
+    field names the field's line when the string starts on another one (3.15):
+    "f-string: expecting '}' to close '{' on line 1"."""
+    error = _compile_error('f"{\n"')
+    return error is not None and error.msg.endswith("on line 1")
+
+
+@functools.cache
+def final_crlf_starts_a_line():
+    """Whether a \\r\\n ending the source starts a line for a string literal's
+    "detected at line N" (3.11); 3.12+ count no line after it, as after a
+    final \\n or lone \\r on every version."""
+    error = _compile_error('s = """a\r\n')
+    return error is not None and error.msg.endswith("(detected at line 2)")
+
+
+@functools.cache
+def t_string_prefix_exists():
+    """Whether t/T (with r/R) is a string prefix (3.14+): t"..." is then one
+    string token, never the name t before a string."""
+    return hasattr(token, "TSTRING_START")
+
+
 def compile_depth_follows_recursion_limit():
     """Whether compile() refuses an AST nested about as deep as the Python
     recursion limit, raising a RecursionError that names no line: CPython
