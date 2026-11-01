@@ -122,7 +122,6 @@ class TestInterpolatedStringScanner:
                 "{",
             ),
             ('f"a}b"', "f-string: single '}' is not allowed", "}"),
-            ('f"ab{x:{y}"', "f-string: expecting '}'", "{"),
             ('bf"x"', "invalid string prefix 'bf'", "b"),
         ],
     )

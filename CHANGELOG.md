@@ -38,6 +38,9 @@ follows [Semantic Versioning](https://semver.org/).
 - An nREPL eval without `file` is named `<nrepl-N>` (a new N per eval)
   instead of `<nrepl>`, which can break a client that matches `<nrepl>` in
   error text.
+- On Python 3.13+, a line break in a single-quoted f/t-string's format spec
+  is a compile error at the break even when the field then closes
+  (`f"{x:ab\n}"`), as CPython 3.13+ refuse it; it compiled before.
 - An invalid `line` or `column` (not an integer from 1 to
   `NREPL-MAX-POSITION-LINE`, 1,000,000, or `NREPL-MAX-POSITION-COLUMN`,
   100,000) gets an `error` reply with the request id instead of being
@@ -86,6 +89,8 @@ follows [Semantic Versioning](https://semver.org/).
   error. A name glued to a quote after `!` reads as a string prefix (`!r"`),
   and an invalid conversion name is reported at the name, after any error in
   its field's format spec where CPython checks it only once the field closes.
+- An f/t-string's closing quote inside a format spec (`f"{x:{y}"`) reports
+  CPython 3.12+'s "expecting '}', or format specs" at the quote.
 - Error positions count a lone CR as a line break, as CPython does (CRLF is
   one break), so a source with CR line endings reports the same line as
   `compile()`.

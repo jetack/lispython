@@ -277,6 +277,7 @@ class _LiteralState:
         "escaped_in",
         "newline",
         "carried",
+        "broken",
     )
 
     def __init__(self, kind, raw, quote, start, quote_start, body, escaped_in):
@@ -295,6 +296,9 @@ class _LiteralState:
         # [break, entry]: the earliest line break recorded on a field or
         # literal that has closed inside this one (_carry_line_break).
         self.carried = None
+        # Outermost literal: whether a line break has been recorded in it
+        # (_note_line_break).
+        self.broken = False
 
 
 class _FieldState:
@@ -565,9 +569,9 @@ class _Lexer:
                 return self._unterminated(
                     entry.kind, entry.quote, entry.start, entry.body, at
                 )
+            # Only 3.12 gets here: on 3.13+ a spec break sorting first was
+            # refused where it was recorded (_note_line_break).
             kind = entry.literal.kind
-            if features.single_quoted_spec_refuses_newline():
-                return self._error(_SPEC_NEWLINE_MSG.format(kind), at, at + 1)
             if entry.code_at is not None:
                 # 3.12 has left the spec at the break, so this is no spec
                 # text but a token where the field must end.
@@ -604,12 +608,12 @@ class _Lexer:
         line break, still CPython's error at the end of the source (CPython
         stops at it), moves up to the literal it closes in."""
         brk = entry.newline
-        if (
-            isinstance(entry, _FieldState)
-            and entry.code_at is None
-            and not features.single_quoted_spec_refuses_newline()
-        ):
-            return  # 3.12: the field closed on the break's line, no error
+        # A field's spec break moves up only on 3.12 with code read after
+        # it (with none, the field closed on the break's line: no error). On
+        # 3.13+ (no code_at) a field closes with one only behind an earlier
+        # break, which stays open and is reported first.
+        if isinstance(entry, _FieldState) and entry.code_at is None:
+            return
         if isinstance(entry, _LiteralState) and entry.carried is not None:
             if brk is None or entry.carried[0] < brk:
                 [brk, entry] = entry.carried
@@ -742,23 +746,42 @@ class _Lexer:
         nested field) ends it; a spec's first segment ends that spec. Once
         recorded, an entry's text is not scanned again, so each character is
         read at most once more.
+
+        Returns the error to stop at, or None (3.13+ refuse a spec's break).
         """
         if len(literal.quote) != 1 or not features.fstring_fields_are_tokens():
-            return  # triple-quoted or escaped (\"), or 3.11
+            return None  # triple-quoted or escaped (\"), or 3.11
         src = self.src
+        refuses = features.single_quoted_spec_refuses_newline()
         if spec is not None and spec.newline is not None:
-            self._note_code(spec, start, end)
-            return
+            if not refuses:
+                self._note_code(spec, start, end)
+            return None
         entry = literal if spec is None or spec.nested else spec
         if entry.newline is not None:
-            return
+            return None
         # A backslash before the stop (\{) is the regex's stop too.
         at = _UNESCAPED_LINE_END_RE.match(src, start, end).end()
         if at == end or src[at] not in "\r\n":
-            return
+            return None
         entry.newline = at
-        if entry is spec:
+        root = self.stack[0]
+        first = not root.broken
+        root.broken = True
+        if entry is not spec:
+            return None
+        if not refuses:
             self._note_code(spec, at, end)
+            return None
+        # 3.13+ refuse only the earliest open break, which is the one the
+        # end of the source would report; past an earlier break CPython has
+        # already refused the literal as unterminated, and a source ending
+        # in it must still say so (_literal_eof_error). On 3.13+ every break
+        # stays open until the outermost literal closes (a literal's carries
+        # up, a field's is never the first), so the earliest is the first.
+        if not first:
+            return None
+        return self._error(_SPEC_NEWLINE_MSG.format(literal.kind), at, at + 1)
 
     def _note_code(self, spec, start, end):
         """3.12 reads a single-quoted literal's spec after its first line
@@ -798,7 +821,10 @@ class _Lexer:
                 self._escaped_error(escaped_in, literal.quote_start, literal.body)
             )
             return
-        self._note_line_break(literal, spec, self.pos, at)
+        error = self._note_line_break(literal, spec, self.pos, at)
+        if error is not None:
+            self._fail(error)
+            return
         if stop == "eof":
             self._eof()
             return
@@ -806,10 +832,7 @@ class _Lexer:
         kind = literal.kind
         if stop == "quote":
             if spec is not None:
-                # The literal ends inside a format spec.
-                self._fail(
-                    self._error(f"{kind}: expecting '}}'", spec.open, spec.open + 1)
-                )
+                self._fail(self._quote_in_spec_error(spec, at))
                 return
             end = at + len(literal.quote)
             quote = literal.quote.replace("\\", "")
@@ -832,6 +855,26 @@ class _Lexer:
             self._fail(self._error(f"{kind}: single '}}' is not allowed", at, at + 1))
         else:
             self._close_field(spec, at)
+
+    def _quote_in_spec_error(self, spec, at):
+        """The literal's closing quote, at ``at``, inside ``spec``'s format
+        spec.
+
+        3.12+ read the quote as a token where the field must end: "expecting
+        '}', or format specs" there, in any segment of the spec. 3.11 (whose
+        literal is one token) and the escaped literal keep "expecting '}'" at
+        the field's brace, as does a spec after its line break (3.12 reads
+        it as code; 3.13+ get here only behind an earlier break).
+        """
+        kind = spec.literal.kind
+        if (
+            features.fstring_fields_are_tokens()
+            and spec.literal.escaped_in is None
+            and spec.newline is None
+        ):
+            msg = f"{kind}: expecting '}}', or format specs"
+            return self._error(msg, at, at + len(spec.literal.quote))
+        return self._error(f"{kind}: expecting '}}'", spec.open, spec.open + 1)
 
     def _delimiter(self, field, at):
         """The end of a field's expression, at a ``}``, ``:`` or ``!`` outside

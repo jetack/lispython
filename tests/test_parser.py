@@ -1043,6 +1043,7 @@ class TestSourceEndingInALiteral:
             'f"{x:{y:a\n}',
             'f"ab{x:a\n}',
             'f"a\nb{x:c\n}',
+            'f"a\nb{x:c\n',
             'f"{x:a\n}{y:c\n',
             'f"{x:a\nb}',
             'f"{x:a\nb}c',
@@ -1084,6 +1085,8 @@ class TestSourceEndingInALiteral:
                     'f"{f"{x:a\n}"',
                     'f"{x:{f"{y:a\n}"}}',
                     'f"{f"a\nb"}{x:c\n}',
+                    'f"{f"a\nb{x:c\n}',
+                    'f"""a\n{f"b\nc{x:d\n}"',
                 ]
             ),
             *[
@@ -1233,6 +1236,88 @@ class TestSourceEndingInALiteral:
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
         monkeypatch.setattr(features, probe, lambda: value)
         assert error_position(parse, src) == errors[value]
+
+
+SPEC_REFUSES_NEWLINE = features.single_quoted_spec_refuses_newline()
+
+
+class TestQuoteOrLineBreakInFormatSpec:
+    """The literal's closing quote, or a single-quoted literal's line break,
+    inside a format spec: CPython's error on the running interpreter."""
+
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads the whole literal first")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            'f"ab{x:{y}"',
+            'f"{x:{y}z"',
+            'f"{x:a{y}b"',
+            'f"{x:a}b{y:c"',
+            'f"{x:ab"',
+            'f"{x:"',
+            'f"{x!r:"',
+            'f"{x!r:{y}"',
+            'f"{x:{y:a}"',
+            'f"{x:{y}}{z:"',
+            'f"""{x:{y}"""',
+            'f"""{x:a"""',
+            'f"{x:{y}" + 1',
+            'f"{x:{y:{z}}"',
+        ],
+    )
+    def test_the_closing_quote_in_a_spec_is_cpython_s(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @pytest.mark.skipif(
+        not SPEC_REFUSES_NEWLINE, reason="3.12 reads the spec after it as code"
+    )
+    @pytest.mark.parametrize(
+        "src",
+        [
+            'f"{x:ab\n}"',
+            'f"{x:\n}"',
+            'f"{x!r:a\nb}"',
+            'f"{x:{y:\n}}"',
+            'f"{x:ab\r}"',
+            'f"{x:ab\r\n}"',
+            'f"{x:ab\n"',
+            'f"{x:ab\n}" f"{"',
+            'f"{x:a\n}{1 1}"',
+            'f"{f"{x:a\n}"}"',
+            'f"{x:a\n{y}}"',
+            pytest.param(
+                't"{x:ab\n}"',
+                marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
+            ),
+        ],
+    )
+    def test_a_line_break_in_a_spec_is_refused_where_it_is(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    NEWLINE_IN_SPEC = TestSourceEndingInALiteral.NEWLINE_IN_SPEC
+
+    @pytest.mark.parametrize(
+        ["src", "at"],
+        [
+            ('f"{x:ab\n}"', (1, 8)),
+            ('f"{x:a\n}{1 1}"', (1, 7)),
+        ],
+    )
+    def test_3_13_refuses_a_spec_line_break(self, monkeypatch, src, at):
+        # 3.13's measured messages, on every interpreter.
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
+        monkeypatch.setattr(
+            features, "single_quoted_spec_refuses_newline", lambda: True
+        )
+        assert error_position(parse, src) == (self.NEWLINE_IN_SPEC, *at)
+
+    @pytest.mark.skipif(
+        not IN_PLACE or SPEC_REFUSES_NEWLINE, reason="3.12 accepts the break"
+    )
+    def test_3_12_accepts_a_closed_spec_line_break(self):
+        src = 'f"{x:ab\n}"'
+        compile(src, "<s>", "exec")
+        parse(src)
 
 
 class TestNumberLexingCost:
