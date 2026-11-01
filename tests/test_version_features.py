@@ -351,7 +351,7 @@ class TestTStringRefused:
                 "t-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
                 "z",
             ),
-            ('t"a{}"', "t-string: valid expression required before '}'", "{"),
+            ('t"a{}"', "t-string: valid expression required before '}'", "}"),
             ('t"a}"', "t-string: single '}' is not allowed", "}"),
         ],
     )

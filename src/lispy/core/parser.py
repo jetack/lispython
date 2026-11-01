@@ -140,14 +140,16 @@ _STRING_PREFIX_RE = re.compile("\\w*")
 # Where a string body scan has to look: an escape, a quote, and (in an f/t
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
+_INTERPOLATED_LINE_STOP = re.compile("[\\\\{}\"'\r\n]")
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 # A single-quoted body up to its first newline (LF or lone CR) no backslash
 # escapes (3.11's "detected at line"): a backslash escapes the next character,
 # or a whole \r\n (3.11 continues the line there). Possessive, so linear.
 _UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
-# What 3.12 skips between tokens after a spec's line break: whitespace, a
-# comment, a backslash before a line break.
-_CODE_BLANKS_RE = re.compile(r"(?:\s++|#[^\r\n]*+|\\(?:\r\n|\r|\n))*+")
+# What CPython's tokenizer skips between tokens (in a spec 3.12 reads as code,
+# _Lexer._code): whitespace, a comment, a backslash before a line break or the
+# end of the source.
+_CODE_BLANKS_RE = re.compile(r"(?:\s++|#[^\r\n]*+|\\(?:\r\n|\r|\n|\Z))*+")
 # CPython's, its kind both times: "t-string: ... single quoted t-strings".
 _SPEC_NEWLINE_MSG = (
     "{0}: newlines are not allowed in format specifiers for single quoted {0}s"
@@ -192,7 +194,7 @@ def _source_locator(src):
     return locate
 
 
-def scan_string_body(src, i, quote, raw, kind, spec=False):
+def scan_string_body(src, i, quote, raw, kind, spec=False, line_break=False):
     """The one scanner of string bodies: a plain string's whole body, and an
     f/t-string's literal text up to its next field, its end, or the end of a
     format spec.
@@ -201,7 +203,10 @@ def scan_string_body(src, i, quote, raw, kind, spec=False):
     text read (source text, escapes unprocessed, ``{{``/``}}`` collapsed),
     why it stopped, and where: ``"quote"`` at the closing quote, ``"field"``
     at a single ``{``, ``"close"`` at a single ``}``, ``"eof"`` at the end of
-    the source. For a plain string (``kind`` "string") braces are ordinary
+    the source, and with ``line_break`` (an f/t-string only) ``"line"`` at a
+    line break no backslash escapes (a backslash escapes a whole \\r\\n, and a
+    \\N{...} escape stops at a break in it, as ``_UNESCAPED_LINE_END_RE``
+    reads it). For a plain string (``kind`` "string") braces are ordinary
     characters. In a format spec (``spec``) no brace is doubled, as in
     CPython: every ``{`` opens a field and the first ``}`` ends the spec. A
     string reads as Python reads it, wherever it stands (a field included):
@@ -215,7 +220,13 @@ def scan_string_body(src, i, quote, raw, kind, spec=False):
     """
     escaped = quote[0] == "\\"
     interpolated = kind != "string"
-    stops = _INTERPOLATED_BODY_STOP if interpolated else _PLAIN_BODY_STOP
+    stops = (
+        _PLAIN_BODY_STOP
+        if not interpolated
+        else _INTERPOLATED_LINE_STOP
+        if line_break
+        else _INTERPOLATED_BODY_STOP
+    )
     n = len(src)
     buf = []
     while True:
@@ -236,9 +247,15 @@ def scan_string_body(src, i, quote, raw, kind, spec=False):
             elif escaped and src.startswith('\\"', i + 1):
                 buf.append('\\"')
                 i += 3
+            elif line_break and src.startswith("\r\n", i + 1):
+                buf.append(src[i : i + 3])
+                i += 3
             elif not raw and src.startswith("N{", i + 1):
                 close = src.find("}", i + 3)
                 close = n - 1 if close < 0 else close
+                if line_break:
+                    brk = _LINE_BREAK_RE.search(src, i + 3, close + 1)
+                    close = close if brk is None else brk.start() - 1
                 buf.append(src[i : close + 1])
                 i = close + 1
             elif interpolated and src[i + 1] in "{}":
@@ -255,6 +272,8 @@ def scan_string_body(src, i, quote, raw, kind, spec=False):
                 return ["".join(buf), "quote", i]
             buf.append(c)
             i += 1
+        elif c in "\r\n":
+            return ["".join(buf), "line", i]
         elif src.startswith(c, i + 1):
             if spec:
                 return ["".join(buf), "field" if c == "{" else "close", i]
@@ -293,17 +312,18 @@ class _LiteralState:
         # The first unescaped line break in its own text (single-quoted,
         # 3.12+): where CPython finds it unterminated (_Lexer._eof).
         self.newline = None
-        # [break, entry]: the earliest line break recorded on a field or
-        # literal that has closed inside this one (_carry_line_break).
+        # [break, literal]: the earliest line break recorded on a literal that
+        # has closed inside this one (_carry_line_break).
         self.carried = None
         # Outermost literal: whether a line break has been recorded in it
-        # (_note_line_break).
+        # (_note_line_break), so _literal_eof_error has one to find.
         self.broken = False
 
 
 class _FieldState:
     """A replacement field the lexer is inside: in its expression, or (once
-    ``spec`` is set) in its format spec."""
+    ``spec`` is set) in its format spec, read as literal text or (``code``)
+    as code."""
 
     __slots__ = (
         "literal",
@@ -315,11 +335,13 @@ class _FieldState:
         "record",
         "nested",
         "newline",
-        "code_at",
+        "in_code",
+        "code",
+        "piece_owed",
         "error",
     )
 
-    def __init__(self, literal, open_brace, record):
+    def __init__(self, literal, open_brace, record, in_code=False):
         self.literal = literal
         self.open = open_brace
         self.depth = 0  # brackets open in the expression
@@ -331,10 +353,16 @@ class _FieldState:
         self.record = record  # shared with the parser through the token
         self.nested = False  # a field has opened in its format spec
         # The first unescaped line break in its spec's first segment (before
-        # any nested field; single-quoted literal, 3.12+), and the first
-        # non-space spec character after it, which 3.12 reads as code.
+        # any nested field; single-quoted literal, 3.13+, _note_line_break).
         self.newline = None
-        self.code_at = None
+        # 3.12 reads a single-quoted literal's spec after a line break in its
+        # first segment as code (_code): ``code`` once the spec is there, and
+        # ``in_code`` for a field opened in such a spec, whose own spec is
+        # code from its ":". ``piece_owed``: the parser's spec needs a
+        # (empty) literal piece before the next field or the close.
+        self.in_code = in_code
+        self.code = False
+        self.piece_owed = False
         # An invalid conversion name, raised when the field closes where
         # CPython checks it only then (_conversion).
         self.error = None
@@ -352,8 +380,12 @@ class _Lexer:
     and fields), its ``}``, and the closing quote. So no character is read more
     than a bounded number of times however deep literals and fields nest, and
     every position is already absolute. A malformed literal is an "error"
-    token where it is found, and lexing stops there: the parser raises it when
-    it gets there, so errors come in source order.
+    token where it is found: the parser raises it when it gets there, so
+    errors come in source order. A tokenizer error (CPython's tokenizer
+    raises it) stops lexing there (``_fail``); after an error CPython's
+    parser raises (``_parser_level``) the lexer reads on as its tokenizer does
+    (``_misread``), so that a later tokenizer error can take its place
+    (``tokenizer_error_after``).
     """
 
     def __init__(self, src):
@@ -367,12 +399,17 @@ class _Lexer:
         # The deprecated escaped string's error, which stays ahead of every
         # version's own rule (whole_literal_error).
         self.escaped_error = None
+        # [error, outermost literal open or None] of the error lexing
+        # stopped at (_stop).
+        self.stopped = None
 
     def run(self):
         while not self.done:
             top = self.stack[-1] if self.stack else None
             if top is None or (isinstance(top, _FieldState) and not top.spec):
                 self._token(top)
+            elif isinstance(top, _FieldState) and top.code:
+                self._code(top)
             else:
                 self._body(top)
         return self.tokens
@@ -383,7 +420,7 @@ class _Lexer:
     def _error(self, msg, i, j):
         return LispyCompileError(msg, String('""', **self.locate(i, j)))
 
-    def _fail(self, error):
+    def _emit_error(self, error):
         position_info = {
             "lineno": error.lineno,
             "col_offset": error.offset - 1,
@@ -391,7 +428,47 @@ class _Lexer:
             "end_col_offset": error.end_offset - 1,
         }
         self.tokens.append([error.msg, "error", position_info, error])
+
+    def _stop(self, error):
+        """Lexing ends at ``error``, already emitted."""
+        self.stopped = [error, self.stack[0] if self.stack else None]
         self.done = True
+
+    def _fail(self, error):
+        self._emit_error(error)
+        self._stop(error)
+
+    def _misread(self, field, msg, i, j, resume):
+        """CPython's parser error ``msg`` at ``src[i:j]`` in ``field``, whose
+        text from ``resume`` its tokenizer then lexes as the field's
+        expression, as the lexer does next."""
+        self._emit_error(_parser_level(self._error(msg, i, j)))
+        field.spec = False
+        field.code = False
+        field.depth = 0
+        field.tail = None
+        self.pos = resume
+
+    def tokenizer_error_after(self, literal):
+        """The tokenizer error lexing stopped at, if CPython reports it in
+        place of a parser error raised in the outermost literal ``literal``
+        (a ``_LiteralState``), else None.
+
+        After a parser error CPython tokenizes the rest of the source, and
+        the first tokenizer error replaces the parser's if it is raised with
+        no f-string open (3.12+; ``_PyPegen_tokenize_full_source_to_check_
+        for_errors``). 3.11 lexes a whole literal as one string token, so
+        there the error is that of any token after ``literal``: a later
+        literal's only when its whole token never closes.
+        """
+        if self.stopped is None:
+            return None
+        [error, open_literal] = self.stopped
+        if open_literal is None:
+            return error
+        if features.fstring_fields_are_tokens() or open_literal is literal:
+            return None
+        return self.whole_literal_error(open_literal, error)
 
     def _token(self, field):
         """One token at the top level or in a field's expression."""
@@ -498,7 +575,7 @@ class _Lexer:
             # raises it after the prefix check.
             self._emit(text, quote, start, end, error)
             if error is not None:
-                self.done = True
+                self._stop(error)
                 return
             if escaped_in is not None:
                 self._deprecated(escaped_in, quote_start, body)
@@ -551,35 +628,34 @@ class _Lexer:
         or None.
 
         3.11: the outermost literal is unterminated. 3.12+: the earliest line
-        break recorded on a literal or field still open, or carried up to an
-        open literal from one closed in it, if it is an error.
+        break recorded in the text of a literal still open, or carried up to
+        one from a literal closed in it: that literal is unterminated there.
+        A spec's break is never one: 3.12 reads on after it as code (_code),
+        and 3.13+ refuse the earliest where it is recorded, so a later one
+        is behind an earlier literal break (_note_line_break).
+
+        Costs nothing until a break is recorded, and once one is, the first
+        caller stops lexing at its error.
         """
         if not self.stack:
             return None
         if not features.fstring_fields_are_tokens():
             return self._whole_literal_unterminated(self.stack[0])
+        if not self.stack[0].broken:
+            return None
         breaks = []
         for entry in self.stack:
-            if entry.newline is not None:
-                breaks.append([entry.newline, len(breaks), entry])
-            if isinstance(entry, _LiteralState) and entry.carried is not None:
-                breaks.append([entry.carried[0], len(breaks), entry.carried[1]])
-        for [at, _, entry] in sorted(breaks):
             if isinstance(entry, _LiteralState):
-                return self._unterminated(
-                    entry.kind, entry.quote, entry.start, entry.body, at
-                )
-            # Only 3.12 gets here: on 3.13+ a spec break sorting first was
-            # refused where it was recorded (_note_line_break).
-            kind = entry.literal.kind
-            if entry.code_at is not None:
-                # 3.12 has left the spec at the break, so this is no spec
-                # text but a token where the field must end.
-                at = entry.code_at
-                return self._error(
-                    f"{kind}: expecting '}}', or format specs", at, at + 1
-                )
-        return None
+                if entry.newline is not None:
+                    breaks.append([entry.newline, entry])
+                if entry.carried is not None:
+                    breaks.append(entry.carried)
+        if not breaks:
+            return None
+        [at, literal] = min(breaks, key=lambda brk: brk[0])
+        return self._unterminated(
+            literal.kind, literal.quote, literal.start, literal.body, at
+        )
 
     def whole_literal_error(self, literal, error):
         """3.11: the error that comes before ``error``, raised inside the
@@ -604,17 +680,11 @@ class _Lexer:
         return None if closes else self._whole_literal_unterminated(literal)
 
     def _carry_line_break(self, entry):
-        """``entry`` (a field or literal) is closing: its earliest recorded
-        line break, still CPython's error at the end of the source (CPython
-        stops at it), moves up to the literal it closes in."""
+        """The literal ``entry`` is closing: its earliest recorded line break,
+        still CPython's error at the end of the source (CPython stops at
+        it), moves up to the literal it closes in."""
         brk = entry.newline
-        # A field's spec break moves up only on 3.12 with code read after
-        # it (with none, the field closed on the break's line: no error). On
-        # 3.13+ (no code_at) a field closes with one only behind an earlier
-        # break, which stays open and is reported first.
-        if isinstance(entry, _FieldState) and entry.code_at is None:
-            return
-        if isinstance(entry, _LiteralState) and entry.carried is not None:
+        if entry.carried is not None:
             if brk is None or entry.carried[0] < brk:
                 [brk, entry] = entry.carried
         if brk is None or not self.stack:
@@ -635,15 +705,14 @@ class _Lexer:
         """3.12+: the error for where the source ends, the open literals'
         line breaks aside, or None where the tokenizer just stops and the
         parser's ``_check_all_closed`` reports the innermost bracket or field
-        still open as never closed (a field's expression)."""
+        still open as never closed (a field's expression, or a spec 3.12
+        reads as code)."""
         top = self.stack[-1]
-        if isinstance(top, _FieldState) and not top.spec:
+        if isinstance(top, _FieldState) and (not top.spec or top.code):
             return None
         [literal, spec] = (
             [top, None] if isinstance(top, _LiteralState) else [top.literal, top]
         )
-        if spec is not None and spec.newline is not None:
-            return None  # 3.12 reads the spec after its line break as code
         src = self.src
         # A backslash escaping the end of the source (or a final line break)
         # in a single-quoted spec's first segment runs the literal's text
@@ -743,19 +812,17 @@ class _Lexer:
         entry it ends, for ``_literal_eof_error``.
 
         A single-quoted literal's own text (its body, and a spec's after a
-        nested field) ends it; a spec's first segment ends that spec. Once
-        recorded, an entry's text is not scanned again, so each character is
-        read at most once more.
+        nested field) ends it; a spec's first segment ends that spec (3.13+:
+        3.12's scan stops before that break, _body). Once recorded, an
+        entry's text is not scanned again, so each character is read at most
+        once more.
 
         Returns the error to stop at, or None (3.13+ refuse a spec's break).
         """
         if len(literal.quote) != 1 or not features.fstring_fields_are_tokens():
             return None  # triple-quoted or escaped (\"), or 3.11
         src = self.src
-        refuses = features.single_quoted_spec_refuses_newline()
         if spec is not None and spec.newline is not None:
-            if not refuses:
-                self._note_code(spec, start, end)
             return None
         entry = literal if spec is None or spec.nested else spec
         if entry.newline is not None:
@@ -768,10 +835,7 @@ class _Lexer:
         root = self.stack[0]
         first = not root.broken
         root.broken = True
-        if entry is not spec:
-            return None
-        if not refuses:
-            self._note_code(spec, at, end)
+        if entry is not spec or not features.single_quoted_spec_refuses_newline():
             return None
         # 3.13+ refuse only the earliest open break, which is the one the
         # end of the source would report; past an earlier break CPython has
@@ -782,23 +846,6 @@ class _Lexer:
         if not first:
             return None
         return self._error(_SPEC_NEWLINE_MSG.format(literal.kind), at, at + 1)
-
-    def _note_code(self, spec, start, end):
-        """3.12 reads a single-quoted literal's spec after its first line
-        break as code: record the first token in ``src[start:end]`` there,
-        where the field must end (a nested field's "{" is the scan's stop).
-
-        ⚠️ Known 3.12 gap: a field nested after the break is lexed here as a
-        field, where 3.12 reads a set display, so a format spec in it
-        (f"{x:a\\n{y:b") does not give 3.12's error.
-        """
-        if spec.code_at is not None:
-            return
-        src = self.src
-        at = _CODE_BLANKS_RE.match(src, start, end).end()
-        # A backslash ending the source is a continuation too.
-        if at < end and not (src[at] == "\\" and at + 1 == len(src)):
-            spec.code_at = at
 
     def _body(self, top):
         """Literal text of an f/t-string, or of a field's format spec, up to
@@ -814,7 +861,15 @@ class _Lexer:
             literal.raw,
             literal.kind,
             spec is not None,
+            spec is not None and self._spec_ends_at_line_break(spec),
         )
+        if stop == "line":
+            # 3.12: the spec's text ends before the break, and what follows
+            # is code at the field's level.
+            self._emit(piece, "interpolated-middle", self.pos, at)
+            spec.code = True
+            self.pos = at
+            return
         escaped_in = literal.escaped_in
         if stop == "mixed" or (stop == "eof" and escaped_in is not None):
             self._fail(
@@ -847,14 +902,99 @@ class _Lexer:
         elif stop == "field":
             if spec is not None:
                 spec.nested = True
-            record = {}
-            self._emit("{", "field-start", at, at + 1, record)
-            self.stack.append(_FieldState(literal, at, record))
-            self.pos = at + 1
+            self._open_field(literal, at, False)
         elif spec is None:
             self._fail(self._error(f"{kind}: single '}}' is not allowed", at, at + 1))
         else:
             self._close_field(spec, at)
+
+    def _open_field(self, literal, at, in_code):
+        record = {}
+        self._emit("{", "field-start", at, at + 1, record)
+        self.stack.append(_FieldState(literal, at, record, in_code))
+        self.pos = at + 1
+
+    def _spec_ends_at_line_break(self, spec):
+        """Whether ``spec``'s text ends at a line break (no backslash before
+        it) in its first segment: 3.12 in a single-quoted literal, whose
+        tokenizer returns there to the field's code (_code)."""
+        return (
+            not spec.nested
+            and len(spec.literal.quote) == 1
+            and features.spec_line_break_returns_to_code()
+        )
+
+    def _code(self, field):
+        """A format spec 3.12 reads as code: after a line break in its first
+        segment (``_body``), or a field's spec opened there (``in_code``).
+
+        CPython's tokenizer is in regular mode at the field's level there:
+        it skips blanks (``_CODE_BLANKS_RE``), a ``}`` closes the field, and
+        a ``{`` opens a field whose expression and conversion lex as usual
+        and whose own spec is code too (it never returns to spec text). Any
+        other token is a parser error, after which the field reads on as an
+        expression; the tokenizer's own errors at that token stop lexing,
+        and an earlier line break it stopped at comes first. The spec's value
+        is its text before the break and its fields, so the parser is given
+        an empty piece of text before each field and the close.
+        """
+        src = self.src
+        at = _CODE_BLANKS_RE.match(src, self.pos).end()
+        self.pos = at
+        if at == len(src):
+            self._eof()
+            return
+        c = src[at]
+        if c in "{}":
+            if field.piece_owed:
+                self._emit("", "interpolated-middle", at, at)
+            field.piece_owed = True
+            if c == "}":
+                self._close_field(field, at)
+            else:
+                self._open_field(field.literal, at, True)
+            return
+        error = self._literal_eof_error() or self._code_token_error(at)
+        if error is not None:
+            self._fail(error)
+            return
+        kind = field.literal.kind
+        msg = f"{kind}: expecting '}}', or format specs"
+        self._misread(field, msg, at, at + 1, at)
+
+    def _code_token_error(self, at):
+        """The tokenizer's error at a token ``_code`` meets at ``at``, or
+        None: a backslash before anything but a line break, a closing bracket
+        with none open, or a plain string that never closes."""
+        src = self.src
+        c = src[at]
+        if c == "\\":
+            msg = "unexpected character after line continuation character"
+            return self._error(msg, at + 1, at + 2)
+        if c in ")]":
+            kind = self.stack[-1].literal.kind
+            return self._error(f"{kind}: unmatched '{c}'", at, at + 1)
+        name_end = _STRING_PREFIX_RE.match(src, at).end()
+        if not src.startswith(('"', "'"), name_end):
+            return None
+        name = src[at:name_end]
+        if name and _string_prefix_kind(name) != "string":
+            return None  # a name, or an f/t-string opening: the parser's
+        return self._unclosed_string_error(at, name_end)
+
+    def _unclosed_string_error(self, start, quote_at):
+        """The error of the plain string at ``start`` (its quote at
+        ``quote_at``) if it never closes, else None."""
+        src = self.src
+        quote = src[quote_at] * 3
+        if not src.startswith(quote, quote_at):
+            quote = src[quote_at]
+        body = quote_at + len(quote)
+        raw = "r" in src[start:quote_at].lower()
+        [_, stop, _] = scan_string_body(src, body, quote, raw, "string")
+        if stop == "quote":
+            return None
+        return self._literal_eof_error() or self._string_eof_error(start, quote, body)
 
     def _quote_in_spec_error(self, spec, at):
         """The literal's closing quote, at ``at``, inside ``spec``'s format
@@ -863,8 +1003,8 @@ class _Lexer:
         3.12+ read the quote as a token where the field must end: "expecting
         '}', or format specs" there, in any segment of the spec. 3.11 (whose
         literal is one token) and the escaped literal keep "expecting '}'" at
-        the field's brace, as does a spec after its line break (3.12 reads
-        it as code; 3.13+ get here only behind an earlier break).
+        the field's brace, as does a 3.13+ spec after its line break (only
+        behind an earlier break; 3.12 reads the spec after it as code).
         """
         kind = spec.literal.kind
         if (
@@ -899,6 +1039,9 @@ class _Lexer:
         )
         if debug:
             self._drop_debug_equals(field, last - 1)
+        # Where CPython places an empty expression's error: at the "=" of
+        # {x=}, else at the delimiter.
+        delimiter = last - 1 if debug else at
         self._emit(
             src[at],
             "field-expression-end",
@@ -909,6 +1052,7 @@ class _Lexer:
                 "end": at,
                 "debug": last - 1 if debug else None,  # the "=" of {x=}
                 "echo": self.locate(expr_start, at),
+                "delimiter": self.locate(delimiter, delimiter + 1),
             },
         )
         if src[at] == "}":
@@ -923,12 +1067,15 @@ class _Lexer:
                 return
         self._emit(":", "field-spec-start", at, at + 1)
         field.spec = True
+        if field.in_code:
+            field.code = True
+            field.piece_owed = True
         self.pos = at + 1
 
     def _conversion(self, field, bang):
         """The ``!conv`` at ``bang``: emits its token and returns the index of
-        the ``}`` or ``:`` after it, or stops (failing or not) and returns
-        None.
+        the ``}`` or ``:`` after it, or returns None where lexing goes on
+        elsewhere (stopped, or reading the field's expression again).
 
         CPython lexes the text after ``!`` as ordinary tokens, skipping
         whitespace and backslash continuations, so a name glued to a quote
@@ -937,7 +1084,10 @@ class _Lexer:
         invalid name is refused where it is read where
         ``conversion_name_checked_first``; elsewhere only once its field has
         closed (``_close_field``), so an error or the end of the source in
-        its format spec comes first.
+        its format spec comes first. Each of these errors is its parser's,
+        so its tokenizer reads on: past a misplaced token as the field's
+        expression (``_misread``), past a missing or invalid name as if it
+        were valid.
         """
         src = self.src
         n = len(src)
@@ -951,7 +1101,7 @@ class _Lexer:
             prefix = _string_prefix_kind(name)
             if prefix == "interpolated":
                 msg = f"{kind}: invalid conversion character"
-                self._fail(self._error(msg, name_start, name_end))
+                self._misread(field, msg, name_start, name_end, name_start)
                 return None
             if prefix == "string":
                 return self._conversion_string(field, name_start, name_end, False)
@@ -959,17 +1109,17 @@ class _Lexer:
         if name:
             if name_start > bang + 1:
                 msg = "conversion type must come right after the exclamation mark"
-                self._fail(self._error(f"{kind}: {msg}", bang, bang + 1))
+                self._misread(field, f"{kind}: {msg}", bang, bang + 1, name_start)
                 return None
             if name not in conversion_dict:
                 msg = (
                     f"{kind}: invalid conversion character {name!r}: "
                     "expected 's', 'r', or 'a'"
                 )
-                error = self._error(msg, name_start, name_end)
+                error = _parser_level(self._error(msg, name_start, name_end))
                 if features.conversion_name_checked_first():
-                    self._fail(error)
-                    return None
+                    self._emit_error(error)
+                    error = None
             rest = self._skip_blanks(name_end)
         else:
             rest = name_start
@@ -986,13 +1136,13 @@ class _Lexer:
             return None
         if src[rest] not in "}:":
             msg = "expecting ':' or '}'" if name else "invalid conversion character"
-            self._fail(self._error(f"{kind}: {msg}", rest, rest + 1))
+            self._misread(field, f"{kind}: {msg}", rest, rest + 1, rest)
             return None
         if not name:
+            # CPython's parser places it at the token after the "!".
             msg = f"{kind}: missing conversion character"
-            self._fail(self._error(msg, bang, bang + 1))
-            return None
-        if error is None:
+            self._emit_error(_parser_level(self._error(msg, rest, rest + 1)))
+        elif name in conversion_dict:
             self._emit(src[bang:name_end], "field-conversion", bang, name_end, name)
         else:
             field.error = error
@@ -1001,22 +1151,16 @@ class _Lexer:
     def _conversion_string(self, field, start, quote_at, named):
         """A plain string at ``start`` (its quote at ``quote_at``) where a
         conversion name is read (``named``: after one). Unterminated, it is
-        the end of the source in a string (``_string_eof_error``); closed,
-        no conversion can follow it there."""
-        src = self.src
-        quote = src[quote_at] * 3
-        if not src.startswith(quote, quote_at):
-            quote = src[quote_at]
-        body = quote_at + len(quote)
-        raw = "r" in src[start:quote_at].lower()
-        [_, stop, _] = scan_string_body(src, body, quote, raw, "string")
-        if stop != "quote":
-            error = self._literal_eof_error()
-            self._fail(error or self._string_eof_error(start, quote, body))
+        the end of the source in a string (``_unclosed_string_error``);
+        closed, no conversion can follow it there, and the field's expression
+        reads on at it."""
+        error = self._unclosed_string_error(start, quote_at)
+        if error is not None:
+            self._fail(error)
             return None
         kind = field.literal.kind
         msg = "expecting ':' or '}'" if named else "invalid conversion character"
-        self._fail(self._error(f"{kind}: {msg}", start, start + 1))
+        self._misread(field, f"{kind}: {msg}", start, start + 1, start)
         return None
 
     def _skip_blanks(self, i):
@@ -1055,12 +1199,11 @@ class _Lexer:
 
     def _close_field(self, field, at):
         if field.error is not None:
-            self._fail(field.error)
-            return
+            self._emit_error(field.error)
+            field.error = None
         self._emit("}", "field-end", at, at + 1)
         field.record["end"] = self.locate(at + 1)
         self.stack.pop()
-        self._carry_line_break(field)
         self.pos = at + 1
 
 
@@ -1070,11 +1213,12 @@ def tokenize(src):
     ``extra`` is the error of a malformed plain string, the data of an f/t
     string's own tokens, else None. A "deprecated" token (its text the
     message, placed where the parser warns) follows a deprecated spelling's
-    last token. An "error" token (placed at the error,
-    which is its ``extra``) ends the tokens of a source the lexer cannot read
-    on; otherwise they run to the end of the source, however deep f/t-strings
-    and their fields nest (the lexer has no limit of its own), in time and
-    memory linear in its length.
+    last token. An "error" token (placed at the error, which is its
+    ``extra``) is a malformed f/t-string: a tokenizer error ends the tokens,
+    a parser-level one (``_parser_level``) is followed by the rest. They run
+    to the end of the source otherwise, however deep f/t-strings and their
+    fields nest (the lexer has no limit of its own), in time and memory
+    linear in its length.
     """
     return deque(_Lexer(src).run())
 
@@ -1218,8 +1362,10 @@ def _parse_into(src, rst):
     so any nesting parses in one pass with no recursion.
 
     On 3.11 an error inside an f/t-string whose whole token never closes is
-    that token's error instead (``_Lexer.whole_literal_error``), asked only
-    here, on the error path.
+    that token's error instead (``_Lexer.whole_literal_error``), and a
+    parser-level f/t-string error gives way to a tokenizer error after it
+    (``_Lexer.tokenizer_error_after``): both asked only here, on the error
+    path.
     """
     lexer = _Lexer(src)
     tokens = deque(lexer.run())
@@ -1228,9 +1374,11 @@ def _parse_into(src, rst):
         _parse_tokens(src, tokens, stack, rst)
     except LispyCompileError as raised:
         outer = next((e for e in stack if isinstance(e, _Interpolated)), None)
-        error = (
-            None if outer is None else lexer.whole_literal_error(outer.lexed, raised)
-        )
+        error = None
+        if outer is not None:
+            error = lexer.whole_literal_error(outer.lexed, raised)
+            if error is None and getattr(raised, "parser_level", False):
+                error = lexer.tokenizer_error_after(outer.lexed)
         if error is None:
             raise
         raise error from None
@@ -1521,8 +1669,18 @@ def _string_prefix_kind(prefix):
 _DEBUG_BLOCKERS = "=!<>:+-*/%&|^@~"
 
 
+def _parser_level(error):
+    """Mark ``error`` (an f/t-string's) as one CPython's parser raises, not
+    its tokenizer: CPython then tokenizes the rest of the source, and a
+    tokenizer error there can take its place (``_parse_into``)."""
+    error.parser_level = True
+    return error
+
+
 def _interpolation_error(kind, msg, position_info):
-    return LispyCompileError(f"{kind}: {msg}", String('""', **position_info))
+    return _parser_level(
+        LispyCompileError(f"{kind}: {msg}", String('""', **position_info))
+    )
 
 
 class _Interpolated:
@@ -1619,18 +1777,22 @@ class _Field:
         self.list.append(node)
 
     def end_expression(self, src, data):
+        if not self.list:
+            delimiter = "=" if data["debug"] is not None else src[data["end"]]
+            raise _interpolation_error(
+                self.owner.kind,
+                f"valid expression required before {delimiter!r}",
+                data["delimiter"],
+            )
         if len(self.list) != 1:
             position_info = {**self.position_info}
             end = self.record.get("end")
             if end is not None:
                 position_info["end_lineno"] = end["lineno"]
                 position_info["end_col_offset"] = end["col_offset"]
-            delimiter = "=" if data["debug"] is not None else src[data["end"]]
             raise _interpolation_error(
                 self.owner.kind,
-                f"valid expression required before {delimiter!r}"
-                if not self.list
-                else "expecting a single expression in a replacement field",
+                "expecting a single expression in a replacement field",
                 position_info,
             )
         [self.value] = self.list
