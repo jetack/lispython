@@ -1043,6 +1043,7 @@ class TestSourceEndingInALiteral:
             'f"{x:{y:a\n}',
             'f"ab{x:a\n}',
             'f"a\nb{x:c\n}',
+            'f"a\nb{x:c\n',
             'f"{x:a\n}{y:c\n',
             'f"{x:a\nb}',
             'f"{x:a\nb}c',
@@ -1084,6 +1085,8 @@ class TestSourceEndingInALiteral:
                     'f"{f"{x:a\n}"',
                     'f"{x:{f"{y:a\n}"}}',
                     'f"{f"a\nb"}{x:c\n}',
+                    'f"{f"a\nb{x:c\n}',
+                    'f"""a\n{f"b\nc{x:d\n}"',
                 ]
             ),
             *[
@@ -1298,11 +1301,6 @@ class TestQuoteOrLineBreakInFormatSpec:
         [
             ('f"{x:ab\n}"', (1, 8)),
             ('f"{x:a\n}{1 1}"', (1, 7)),
-            # Behind a lispython multi-line literal, which CPython refuses
-            # as unterminated, the break is refused once that literal
-            # closes (a source ending in it reports the literal).
-            ('f"a\nb{x:c\n}"', (2, 6)),
-            ('f"a\nb{x:c\n"', (2, 6)),
         ],
     )
     def test_3_13_refuses_a_spec_line_break(self, monkeypatch, src, at):
