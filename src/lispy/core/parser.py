@@ -138,10 +138,14 @@ _STRING_PREFIX_RE = re.compile("\\w*")
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
-# A single-quoted body up to its first newline no backslash escapes (3.11's
+# A single-quoted body up to its first newline (LF or lone CR) no backslash escapes (3.11's
 # "detected at line"): a backslash escapes the next character, or a whole
 # \r\n (3.11 continues the line there). Possessive, so linear.
-_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\n]++|\\\r\n|\\.)*+", re.DOTALL)
+_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
+
+
+# CPython ends a line at LF, CRLF (one break) or a lone CR.
+_LINE_BREAK_RE = re.compile("\r\n|\r|\n")
 
 
 def _source_locator(src):
@@ -152,7 +156,7 @@ def _source_locator(src):
     a literal with many fields quadratic.
     """
     line_starts = [0]
-    line_starts.extend(m.end() for m in re.finditer("\n", src))
+    line_starts.extend(m.end() for m in _LINE_BREAK_RE.finditer(src))
     line_starts.append(len(src) + 1)
     # [line, its start, the next line's start] of the last position: tokens
     # come in order, so most lookups stay on that line.
@@ -487,8 +491,8 @@ class _Lexer:
         if len(outer.quote) == 1:
             # A backslash pairs with the next character, raw or not.
             end = _UNESCAPED_LINE_END_RE.match(src, outer.body).end()
-        if end == len(src) and src.endswith("\n") and not src.endswith("\r\n"):
-            end -= 1  # 3.11: a final \n starts no line, a final \r\n does
+        if end == len(src) and src.endswith(("\n", "\r")) and not src.endswith("\r\n"):
+            end -= 1  # 3.11: a final \n or lone \r starts no line, a final \r\n does
         line = self.locate(end)["lineno"]
         triple = "triple-quoted " if len(outer.quote) == 3 else ""
         self._fail(

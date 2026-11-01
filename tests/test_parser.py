@@ -735,6 +735,10 @@ class TestSourceEndingInAFieldExpression:
             ('f"""{x\r\n y\r\n', None),
             ('f"ab\\\r\n{x', None),
             ('rf"a\\\n{x\n', None),
+            # A lone CR ends a line too (CRLF is one break).
+            ('f"a\\\r{x', None),
+            ('f"""{x\r y\r', None),
+            ('f"""{x\r\n\r\r\n \r', None),
             pytest.param(
                 'f"{f"{(',
                 None,
@@ -765,6 +769,9 @@ class TestSourceEndingInAFieldExpression:
             "final-crlf",
             "backslash-crlf",
             "raw-backslash-newline",
+            "backslash-lone-cr",
+            "triple-lone-cr",
+            "mixed-breaks",
             "nested-literal",
             "t-string",
         ],
@@ -852,6 +859,17 @@ class TestSourceEndingInAFieldExpression:
         # Both branches on every interpreter: CPython's measured messages.
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: in_place)
         assert error_position(parse, src) == errors[in_place]
+
+    def test_3_11_ends_an_unescaped_string_line_at_a_lone_cr(self, monkeypatch):
+        # Measured on 3.11's compile(): the line ends at the CR, so it is line
+        # 1 (a backslash-CR continues it, which the CPython-oracle test covers).
+        # Pins the body regex together with the locator's CR counting.
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
+        assert error_position(parse, 'f"ab\r{x') == (
+            "unterminated string literal (detected at line 1)",
+            1,
+            1,
+        )
 
 
 class TestNumberLexingCost:

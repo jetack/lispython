@@ -16,6 +16,12 @@ follows [Semantic Versioning](https://semver.org/).
 - `(raise)` compiles to a bare `raise`, re-raising the exception being
   handled.
 
+### Fixed
+
+- Error positions count a lone CR as a line break, as CPython does (CRLF is
+  one break), so a source with CR line endings reports the same line as
+  `compile()`.
+
 ### Deprecated
 
 - Writing a string in an f/t-string replacement field with `\"`
