@@ -451,14 +451,12 @@ class TestFormatSpecChains:
         [
             # Not the closing quote: a string where the name should be.
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
-            ('f"""{x!""', "f-string: invalid conversion character", (1, 8)),
             # The conversion slot is no body text: a closed escaped literal
             # with a string there is the same error, not the quote mix.
             (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
         ],
         ids=[
             "string-in-triple",
-            "quotes-in-triple",
             "escaped-literal-string",
         ],
     )
@@ -961,6 +959,41 @@ class TestSourceEndingInALiteral:
             'f"{x!z\\',
             'f"{x!z:',
             'f"{x!z:{y',
+            # A backslash escaping the end of the source in a spec.
+            'f"{x:a\\',
+            'f"{x:\\',
+            'f"{x:\\\n',
+            'f"{x:\\\r\n',
+            'f"{x:a\\\r',
+            'rf"{x:a\\',
+            'f"{x!r:\\',
+            'f"{x:{y:a\\',
+            'f"{x:a\\\n',
+            'f"{x:a\\\nb\\',
+            'f"{x:a\\\nb',
+            'f"{x:a\\\nb\n',
+            'f"{x:a\\b',
+            'f"{x:a\\\\',
+            # After a spec's line break 3.12 skips comments and continuations.
+            'f"{x:a\n#c',
+            'f"{x:a\n\\',
+            'f"{x:a\n\\\n',
+            'f"{x:a\n#c\nb',
+            'f"{x:a\n\\\nb',
+            # An error inside a literal 3.11 finds unterminated as a whole.
+            'f"{x! z:',
+            'f"{x!z}',
+            'f"{x!z}a\nb',
+            'f"{x!r ;',
+            'f"{x!r (',
+            'f"{x!r=',
+            'f"{x!z (',
+            'f"{x! z',
+            'f"a}',
+            'f"""a}',
+            'f"a}\nb"',
+            'f"a\\"}',
+            'f"""{x!""',
             *_read_on_3_12_plus(
                 [
                     'f"{(b"a',
@@ -989,12 +1022,6 @@ class TestSourceEndingInALiteral:
                     'f"{x! "',
                     'f"{x!\n"',
                     'f"{x} {"',
-                    # 3.11 lexes the whole literal before its fields.
-                    'f"{x! z:',
-                    'f"{x!z}',
-                    'f"{x!r ;',
-                    'f"{x!r (',
-                    'f"{x!z (',
                 ]
             ),
             *[
@@ -1023,6 +1050,43 @@ class TestSourceEndingInALiteral:
     )
     def test_a_closed_field_s_conversion_is_cpython_s(self, src):
         assert error_position(parse, src) == _python_error_position_spelled(src)
+
+    @pytest.mark.parametrize(
+        ["src", "triple"],
+        [
+            ('f"{}', ""),
+            ('f"{x!}', ""),
+            ('f"{a b}', ""),
+            ('f"{x!z:{y!q}}', ""),
+            ("f'''{}", "triple-quoted "),
+        ],
+    )
+    def test_3_11_reports_an_unclosed_whole_literal_first(
+        self, monkeypatch, src, triple
+    ):
+        # Measured on 3.11's compile(): the error inside (an empty field, a
+        # missing conversion, ...) never comes. The 3.11 branch runs on
+        # every interpreter, whose own columns for those errors differ.
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
+        assert error_position(parse, src) == (
+            f"unterminated {triple}string literal (detected at line 1)",
+            1,
+            1,
+        )
+
+    def test_3_11_reads_inside_a_literal_its_token_closes(self, monkeypatch):
+        # 3.11's token ends at the first same quote, so the error inside
+        # stands (a single "}" is one on every interpreter).
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
+        with pytest.raises(LispyCompileError) as info:
+            parse('f"a}"')
+        assert info.value.msg == "f-string: single '}' is not allowed"
+
+    def test_a_spec_newline_error_exists_only_where_fields_are_tokens(self):
+        # 3.11 refuses the probe's text too, as an unterminated string.
+        assert features.fstring_fields_are_tokens() or not (
+            features.single_quoted_spec_refuses_newline()
+        )
 
     NEWLINE_IN_SPEC = (
         "f-string: newlines are not allowed in format specifiers for single "

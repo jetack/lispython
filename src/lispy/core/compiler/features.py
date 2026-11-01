@@ -94,8 +94,12 @@ def single_quoted_spec_refuses_newline():
     """Whether a line break in a single-quoted f-string's format spec is an
     error of its own: "newlines are not allowed in format specifiers for
     single quoted f-strings" (3.13+). 3.12 accepts one; there the text after
-    it is read as the field's code."""
-    return _compile_error('f"{x:\n}"') is not None
+    it is read as the field's code. (3.11 refuses the probe as an
+    unterminated string, hence the message check.)"""
+    error = _compile_error('f"{x:\n}"')
+    return error is not None and error.msg.startswith(
+        "f-string: newlines are not allowed"
+    )
 
 
 @functools.cache
