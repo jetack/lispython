@@ -141,7 +141,7 @@ _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 # A single-quoted body up to its first newline no backslash escapes (3.11's
 # "detected at line"): a backslash escapes the next character, or a whole
 # \r\n (3.11 continues the line there). Possessive, so linear.
-_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\n]++|\\\r\n|\\.)*+", re.DOTALL)
+_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
 
 
 # CPython ends a line at LF, CRLF (one break) or a lone CR.
@@ -491,8 +491,8 @@ class _Lexer:
         if len(outer.quote) == 1:
             # A backslash pairs with the next character, raw or not.
             end = _UNESCAPED_LINE_END_RE.match(src, outer.body).end()
-        if end == len(src) and src.endswith("\n") and not src.endswith("\r\n"):
-            end -= 1  # 3.11: a final \n starts no line, a final \r\n does
+        if end == len(src) and src.endswith(("\n", "\r")) and not src.endswith("\r\n"):
+            end -= 1  # 3.11: a final \n or lone \r starts no line, a final \r\n does
         line = self.locate(end)["lineno"]
         triple = "triple-quoted " if len(outer.quote) == 3 else ""
         self._fail(

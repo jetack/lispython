@@ -861,6 +861,17 @@ class TestSourceEndingInAFieldExpression:
         assert error_position(parse, src) == errors[in_place]
 
 
+    def test_3_11_ends_an_unescaped_string_line_at_a_lone_cr(self, monkeypatch):
+        # Measured on 3.11's compile(): the line ends at the CR, so it is line
+        # 1 (a backslash-CR continues it, which the CPython-oracle test covers).
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
+        assert error_position(parse, 'f"ab\r{x') == (
+            "unterminated string literal (detected at line 1)",
+            1,
+            1,
+        )
+
+
 class TestNumberLexingCost:
     """A long digit run that is not a number costs time linear in its length."""
 
