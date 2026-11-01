@@ -229,7 +229,7 @@ class TestCommentEndsAtAnyLineBreak:
     )
     def test_error_lines_count_the_lone_cr(self, src, msg, lineno):
         with pytest.raises(SyntaxError) as info:
-            compile(src, "<s>", "exec")
+            compile(src.replace(";", "#", 1), "<s>", "exec")
         assert (info.value.msg, info.value.lineno) == (msg, lineno)
         with pytest.raises(LispyCompileError) as ours:
             parse(src)
