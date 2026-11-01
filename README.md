@@ -31,6 +31,8 @@ uv sync # install dependencies
 uv pip install -e . # for development
 ```
 
+Contributors using git worktrees: run `git config core.hooksPath .githooks` once in the main checkout; see [`.githooks/README.md`](.githooks/README.md).
+
 ## How to Run LisPython code
 ### Run from source
 ```bash
