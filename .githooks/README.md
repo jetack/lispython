@@ -16,7 +16,9 @@ Run in the main checkout:
 git config core.hooksPath .githooks
 ```
 
-This is local config and is not tracked. Run `git worktree add` from a checkout root, because a relative `hooksPath` resolves against the current directory.
+⚠️ This replaces `.git/hooks`: any hook installed there (for example by an earlier `pre-commit install`) stops running.
+
+This is local config and is not tracked. git looks for the hook relative to the root of the checkout you run `git worktree add` from, and runs the copy inside the new worktree. A worktree of a commit older than the hook's introduction has no `.githooks/post-checkout`, so it is not provisioned (and the catch-up command below is unavailable there).
 
 A worktree created before activation can be provisioned from inside it:
 
@@ -29,9 +31,9 @@ A worktree created before activation can be provisioned from inside it:
 With `core.hooksPath` set, git never reads `.git/hooks`, and `pre-commit install` refuses to run. The supported way to run the pre-commit framework is a tracked `.githooks/pre-commit` shim that calls `pre-commit run`, for example:
 
 ```bash
-exec uv run --frozen pre-commit run --hook-stage pre-commit
+exec uv run --frozen --extra dev pre-commit run --hook-stage pre-commit
 ```
 
-(or `pre-commit` from the active venv). Never run `pre-commit install`.
+pre-commit is in the `dev` extra, so `uv run` needs `--extra dev` to provide it. (Or use `pre-commit` from the active venv.) Never run `pre-commit install`.
 
 No such shim exists yet, so commits currently run no pre-commit checks.

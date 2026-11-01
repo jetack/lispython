@@ -31,7 +31,7 @@ uv sync # install dependencies
 uv pip install -e . # for development
 ```
 
-Contributors using git worktrees: run `git config core.hooksPath .githooks` once in the main checkout; see [`.githooks/README.md`](.githooks/README.md).
+Contributors using git worktrees: run `git config core.hooksPath .githooks` once in the main checkout; see [`.githooks/README.md`](.githooks/README.md). This replaces `.git/hooks`, so hooks installed there stop running.
 
 ## How to Run LisPython code
 ### Run from source
