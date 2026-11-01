@@ -86,6 +86,10 @@ follows [Semantic Versioning](https://semver.org/).
   error. A name glued to a quote after `!` reads as a string prefix (`!r"`),
   and an invalid conversion name is reported at the name, after any error in
   its field's format spec where CPython checks it only once the field closes.
+- An f/t-string's closing quote inside a format spec (`f"{x:{y}"`) reports
+  CPython 3.12+'s "expecting '}', or format specs" at the quote, and on
+  3.13+ a line break in a single-quoted literal's format spec is refused
+  even when the field then closes (`f"{x:ab\n}"`), as CPython does.
 - Error positions count a lone CR as a line break, as CPython does (CRLF is
   one break), so a source with CR line endings reports the same line as
   `compile()`.
