@@ -51,6 +51,9 @@ _META_CHARS = "(?:'|`|~@|~)"
 # (so a comment needs no space before it: a;c is the symbol a), a quote
 # followed by it quotes nothing, and ~ followed by it is the symbol ~.
 _FORM_END = "\\s\\)\\}\\],;"
+# The characters CPython ends a line at (LF, CR; CRLF is one break of both).
+# A comment stops at either; a lone CR is skipped between tokens like a tab.
+_LINE_BREAK_CHARS = "\\r\\n"
 # What ends a symbol token.
 _SYMBOL_STOP = _FORM_END + '\\"\\['
 
@@ -90,9 +93,9 @@ def _token_patterns(in_field, field_level=False):
     # character, hundreds of MB for a long symbol or comment.
     if field_level:
         char = f"[^{_SYMBOL_STOP}\\\\:!]|!(?==)"
-        comment_char = "[^\\n}:!]|!(?==)"
+        comment_char = f"[^{_LINE_BREAK_CHARS}}}:!]|!(?==)"
     else:
-        [char, comment_char] = [f"[^{_SYMBOL_STOP}\\\\]", "[^\\n]"]
+        [char, comment_char] = [f"[^{_SYMBOL_STOP}\\\\]", f"[^{_LINE_BREAK_CHARS}]"]
     return [
         [_WRAPPER + _OPENING, "opening"],
         ["[\\)\\}\\]]", "closing"],

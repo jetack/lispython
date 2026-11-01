@@ -75,6 +75,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A comment ends at a lone CR as at LF and CRLF, as in CPython. A CR-only
+  source (`; c\r(f 1)`) used to lose every form after a comment.
 - A source ending inside a string, an f/t-string, a format spec or a
   conversion reports the error `compile()` raises for that text on the
   running Python: "unterminated ... literal (detected at line N)" at the

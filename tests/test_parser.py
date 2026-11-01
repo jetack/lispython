@@ -210,6 +210,42 @@ class TestSemicolonEndsToken:
         assert (info.value.lineno, info.value.offset) == (1, 9)
 
 
+class TestCommentEndsAtAnyLineBreak:
+    """CPython ends a comment at LF, CRLF or a lone CR."""
+
+    @pytest.mark.parametrize("brk", ["\n", "\r\n", "\r"])
+    def test_the_form_after_a_comment_is_kept(self, brk):
+        assert repr(parse(f"; c{brk}(f 1)")) == "[Paren(Sym(f), Const('1'))]"
+
+    def test_a_comment_in_a_field_ends_at_a_lone_cr(self):
+        assert str(parse('f"{(f x ;c\r y)}"')[0].list[2].value) == "(f x y)"
+
+    @pytest.mark.parametrize("brk", ["\n", "\r\n", "\r"])
+    def test_a_comment_at_a_fields_own_level_ends_at_any_line_break(self, brk):
+        # Not in brackets: the comment ends at the break, leaving a second
+        # expression, as CPython reports.
+        with pytest.raises(LispyCompileError) as info:
+            parse(f'f"""{{x ;c{brk} y}}"""')
+        assert info.value.msg == (
+            "f-string: expecting a single expression in a replacement field"
+        )
+
+    @pytest.mark.parametrize(
+        ["src", "msg", "lineno"],
+        [
+            ("; c\r(f 1", "'(' was never closed", 2),
+            ("; c\r(f 1)\r)", "unmatched ')'", 3),
+        ],
+    )
+    def test_error_lines_count_the_lone_cr(self, src, msg, lineno):
+        with pytest.raises(SyntaxError) as info:
+            compile(src.replace(";", "#", 1), "<s>", "exec")
+        assert (info.value.msg, info.value.lineno) == (msg, lineno)
+        with pytest.raises(LispyCompileError) as ours:
+            parse(src)
+        assert (ours.value.msg, ours.value.lineno) == (msg, lineno)
+
+
 class TestDanglingQuote:
     """A quote, quasiquote or unquote-splice (wrapped or not) with no form
     right after it is refused at the token, never a symbol, a quote of the
