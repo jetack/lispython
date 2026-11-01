@@ -735,6 +735,10 @@ class TestSourceEndingInAFieldExpression:
             ('f"""{x\r\n y\r\n', None),
             ('f"ab\\\r\n{x', None),
             ('rf"a\\\n{x\n', None),
+            # A lone CR ends a line too (CRLF is one break).
+            ('f"a\\\r{x', None),
+            ('f"""{x\r y\r', None),
+            ('f"""{x\r\n\r\r\n \r', None),
             pytest.param(
                 'f"{f"{(',
                 None,
@@ -765,6 +769,9 @@ class TestSourceEndingInAFieldExpression:
             "final-crlf",
             "backslash-crlf",
             "raw-backslash-newline",
+            "backslash-lone-cr",
+            "triple-lone-cr",
+            "mixed-breaks",
             "nested-literal",
             "t-string",
         ],

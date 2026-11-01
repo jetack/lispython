@@ -144,6 +144,10 @@ _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 _UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\n]++|\\\r\n|\\.)*+", re.DOTALL)
 
 
+# CPython ends a line at LF, CRLF (one break) or a lone CR.
+_LINE_BREAK_RE = re.compile("\r\n|\r|\n")
+
+
 def _source_locator(src):
     """locate(i, j) -> position_info of src[i:j], in any order of calls.
 
@@ -152,7 +156,7 @@ def _source_locator(src):
     a literal with many fields quadratic.
     """
     line_starts = [0]
-    line_starts.extend(m.end() for m in re.finditer("\n", src))
+    line_starts.extend(m.end() for m in _LINE_BREAK_RE.finditer(src))
     line_starts.append(len(src) + 1)
     # [line, its start, the next line's start] of the last position: tokens
     # come in order, so most lookups stay on that line.
