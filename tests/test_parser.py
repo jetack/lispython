@@ -223,7 +223,7 @@ class TestCommentEndsAtAnyLineBreak:
     @pytest.mark.parametrize("brk", ["\n", "\r\n", "\r"])
     def test_a_comment_at_a_fields_own_level_ends_at_any_line_break(self, brk):
         # Not in brackets: the comment ends at the break, leaving a second
-        # expression, as CPython reports.
+        # expression, which is refused (CPython's wording varies by version).
         with pytest.raises(LispyCompileError) as info:
             parse(f'f"""{{x ;c{brk} y}}"""')
         assert info.value.msg == (
