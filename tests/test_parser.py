@@ -220,6 +220,16 @@ class TestCommentEndsAtAnyLineBreak:
     def test_a_comment_in_a_field_ends_at_a_lone_cr(self):
         assert str(parse('f"{(f x ;c\r y)}"')[0].list[2].value) == "(f x y)"
 
+    @pytest.mark.parametrize("brk", ["\n", "\r\n", "\r"])
+    def test_a_comment_at_a_fields_own_level_ends_at_any_line_break(self, brk):
+        # Not in brackets: the comment ends at the break, leaving a second
+        # expression, as CPython reports.
+        with pytest.raises(LispyCompileError) as info:
+            parse(f'f"{{x ;c{brk} y}}"')
+        assert info.value.msg == (
+            "f-string: expecting a single expression in a replacement field"
+        )
+
     @pytest.mark.parametrize(
         ["src", "msg", "lineno"],
         [
