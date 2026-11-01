@@ -225,7 +225,7 @@ class TestCommentEndsAtAnyLineBreak:
         # Not in brackets: the comment ends at the break, leaving a second
         # expression, as CPython reports.
         with pytest.raises(LispyCompileError) as info:
-            parse(f'f"{{x ;c{brk} y}}"')
+            parse(f'f"""{{x ;c{brk} y}}"""')
         assert info.value.msg == (
             "f-string: expecting a single expression in a replacement field"
         )
