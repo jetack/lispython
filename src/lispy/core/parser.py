@@ -142,14 +142,6 @@ _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 # escapes (3.11's "detected at line"): a backslash escapes the next character,
 # or a whole \r\n (3.11 continues the line there). Possessive, so linear.
 _UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
-# 3.11's whole f-string token body, by quote: up to its closing quote (or,
-# single-quoted, a line break) that no backslash escapes. Possessive, so
-# linear.
-_WHOLE_TOKEN_BODY_RES = {
-    '"': re.compile(r'(?:[^\\\r\n"]++|\\\r\n|\\.)*+', re.DOTALL),
-    '"""': re.compile(r'(?:[^\\"]++|\\.|"(?!""))*+', re.DOTALL),
-    "'''": re.compile(r"(?:[^\\']++|\\.|'(?!''))*+", re.DOTALL),
-}
 # What 3.12 skips between tokens after a spec's line break: whitespace, a
 # comment, a backslash before a line break.
 _CODE_BLANKS_RE = re.compile(r"(?:\s++|#[^\r\n]*+|\\(?:\r\n|\r|\n))*+")
@@ -281,6 +273,7 @@ class _LiteralState:
         "body",
         "escaped_in",
         "newline",
+        "carried",
     )
 
     def __init__(self, kind, raw, quote, start, quote_start, body, escaped_in):
@@ -296,6 +289,9 @@ class _LiteralState:
         # The first unescaped line break in its own text (single-quoted,
         # 3.12+): where CPython finds it unterminated (_Lexer._eof).
         self.newline = None
+        # [break, entry]: the earliest line break recorded on a field or
+        # literal that has closed inside this one (_carry_line_break).
+        self.carried = None
 
 
 class _FieldState:
@@ -548,19 +544,20 @@ class _Lexer:
         or None.
 
         3.11: the outermost literal is unterminated. 3.12+: the earliest line
-        break recorded on a literal or field still open, if it is an error.
+        break recorded on a literal or field still open, or carried up to an
+        open literal from one closed in it, if it is an error.
         """
         if not self.stack:
             return None
         if not features.fstring_fields_are_tokens():
             return self._whole_literal_unterminated(self.stack[0])
-        breaks = sorted(
-            [entry.newline, index]
-            for [index, entry] in enumerate(self.stack)
-            if entry.newline is not None
-        )
-        for [at, index] in breaks:
-            entry = self.stack[index]
+        breaks = []
+        for entry in self.stack:
+            if entry.newline is not None:
+                breaks.append([entry.newline, len(breaks), entry])
+            if isinstance(entry, _LiteralState) and entry.carried is not None:
+                breaks.append([entry.carried[0], len(breaks), entry.carried[1]])
+        for [at, _, entry] in sorted(breaks):
             if isinstance(entry, _LiteralState):
                 return self._unterminated(
                     entry.kind, entry.quote, entry.start, entry.body, at
@@ -590,11 +587,35 @@ class _Lexer:
         """
         if features.fstring_fields_are_tokens() or error is self.escaped_error:
             return None
-        src = self.src
-        body = _WHOLE_TOKEN_BODY_RES[literal.quote].match(src, literal.body).end()
-        if src.startswith(literal.quote, body):
-            return None
-        return self._whole_literal_unterminated(literal)
+        # The token's body is a plain string's (raw: no \N{...} to read),
+        # ended for a single-quoted one at its first unescaped line break.
+        quote = literal.quote
+        [_, stop, at] = scan_string_body(self.src, literal.body, quote, True, "string")
+        closes = stop == "quote" and (
+            len(quote) == 3 or at < self._text_end(quote, literal.body)
+        )
+        return None if closes else self._whole_literal_unterminated(literal)
+
+    def _carry_line_break(self, entry):
+        """``entry`` (a field or literal) is closing: its earliest recorded
+        line break, still CPython's error at the end of the source (CPython
+        stops at it), moves up to the literal it closes in."""
+        brk = entry.newline
+        if (
+            isinstance(entry, _FieldState)
+            and entry.code_at is None
+            and not features.single_quoted_spec_refuses_newline()
+        ):
+            return  # 3.12: the field closed on the break's line, no error
+        if isinstance(entry, _LiteralState) and entry.carried is not None:
+            if brk is None or entry.carried[0] < brk:
+                [brk, entry] = entry.carried
+        if brk is None or not self.stack:
+            return
+        top = self.stack[-1]
+        literal = top if isinstance(top, _LiteralState) else top.literal
+        if literal.carried is None or brk < literal.carried[0]:
+            literal.carried = [brk, entry]
 
     def _whole_literal_unterminated(self, literal):
         """3.11's whole-literal error for ``literal``, an outermost one."""
@@ -791,6 +812,7 @@ class _Lexer:
             quote = literal.quote.replace("\\", "")
             self._emit(quote, "interpolated-end", at, end)
             self.stack.pop()
+            self._carry_line_break(literal)
             if escaped_in is not None:
                 self._deprecated(escaped_in, literal.quote_start, literal.body)
             context = self.stack[-1] if self.stack else self
@@ -992,6 +1014,7 @@ class _Lexer:
         self._emit("}", "field-end", at, at + 1)
         field.record["end"] = self.locate(at + 1)
         self.stack.pop()
+        self._carry_line_break(field)
         self.pos = at + 1
 
 

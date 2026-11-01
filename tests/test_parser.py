@@ -994,6 +994,26 @@ class TestSourceEndingInALiteral:
             'f"a}\nb"',
             'f"a\\"}',
             'f"""{x!""',
+            # A line break in a field or literal that closed before the end.
+            'f"{x:a\n}',
+            'f"{x:a\n}b',
+            'f"{x:a\n#c\n}',
+            'f"{x:a\n}{y:b\n}',
+            'f"{x:{y:a\n}}',
+            'f"{x:a\n}\n',
+            'f"{x:a\n}b\nc',
+            'f"{x:a\n}{',
+            'f"{x:a\n}{y',
+            'f"{x:{y:a\n}',
+            'f"ab{x:a\n}',
+            'f"a\nb{x:c\n}',
+            'f"{x:a\n}{y:c\n',
+            'f"{x:a\nb}',
+            'f"{x:a\nb}c',
+            'f"{x:a\n b}',
+            'f"{x:a\n{y}}',
+            'f"{x:a\n{y}b}',
+            'f"{x:a\n}{f"b\nc"}',
             *_read_on_3_12_plus(
                 [
                     'f"{(b"a',
@@ -1022,6 +1042,12 @@ class TestSourceEndingInALiteral:
                     'f"{x! "',
                     'f"{x!\n"',
                     'f"{x} {"',
+                    'f"{f"a\nb"}',
+                    'f"{f"a\nb"}c',
+                    'f"{f"{x:a\n}"}',
+                    'f"{f"{x:a\n}"',
+                    'f"{x:{f"{y:a\n}"}}',
+                    'f"{f"a\nb"}{x:c\n}',
                 ]
             ),
             *[
@@ -1029,7 +1055,7 @@ class TestSourceEndingInALiteral:
                     src,
                     marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
                 )
-                for src in ['t"{x:abc', 't"ab\n{x', 't"{(t"a', 't"{x!z']
+                for src in ['t"{x:abc', 't"ab\n{x', 't"{(t"a', 't"{x!z', 't"{x:a\n}']
             ],
         ],
     )
