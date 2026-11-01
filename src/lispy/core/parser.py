@@ -138,7 +138,7 @@ _STRING_PREFIX_RE = re.compile("\\w*")
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
-# A single-quoted body up to its first newline no backslash escapes (3.11's
+# A single-quoted body up to its first newline (LF or lone CR) no backslash escapes (3.11's
 # "detected at line"): a backslash escapes the next character, or a whole
 # \r\n (3.11 continues the line there). Possessive, so linear.
 _UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
