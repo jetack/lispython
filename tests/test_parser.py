@@ -1137,6 +1137,13 @@ class TestConversion:
             ('f"{x!"a"}"', "f-string: invalid conversion character", (1, 6)),
             ('f"{x! "a"}"', "f-string: invalid conversion character", (1, 7)),
             ('f"{x!!}"', "f-string: invalid conversion character", (1, 6)),
+            ('f"{x!(}"', "f-string: invalid conversion character", (1, 6)),
+            # Python's own words for a closer, or a quote that ends the literal.
+            ('f"{x!)}"', "f-string: unmatched ')'", (1, 6)),
+            ('f"{x!]}"', "f-string: unmatched ']'", (1, 6)),
+            ('f"{x! )}"', "f-string: unmatched ')'", (1, 7)),
+            ('f"{x!"', "f-string: expecting '}'", (1, 6)),
+            ('f"""{x!"""', "f-string: expecting '}'", (1, 8)),
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
             (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
             ('f"{x! r}"', CONVERSION_GAP, (1, 5)),

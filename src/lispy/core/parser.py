@@ -694,14 +694,24 @@ class _Lexer:
                 return brk
         return None
 
+    def _closes_literal_for_good(self, literal, at):
+        """Whether ``literal``'s quote stands at ``at`` with no later one, so
+        it can only end the literal, never open a string that closes."""
+        quote = literal.quote
+        src = self.src
+        return src.startswith(quote, at) and src.find(quote, at + len(quote)) == -1
+
     def _conversion(self, field, bang):
         """The ``!conv`` at ``bang``: emits its token and returns the index of
         the ``}`` or ``:`` after it, or None where lexing has stopped.
 
         The name comes right after the ``!``: a name after a gap is refused
-        at the ``!``; with no name, a ``}`` or ``:`` next is "missing
-        conversion character" there, and any other token "invalid conversion
-        character". A name other than s, r or a is refused where it is
+        at the ``!``; with no name, the next token is refused there: a ``}``
+        or ``:`` is "missing conversion character", a ``)`` or ``]``
+        "unmatched", the literal's quote with no later one to close a string
+        it opens (``f"{x!"``) "expecting '}'", and any other token "invalid
+        conversion character", as Python 3.12+ word each. A name other than
+        s, r or a is refused where it is
         read. After the name only blanks (``_skip_blanks``) may stand before
         the ``:`` or ``}``; anything else is refused where it is.
         """
@@ -721,6 +731,12 @@ class _Lexer:
                 self._fail(self._error(f"{kind}: {msg}", bang, bang + 1))
             elif src[at] in "}:":
                 msg = f"{kind}: missing conversion character"
+                self._fail(self._error(msg, at, at + 1))
+            elif src[at] in ")]":
+                msg = f"{kind}: unmatched '{src[at]}'"
+                self._fail(self._error(msg, at, at + 1))
+            elif self._closes_literal_for_good(field.literal, at):
+                msg = f"{kind}: expecting '}}'"
                 self._fail(self._error(msg, at, at + 1))
             else:
                 msg = f"{kind}: invalid conversion character"

@@ -30,8 +30,9 @@ follows [Semantic Versioning](https://semver.org/).
   conversion is checked where it is read: an invalid name (`!z`) is refused at once, even
   where 3.12 and 3.13 reported an error later in the field first; with no
   name after the `!`, a `}` or `:` next is "missing conversion character"
-  and any other token (`f"{x!"a"}"`) "invalid conversion character", at
-  that token; anything but blanks, `:` or `}` after the name is "expecting
+  a `)` or `]` "unmatched ')'", a quote that can only end the literal
+  (`f"{x!"`) "expecting '}'", and any other token (`f"{x!"a"}"`) "invalid
+  conversion character", at that token; anything but blanks, `:` or `}` after the name is "expecting
   ':' or '}'" there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.
