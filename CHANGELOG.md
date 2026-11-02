@@ -28,6 +28,10 @@ follows [Semantic Versioning](https://semver.org/).
   ':' or '}'" there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.
+- On Python 3.12+, an error after a line break in a single-quoted f/t-string's
+  text, or in a plain string spanning lines in a field, is reported where it
+  is (`f"a\n}"`: "single '}' is not allowed" on line 2), no longer as the
+  literal unterminated at the break.
 
 ## [0.6.0] - 2026-11-02
 

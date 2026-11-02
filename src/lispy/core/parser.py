@@ -275,7 +275,6 @@ class _LiteralState:
         "quote_start",
         "body",
         "escaped_in",
-        "line_break",
     )
 
     def __init__(self, kind, raw, quote, start, quote_start, body, escaped_in):
@@ -288,13 +287,6 @@ class _LiteralState:
         # An escaped literal (opened with \" in a field): the kind of the
         # literal that field is in, which names it in messages. Else None.
         self.escaped_in = escaped_in
-        # Outermost literal only (3.12+): [token index, error] of the first
-        # line break CPython's tokenizer stops at in the literal text of it
-        # or of any literal nested in it, or in a single-quoted plain string
-        # in a field of them, once one is lexed: the index of the
-        # first token lexed from there, and that literal unterminated at the
-        # break (_note_line_break, _Lexer.line_break_error).
-        self.line_break = None
 
 
 class _FieldState:
@@ -346,10 +338,8 @@ class _Lexer:
     stops there (``_fail``): the parser raises it when it gets there, so an
     error the parser finds earlier in the source (an unmatched closing
     bracket) comes first, and only the first error is ever reported.
-    lispython reads a single-quoted literal on past a line break in its
-    text, where 3.12+'s tokenizer stops: the first such break is recorded on
-    the outermost literal (``_note_line_break``), and any error met after it
-    is that break's (``line_break_error``).
+    A literal's own text, single-quoted or not, may span lines, and so may
+    a plain string in a field.
     """
 
     def __init__(self, src):
@@ -495,8 +485,6 @@ class _Lexer:
             )
             if stop == "quote":
                 end = at + len(quote_text)
-                if escaped_in is None:  # the \" spelling is lispython's own
-                    self._note_string_line_break(string_start, quote, body, at)
                 text = src[start:end] if escaped_in is None else prefix + quote
                 if escaped_in is not None:
                     text += piece + quote
@@ -543,17 +531,6 @@ class _Lexer:
         msg = f'{kind}: write a plain " in a replacement field, not \\"'
         self._emit(msg, "deprecated", quote_start, body)
 
-    # The source ends inside an open literal: CPython's errors, per version.
-    #
-    # 3.11 lexes a whole f-string as one string token, so the end of the
-    # source anywhere in it is that token unterminated (_literal_eof_error).
-    # 3.12+ lex it in place (as this lexer does), so the error is the state
-    # the tokenizer is in. Its single-quoted literal text ends at a line
-    # break, which lispython reads on: at the end of the source the first
-    # such break in the outermost literal is CPython's error, ahead of the
-    # state's (_note_line_break records it while lexing, so nothing is
-    # rescanned).
-
     def _eof(self):
         """The source ends in a literal's text or in a field (its expression,
         conversion or format spec)."""
@@ -567,39 +544,10 @@ class _Lexer:
     def _literal_eof_error(self):
         """The error the open literals give at the end of the source, ahead
         of anything lexed after them (a plain string's own error included),
-        or None.
-
-        3.11: the outermost literal is unterminated. 3.12+: the line break
-        recorded on the outermost literal (``_note_line_break``), whose
-        literal is unterminated there.
-        """
-        if not self.stack:
+        or None: 3.11's outermost literal unterminated."""
+        if not self.stack or features.fstring_fields_are_tokens():
             return None
-        if not features.fstring_fields_are_tokens():
-            return self._whole_literal_unterminated(self.stack[0])
-        line_break = self.stack[0].line_break
-        return None if line_break is None else line_break[1]
-
-    def line_break_error(self, literal, index, error):
-        """The error that replaces ``error``, raised at token ``index`` inside
-        the outermost literal ``literal`` (a ``_LiteralState``), or None:
-        that of the line break recorded on it, if the token was lexed after
-        it. The escaped string's error stays: that spelling is lispython's
-        own, with no CPython error to match (as in ``whole_literal_error``).
-
-        3.12+'s tokenizer stops at the first line break in a single-quoted
-        literal's text, so nothing after it reaches CPython's parser: an
-        error there, lexed or parser-raised, whether or not the literal
-        later closes, is that literal unterminated at the break. An error
-        before the break stays (CPython raises it first). The parser asks
-        only on an error path (``_parse_into``).
-        """
-        line_break = literal.line_break
-        if line_break is None or index < line_break[0]:
-            return None
-        if error is self.escaped_error:
-            return None
-        return line_break[1]
+        return self._whole_literal_unterminated(self.stack[0])
 
     def whole_literal_error(self, literal, error):
         """3.11: the error that comes before ``error``, raised inside the
@@ -702,43 +650,6 @@ class _Lexer:
             body,
         )
 
-    def _note_line_break(self, literal, start, end):
-        """Record the first line break in the literal's own text
-        ``src[start:end]`` on the outermost literal, for
-        ``_literal_eof_error`` and ``line_break_error``.
-
-        A single-quoted literal's own text ends at a line break, which
-        CPython's tokenizer stops at. The first break recorded is the
-        earliest in the source, and everything after it is superseded by
-        it, so no text is scanned once one is recorded: each character is
-        read at most once more.
-
-        A single-quoted plain string in a field that spans a line records
-        one too (``_string``; CPython stops at it: ``_string_eof_error``).
-        """
-        if len(literal.quote) != 1 or not features.fstring_fields_are_tokens():
-            return  # triple-quoted or escaped (\"), or 3.11
-        root = self.stack[0]
-        if root.line_break is not None:
-            return
-        src = self.src
-        # A backslash before the stop (\{) is the regex's stop too.
-        at = _UNESCAPED_LINE_END_RE.match(src, start, end).end()
-        if at == end or src[at] not in "\r\n":
-            return
-        error = self._unterminated(
-            literal.kind, literal.quote, literal.start, literal.body, at
-        )
-        self._record_line_break(error)
-
-    def _record_line_break(self, error):
-        """Record ``error`` as the outermost literal's first line break, if
-        none is recorded: the piece holding the break is the first token
-        lexed after it."""
-        root = self.stack[0]
-        if root.line_break is None:
-            root.line_break = [len(self.tokens), error]
-
     def _body(self, top):
         """Literal text of an f/t-string, or of a field's format spec, up to
         what ends it.
@@ -772,8 +683,6 @@ class _Lexer:
                 self._escaped_error(escaped_in, literal.quote_start, literal.body)
             )
             return
-        if spec is None:
-            self._note_line_break(literal, self.pos, at)
         if stop == "eof":
             self._eof()
             return
@@ -817,22 +726,6 @@ class _Lexer:
         if spec is None:
             return "{}"
         return "{" if spec.nested else ""
-
-    def _note_string_line_break(self, start, quote, body, at):
-        """Record a line break in the closed plain string at ``start`` (body
-        ``src[body:at]``) in a literal's field: CPython's tokenizer stops at
-        it (``_string_eof_error``), so it supersedes what follows."""
-        if not (
-            self.stack
-            and len(quote) == 1
-            and features.fstring_fields_are_tokens()
-            and self.stack[0].line_break is None
-        ):
-            return
-        src = self.src
-        stop_at = _UNESCAPED_LINE_END_RE.match(src, body, at).end()
-        if stop_at < at and src[stop_at] in "\r\n":
-            self._record_line_break(self._string_eof_error(start, quote, body))
 
     def _quote_in_spec_error(self, spec, at):
         """The literal's closing quote, at ``at``, inside ``spec``'s format
@@ -1146,14 +1039,12 @@ def _parse_into(src, rst):
     (``_Interpolated``/``_Field``), which the lexer's tokens build in place,
     so any nesting parses in one pass with no recursion.
 
-    An error raised inside an f/t-string is, in order: on 3.12+ that of a
-    line break lexed before it (``_Lexer.line_break_error``); on 3.11 that
-    of a whole token that never closes (``_Lexer.whole_literal_error``).
-    Both are asked only here, on the error path.
+    An error raised inside an f/t-string is, on 3.11, that of a whole token
+    that never closes (``_Lexer.whole_literal_error``), asked only here, on
+    the error path.
     """
     lexer = _Lexer(src)
     tokens = deque(lexer.run())
-    total = len(tokens)
     stack = []
     try:
         _parse_tokens(src, tokens, stack, rst)
@@ -1161,11 +1052,7 @@ def _parse_into(src, rst):
         outer = next((e for e in stack if isinstance(e, _Interpolated)), None)
         error = None
         if outer is not None:
-            # _parse_tokens pops one token per step: this one raised.
-            index = total - len(tokens) - 1
-            error = lexer.line_break_error(outer.lexed, index, raised)
-            if error is None:
-                error = lexer.whole_literal_error(outer.lexed, raised)
+            error = lexer.whole_literal_error(outer.lexed, raised)
         if error is None:
             raise
         raise error from None

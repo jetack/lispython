@@ -21,6 +21,13 @@ NOT_CONVERSION = (
     "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
 )
 CONVERSION_GAP = "f-string: conversion type must come right after the exclamation mark"
+SPEC_NEWLINE = (
+    "{0}: newlines are not allowed in format specifiers for single quoted {0}s"
+)
+# 3.11's whole-literal error still comes first there.
+WHOLE_LITERAL_ON_3_11 = pytest.mark.skipif(
+    not IN_PLACE, reason="3.11 reports the whole literal first"
+)
 
 
 def error_position(read, src):
@@ -934,12 +941,8 @@ class TestSourceEndingInALiteral:
             'f"{x}{\n"a',
             'f"{\n{x}{\n"a',
             # A line break in a single-quoted literal's text.
-            'f"ab\n{x',
-            'f"ab\r{x',
-            'f"ab\r\n{x',
             'f"ab\n',
             'f"{x}ab\n',
-            'f"{x}ab\n{y',
             # Literal text.
             's = f"abc',
             's = rf"abc',
@@ -988,8 +991,6 @@ class TestSourceEndingInALiteral:
             'f"a}\nb"',
             'f"a\\"}',
             # A line break in a field or literal that closed before the end.
-            'f"a\nb{x:c\n}',
-            'f"a\nb{x:c\n',
             *_read_on_3_12_plus(
                 [
                     'f"{(b"a',
@@ -1003,11 +1004,6 @@ class TestSourceEndingInALiteral:
                     'f"{f"""abc',
                     'f"{f"{f"abc',
                     'f"{x} {"',
-                    'f"{f"a\nb"}',
-                    'f"{f"a\nb"}c',
-                    'f"{f"a\nb"}{x:c\n}',
-                    'f"{f"a\nb{x:c\n}',
-                    'f"""a\n{f"b\nc{x:d\n}"',
                 ]
             ),
             *[
@@ -1015,50 +1011,45 @@ class TestSourceEndingInALiteral:
                     src,
                     marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
                 )
-                for src in ['t"ab\n{x', 't"{(t"a', 't"{x!z', 't"{x:a\n}']
+                for src in ['t"{(t"a', 't"{x!z', 't"{x:a\n}']
             ],
         ],
     )
     def test_the_error_is_cpython_s(self, src):
         assert error_position(parse, src) == _python_error_position_spelled(src)
 
+    @WHOLE_LITERAL_ON_3_11
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "at"],
         [
-            # Lexed errors, the source ending in the literal or not.
-            'f"a\n}',
-            'f"a\n}"',
-            'f"a\nb}',
-            'f"a\n{x:a\n}}',
-            'f"a\n{x:a\n"',
-            # A conversion checked when its field closes.
-            'f"a\n{x!z}',
-            'f"a\n{x!z}"',
-            'f"a\n{x=!z}',
-            'f"a\n{x!}',
-            # Raised by the parser.
-            'f"a\n{)',
-            'f"a\n{x:{)',
-            'f"a\n{x!r:{)',
-            # An error before the break stays.
-            'f"{x!z}a\n}',
-            *_read_on_3_12_plus(['f"{f"a\nb"}}', 'f"{f"a\nb"} \n}']),
-            # A plain string in a field spanning a line (CPython stops at it).
-            *_read_on_3_12_plus(
-                [
-                    'f"{"a\nb"}{)}"',
-                    'f"{b"a\nb"}{)}"',
-                    '''f"""{"a\nb"}{)}"""''',
-                    'f"{\n"a\nb"}{)}"',
-                    'f"{"a\r\nb"}{)}"',
-                    'f"{f"{"a\nb"}"}{)}"',
-                    'f"{"a\nb"}',
-                ]
+            # A literal's own text, and a plain string in a field, may span
+            # lines: an error after the break is the one where it is.
+            ('f"a\n}', "f-string: single '}' is not allowed", (2, 1)),
+            ('f"a\n{x!z}"', NOT_CONVERSION.format("z"), (2, 4)),
+            ('f"a\n{x!}', "f-string: missing conversion character", (2, 4)),
+            ('f"a\n{)', "unmatched ')'", (2, 2)),
+            ('f"ab\n{x', "'{' was never closed", (2, 1)),
+            ('f"a\n{x:a\n}}', SPEC_NEWLINE.format("f-string"), (2, 5)),
+            ('f"a\nb{x:c\n}', SPEC_NEWLINE.format("f-string"), (2, 6)),
+            ('f"{f"a\nb"}}', "f-string: single '}' is not allowed", (2, 4)),
+            ('f"{"a\nb"}{)}"', "unmatched ')'", (2, 5)),
+            ('f"""{"a\nb"}{)}"""', "unmatched ')'", (2, 5)),
+            ('f"{"a\r\nb"}{)}"', "unmatched ')'", (2, 5)),
+            # The source ends in the outer literal's text.
+            (
+                'f"{"a\nb"}',
+                "unterminated f-string literal (detected at line 2)",
+                (1, 1),
+            ),
+            (
+                'f"{f"a\nb"}c',
+                "unterminated f-string literal (detected at line 2)",
+                (1, 1),
             ),
         ],
     )
-    def test_an_error_after_a_literal_s_line_break_is_that_break_s(self, src):
-        assert error_position(parse, src) == _python_error_position_spelled(src)
+    def test_an_error_after_a_literal_s_line_break_is_where_it_is(self, src, msg, at):
+        assert error_position(parse, src) == (msg, *at)
 
     @pytest.mark.parametrize("src", ['f"a\n{\\"b"}"', 'f"a\n{\\"b'])
     def test_an_escaped_string_s_error_stays_ahead_of_a_line_break(self, src):
@@ -1318,14 +1309,6 @@ class TestQuoteOrLineBreakInFormatSpec:
     def test_the_closing_quote_in_a_spec_is_cpython_s(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
-    # 3.11's whole-literal error still comes first there.
-    WHOLE_LITERAL_ON_3_11 = pytest.mark.skipif(
-        not IN_PLACE, reason="3.11 reports the whole literal first"
-    )
-    SPEC_NEWLINE = (
-        "{0}: newlines are not allowed in format specifiers for single quoted {0}s"
-    )
-
     @pytest.mark.parametrize(
         ["lpy", "py"],
         [
@@ -1375,7 +1358,7 @@ class TestQuoteOrLineBreakInFormatSpec:
         ],
     )
     def test_a_line_break_in_single_quoted_spec_text_is_refused(self, src, kind, at):
-        assert error_position(parse, src) == (self.SPEC_NEWLINE.format(kind), *at)
+        assert error_position(parse, src) == (SPEC_NEWLINE.format(kind), *at)
 
     @WHOLE_LITERAL_ON_3_11
     @pytest.mark.parametrize(
