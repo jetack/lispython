@@ -669,10 +669,12 @@ class _Lexer:
         line_break = self.stack[0].line_break
         return None if line_break is None else line_break[1]
 
-    def line_break_error(self, literal, index):
-        """The error that replaces one raised at token ``index`` inside the
-        outermost literal ``literal`` (a ``_LiteralState``), or None: that of
-        the line break recorded on it, if the token was lexed after it.
+    def line_break_error(self, literal, index, error):
+        """The error that replaces ``error``, raised at token ``index`` inside
+        the outermost literal ``literal`` (a ``_LiteralState``), or None:
+        that of the line break recorded on it, if the token was lexed after
+        it. The escaped string's error stays: that spelling is lispython's
+        own, with no CPython error to match (as in ``whole_literal_error``).
 
         3.12+'s tokenizer stops at the first line break in a single-quoted
         literal's text, so nothing after it reaches CPython's parser: an
@@ -683,6 +685,8 @@ class _Lexer:
         """
         line_break = literal.line_break
         if line_break is None or index < line_break[0]:
+            return None
+        if error is self.escaped_error:
             return None
         return line_break[1]
 
@@ -1402,7 +1406,7 @@ def _parse_into(src, rst):
         if outer is not None:
             # _parse_tokens pops one token per step: this one raised.
             index = total - len(tokens) - 1
-            error = lexer.line_break_error(outer.lexed, index)
+            error = lexer.line_break_error(outer.lexed, index, raised)
             if error is None:
                 error = lexer.whole_literal_error(outer.lexed, raised)
             if error is None and getattr(raised, "parser_level", False):

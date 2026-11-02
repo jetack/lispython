@@ -1128,6 +1128,15 @@ class TestSourceEndingInALiteral:
     def test_an_error_after_a_literal_s_line_break_is_that_break_s(self, src):
         assert error_position(parse, src) == _python_error_position_spelled(src)
 
+    @pytest.mark.parametrize("src", ['f"a\n{\\"b"}"', 'f"a\n{\\"b'])
+    def test_an_escaped_string_s_error_stays_ahead_of_a_line_break(self, src):
+        # The \" spelling is lispython's own: no compile() text to match.
+        assert error_position(parse, src) == (
+            'f-string: a string opened with \\" closes only with \\"',
+            2,
+            2,
+        )
+
     def test_a_literal_with_a_line_break_and_no_error_parses(self):
         assert len(parse('f"{x}a\n}}"')) == 1
 
