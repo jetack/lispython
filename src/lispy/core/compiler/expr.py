@@ -273,9 +273,12 @@ def check_target(node, kind):
     checked like any other; the refusal is the first bad node in a
     left-to-right pre-order walk. Where the AST is one compile() refuses
     with a positioned SyntaxError of its own (a starred target outside a
-    list or tuple, two starred in one), it is left to compile().
+    list or tuple, two starred in one, a starred delete target), it is left
+    to compile().
     """
     if kind == "walrus":
+        # compile() takes a non-Name walrus target with a TypeError or
+        # SystemError naming no position, so lispython refuses it here.
         if not isinstance(node, ast.Name):
             raise target_error(node, kind)
         return
@@ -289,7 +292,15 @@ def check_target(node, kind):
             pending.extend(reversed(node.elts))
         elif kind == "assign" and isinstance(node, ast.Starred):
             pending.append(node.value)
+        elif kind == "delete" and isinstance(node, ast.Starred):
+            # compile() refuses it at the starred: "can't use starred
+            # expression here".
+            pass
         else:
+            # compile() meets any other bad target with a ValueError or
+            # SystemError naming no position (an augmented-assignment starred
+            # included), or, for a starred annotation target, with the
+            # assignment's message, so lispython refuses it here.
             raise target_error(node, kind)
 
 

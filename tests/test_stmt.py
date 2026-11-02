@@ -677,7 +677,6 @@ class TestFormArity:
             ("(+= 1 2)", "'literal' is an illegal expression for augmented", "1"),
             ("(+= [] 1)", "'list' is an illegal expression for augmented", "[]"),
             ("(del 1)", "cannot delete literal", "1"),
-            ("(del *a)", "cannot delete starred", "*a"),
             ("(for 1 in xs 2)", "cannot assign to literal", "1"),
             ("(with [a as 1] 2)", "cannot assign to literal", "1"),
             ("(raise from)", "from is a Python keyword and cannot be used as", "from"),
@@ -707,6 +706,9 @@ class TestFormArity:
             ("(= *a 1)", "starred assignment target must be in a list or tuple", "*a"),
             ("(for *a in xs 1)", "starred assignment target must be in a list", "*a"),
             ("(= [*a *b] 1)", "multiple starred expressions in assignment", "[*a *b]"),
+            ("(del *a)", "can't use starred expression here", "*a"),
+            ("(del a *b)", "can't use starred expression here", "*b"),
+            ("(del [a *b])", "can't use starred expression here", "*b"),
         ],
     )
     def test_starred_target_refused_by_compile_at_the_lpy_position(self, form, msg, at):
