@@ -1295,6 +1295,50 @@ class TestQuoteOrLineBreakInFormatSpec:
         )
 
 
+def _field_value(src, **names):
+    """What the f-string ``src`` evaluates to, with ``names`` bound."""
+    [stmt] = macroexpand_then_compile(parse(src))
+    expr = ast.fix_missing_locations(ast.Expression(stmt.value))
+    return eval(compile(expr, "<test>", "eval"), names)
+
+
+class TestBackslashContinuationInAField:
+    """A backslash before a line break in a field's code continues the line:
+    whitespace, as CPython 3.12+ read it, on every interpreter."""
+
+    @pytest.mark.parametrize(
+        ["src", "value"],
+        [
+            ('f"{\\\nx}"', "5"),
+            ('f"{x\\\n}"', "5"),
+            ('f"{(+ x\\\n1)}"', "6"),
+            ('f"{(+ x\\\r\n1)}"', "6"),
+            ('f"""{(+ x\\\n1)}"""', "6"),
+            ('f"{1\\\n}"', "1"),
+            ('f"{x\\\n!r}"', "5"),
+            ('f"{x!r\\\n}"', "5"),
+            ('f"{x\\\n:>3}"', "  5"),
+            # A debug echo is the source text as written.
+            ('f"{x=\\\n}"', "x=\\\n5"),
+            ('f"{x \\\n=}"', "x \\\n=5"),
+            ('f"{x\\\n=}"', "x\\\n=5"),
+            ('f"{x=\\\n!r}"', "x=\\\n5"),
+        ],
+    )
+    def test_a_continuation_is_whitespace(self, src, value):
+        assert _field_value(src, x=5) == value
+
+    def test_a_continuation_before_equals_leaves_no_expression(self):
+        assert error_position(parse, 'f"{\\\n=}"') == (
+            "f-string: valid expression required before '='",
+            2,
+            1,
+        )
+
+    def test_a_continuation_separates_two_expressions(self):
+        assert error_position(parse, 'f"{a\\\nb}"') == error_position(parse, 'f"{a b}"')
+
+
 def _read_and_compile(src):
     return macroexpand_then_compile(parse(src))
 

@@ -21,7 +21,9 @@ follows [Semantic Versioning](https://semver.org/).
   (an odd run of them, raw literal or not) continues the line and is no
   line break (`f"{x:a\<newline>b}"`). A line break elsewhere in a field
   stands wherever code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
-  the `!`, and a triple-quoted literal's spec text keeps it as text. A source
+  the `!`, and a triple-quoted literal's spec text keeps it as text. So does
+  a backslash continuation in a field's code (`f"{x\<newline>+1}"` compiles,
+  as on 3.12+, where the backslash was lexed into a symbol). A source
   ending in format-spec text is the literal unterminated on every version.
 - An f/t-string error is the first error in the source, on every Python
   version: nothing after it is read, so a later unterminated string or

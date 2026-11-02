@@ -55,6 +55,9 @@ _FORM_END = "\\s\\)\\}\\],;"
 _LINE_BREAK_CHARS = "\\r\\n"
 # What ends a symbol token.
 _SYMBOL_STOP = _FORM_END + '\\"\\['
+# A line continuation in a field: a backslash before a line break or the end
+# of the source (_token_patterns).
+_FIELD_CONTINUATION = "\\\\(?:\\r\\n|\\r|\\n|\\Z)"
 
 
 def _token_patterns(in_field, field_level=False):
@@ -66,6 +69,11 @@ def _token_patterns(in_field, field_level=False):
     deprecated spelling of a field's string from before 3.12, which only the
     same escaped quote closes (_Lexer._string). A symbol stops before \\"
     (a\\"b).
+
+    In a field a backslash before a line break or the end of the source is a
+    line continuation, as CPython 3.12+ read it there: it lexes as spaces
+    and ends any form before it, so x\\<LF>+1 is x, + and 1
+    (``_FIELD_CONTINUATION``; _Lexer._skip_blanks skips it the same way).
 
     At the field's own level (``field_level``, outside its brackets) the
     expression ends at a delimiter (``:``, ``}``, or ``!`` not before ``=``):
@@ -79,6 +87,9 @@ def _token_patterns(in_field, field_level=False):
     past every field, so each field would rescan the rest of the source.
     """
     end = "$|:|!(?!=)" if field_level else "$"
+    if in_field:
+        # A continuation ends a form as whitespace does.
+        end = f"{_FIELD_CONTINUATION}|{end}"
     # In a field a symbol also stops before \" (see above), so ^* before it
     # is a bad prefix, reported ahead of anything in the escaped string.
     quote = '(?:\\\\"){3}|\\\\"|' if in_field else ""
@@ -116,13 +127,14 @@ def _token_patterns(in_field, field_level=False):
         # field's own level a lone ":" or "!" matches too, so the lexer sees
         # the delimiter where a token starts.
         [
-            f'(?:{char}|\\\\(?!"))++' + ("|[:!]" if field_level else "")
+            f'(?:{char}|\\\\(?!["{_LINE_BREAK_CHARS}]|\\Z))++'
+            + ("|[:!]" if field_level else "")
             if in_field
             else f"[^{_SYMBOL_STOP}]+",
             "symbol",
         ],
         ["\\n", "new-line"],
-        [" +", "spaces"],
+        [f"(?: |{_FIELD_CONTINUATION})++" if in_field else " +", "spaces"],
     ]
 
 
@@ -641,8 +653,12 @@ class _Lexer:
         """
         src = self.src
         expr_start = field.open + 1
-        last = at  # past the expression's last non-space character
-        while last > expr_start and src[last - 1].isspace():
+        # Past the expression's last character that is neither whitespace nor
+        # a line continuation's backslash ({x=\<LF>} is debug, as in Python).
+        last = at
+        while last > expr_start and (
+            src[last - 1].isspace() or (src[last - 1] == "\\" and src[last] in "\r\n")
+        ):
             last -= 1
         # Python's {x=}: a final "=" not ending an operator (x==, x<=).
         debug = (
