@@ -365,6 +365,8 @@ follows [Semantic Versioning](https://semver.org/).
   keyword".
 - An empty `()` is a compile error at it ("use (,) for an empty tuple")
   instead of an `IndexError`, wherever it appears.
+- Installing lispython no longer puts a `test` command (pytest's entry point)
+  on `PATH`.
 
 ## [0.5.0]
 
