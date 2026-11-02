@@ -102,11 +102,14 @@ follows [Semantic Versioning](https://semver.org/).
   reported where CPython 3.12+ report it: at the `}`, `!`, `:` or the `=` of
   `{ = }`, not at the field's `{`. A missing conversion (`f"{x! }"`) is
   reported at the token after the `!`, not at the `!`.
-- An error in an f/t-string's field (an empty expression, a missing or
-  invalid conversion, a token out of place after `!`) gives way, as in
-  CPython, to a later tokenizer error outside any literal, such as a string
-  that never closes: `f"{x!z}" "b` reports "unterminated string literal" at
-  the `"b`. On 3.11 a later f-string that never closes does too.
+- An error in an f/t-string's field (an empty expression, more than one
+  expression, a missing or invalid conversion, a token out of place after
+  `!`) gives way, as in CPython, to a later tokenizer error outside any
+  literal, such as a string that never closes: `f"{x!z}" "b` and
+  `f"{a b}" "c` report "unterminated string literal" at the last string. On
+  3.11 a later f-string that never closes does too. On 3.12+ a closing
+  bracket out of place in a field after the error keeps it (`f"{x!r y)}" "b`),
+  and one right after a conversion is CPython's "f-string: unmatched ')'".
 - Error positions count a lone CR as a line break, as CPython does (CRLF is
   one break), so a source with CR line endings reports the same line as
   `compile()`.

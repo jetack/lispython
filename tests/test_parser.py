@@ -1326,6 +1326,10 @@ class TestTokenizerErrorAfterAParserError:
             'f"{x!z}"\n\n"b',
             'f"{x!z}" \\\n"b',
             '"a" f"{x!z}" "b',
+            # lispython's "expecting a single expression" is CPython's
+            # parser error for the same text too.
+            'f"{a b}" "c',
+            'f"{(a) b}" "c',
         ],
     )
     def test_a_later_tokenizer_error_outside_a_literal_is_reported(self, src):
@@ -1351,6 +1355,47 @@ class TestTokenizerErrorAfterAParserError:
     )
     def test_the_parser_error_stands_otherwise(self, lpy, py):
         assert error_position(parse, lpy) == python_error_position(py or lpy)
+
+    # 3.11 differs from lispython on these, apart from the bracket: it checks
+    # a nested f-string's brackets, and refuses a single-quoted f-string's
+    # line break as its whole token unterminated.
+    NOT_ON_3_11 = pytest.mark.skipif(not IN_PLACE, reason="a separate 3.11 gap")
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # After the parser error, a closing bracket with none open in the
+            # field, or of the wrong kind, stops 3.12+'s tokenizer inside the
+            # literal: the parser error stands, never the "b after it.
+            'f"{x!r y)}" "b',
+            'f"{x!r y]}" "b',
+            'f"{x!r (]}" "b',
+            'f"{x!z (]}" "b',
+            'f"{x!r y(]}" "b',
+            'f"{x!r [)]}" "b',
+            'f"{(f"{x!r y}" ]}" "b',
+            'f"""{x!r (\n]}""" "b',
+            'f"{}{)}" "c',
+            'f"{x!z}{)}" "c',
+            'f"{x!}{)}" "c',
+            pytest.param('f"{x!r f"{)}"}" "b', marks=NOT_ON_3_11),
+            # Right after a conversion it is the parser's next token: the
+            # tokenizer raises first (3.14+ check an invalid name before).
+            'f"{x!r )}" "b',
+            'f"{x!z )}" "b',
+            'f"{x!z ]}" "b',
+            'f"{x! )}" "b',
+            'f"{x!r ]}" "b',
+            'f"{x!r )}"\n"b',
+            'f"{x!r\\\n)}" "b',
+            'f"{x!r \\q}" "b',
+            # After the code 3.12 reads in a spec past a line break.
+            pytest.param('f"{x:a\nb)}" "c', marks=NOT_ON_3_11),
+            pytest.param('f"{x:a\nb]}" "c', marks=NOT_ON_3_11),
+        ],
+    )
+    def test_a_closing_bracket_out_of_place_in_a_field(self, src):
+        assert error_position(parse, src) == python_error_position(src)
 
     @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
     @pytest.mark.parametrize("src", ['f"{x!z}" f"b', 'f"{x!z}" f"{y'])

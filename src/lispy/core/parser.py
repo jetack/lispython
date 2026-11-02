@@ -146,9 +146,10 @@ _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 # escapes (3.11's "detected at line"): a backslash escapes the next character,
 # or a whole \r\n (3.11 continues the line there). Possessive, so linear.
 _UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
-# What CPython's tokenizer skips between tokens (in a spec 3.12 reads as code,
-# _Lexer._code): whitespace, a comment, a backslash before a line break or the
-# end of the source.
+# What is skipped between tokens in a spec 3.12 reads as code (_Lexer._code):
+# whitespace, a comment, a backslash before a line break or the end of the
+# source. Not exactly CPython's set: \s also takes Unicode whitespace (\x0b,
+# \xa0, ...) that CPython's tokenizer refuses there.
 _CODE_BLANKS_RE = re.compile(r"(?:\s++|#[^\r\n]*+|\\(?:\r\n|\r|\n|\Z))*+")
 # CPython's, its kind both times: "t-string: ... single quoted t-strings".
 _SPEC_NEWLINE_MSG = (
@@ -328,7 +329,7 @@ class _FieldState:
     __slots__ = (
         "literal",
         "open",
-        "depth",
+        "brackets",
         "spec",
         "previous",
         "tail",
@@ -344,7 +345,8 @@ class _FieldState:
     def __init__(self, literal, open_brace, record, in_code=False):
         self.literal = literal
         self.open = open_brace
-        self.depth = 0  # brackets open in the expression
+        # The opening of each bracket open in the expression, innermost last.
+        self.brackets = []
         self.spec = False
         self.previous = None  # for the comma rule, as at the top level
         # [first token index, start, end, type] of the last token at depth 0,
@@ -402,6 +404,9 @@ class _Lexer:
         # [error, outermost literal open or None] of the error lexing
         # stopped at (_stop).
         self.stopped = None
+        # The tokenizer error of the first closing bracket out of place in a
+        # field (_note_closer).
+        self.closer_error = None
 
     def run(self):
         while not self.done:
@@ -445,7 +450,7 @@ class _Lexer:
         self._emit_error(_parser_level(self._error(msg, i, j)))
         field.spec = False
         field.code = False
-        field.depth = 0
+        field.brackets = []
         field.tail = None
         self.pos = resume
 
@@ -461,6 +466,8 @@ class _Lexer:
         there the error is that of any token after ``literal``: a later
         literal's only when its whole token never closes.
         """
+        if self.closer_error is not None:
+            return None  # met first, in a literal (_note_closer)
         if self.stopped is None:
             return None
         [error, open_literal] = self.stopped
@@ -477,7 +484,7 @@ class _Lexer:
             _TOKEN_RE
             if field is None
             else _FIELD_TOKEN_RE
-            if field.depth == 0
+            if not field.brackets
             else _BRACKETED_FIELD_TOKEN_RE
         )
         m = regex.search(src, self.pos)
@@ -487,7 +494,7 @@ class _Lexer:
             self.done = True
             return
         start = m.start()
-        if field is not None and field.depth == 0:
+        if field is not None and not field.brackets:
             c = src[start]
             if c in ":}" or (c == "!" and not src.startswith("=", start + 1)):
                 self._delimiter(field, start)
@@ -507,20 +514,49 @@ class _Lexer:
             tktype = "symbol" if kept and previous[0][-1] in "({" else "spaces"
         if field is not None:
             if tktype == "opening" or (tktype == "bad-prefix" and tk[-1] in "([{"):
-                field.depth += 1
-            elif tktype == "closing" and field.depth:
-                field.depth -= 1
+                field.brackets.append(tk[-1])
+            elif tktype == "closing":
+                self._note_closer(field, start)
+                if field.brackets:
+                    field.brackets.pop()
         if tktype not in ("new-line", "spaces"):
             context.previous = [tk, tktype]
         if tktype not in ("new-line", "spaces", "comment"):
             self._emit(tk, tktype, start, end)
-            if field is not None and field.depth == 0:
+            if field is not None and not field.brackets:
                 tail = field.tail
                 glued = tail is not None and tail[2] == start
                 glued = glued and tail[3] == "meta-indicator"
                 first = tail[:2] if glued else [len(self.tokens) - 1, start]
                 field.tail = [*first, end, tktype]
         self.pos = end
+
+    def _note_closer(self, field, at):
+        """Record the tokenizer error of the closing bracket at ``at`` in
+        ``field``'s expression, if it is the first one out of place (3.12+,
+        whose tokenizer checks brackets in a field).
+
+        Lexing reads on: the parser raises its own error when it gets there.
+        The record matters only after a parser error raised before it (the
+        lexer reads on past one, ``_misread``): CPython's tokenizer, reading
+        on after that error, stops at this bracket with a literal open, so
+        no later tokenizer error takes the parser error's place
+        (``tokenizer_error_after``).
+        """
+        if self.closer_error is None and features.fstring_fields_are_tokens():
+            self.closer_error = self._closer_error(field, at)
+
+    def _closer_error(self, field, at):
+        """CPython's tokenizer error for the closing bracket at ``at`` in
+        ``field`` (its expression, or code at its level), or None where it
+        closes the innermost bracket open there."""
+        opening = field.brackets[-1] if field.brackets else None
+        msg = _closing_bracket_error(opening, self.src[at])
+        if msg is None:
+            return None
+        if opening is None:
+            msg = f"{field.literal.kind}: {msg}"  # it meets the field's brace
+        return self._error(msg, at, at + 1)
 
     def _string(self, start, opening):
         """A string opening at ``start``: a plain string is one token; an f/t
@@ -963,17 +999,18 @@ class _Lexer:
         self._misread(field, msg, at, at + 1, at)
 
     def _code_token_error(self, at):
-        """The tokenizer's error at a token ``_code`` meets at ``at``, or
-        None: a backslash before anything but a line break, a closing bracket
-        with none open, or a plain string that never closes."""
+        """The tokenizer's error at the token at ``at`` at the level of the
+        field on top (3.12+: code ``_code`` meets, or the token after a
+        conversion), or None: a backslash before anything but a line break,
+        a closing bracket with none open, or a plain string that never
+        closes."""
         src = self.src
         c = src[at]
         if c == "\\":
             msg = "unexpected character after line continuation character"
             return self._error(msg, at + 1, at + 2)
         if c in ")]":
-            kind = self.stack[-1].literal.kind
-            return self._error(f"{kind}: unmatched '{c}'", at, at + 1)
+            return self._closer_error(self.stack[-1], at)
         name_end = _STRING_PREFIX_RE.match(src, at).end()
         if not src.startswith(('"', "'"), name_end):
             return None
@@ -1135,6 +1172,12 @@ class _Lexer:
             self._fail(self._error(f"{kind}: expecting '}}'", rest, rest + 1))
             return None
         if src[rest] not in "}:":
+            # The token CPython's parser reads next: 3.12+ tokenize it first.
+            if features.fstring_fields_are_tokens():
+                token_error = self._code_token_error(rest)
+                if token_error is not None:
+                    self._fail(token_error)
+                    return None
             msg = "expecting ':' or '}'" if name else "invalid conversion character"
             self._misread(field, f"{kind}: {msg}", rest, rest + 1, rest)
             return None
@@ -1281,16 +1324,23 @@ def _check_closing(stack, closing, position_info):
     """CPython's errors for a closing bracket with nothing (or the wrong
     kind) open, instead of popping the wrong node or an empty stack."""
     top = stack[-1] if stack else None
-    if type(top) not in _OPENERS:
-        raise LispyCompileError(
-            f"unmatched '{closing}'", Symbol(closing, **position_info)
-        )
-    if _OPENERS[type(top)] != _CLOSERS[closing]:
-        raise LispyCompileError(
+    msg = _closing_bracket_error(_OPENERS.get(type(top)), closing)
+    if msg is not None:
+        raise LispyCompileError(msg, Symbol(closing, **position_info))
+
+
+def _closing_bracket_error(opening, closing):
+    """CPython's message for the closing bracket ``closing`` where
+    ``opening`` is the innermost bracket open (None: none is), or None where
+    it closes it."""
+    if opening is None:
+        return f"unmatched '{closing}'"
+    if opening != _CLOSERS[closing]:
+        return (
             f"closing parenthesis '{closing}' does not match opening "
-            f"parenthesis '{_OPENERS[type(top)]}'",
-            Symbol(closing, **position_info),
+            f"parenthesis '{opening}'"
         )
+    return None
 
 
 def _check_all_closed(stack):
