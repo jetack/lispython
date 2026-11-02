@@ -383,6 +383,18 @@ class TestInvalidEscapeWarning:
         assert "\\d" in str(warning.message)
         assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
+    def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
+        # Swapping the warning filters resets every "warn once" registry, so a
+        # REPL session would repeat warnings it already showed after each
+        # string it compiles.
+        registry = {}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("default")
+            warnings.warn_explicit("once", UserWarning, "f", 1, registry=registry)
+            stmt_to_dump('(= s "plain") (= n 1.5)')
+            warnings.warn_explicit("once", UserWarning, "f", 1, registry=registry)
+        assert len(caught) == 1
+
 
 class TestPlainStringExtent:
     """Plain strings end where CPython's do: the f/t-string scanner finds them."""

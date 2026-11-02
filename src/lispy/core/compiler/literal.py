@@ -57,9 +57,17 @@ def literal_value(text, node):
     at ``node``, naming the .lpy file and line where literal_eval would name
     ``<unknown>`` line 1, the text it was handed.
     """
+    caught = []
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        if "\\" in text:
+            # Only an escape makes literal_eval warn. catch_warnings swaps the
+            # process-wide filters (not thread-safe, and it resets the
+            # warning registry a REPL, nREPL or LSP session keeps), so it is
+            # entered only for text that can warn.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                value = ast.literal_eval(text)
+        else:
             value = ast.literal_eval(text)
     except (SyntaxError, ValueError) as err:
         msg = err.msg if isinstance(err, SyntaxError) else str(err)
