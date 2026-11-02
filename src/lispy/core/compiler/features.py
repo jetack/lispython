@@ -90,19 +90,6 @@ def _compile_error(src):
 
 
 @functools.cache
-def conversion_name_checked_first():
-    """Whether an invalid conversion name is refused where it is read, before
-    the rest of its field (3.14.8 and 3.15, a backport): f"{x!z: is "invalid
-    conversion character 'z'". 3.12 and 3.13 check it only once the field
-    has closed, so an error or the end of the source in the field's format
-    spec comes first."""
-    error = _compile_error('f"{x!z:')
-    return error is not None and error.msg.startswith(
-        "f-string: invalid conversion character 'z'"
-    )
-
-
-@functools.cache
 def expecting_brace_names_its_line():
     """Whether "expecting '}'" for a string closing the literal inside a
     field names the field's line when the string starts on another one (3.15):

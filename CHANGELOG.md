@@ -17,6 +17,17 @@ follows [Semantic Versioning](https://semver.org/).
   code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
   the `!`, and a triple-quoted literal's spec text keeps it as text. A source
   ending in format-spec text is the literal unterminated on every version.
+- An f/t-string error is the first error in the source, on every Python
+  version: nothing after it is read, so a later unterminated string or
+  unmatched bracket no longer replaces it (`f"{x!z}" "b` reports the
+  invalid conversion, where 3.12+ reported the string). A conversion is
+  checked where it is read: an invalid name (`!z`) is refused at once, even
+  where 3.12 and 3.13 reported an error later in the field first; nothing
+  after the `!` (`f"{x!"a"}"`) is "missing conversion character" at the
+  next token; anything but blanks, `:` or `}` after the name is "expecting
+  ':' or '}'" there. The literal's closing quote in a format spec is
+  "expecting '}', or format specs" at the quote, the escaped `\"` literal
+  included.
 
 ## [0.6.0] - 2026-11-02
 

@@ -17,6 +17,10 @@ T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
 )
 IN_PLACE = features.fstring_fields_are_tokens()
+NOT_CONVERSION = (
+    "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
+)
+CONVERSION_GAP = "f-string: conversion type must come right after the exclamation mark"
 
 
 def error_position(read, src):
@@ -498,26 +502,6 @@ class TestFormatSpecChains:
         )
         assert (info.value.lineno, info.value.offset) == (1, 6)
 
-    @pytest.mark.parametrize(
-        ["src", "msg", "at"],
-        [
-            # Not the closing quote: a string where the name should be.
-            ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
-            # The conversion slot is no body text: a closed escaped literal
-            # with a string there is the same error, not the quote mix.
-            (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
-        ],
-        ids=[
-            "string-in-triple",
-            "escaped-literal-string",
-        ],
-    )
-    def test_a_literal_ending_after_the_exclamation_mark(self, src, msg, at):
-        with pytest.raises(LispyCompileError) as info:
-            parse(src)
-        assert info.value.msg == msg
-        assert (info.value.lineno, info.value.offset) == at
-
     def test_an_earlier_literal_error_comes_first(self):
         with pytest.raises(LispyCompileError) as info:
             parse('f"}"\nf"{x:{x:{x:{x}}}}"')
@@ -985,12 +969,6 @@ class TestSourceEndingInALiteral:
             'f"{x! z\n',
             'f"{x! r\\\n',
             'f"{x! r ',
-            'f"{x!z',
-            'f"{x!z ',
-            'f"{x!z\n',
-            'f"{x!zz',
-            'f"{x!z\\',
-            'f"{x!z:{y',
             # A backslash escaping the end of the source in a spec.
             'f"{x:a\\',
             'f"{x:\\',
@@ -1004,13 +982,11 @@ class TestSourceEndingInALiteral:
             'f"{x!r ;',
             'f"{x!r (',
             'f"{x!r=',
-            'f"{x!z (',
             'f"{x! z',
             'f"a}',
             'f"""a}',
             'f"a}\nb"',
             'f"a\\"}',
-            'f"""{x!""',
             # A line break in a field or literal that closed before the end.
             'f"a\nb{x:c\n}',
             'f"a\nb{x:c\n',
@@ -1026,20 +1002,6 @@ class TestSourceEndingInALiteral:
                     'f"{f"abc',
                     'f"{f"""abc',
                     'f"{f"{f"abc',
-                    'f"{x!r"',
-                    'f"{x!b"',
-                    'f"{x!rb"',
-                    'f"{x!r "',
-                    'f"{x! r"',
-                    'f"{x!f"',
-                    'f"{x!f"a',
-                    'f"{x!t"',
-                    'f"{x!z"',
-                    'f"{x! z"',
-                    'f"{x! r "',
-                    'f"{x!"',
-                    'f"{x! "',
-                    'f"{x!\n"',
                     'f"{x} {"',
                     'f"{f"a\nb"}',
                     'f"{f"a\nb"}c',
@@ -1091,13 +1053,6 @@ class TestSourceEndingInALiteral:
                     'f"{"a\r\nb"}{)}"',
                     'f"{f"{"a\nb"}"}{)}"',
                     'f"{"a\nb"}',
-                    # After a "!" the string is met by the conversion reader.
-                    'f"{x!"a\nb"}"',
-                    'f"{x!r"a\nb"}"',
-                    'f"{x! "a\nb"}"',
-                    'f"{x!s "a\nb"}"',
-                    'f"{x!r "a\nb"}"',
-                    'f"{x!z"a\nb"}"',
                 ]
             ),
         ],
@@ -1121,21 +1076,6 @@ class TestSourceEndingInALiteral:
     @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
     def test_a_plain_string_continued_by_a_backslash_records_no_break(self):
         src = 'f"{"a\\\nb"}{x!z}"'
-        assert error_position(parse, src) == _python_error_position_spelled(src)
-
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
-    @pytest.mark.parametrize(
-        "src",
-        [
-            'f"{x!z}"',
-            'f"{x!z:>3}"',
-            'f"{x!z:{y!q}}"',
-            'f"{x!r"a" }"',
-            'f"{x!r "a"}"',
-            'f"{x!z "a"}"',
-        ],
-    )
-    def test_a_closed_field_s_conversion_is_cpython_s(self, src):
         assert error_position(parse, src) == _python_error_position_spelled(src)
 
     @pytest.mark.parametrize(
@@ -1169,29 +1109,9 @@ class TestSourceEndingInALiteral:
             parse('f"a}"')
         assert info.value.msg == "f-string: single '}' is not allowed"
 
-    NOT_CONVERSION = (
-        "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
-    )
-
     @pytest.mark.parametrize(
         ["probe", "src", "errors"],
         [
-            (
-                "conversion_name_checked_first",
-                'f"{x!z:',
-                {
-                    True: (NOT_CONVERSION.format("z"), 1, 6),
-                    False: ("unterminated f-string literal (detected at line 1)", 1, 1),
-                },
-            ),
-            (
-                "conversion_name_checked_first",
-                'f"{x!z:{y!q}}"',
-                {
-                    True: (NOT_CONVERSION.format("z"), 1, 6),
-                    False: (NOT_CONVERSION.format("q"), 1, 11),
-                },
-            ),
             (
                 "expecting_brace_names_its_line",
                 'x = f"{(\nb"a',
@@ -1219,12 +1139,7 @@ class TestSourceEndingInALiteral:
                 },
             ),
         ],
-        ids=[
-            "conversion-then-spec",
-            "conversion-in-spec",
-            "line",
-            "crlf",
-        ],
+        ids=["line", "crlf"],
     )
     @pytest.mark.parametrize("value", [True, False])
     def test_each_tokenizer_s_error_is_produced(
@@ -1232,11 +1147,7 @@ class TestSourceEndingInALiteral:
     ):
         # Both branches on every interpreter, the other probes at 3.12's
         # values: CPython's measured messages.
-        for name in [
-            "conversion_name_checked_first",
-            "expecting_brace_names_its_line",
-            "final_crlf_starts_a_line",
-        ]:
+        for name in ["expecting_brace_names_its_line", "final_crlf_starts_a_line"]:
             monkeypatch.setattr(features, name, lambda: False)
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
         monkeypatch.setattr(features, probe, lambda: value)
@@ -1291,7 +1202,6 @@ class TestFieldErrorPosition:
                     'f"{x:{=}}"',
                     'f"{=\\\n}"',
                     'f"""{\n=}"""',
-                    'f"{=}" "b',
                 ]
             ),
             'f"{=',
@@ -1331,175 +1241,54 @@ class TestFieldErrorPosition:
         assert error_position(parse, src) == python_error_position(src)
 
 
-class TestTokenizerErrorAfterAParserError:
-    """After an f/t-string error of CPython's parser, CPython tokenizes the
-    rest of the source, and a tokenizer error raised with no literal open
-    (3.11: outside the literal holding the parser's) is reported instead."""
+class TestFirstErrorInSourceOrder:
+    """Only the first error in the source is reported: the lexer stops at
+    its first error, and an earlier one the parser finds comes first."""
 
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "at"],
         [
-            'f"{x!z}" "b',
-            'f"""{x!z}""""',
-            'f"{x!}" "b',
-            'f"{x!:}" "b',
-            'f"{}" "b',
-            'f"{ }" "b',
-            'f"{!r}" "b',
-            'f"{:x}" "b',
-            'f"{x! r}" "b',
-            'f"{x!r a}" "b',
-            'f"{x!r"a"}" "b',
-            'f"{x!"a"}" "b',
-            'f"{x!f"a"}" "b',
-            'f"{x!z:a}" "b',
-            'f"{x!z:{y!q}}" "b',
-            'f"{x!z}" rb"b',
-            'f"{x!z}" b"""b',
-            'f"{x!z}" x"b',
-            'f"{x!z}" "a" "b',
-            'f"{x!z}" f"{y}" "b',
-            'f"{x!z}" f"{y!q}" "b',
-            'f"{x!z}"\n\n"b',
-            'f"{x!z}" \\\n"b',
-            '"a" f"{x!z}" "b',
-            # lispython's "expecting a single expression" is CPython's
-            # parser error for the same text too.
-            'f"{a b}" "c',
-            'f"{(a) b}" "c',
+            # Nothing after a literal's error is read.
+            ('f"{x!z}" "b', NOT_CONVERSION.format("z"), (1, 6)),
+            ('f"{x!z}" )', NOT_CONVERSION.format("z"), (1, 6)),
+            ('f"{x!r y)}" "b', "f-string: expecting ':' or '}'", (1, 8)),
+            ('f"{x:ab" "a', "f-string: expecting '}', or format specs", (1, 8)),
+            ('f"{=}" )', "f-string: valid expression required before '='", (1, 4)),
+            # An unmatched bracket before the literal comes first.
+            ('(a b)) f"{x!z}"', "unmatched ')'", (1, 6)),
         ],
     )
-    def test_a_later_tokenizer_error_outside_a_literal_is_reported(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_the_first_error_is_reported(self, src, msg, at):
+        assert error_position(parse, src) == (msg, *at)
 
-    CLOSED = pytest.mark.skipif(
-        not IN_PLACE, reason="3.11 reads its own messages in a closed literal"
-    )
+
+class TestConversion:
+    """A conversion is s, r or a right after the "!", then only blanks
+    before the ":" or "}"; each error is refused where it is."""
 
     @pytest.mark.parametrize(
-        ["lpy", "py"],
+        ["src", "msg", "at"],
         [
-            # 3.11 reports these later literals' whole tokens (below).
-            ('f"{x!z}" f"b', None),
-            ('f"{x!z}" f"{y', None),
-            ('f"{x!z}" f"{y\n"b', None),
-            ('f"{x!}', None),
-            pytest.param('f"{x!z}" f"""b', None, marks=CLOSED),
-            pytest.param('f"{f"{x!z}" "b"}"', None, marks=CLOSED),
-            # A comment: lispython's ";" is Python's "#".
-            pytest.param('f"{x!z}" ;"b', 'f"{x!z}" #"b', marks=CLOSED),
+            ('f"{x!z}"', NOT_CONVERSION.format("z"), (1, 6)),
+            ('f"{x!zz}"', NOT_CONVERSION.format("zz"), (1, 6)),
+            ('f"{x!z:{y!q}}"', NOT_CONVERSION.format("z"), (1, 6)),
+            ('f"{x!f"a"}"', NOT_CONVERSION.format("f"), (1, 6)),
+            ('f"{x!"a"}"', "f-string: missing conversion character", (1, 6)),
+            ('f"""{x!" """', "f-string: missing conversion character", (1, 8)),
+            (r'f"{f\"{x!"r"}\"}"', "f-string: missing conversion character", (1, 10)),
+            ('f"{x! r}"', CONVERSION_GAP, (1, 5)),
+            ('f"{x!r"a"}"', "f-string: expecting ':' or '}'", (1, 7)),
+            ('f"{x!r a}"', "f-string: expecting ':' or '}'", (1, 8)),
+            ('f"{x!r (}"', "f-string: expecting ':' or '}'", (1, 8)),
         ],
     )
-    def test_the_parser_error_stands_otherwise(self, lpy, py):
-        assert error_position(parse, lpy) == python_error_position(py or lpy)
+    def test_a_malformed_conversion_is_refused_where_it_is(self, src, msg, at):
+        assert error_position(parse, src) == (msg, *at)
 
-    # 3.11 differs from lispython on these, apart from the bracket: it checks
-    # a nested f-string's brackets, and refuses a single-quoted f-string's
-    # line break as its whole token unterminated.
-    NOT_ON_3_11 = pytest.mark.skipif(not IN_PLACE, reason="a separate 3.11 gap")
-
-    @pytest.mark.parametrize(
-        "src",
-        [
-            # After the parser error, a closing bracket with none open in the
-            # field, or of the wrong kind, stops 3.12+'s tokenizer inside the
-            # literal: the parser error stands, never the "b after it.
-            'f"{x!r y)}" "b',
-            'f"{x!r y]}" "b',
-            'f"{x!r (]}" "b',
-            'f"{x!z (]}" "b',
-            'f"{x!r y(]}" "b',
-            'f"{x!r [)]}" "b',
-            'f"{(f"{x!r y}" ]}" "b',
-            'f"""{x!r (\n]}""" "b',
-            'f"{}{)}" "c',
-            'f"{x!z}{)}" "c',
-            'f"{x!}{)}" "c',
-            pytest.param('f"{x!r f"{)}"}" "b', marks=NOT_ON_3_11),
-            # Right after a conversion it is the parser's next token: the
-            # tokenizer raises first (3.14+ check an invalid name before).
-            'f"{x!r )}" "b',
-            'f"{x!z )}" "b',
-            'f"{x!z ]}" "b',
-            'f"{x! )}" "b',
-            'f"{x!r ]}" "b',
-            'f"{x!r )}"\n"b',
-            'f"{x!r\\\n)}" "b',
-            'f"{x!r \\q}" "b',
-        ],
-    )
-    def test_a_closing_bracket_out_of_place_in_a_field(self, src):
-        assert error_position(parse, src) == python_error_position(src)
-
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 is a separate gap")
-    @pytest.mark.parametrize(
-        "src",
-        [
-            'f"{x!z}" )',
-            'f"{x!z}"\n(\n]',
-            'f"{=}" )',
-            'f"{}" )',
-        ],
-    )
-    def test_a_closing_bracket_out_of_place_outside_a_literal(self, src):
-        assert error_position(parse, src) == python_error_position(src)
-
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 is a separate gap")
-    @pytest.mark.parametrize(
-        "src",
-        [
-            # The scan ends at a backslash that continues no line, or at an
-            # indentation CPython's tokenizer refuses: the parser error
-            # stands, never the later error.
-            'f"{x!z}" \\x )',
-            'f"{x:ab" \\x )',
-            'f"{x!z}"\n  x\n y )',
-            'f"{x!z}"\n\tx\n        y )',
-            # ... but not at a continued line, or at a bracket's, blank or
-            # comment line, or at a level still open.
-            'f"{x!z}"\n  x\\\n y )',
-            'f"{x!z}" (\n  x\n y ))',
-            'f"{x!z}"\n  x\n \n  )',
-            'f"{x!z}"\n  x\n    y\n  )',
-            # Python's lexical rules: "#" starts a comment to the end of the
-            # line (a blank line; its backslash and brackets are ignored),
-            # and ";" is code.
-            'f"{x!z}"\n  x\n #c\n  )',
-            'f"{x!z}" #\\x\n )',
-            'f"{x!z}"\n  x\n #\\\n  )',
-            'f"{x!z}" x #c (\n )',
-            'f"{x!z}"\n  x\n ;c\n  )',
-            'f"{x!z}"\n  x\n  ;a\\\n y )',
-            # A backslash continuation in the indentation: the first one's
-            # column is the line's, except column 0; a line ending in "#"
-            # after it is blank; a backslash there continuing nothing stops
-            # the scan, inside brackets too.
-            'f"{x!z}"\n  x\n \\\n   y\n  )',
-            'f"{x!z}"\n  x\n\\\n y )',
-            'f"{x!z}"\n  x\n \\\n#c\n  )',
-            'f"{x!z}" (\n\\x\n ))',
-            # At most 100 indentation levels.
-            'f"{x!z}"\n' + "".join(" " * i + "x\n" for i in range(1, 100)) + ")",
-            'f"{x!z}"\n' + "".join(" " * i + "x\n" for i in range(1, 101)) + ")",
-        ],
-        ids=lambda src: repr(src) if len(src) < 40 else f"{src.count(chr(10))} lines",
-    )
-    def test_the_scan_ends_where_cpython_s_tokenizer_stops_silently(self, src):
-        assert error_position(parse, src) == python_error_position(src)
-
-    @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
-    @pytest.mark.parametrize("src", ['f"{x!z}" f"b', 'f"{x!z}" f"{y'])
-    def test_3_11_reports_a_later_literal_s_whole_token(
-        self, monkeypatch, in_place, src
-    ):
-        # Measured on 3.12 and 3.11: a later literal that never closes is a
-        # tokenizer error inside a literal on 3.12+, one string token on 3.11.
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: in_place)
-        assert error_position(parse, src) == (
-            (TestSourceEndingInALiteral.NOT_CONVERSION.format("z"), 1, 6)
-            if in_place
-            else ("unterminated string literal (detected at line 1)", 1, 10)
-        )
+    @pytest.mark.parametrize("src", ['f"{x!r}"', 'f"{x!r }"', 'f"{x!r :>3}"'])
+    def test_blanks_may_follow_the_name(self, src):
+        [field] = macroexpand_then_compile(parse(src))[0].value.values
+        assert field.conversion == ord("r")
 
 
 class TestQuoteOrLineBreakInFormatSpec:
@@ -1527,39 +1316,6 @@ class TestQuoteOrLineBreakInFormatSpec:
         ],
     )
     def test_the_closing_quote_in_a_spec_is_cpython_s(self, src):
-        assert error_position(parse, src) == python_error_position(src)
-
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads the whole literal first")
-    @pytest.mark.parametrize(
-        "src",
-        [
-            # The quote ends the literal: lexing resumes after it.
-            'f"{x:ab" "a',
-            'f"""{x:ab""" "a',
-            # The field's "{" stays on CPython's bracket stack.
-            'f"{x:{y}" )',
-            'f"{x:ab"\n)',
-            'f"{x:ab" ( ) )',
-            'f"{x:ab" } "a',
-            'f"{x:ab" } )',
-            'f"{x:{y:ab"}} "a',
-            'f"{x:{y:ab"}}} "a',
-            # A nested literal's quote closes only that literal.
-            'f"{f"{x:ab"}" "a',
-            'f"{f"{x:ab"}" )',
-            # The parser error stands: no later error, or one with a literal
-            # open.
-            'f"{x:ab" "a"',
-            'f"{x:ab" f"{" "b',
-            'f"{(f"{x:ab")}" "a',
-            'f"{f"{x:ab"}}" "a',
-            pytest.param(
-                't"{x:ab" "a',
-                marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
-            ),
-        ],
-    )
-    def test_a_tokenizer_error_after_the_quote_takes_its_place(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
     # 3.11's whole-literal error still comes first there.
