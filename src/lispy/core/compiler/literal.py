@@ -58,7 +58,8 @@ def literal_value(text, node, malformed=False):
     ``<unknown>`` line 1, the text it was handed; one raised before an error
     (``1if``: "invalid decimal literal") becomes the error's message
     (_literal_eval). ``malformed`` says ``text`` is a number token
-    number_parts rejected.
+    number_parts rejected: its error keeps only wording of the token
+    (_number_wording), else is "invalid number literal".
     """
     try:
         # Only an escape or a malformed number makes literal_eval warn.
@@ -68,6 +69,10 @@ def literal_value(text, node, malformed=False):
         [value, caught] = _literal_eval(text, malformed or "\\" in text)
     except (SyntaxError, ValueError) as err:
         msg = err.msg if isinstance(err, SyntaxError) else str(err)
+        if malformed:
+            # 406E-9.8J is "invalid syntax", 1e+7145.J "malformed node":
+            # how CPython parses the text, no word for the token.
+            msg = _number_wording(msg) or f"invalid number literal {text}"
         raise LispyCompileError(msg, node) from err
     for warning in caught:
         compile_warning(str(warning.message), warning.category, node.position_info)
@@ -99,16 +104,37 @@ def _literal_eval(text, record):
         raise
 
 
+def _number_wording(msg):
+    """``msg`` where it words the number token itself ("invalid decimal
+    literal", "invalid digit '9' in octal literal", "leading zeros in decimal
+    integer literals ...", "invalid character ... (U+0661)" for a non-ASCII
+    digit), else None.
+
+    ⚠️ Any other message ("invalid syntax" for 1.0.0, "'{' was never
+    closed") says how CPython parses the text as Python source, which a
+    lispython token never is worded by.
+    """
+    return msg if "literal" in msg or msg.startswith("invalid character") else None
+
+
+# A text shaped as one number or a complex's two parts, ASCII: the only
+# digit-led names literal_eval is asked about. Nothing in it nests, so
+# literal_eval's cost is linear in it, where 1-...-x or 1+1+...+1 overflow
+# its parser (RecursionError, MemoryError).
+_NUMBER_SHAPE_RE = re.compile("[0-9][0-9A-Za-z_.]*(?:[+-][0-9][0-9A-Za-z_.]*)?")
+
+
 def _malformed_number_message(text):
-    """What literal_eval says of digit-led ``text`` that is no name (``1.else``,
-    ``1__0``: "invalid decimal literal"), or None where it raises no
-    SyntaxError (``1-x``)."""
-    if not text[:1].isdigit():
+    """CPython's word for a number-shaped ``text`` that is no name
+    (``1.else``, ``1__0``: "invalid decimal literal"), or None where the text
+    has no number shape (``1-x``, ``1=x``) or literal_eval does not word the
+    token (``1.0.0``)."""
+    if not _NUMBER_SHAPE_RE.fullmatch(text):
         return None
     try:
         _literal_eval(text, True)
     except SyntaxError as err:
-        return err.msg
+        return _number_wording(err.msg)
     except (ValueError, TypeError):
         return None
     return None

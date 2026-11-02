@@ -403,6 +403,9 @@ class TestInvalidEscapeWarning:
             ("(= a 1_)", "invalid decimal literal", 6),
             ("(= a 1+2jif)", "invalid imaginary literal", 6),
             ("(match x (case 1__0 2))", "invalid decimal literal", 16),
+            # A number token CPython reads as more than one token.
+            ("(= a 406E-9.8J)", "invalid number literal 406E-9.8J", 6),
+            ("(= a 1e+7.J)", "invalid number literal 1e+7.J", 6),
             # No SyntaxError from literal_eval: still no valid name.
             ("(= a 1-x)", "1-x is not a valid Python name", 6),
         ],
@@ -419,6 +422,32 @@ class TestInvalidEscapeWarning:
                 stmt_to_dump(src)
         assert [str(w.message) for w in caught] == []
         assert (info.value.msg, info.value.lineno, info.value.offset) == (msg, 1, col)
+
+    @pytest.mark.usefixtures("time_bound")
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # No number shape: literal_eval would overflow its parser on
+            # either (RecursionError or MemoryError, by version).
+            "1" + "-" * 7000 + "x",
+            "+".join(["1"] * 3001),
+            # Number-shaped, but CPython's word is no word for a token.
+            "1.0.0",
+            "1..2",
+            # Parsed as Python, "invalid syntax" or "'{' was never closed".
+            "1=x",
+            "1:x",
+            "1{",
+        ],
+    )
+    def test_a_digit_led_name_not_worded_as_a_token_is_no_valid_name(self, name):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump(f"(= a {name})")
+        assert (info.value.msg, info.value.lineno, info.value.offset) == (
+            f"{name} is not a valid Python name",
+            1,
+            6,
+        )
 
     def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
         # Swapping the warning filters resets every "warn once" registry, so a

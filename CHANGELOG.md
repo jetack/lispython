@@ -81,7 +81,9 @@ follows [Semantic Versioning](https://semver.org/).
   "invalid imaginary literal", ...) at the token, where it said "invalid
   syntax" and 0.6.0 also printed a stray "<unknown>:1: SyntaxWarning:
   invalid decimal literal"; a digit-led symbol (`1.else`, `1__0`) says the
-  same where it said "is not a valid Python name".
+  same where it said "is not a valid Python name". A number token Python
+  reads as two (`406E-9.8J`) is "invalid number literal" at the token, where
+  it said "invalid syntax".
 
 ## [0.6.0] - 2026-11-02
 
