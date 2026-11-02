@@ -1520,7 +1520,28 @@ class TestTokenizerErrorAfterAParserError:
             'f"{x!z}" (\n  x\n y ))',
             'f"{x!z}"\n  x\n \n  )',
             'f"{x!z}"\n  x\n    y\n  )',
+            # Python's lexical rules: "#" starts a comment to the end of the
+            # line (a blank line; its backslash and brackets are ignored),
+            # and ";" is code.
+            'f"{x!z}"\n  x\n #c\n  )',
+            'f"{x!z}" #\\x\n )',
+            'f"{x!z}"\n  x\n #\\\n  )',
+            'f"{x!z}" x #c (\n )',
+            'f"{x!z}"\n  x\n ;c\n  )',
+            'f"{x!z}"\n  x\n  ;a\\\n y )',
+            # A backslash continuation in the indentation: the first one's
+            # column is the line's, except column 0; a line ending in "#"
+            # after it is blank; a backslash there continuing nothing stops
+            # the scan, inside brackets too.
+            'f"{x!z}"\n  x\n \\\n   y\n  )',
+            'f"{x!z}"\n  x\n\\\n y )',
+            'f"{x!z}"\n  x\n \\\n#c\n  )',
+            'f"{x!z}" (\n\\x\n ))',
+            # At most 100 indentation levels.
+            'f"{x!z}"\n' + "".join(" " * i + "x\n" for i in range(1, 100)) + ")",
+            'f"{x!z}"\n' + "".join(" " * i + "x\n" for i in range(1, 101)) + ")",
         ],
+        ids=lambda src: repr(src) if len(src) < 40 else f"{src.count(chr(10))} lines",
     )
     def test_the_scan_ends_where_cpython_s_tokenizer_stops_silently(self, src):
         assert error_position(parse, src) == python_error_position(src)

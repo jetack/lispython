@@ -421,13 +421,18 @@ class _Lexer:
         # error: a closing bracket it refuses (_note_closer), or (error
         # None) a stop with no error of its own (_scan_end_at_top_level).
         self.scan_end = None
-        # CPython's indentation stack, [column, column with tabs as 1] of
-        # each open level, and where the line whose indentation is checked
-        # next starts (None: none pending) (_scan_end_at_top_level).
+        # CPython's reading of the top level for that scan (3.12+,
+        # _scan_end_at_top_level): its indentation stack, [column, column
+        # with tabs as 1] of each open level; where the current line's
+        # indentation ends (_indentation); and whether the rest of the line
+        # is a Python comment, from a "#" lispython reads as code.
         self.indents = [[0, 0]]
-        self.line_start = 0
+        self.indent_end = 0
+        self.py_comment = False
 
     def run(self):
+        if features.fstring_fields_are_tokens():
+            self._indentation(0)
         while not self.done:
             top = self.stack[-1] if self.stack else None
             if top is None or (isinstance(top, _FieldState) and not top.spec):
@@ -543,16 +548,20 @@ class _Lexer:
             previous = context.previous
             kept = previous is not None and previous[1] == "opening"
             tktype = "symbol" if kept and previous[0][-1] in "({" else "spaces"
+        # A bracket after a "#" on a top-level line is in CPython's comment.
+        bracket = field is not None or not self.py_comment
         if tktype == "opening" or (tktype == "bad-prefix" and tk[-1] in "([{"):
-            self.parens.append([tk[-1], end - 1])
+            if bracket:
+                self.parens.append([tk[-1], end - 1])
             if field is not None:
                 field.brackets.append(tk[-1])
         elif tktype == "closing":
-            self._note_closer(field, start)
-            # CPython pops the innermost bracket even where the closer
-            # does not match it.
-            if self.parens:
-                self.parens.pop()
+            if bracket:
+                self._note_closer(field, start)
+                # CPython pops the innermost bracket even where the closer
+                # does not match it.
+                if self.parens:
+                    self.parens.pop()
             if field is not None and field.brackets:
                 field.brackets.pop()
         if tktype not in ("new-line", "spaces"):
@@ -606,57 +615,97 @@ class _Lexer:
                 self.scan_end = [error, field is not None]
 
     def _scan_end_at_top_level(self, tk, tktype, start, end):
-        """Record where CPython's scan after a parser error ends with no
-        error of its own (3.12+; an entry ``[None, False]`` of
-        ``scan_end``), at the token ``tk`` (``src[start:end]``) outside
-        every literal: a backslash that continues no line, or a line whose
-        indentation its tokenizer refuses. The parser error then stands.
+        """Read the top-level token ``tk`` (``src[start:end]``) by Python's
+        lexical rules, for where CPython's scan after a parser error ends
+        with no error of its own (3.12+; an entry ``[None, False]`` of
+        ``scan_end``): a backslash that continues no line, or an indentation
+        its tokenizer refuses (``_indentation``). The parser error then
+        stands.
 
-        The indentation is CPython's check where no bracket is open, of each
-        line its tokenizer starts (none after a backslash continuation, or
-        inside a string) that is not blank or only a comment: a column of
-        tab stops of 8 and one of tabs as 1, which must both be deeper than
-        the enclosing level's or both equal an open level's. Only space, tab
-        and form feed (which resets both) are read as indentation, and only
-        LF and CRLF end a line here: a lone CR, or other whitespace, there
-        is not modelled.
+        To CPython a "#" starts a comment to the end of the line, and a
+        lispython symbol or ``;`` comment is code up to it: so the text of
+        either is read for its first "#" or backslash, and the rest of the
+        line after a "#" (its brackets included, ``_token``) is ignored.
+        Not modelled: a string lispython opens there, and the other Python
+        tokens a ``;`` comment holds (brackets, quotes).
         """
-        if self.scan_end is not None:
-            return
+        if start < self.indent_end:
+            return  # read by _indentation
         src = self.src
-        if self.line_start is not None and tktype != "spaces":
-            if tktype not in ("new-line", "comment"):
-                col = alt = 0
-                for i in range(self.line_start, start):
-                    if src[i] == "\t":
-                        [col, alt] = [col // 8 * 8 + 8, alt + 1]
-                    elif src[i] == "\f":
-                        col = alt = 0
-                    else:
-                        [col, alt] = [col + 1, alt + 1]
-                indents = self.indents
-                if col > indents[-1][0]:
-                    refused = alt <= indents[-1][1]
-                    indents.append([col, alt])
-                else:
-                    while col < indents[-1][0]:
-                        indents.pop()
-                    refused = indents[-1] != [col, alt]
-                if refused:
-                    self.scan_end = [None, False]
-                    return
-            self.line_start = None
-        if tktype == "symbol" and "\\" in tk:
-            if self._backslash_error(start + tk.index("\\")) is not None:
-                self.scan_end = [None, False]
-        elif tktype == "new-line" and not self.parens:
+        if tktype == "new-line":
             before = start - 1 if src[start - 1 : start] != "\r" else start - 2
             previous = self.previous
-            continued = src[before : before + 1] == "\\" and (
-                previous is not None and previous[1] == "symbol"
+            continued = (
+                not self.py_comment
+                and src[before : before + 1] == "\\"
+                and previous is not None
+                and previous[1] in ("symbol", "comment")
             )
-            if not continued:
-                self.line_start = end
+            self.py_comment = False
+            if not continued and self.scan_end is None:
+                self._indentation(end)
+        elif tktype in ("symbol", "comment") and not self.py_comment:
+            backslash = tk.find("\\")
+            comment = tk.find("#")
+            if backslash >= 0 and (comment < 0 or backslash < comment):
+                error = self._backslash_error(start + backslash)
+                if error is not None and self.scan_end is None:
+                    self.scan_end = [None, False]
+            elif comment >= 0:
+                self.py_comment = True
+
+    def _indentation(self, i):
+        """CPython's indentation of the line starting at ``i`` (3.12+'s
+        loop at the start of each line its tokenizer reads, outside strings
+        and backslash continuations): records in ``scan_end`` where it stops
+        the scan, and ``indent_end``, where the line's code starts.
+
+        The loop reads spaces, tabs (a column of tab stops of 8, and one of
+        tabs as 1), form feeds (which reset both) and backslash
+        continuations: the column of the first backslash is the line's, but
+        a backslash in column 0 leaves it to the next line's (CPython's
+        falsy ``cont_line_col``). A line with nothing else or a "#" after it
+        is blank; outside every bracket, any other must be deeper in both
+        columns than the enclosing level (at most 100 levels) or equal an
+        open level in both. Only LF and CRLF end a line here: a lone CR, or
+        other whitespace, is not modelled.
+        """
+        src = self.src
+        n = len(src)
+        col = alt = cont = 0
+        while i < n:
+            c = src[i]
+            if c == " ":
+                [col, alt] = [col + 1, alt + 1]
+            elif c == "\t":
+                [col, alt] = [col // 8 * 8 + 8, alt + 1]
+            elif c == "\f":
+                col = alt = 0
+            elif c == "\\":
+                if self._backslash_error(i) is not None:
+                    self.scan_end = [None, False]
+                    return
+                cont = cont or col
+                i += 3 if src.startswith("\r\n", i + 1) else 2
+                continue
+            else:
+                break
+            i += 1
+        self.indent_end = i
+        if i >= n or src[i] in "#\r\n" or self.parens:
+            return
+        if cont:
+            col = alt = cont
+        indents = self.indents
+        if col > indents[-1][0]:
+            refused = alt <= indents[-1][1] or len(indents) >= 100
+            indents.append([col, alt])
+        else:
+            while col < indents[-1][0]:
+                indents.pop()
+            refused = indents[-1] != [col, alt]
+        if refused:
+            self.scan_end = [None, False]
 
     def _closer_error(self, field, at):
         """CPython's tokenizer error for the closing bracket at ``at`` (in
