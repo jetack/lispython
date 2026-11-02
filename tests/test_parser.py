@@ -1503,6 +1503,28 @@ class TestTokenizerErrorAfterAParserError:
     def test_a_closing_bracket_out_of_place_outside_a_literal(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 is a separate gap")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # The scan ends at a backslash that continues no line, or at an
+            # indentation CPython's tokenizer refuses: the parser error
+            # stands, never the later error.
+            'f"{x!z}" \\x )',
+            'f"{x:ab" \\x )',
+            'f"{x!z}"\n  x\n y )',
+            'f"{x!z}"\n\tx\n        y )',
+            # ... but not at a continued line, or at a bracket's, blank or
+            # comment line, or at a level still open.
+            'f"{x!z}"\n  x\\\n y )',
+            'f"{x!z}" (\n  x\n y ))',
+            'f"{x!z}"\n  x\n \n  )',
+            'f"{x!z}"\n  x\n    y\n  )',
+        ],
+    )
+    def test_the_scan_ends_where_cpython_s_tokenizer_stops_silently(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
     @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
     @pytest.mark.parametrize("src", ['f"{x!z}" f"b', 'f"{x!z}" f"{y'])
     def test_3_11_reports_a_later_literal_s_whole_token(

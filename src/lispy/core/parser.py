@@ -386,7 +386,9 @@ class _Lexer:
     so that a later tokenizer error can take its place
     (``tokenizer_error_after``): one that stops lexing, or a closing bracket
     out of place on CPython's bracket stack (``parens``, ``_note_closer``),
-    which the parser refuses in its own way and so does not stop lexing.
+    which the parser refuses in its own way and so does not stop lexing. A
+    backslash or an indentation that ends CPython's scan with no error of
+    its own (``_scan_end_at_top_level``) keeps the parser error.
     lispython reads a single-quoted literal on past a line break in its
     text, where 3.12+'s tokenizer stops: the first such break is recorded on
     the outermost literal (``_note_line_break``), and any error met after it
@@ -414,9 +416,16 @@ class _Lexer:
         # where the expression ends; this stack decides only which bracket
         # a closer must match (_closer_error).
         self.parens = []
-        # [error, whether a literal was open] of the first closing bracket
-        # CPython's tokenizer refuses (_note_closer).
-        self.closer_error = None
+        # [error, whether a literal was open] of the first place lexing reads
+        # on past where CPython's tokenizer ends its scan after a parser
+        # error: a closing bracket it refuses (_note_closer), or (error
+        # None) a stop with no error of its own (_scan_end_at_top_level).
+        self.scan_end = None
+        # CPython's indentation stack, [column, column with tabs as 1] of
+        # each open level, and where the line whose indentation is checked
+        # next starts (None: none pending) (_scan_end_at_top_level).
+        self.indents = [[0, 0]]
+        self.line_start = 0
 
     def run(self):
         while not self.done:
@@ -474,15 +483,17 @@ class _Lexer:
         After a parser error CPython tokenizes the rest of the source, and
         the first tokenizer error replaces the parser's if it is raised with
         no f-string open (3.12+; ``_PyPegen_tokenize_full_source_to_check_
-        for_errors``). A closing bracket that tokenizer refuses does not
-        stop lexing (``_note_closer``), so when one is recorded it is the
-        first tokenizer error: lexing can only have stopped after it. 3.11
+        for_errors``); a tokenizer stop that raises nothing ends the scan
+        with the parser's standing. Lexing reads on past a closing bracket
+        that tokenizer refuses and past such a stop (``scan_end``), so when
+        one is recorded it is where the scan ends: lexing can only have
+        stopped after it. 3.11
         lexes a whole literal as one string token, so there the error is
         that of any token after ``literal``: a later literal's only when its
         whole token never closes.
         """
-        if self.closer_error is not None:
-            [error, in_literal] = self.closer_error
+        if self.scan_end is not None:
+            [error, in_literal] = self.scan_end
             return None if in_literal else error
         if self.stopped is None:
             return None
@@ -520,6 +531,8 @@ class _Lexer:
         tk = m.group()
         tktype = _TOKEN_LABELS[m.lastindex - 1]
         end = m.end()
+        if field is None and features.fstring_fields_are_tokens():
+            self._scan_end_at_top_level(tk, tktype, start, end)
         if tktype == "string":
             self._string(start, tk)
             return
@@ -587,10 +600,63 @@ class _Lexer:
         parser error's place only where no literal is open
         (``tokenizer_error_after``).
         """
-        if self.closer_error is None and features.fstring_fields_are_tokens():
+        if self.scan_end is None and features.fstring_fields_are_tokens():
             error = self._closer_error(field, at)
             if error is not None:
-                self.closer_error = [error, field is not None]
+                self.scan_end = [error, field is not None]
+
+    def _scan_end_at_top_level(self, tk, tktype, start, end):
+        """Record where CPython's scan after a parser error ends with no
+        error of its own (3.12+; an entry ``[None, False]`` of
+        ``scan_end``), at the token ``tk`` (``src[start:end]``) outside
+        every literal: a backslash that continues no line, or a line whose
+        indentation its tokenizer refuses. The parser error then stands.
+
+        The indentation is CPython's check where no bracket is open, of each
+        line its tokenizer starts (none after a backslash continuation, or
+        inside a string) that is not blank or only a comment: a column of
+        tab stops of 8 and one of tabs as 1, which must both be deeper than
+        the enclosing level's or both equal an open level's. Only space, tab
+        and form feed (which resets both) are read as indentation, and only
+        LF and CRLF end a line here: a lone CR, or other whitespace, there
+        is not modelled.
+        """
+        if self.scan_end is not None:
+            return
+        src = self.src
+        if self.line_start is not None and tktype != "spaces":
+            if tktype not in ("new-line", "comment"):
+                col = alt = 0
+                for i in range(self.line_start, start):
+                    if src[i] == "\t":
+                        [col, alt] = [col // 8 * 8 + 8, alt + 1]
+                    elif src[i] == "\f":
+                        col = alt = 0
+                    else:
+                        [col, alt] = [col + 1, alt + 1]
+                indents = self.indents
+                if col > indents[-1][0]:
+                    refused = alt <= indents[-1][1]
+                    indents.append([col, alt])
+                else:
+                    while col < indents[-1][0]:
+                        indents.pop()
+                    refused = indents[-1] != [col, alt]
+                if refused:
+                    self.scan_end = [None, False]
+                    return
+            self.line_start = None
+        if tktype == "symbol" and "\\" in tk:
+            if self._backslash_error(start + tk.index("\\")) is not None:
+                self.scan_end = [None, False]
+        elif tktype == "new-line" and not self.parens:
+            before = start - 1 if src[start - 1 : start] != "\r" else start - 2
+            previous = self.previous
+            continued = src[before : before + 1] == "\\" and (
+                previous is not None and previous[1] == "symbol"
+            )
+            if not continued:
+                self.line_start = end
 
     def _closer_error(self, field, at):
         """CPython's tokenizer error for the closing bracket at ``at`` (in
@@ -1062,6 +1128,16 @@ class _Lexer:
         msg = f"{kind}: expecting '}}', or format specs"
         self._misread(field, msg, at, at + 1, at)
 
+    def _backslash_error(self, at):
+        """The tokenizer's error at the backslash at ``at`` outside a string,
+        or None where it continues the line (a line break or the end of the
+        source follows it, which the blanks CPython skips between tokens
+        take, ``_skip_blanks``/``_CODE_BLANKS_RE``)."""
+        if at + 1 == len(self.src) or self.src[at + 1] in "\r\n":
+            return None
+        msg = "unexpected character after line continuation character"
+        return self._error(msg, at + 1, at + 2)
+
     def _code_token_error(self, at):
         """The tokenizer's error at the token at ``at`` at the level of the
         field on top (3.12+: code ``_code`` meets, or the token after a
@@ -1071,8 +1147,7 @@ class _Lexer:
         src = self.src
         c = src[at]
         if c == "\\":
-            msg = "unexpected character after line continuation character"
-            return self._error(msg, at + 1, at + 2)
+            return self._backslash_error(at)
         if c in ")]":
             return self._closer_error(self.stack[-1], at)
         name_end = _STRING_PREFIX_RE.match(src, at).end()
