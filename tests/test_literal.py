@@ -431,6 +431,11 @@ class TestInvalidEscapeWarning:
             # either (RecursionError or MemoryError, by version).
             "1" + "-" * 7000 + "x",
             "+".join(["1"] * 3001),
+            # Nor an attribute chain, each "." one more level.
+            "1e5" + ".real" * 3000,
+            "1e5" + ".real" * 100000,
+            "1j" + ".imag" * 3000,
+            "1-1e5" + ".real" * 3000,
             # Number-shaped, but CPython's word is no word for a token.
             "1.0.0",
             "1..2",
@@ -439,15 +444,15 @@ class TestInvalidEscapeWarning:
             "1:x",
             "1{",
         ],
+        ids=lambda name: name if len(name) < 20 else f"{name[:12]}...({len(name)})",
     )
     def test_a_digit_led_name_not_worded_as_a_token_is_no_valid_name(self, name):
         with pytest.raises(LispyCompileError) as info:
             stmt_to_dump(f"(= a {name})")
-        assert (info.value.msg, info.value.lineno, info.value.offset) == (
-            f"{name} is not a valid Python name",
-            1,
-            6,
-        )
+        # Compared apart, so a failure does not print a 500 kB name.
+        worded = info.value.msg == f"{name} is not a valid Python name"
+        assert worded, info.value.msg[:120]
+        assert (info.value.lineno, info.value.offset) == (1, 6)
 
     def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
         # Swapping the warning filters resets every "warn once" registry, so a

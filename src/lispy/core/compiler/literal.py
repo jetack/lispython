@@ -117,11 +117,13 @@ def _number_wording(msg):
     return msg if "literal" in msg or msg.startswith("invalid character") else None
 
 
-# A text shaped as one number or a complex's two parts, ASCII: the only
-# digit-led names literal_eval is asked about. Nothing in it nests, so
-# literal_eval's cost is linear in it, where 1-...-x or 1+1+...+1 overflow
-# its parser (RecursionError, MemoryError).
-_NUMBER_SHAPE_RE = re.compile("[0-9][0-9A-Za-z_.]*(?:[+-][0-9][0-9A-Za-z_.]*)?")
+# A text shaped as one number or a complex's two parts, ASCII, each part with
+# at most one ".": the only digit-led names literal_eval is asked about.
+# ⚠️ No part may repeat an operator or a ".", because Python parses each
+# repeat as one more nesting level (1-...-x, 1+...+1, 1e5.real.real...),
+# and literal_eval then overflows (RecursionError, MemoryError).
+_NUMBER_PART = "[0-9][0-9A-Za-z_]*(?:\\.[0-9A-Za-z_]*)?"
+_NUMBER_SHAPE_RE = re.compile(f"{_NUMBER_PART}(?:[+-]{_NUMBER_PART})?")
 
 
 def _malformed_number_message(text):

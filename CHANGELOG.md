@@ -38,11 +38,10 @@ follows [Semantic Versioning](https://semver.org/).
   string prefix glued to the quote is part of that string, as CPython 3.14+
   read it: `!r"a"` and `!f"a"` are "invalid conversion character" at the
   prefix, an f/t-string's body unread; an invalid prefix (`!bt"a"`,
-  `!ub"a"`) is refused at the prefix, where it was "expecting ':' or '}'"
-  after the name; a plain string that never closes (`!r"a`) is
-  unterminated, where it was "expecting '}'". A name of other letters, or
-  repeating one, is a conversion (`!ra"a"`, `!rr"a"`: "invalid conversion
-  character 'ra'"). Anything but
+  `!ub"a"`) is refused at the prefix; a plain string that never closes
+  (`!r"a`) is unterminated. A name of other letters, or repeating one, is a
+  conversion (`!ra"a"`, `!rr"a"`: "invalid conversion character 'ra'").
+  0.6.0 worded and placed these differently by Python version. Anything but
   blanks, `:` or `}` after the name is "expecting ':' or '}'"
   there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
