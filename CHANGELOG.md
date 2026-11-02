@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-02
+
 ### Added
 
 - The nREPL `eval` op reads the standard `file`, `line` and `column` fields
@@ -15,17 +17,6 @@ follows [Semantic Versioning](https://semver.org/).
   for `load-file`.
 - `(raise)` compiles to a bare `raise`, re-raising the exception being
   handled.
-
-### Deprecated
-
-- Writing a string in an f/t-string replacement field with `\"`
-  (`f"{(.get d \"k\")}"`) is deprecated: each such string emits a
-  `SyntaxWarning` at its opening `\"`, shown by default (as CPython
-  3.12+'s invalid escape sequences are). Write plain quotes
-  (`f"{(.get d "k")}"`), which works on every supported Python. A
-  warnings filter that turns it into an error
-  (`PYTHONWARNINGS=error::SyntaxWarning`) makes it a compile error at the
-  opener.
 
 ### Changed
 
@@ -82,6 +73,119 @@ follows [Semantic Versioning](https://semver.org/).
   printed as `lambda a: int: 1`) is refused too.
 - Class bases are read as call arguments: `(class A [**kw])` compiles to
   `class A(**kw)`.
+- A statement form (`do`, `=`, `if`, `return`, ...) in expression position is
+  now a compile error instead of emitting an invalid call such as `do(...)`.
+  A Python function named `do`, `deco`, `async_def`, etc. can no longer be
+  called with lispython call syntax in expression position; they were already
+  unreachable as statements.
+- A Python hard keyword in call position (e.g. `(not a b)`, which used to
+  compile to `not (a, b)`, silently false, or `(else ...)`) is now a compile
+  error.
+- Statement forms that compiled while dropping part of what was written are
+  now compile errors: `(deco d (f))`, whose definition is not a `def`,
+  `async-def`, `class` or `deco` (the decorator was silently dropped);
+  `(assert a b c)` (the third operand was ignored); a form other than
+  `(case ...)` inside `match` (it was read as a case); and def arguments or
+  class bases written as anything but a `[...]` bracket (`(def f (x) ...)`
+  compiled). A `case` with `as` after its guard (`(case 1 if g as y ...)`,
+  which compiled `as y` into the body) is refused: `as` comes before `if`.
+- A `;` ends a symbol or number, so a comment needs no space before it:
+  `a;c` was the symbol `a;c`, now `a` followed by a comment.
+- A Python hard keyword as a symbol name, or as a part of a dotted symbol,
+  is a compile error: `(raise from)`, `(= o.if 1)` (which compiled to an
+  attribute named `if`), and a keyword as a def, class, global, nonlocal,
+  `case ... as` or `except [... as]` name (`(def if [] 1)`,
+  `(case 1 as as ...)`).
+- `~` directly before a closing bracket, a comma, `;` or the end of input
+  (`(f ~)`, `(f ~,a)`, `~;c`) is the symbol `~`, as before a space, instead
+  of an unquote that took the next form or gave "unmatched ')'".
+- A dotted name in a case pattern (`(case Color.RED ...)`) is a value
+  pattern, compared with `==` as in Python. It compiled to a capture pattern
+  that matched every subject, so code that relied on that now falls through
+  to the next case.
+- A `()` in a case pattern whose head is an expression form (`(sub x)`,
+  `(ife a b c)`, `(is-not x)`, `(not-in x)`) is a compile error ("pattern
+  expected") instead of a class pattern on a class of that name.
+- A sign before anything but a number in a case pattern (`(- a)`, `{-a 1}`)
+  reports "pattern can sign only a number literal, got (- a)" with the
+  pattern usage, instead of "only a number literal can be signed in a match
+  pattern".
+- An f/t-string format spec reads braces as CPython does: `}` always ends
+  the spec and `{` opens a nested field, so `{{` and `}}` are no escapes
+  there, except that on 3.12+ `{{` is a literal `{` once a nested field has
+  opened in the spec. `f"{x:{{}}}"`, which formatted `x` with the literal
+  spec `{}`, is now `x` with a spec field holding `{}`, and `f"{x:{y}{{}}}"`,
+  whose spec was `{y}` then `{}`, has the spec `{y}` then `{` followed by a
+  literal `}` on 3.12+ (a spec field `{}` on 3.11).
+- The operand after `^`, `*`, `**` or `:` keeps its own token type, so `*1`,
+  `**1`, `:1` and `^1` read a number `1` instead of a symbol named `1`. A
+  keyword with a number or other non-name after it (`(f :1 x)`, `(def g [:1
+  2] ...)`) is a compile error at it, a bare `:a` or `**x` used as a value
+  (`(= x :a)`, `[**1]`) is a compile error instead of silently the name `a`
+  (or a raw `AttributeError`), and a trailing `:a` with no value in a call,
+  def or class argument list is a compile error instead of a raw `IndexError`.
+- Threading a literal into a call (`(-> 1 (f))`, `(->> 1 (f 2))`,
+  `(-> "a" (f))`, `(-> ... (f))`) compiles to `f(1)`, `f(2, 1)`, `f('a')`
+  and `f(...)` instead of failing with an `AttributeError`, and
+  `(-> None (f))`, which compiled to `f()`, now gives `f(None)`. A macro may
+  put Python values (`None`, booleans, numbers, `...`, str, bytes, and
+  lists and tuples of them) anywhere in the forms it returns, including
+  inside `*`, `**`, `^` and quote forms (`` `(list *~y) ``); each compiles
+  to the same value (including `inf`, `nan`, `-0.0`, complex numbers with a
+  signed zero, `inf` or `nan` part and ints of any size) at the macro
+  call's position, even where `float` or `complex` is rebound or inside a
+  match pattern. Converting nested lists does not recurse, so deep nesting
+  does not hit `RecursionError` there. Any other value (a dict, a set, an
+  object), or a form or list that contains itself (also one unquoted with
+  `~`), is a compile error at the call naming the macro.
+- A str a macro returns keeps its backslashes literally: `"a\\b"` was
+  compiled as `"a\b"` (backspace), and a quote, line ending or control
+  character is kept as written. The same holds for quoted strings and
+  quoted symbols (`'a\b` was `Symbol('a\x08')`); bytes are supported.
+- An assignment, augmented assignment, `del`, `for` or `with ... as` target
+  that Python cannot bind (`(= 1 2)`, `(= (f) 1)`, `(+= [] 1)`, `(del *a)`)
+  is a compile error at the target with CPython's message ("cannot assign to
+  literal"), and so is an annotation anywhere but right after a single
+  target (`(= ^int 1)`, `(= a b ^int 1)`) or a def/class name that is not a
+  name (`(def [] [] 1)`, `(class 1 [])`).
+- A quote, quasiquote or unquote-splice with no form right after it
+  (`(f ' a)`, `(f *' a)`, `(f ~@ a)`, `(f ')`, `',a`) is a compile error at
+  the quote instead of a symbol `'`, `f(*', a)`, an unquote of `@` or
+  "unmatched ')'". `~` alone is still the invert operator.
+- A malformed `match` case pattern is a compile error at the part at fault,
+  quoting the usage of its kind (class, mapping or sequence pattern, `(| ...)`),
+  instead of an `IndexError`, `ValueError` or `AttributeError` or an AST
+  that means something else: a dangling `:attr` (`(P :x)`), a positional
+  pattern after a keyword one (`(P :x 1 2)`, which compiled to `P(2, x=1)`),
+  a mapping key without a pattern (`{"a"}`), `**rest` not last (`{**r 1}`),
+  `**_` (the rest must be a capture name), a key that is no literal or
+  dotted name (`{a 1}`), a second `*rest` (`[*a *b]`), `*rest` outside a
+  sequence (`(case *a ...)`), `(| 1)`, a class pattern head that is no name
+  (`(1)`, `((f) 1)`), a `()` that is no call (`(+ 1 2)`, `(, a b)`,
+  `f"x"`), `...` and a `:x` keyword token as a pattern.
+- A name after `*`, `**` or `:` in a case pattern that is no Python
+  identifier (`[*1a]`, `{**1a}`, `(P :1a 2)`) is a compile error instead of
+  an AST naming `1a`.
+- A malformed dotted name in a case pattern (`.x`, `a..b`, `x.`), as a value
+  pattern, a mapping key or a class pattern head, is a compile error instead
+  of an attribute with an empty name.
+- A string opened with a bare quote inside an f/t-string replacement field
+  reads as Python reads it: `\"` in it is an escaped quote and its
+  backslashes are kept. `f"{(g "a\" b \"c")}"` compiles to
+  `f"{g('a" b "c')}"`; it used to turn every `\"` into `"` before parsing
+  the field, which split the string into `g('a', b, 'c')` or refused it
+  (`f"{(g "say \"hi\"")}"`: "invalid string prefix").
+
+### Deprecated
+
+- Writing a string in an f/t-string replacement field with `\"`
+  (`f"{(.get d \"k\")}"`) is deprecated: each such string emits a
+  `SyntaxWarning` at its opening `\"`, shown by default (as CPython
+  3.12+'s invalid escape sequences are). Write plain quotes
+  (`f"{(.get d "k")}"`), which works on every supported Python. A
+  warnings filter that turns it into an error
+  (`PYTHONWARNINGS=error::SyntaxWarning`) makes it a compile error at the
+  opener.
 
 ### Fixed
 
@@ -95,8 +199,6 @@ follows [Semantic Versioning](https://semver.org/).
   Python name") or as a missing conversion (`f"{=!}"`), and on 3.12+ `f"{=`
   gave "'{' was never closed" and `f"{=}` "unterminated f-string literal".
   It is now refused when the source is read, so also inside quoted code.
-- On 3.12+ a format spec reads `{{` as a literal `{` once a nested field has
-  opened in it, as CPython does (`f"{x:{y}{{}"`); `}` still ends the spec.
 - On 3.12+ an error after a line break in a single-quoted f/t-string's text
   (`f"a\n}"`, `f"a\n{x!z}"`, `f"a\n{)`) reports CPython's "unterminated
   f-string literal (detected at line N)" for that literal, as `compile()`
@@ -104,10 +206,13 @@ follows [Semantic Versioning](https://semver.org/).
   at the break. A multi-line literal with no error still compiles.
 - A comment ends at a lone CR as at LF and CRLF, as in CPython. A CR-only
   source (`; c\r(f 1)`) used to lose every form after a comment.
-- A source ending inside a string, an f/t-string, a format spec or a
-  conversion reports the error `compile()` raises for that text on the
-  running Python: "unterminated ... literal (detected at line N)" at the
-  literal's prefix, "expecting '}'" for a string whose quote closes the
+- A source ending inside a string, an f/t-string, a replacement field's
+  expression, a format spec or a conversion reports the error `compile()`
+  raises for that text on the running Python: "unterminated ... literal
+  (detected at line N)" at the literal's prefix, 3.12+'s "'(' was never
+  closed" (or "'{' was never closed") at the innermost bracket or field
+  brace still open,
+  "expecting '}'" for a string whose quote closes the
   literal it is in, 3.13+'s "newlines are not allowed in format specifiers",
   3.15's "expecting '}' to close '{' on line N", and 3.11's whole-literal
   error. A name glued to a quote after `!` reads as a string prefix (`!r"`),
@@ -140,6 +245,13 @@ follows [Semantic Versioning](https://semver.org/).
   an unquote once, linear instead of quadratic in the nesting (4,000 levels
   took 15 s), and a deep nest of `(do ...)` statements compiles in linear
   time.
+- Deeply nested forms compile in time linear in their nesting: a nested list
+  (`[[[...]]]`, also inside a macro call such as `when`) was exponential (20
+  levels took seconds) and a form in head position (`((((f))))`) quadratic.
+  Rendering a form and expanding macros no longer recurse, so a form nested
+  past Python's recursion limit renders and expands.
+- A long run of digits that is not a number lexes in linear time instead of
+  quadratic.
 - Forms nested deeper than about 245–330 levels (case patterns about 490)
   are no longer refused with "form nested too deeply to compile": the
   compiler and quote expansion no longer spend Python frames per level, so
@@ -153,8 +265,9 @@ follows [Semantic Versioning](https://semver.org/).
 - Nesting past compile()'s own limit is the positioned "form nested too
   deeply to compile" error from `lpy`, imports, the REPL, nREPL, `defmacro`
   and `require`, instead of a `RecursionError` traceback, at the bottom of the
-  deepest path in what compile() was given: the whole module for `lpy` files
-  and imports, the whole form for `defmacro` and `require`, and the statement
+  deepest path in what compile() was given: for `lpy` files and imports the
+  first statement that fails to compile alone (the whole module when each
+  fits alone), the whole form for `defmacro` and `require`, and the statement
   compile() fails on for `lpy -c`, the REPL and nREPL. Its message names
   Python's recursion limit only where that is the limit hit (3.11, and
   `l2py`), since raising it does not move compile()'s limit on 3.12+. A
@@ -172,13 +285,6 @@ follows [Semantic Versioning](https://semver.org/).
   show the same usage line.
 - `(= (sub a) ^int 1)` records `a` in `__annotations__`, as `(= a ^int 1)`
   does.
-- The operand after `^`, `*`, `**` or `:` keeps its own token type, so `*1`,
-  `**1`, `:1` and `^1` read a number `1` instead of a symbol named `1`. A
-  keyword with a number or other non-name after it (`(f :1 x)`, `(def g [:1
-  2] ...)`) is a compile error at it, a bare `:a` or `**x` used as a value
-  (`(= x :a)`, `[**1]`) is a compile error instead of silently the name `a`
-  (or a raw `AttributeError`), and a trailing `:a` with no value in a call,
-  def or class argument list is a compile error instead of a raw `IndexError`.
 - `~x` or `~@x` outside a quasiquote is a compile error at it (`~ (unquote)
   is only allowed inside a quasiquote`) instead of a raw `ValueError`.
 - A comprehension target that cannot be assigned (`[x for 1 in xs]`) and a
@@ -237,24 +343,6 @@ follows [Semantic Versioning](https://semver.org/).
   threaded value.
 - `as->` also renames a dotted reference (`x.real` becomes `__x_0.real`) and
   a reference inside an f-string format spec (`f"{1:{x}}"`).
-- Threading a literal into a call (`(-> 1 (f))`, `(->> 1 (f 2))`,
-  `(-> "a" (f))`, `(-> ... (f))`) compiles to `f(1)`, `f(2, 1)`, `f('a')`
-  and `f(...)` instead of failing with an `AttributeError`, and
-  `(-> None (f))`, which compiled to `f()`, now gives `f(None)`. A macro may
-  put Python values (`None`, booleans, numbers, `...`, str, bytes, and
-  lists and tuples of them) anywhere in the forms it returns, including
-  inside `*`, `**`, `^` and quote forms (`` `(list *~y) ``); each compiles
-  to the same value (including `inf`, `nan`, `-0.0`, complex numbers with a
-  signed zero, `inf` or `nan` part and ints of any size) at the macro
-  call's position, even where `float` or `complex` is rebound or inside a
-  match pattern. Converting nested lists does not recurse, so deep nesting
-  does not hit `RecursionError` there. Any other value (a dict, a set, an
-  object), or a form or list that contains itself (also one unquoted with
-  `~`), is a compile error at the call naming the macro.
-- A str a macro returns keeps its backslashes literally: `"a\\b"` was
-  compiled as `"a\b"` (backspace), and a quote, line ending or control
-  character is kept as written. The same holds for quoted strings and
-  quoted symbols (`'a\b` was `Symbol('a\x08')`); bytes are supported.
 - A `for` or `while` with no target, iterable or test, or with no body
   before its `(else ...)` (`(for x in)`, `(for [x [1]] (print x))`,
   `(while x)`), is a compile error at the loop instead of an `IndexError`
@@ -275,80 +363,8 @@ follows [Semantic Versioning](https://semver.org/).
   (except after else or finally, except mixed with except*, a form after
   the clauses) is reported at that clause instead of as "except is a Python
   keyword".
-- An assignment, augmented assignment, `del`, `for` or `with ... as` target
-  that Python cannot bind (`(= 1 2)`, `(= (f) 1)`, `(+= [] 1)`, `(del *a)`)
-  is a compile error at the target with CPython's message ("cannot assign to
-  literal"), and so is an annotation anywhere but right after a single
-  target (`(= ^int 1)`, `(= a b ^int 1)`) or a def/class name that is not a
-  name (`(def [] [] 1)`, `(class 1 [])`).
 - An empty `()` is a compile error at it ("use (,) for an empty tuple")
   instead of an `IndexError`, wherever it appears.
-- A quote, quasiquote or unquote-splice with no form right after it
-  (`(f ' a)`, `(f *' a)`, `(f ~@ a)`, `(f ')`, `',a`) is a compile error at
-  the quote instead of a symbol `'`, `f(*', a)`, an unquote of `@` or
-  "unmatched ')'". `~` alone is still the invert operator.
-- A malformed `match` case pattern is a compile error at the part at fault,
-  quoting the usage of its kind (class, mapping or sequence pattern, `(| ...)`),
-  instead of an `IndexError`, `ValueError` or `AttributeError` or an AST
-  that means something else: a dangling `:attr` (`(P :x)`), a positional
-  pattern after a keyword one (`(P :x 1 2)`, which compiled to `P(2, x=1)`),
-  a mapping key without a pattern (`{"a"}`), `**rest` not last (`{**r 1}`),
-  `**_` (the rest must be a capture name), a key that is no literal or
-  dotted name (`{a 1}`), a second `*rest` (`[*a *b]`), `*rest` outside a
-  sequence (`(case *a ...)`), `(| 1)`, a class pattern head that is no name
-  (`(1)`, `((f) 1)`), a `()` that is no call (`(+ 1 2)`, `(, a b)`,
-  `f"x"`), `...` and a `:x` keyword token as a pattern.
-- A name after `*`, `**` or `:` in a case pattern that is no Python
-  identifier (`[*1a]`, `{**1a}`, `(P :1a 2)`) is a compile error instead of
-  an AST naming `1a`.
-- A malformed dotted name in a case pattern (`.x`, `a..b`, `x.`), as a value
-  pattern, a mapping key or a class pattern head, is a compile error instead
-  of an attribute with an empty name.
-
-### Changed
-
-- A statement form (`do`, `=`, `if`, `return`, ...) in expression position is
-  now a compile error instead of emitting an invalid call such as `do(...)`.
-  A Python function named `do`, `deco`, `async_def`, etc. can no longer be
-  called with lispython call syntax in expression position; they were already
-  unreachable as statements.
-- A Python hard keyword in call position (e.g. `(not a b)`, which used to
-  compile to `not (a, b)`, silently false, or `(else ...)`) is now a compile
-  error.
-- Statement forms that compiled while dropping part of what was written are
-  now compile errors: `(deco d (f))`, whose definition is not a `def`,
-  `async-def`, `class` or `deco` (the decorator was silently dropped);
-  `(assert a b c)` (the third operand was ignored); a form other than
-  `(case ...)` inside `match` (it was read as a case); and def arguments or
-  class bases written as anything but a `[...]` bracket (`(def f (x) ...)`
-  compiled). A `case` with `as` after its guard (`(case 1 if g as y ...)`,
-  which compiled `as y` into the body) is refused: `as` comes before `if`.
-- A `;` ends a symbol or number, so a comment needs no space before it:
-  `a;c` was the symbol `a;c`, now `a` followed by a comment.
-- A Python hard keyword as a symbol name, or as a part of a dotted symbol,
-  is a compile error: `(raise from)`, `(= o.if 1)` (which compiled to an
-  attribute named `if`), and a keyword as a def, class, global, nonlocal,
-  `case ... as` or `except [... as]` name (`(def if [] 1)`,
-  `(case 1 as as ...)`).
-- `~` directly before a closing bracket, a comma, `;` or the end of input
-  (`(f ~)`, `(f ~,a)`, `~;c`) is the symbol `~`, as before a space, instead
-  of an unquote that took the next form or gave "unmatched ')'".
-- A dotted name in a case pattern (`(case Color.RED ...)`) is a value
-  pattern, compared with `==` as in Python. It compiled to a capture pattern
-  that matched every subject, so code that relied on that now falls through
-  to the next case.
-- A `()` in a case pattern whose head is an expression form (`(sub x)`,
-  `(ife a b c)`, `(is-not x)`, `(not-in x)`) is a compile error ("pattern
-  expected") instead of a class pattern on a class of that name.
-- A sign before anything but a number in a case pattern (`(- a)`, `{-a 1}`)
-  reports "pattern can sign only a number literal, got (- a)" with the
-  pattern usage, instead of "only a number literal can be signed in a match
-  pattern".
-- Deeply nested forms compile in time linear in their nesting: a nested list
-  (`[[[...]]]`, also inside a macro call such as `when`) was exponential (20
-  levels took seconds) and a form in head position (`((((f))))`) quadratic.
-  Rendering a form and expanding macros no longer recurse, so a form nested
-  past Python's recursion limit renders and expands.
 
 ## [0.5.0]
 
