@@ -35,6 +35,8 @@ def check_sdist(path: Path, version: str, tracked: set[str]) -> list[str]:
     root = f"lispython-{version}"
     with tarfile.open(path) as tar:
         for m in tar.getmembers():
+            if m.name != root and not m.name.startswith(root + "/"):
+                errors.append(f"sdist: member outside {root}/: {m.name}")
             if not (m.isfile() or m.isdir()):
                 errors.append(f"sdist: not a regular file or directory: {m.name}")
             errors += [f"sdist: {e}" for e in path_problems(m.name)]
@@ -59,7 +61,9 @@ def check_wheel(path: Path, version: str, tracked: set[str]) -> list[str]:
             errors += [f"wheel: {e}" for e in path_problems(i.filename)]
             if i.filename.startswith(dist_info) or i.is_dir():
                 continue
-            if i.filename.startswith("lispy/") and (f"src/{i.filename}" not in tracked):
+            if not i.filename.startswith("lispy/"):
+                errors.append(f"wheel: unexpected file: {i.filename}")
+            elif f"src/{i.filename}" not in tracked:
                 errors.append(f"wheel: untracked file: {i.filename}")
         try:
             meta = whl.read(f"{dist_info}METADATA").decode()
