@@ -85,6 +85,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- On 3.12+ a format spec reads `{{` as a literal `{` once a nested field has
+  opened in it, as CPython does (`f"{x:{y}{{}"`); `}` still ends the spec.
 - On 3.12+ an error after a line break in a single-quoted f/t-string's text
   (`f"a\n}"`, `f"a\n{x!z}"`, `f"a\n{)`) reports CPython's "unterminated
   f-string literal (detected at line N)" for that literal, as `compile()`

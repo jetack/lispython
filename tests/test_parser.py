@@ -1655,6 +1655,66 @@ class TestQuoteOrLineBreakInFormatSpec:
         assert error_position(parse, src) == error
 
 
+def _read_and_compile(src):
+    return macroexpand_then_compile(parse(src))
+
+
+class TestBraceAfterNestedFieldInSpec:
+    """In a format spec, after a nested field has opened, "{{" is a literal
+    "{" (3.12+) and "}" ends the spec even doubled; before one, every "{"
+    opens a field. compile() on the running interpreter is the oracle."""
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            *_read_on_3_12_plus(
+                [
+                    'f"{x:{y}{{}"',
+                    'f"{x:{y}{{"',
+                    'f"{x:{y}{z}{{}"',
+                    'f"{x:{y}{{{z}}"',
+                    'f"{x:{y!r}{{}"',
+                    'f"""{x:{y}{{}"""',
+                    'f"{x:{y}{{ }"',
+                    'f"{x:{y}a{{b}}c}"',
+                    'f"{x:{y}{{{z}}}"',
+                    'f"{x:{y:{z}{{}}}"',
+                    'f"{x:{y}{{}}"',
+                    'f"{x:{y}}}"',
+                ]
+            ),
+            # 3.11 reads these as CPython does too.
+            'f"{x:{y}{{}}}"',
+            'f"{x:{y}}}}"',
+            'f"{x:a}}}"',
+        ],
+    )
+    def test_reads_as_cpython_does(self, src):
+        try:
+            [expected] = ast.parse(src).body
+        except SyntaxError:
+            assert error_position(_read_and_compile, src) == python_error_position(src)
+            return
+        [stmt] = _read_and_compile(src)
+        assert ast.dump(stmt.value) == ast.dump(expected.value)
+
+    def test_3_11_style_refuses_the_doubled_brace(self, monkeypatch):
+        # Measured on 3.12-3.15 before the probe: the doubled "{" opened a
+        # field.
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
+        monkeypatch.setattr(features, "spec_doubles_brace_after_field", lambda: False)
+        assert error_position(parse, 'f"{x:{y}{{}"') == (
+            "f-string: expecting '}'",
+            1,
+            12,
+        )
+
+    def test_3_12_style_reads_the_doubled_brace(self, monkeypatch):
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
+        monkeypatch.setattr(features, "spec_doubles_brace_after_field", lambda: True)
+        parse('f"{x:{y}{{}"')
+
+
 class TestNumberLexingCost:
     """A long digit run that is not a number costs time linear in its length."""
 
