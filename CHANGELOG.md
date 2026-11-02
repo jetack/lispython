@@ -45,6 +45,13 @@ follows [Semantic Versioning](https://semver.org/).
   3.12+ reported "f-string: expecting '}'" (3.15: "... to close '{' on line
   N"). A name glued to the quote (`x"`) is part of the token, so the error is
   at the name.
+- A starred assignment target outside a list or tuple (`(= *a 1)`) and two
+  starred targets in one (`(= [*a *b] 1)`) are reported by Python's own
+  compiler, with its message at the .lpy position; two starred are now
+  positioned at the list or tuple rather than the second starred, and a bad
+  target after them in the same assignment is reported first. On 3.15,
+  `(lazy-from json *)` (shipped with `lazy-from` in 0.5.0) is likewise
+  Python's own "lazy from ... import * is not allowed".
 
 ## [0.6.0] - 2026-11-02
 

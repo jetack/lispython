@@ -260,8 +260,6 @@ def target_error(node, kind):
         if kind == "annotate" and desc in ("tuple", "list")
         else "illegal target for annotation"
         if kind == "annotate"
-        else "starred assignment target must be in a list or tuple"
-        if desc == "starred"
         else f"cannot assign to {desc}"
     )
     position = {k: getattr(node, k) for k in Node().position_info}
@@ -272,34 +270,25 @@ def check_target(node, kind):
     """Refuse a compiled target ``node`` CPython cannot bind as ``kind``.
 
     One iterative walk, so a target nested past the recursion limit is
-    checked like any other. The refusal is the one recursion would raise
-    first: the first bad node in a left-to-right pre-order walk, and a tuple
-    or list with two starred elements once all its elements are checked.
+    checked like any other; the refusal is the first bad node in a
+    left-to-right pre-order walk. Where the AST is one compile() refuses
+    with a positioned SyntaxError of its own (a starred target outside a
+    list or tuple, two starred in one), it is left to compile().
     """
     if kind == "walrus":
         if not isinstance(node, ast.Name):
             raise target_error(node, kind)
         return
-    # (node, top): top is whether node is the whole target; None marks a
-    # tuple or list whose elements were all checked.
-    pending = [(node, True)]
+    pending = [node]
     while pending:
-        [node, top] = pending.pop()
-        if top is None:
-            starred = [elt for elt in node.elts if isinstance(elt, ast.Starred)]
-            if len(starred) > 1:
-                raise LispyCompileError(
-                    "multiple starred expressions in assignment",
-                    Node(**{k: getattr(starred[1], k) for k in Node().position_info}),
-                )
-        elif isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+        node = pending.pop()
+        if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
             pass
         elif kind in ("assign", "delete") and isinstance(node, (ast.Tuple, ast.List)):
-            pending.append((node, None))
             # Reversed, so the first element is popped (checked) first.
-            pending.extend((elt, False) for elt in reversed(node.elts))
-        elif kind == "assign" and isinstance(node, ast.Starred) and not top:
-            pending.append((node.value, False))
+            pending.extend(reversed(node.elts))
+        elif kind == "assign" and isinstance(node, ast.Starred):
+            pending.append(node.value)
         else:
             raise target_error(node, kind)
 
