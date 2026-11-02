@@ -1205,7 +1205,8 @@ class _Lexer:
         field on top (3.12+: code ``_code`` meets, or the token after a
         conversion), or None: a backslash before anything but a line break,
         a closing bracket with none open, or a plain string that never
-        closes."""
+        closes (one that closes records any line break in it,
+        ``_unclosed_string_error``)."""
         src = self.src
         c = src[at]
         if c == "\\":
@@ -1222,7 +1223,9 @@ class _Lexer:
 
     def _unclosed_string_error(self, start, quote_at):
         """The error of the plain string at ``start`` (its quote at
-        ``quote_at``) if it never closes, else None."""
+        ``quote_at``) if it never closes, else None. A closed one records
+        its line break (``_note_string_line_break``), so call this only
+        where CPython's tokenizer reaches the string, never as a lookahead."""
         src = self.src
         quote = src[quote_at] * 3
         if not src.startswith(quote, quote_at):
