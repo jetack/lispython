@@ -210,7 +210,7 @@ def scan_string_body(src, i, quote, raw, kind, doubled="{}", line_break=False):
     reads it). For a plain string (``kind`` "string") braces are ordinary
     characters. ``doubled`` names the braces whose doubling is literal text:
     both in a literal's text, none in a format spec's first segment, and
-    (3.12+) only ``{`` in a spec after a nested field (``_Lexer._doubled``);
+    only ``{`` in a spec after a nested field (``_Lexer._doubled``);
     any other doubled brace is read as a single one. A
     string reads as Python reads it, wherever it stands (a field included):
     a backslash and the character after it are one pair (raw too), so \\"
@@ -1131,15 +1131,12 @@ class _Lexer:
     @staticmethod
     def _doubled(spec):
         """The braces ``spec``'s text reads doubled as literal (None: a
-        literal's own text, both). CPython's tokenizer leaves format-spec
-        mode at a nested field's "{" and does not re-enter it when the field
-        closes (3.12+), so after one a "{{" is a literal "{" while "}" still
-        ends the spec, a "}}" doubling only at bracket depth 0."""
+        literal's own text, both). In a format spec no brace is doubled
+        before its first nested field; after one, "{{" is a literal "{" while
+        "}" still ends the spec (Python's reading since 3.12)."""
         if spec is None:
             return "{}"
-        if spec.nested and features.spec_doubles_brace_after_field():
-            return "{"
-        return ""
+        return "{" if spec.nested else ""
 
     def _spec_ends_at_line_break(self, spec):
         """Whether ``spec``'s text ends at a line break (no backslash before

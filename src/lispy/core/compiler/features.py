@@ -114,15 +114,6 @@ def spec_line_break_returns_to_code():
 
 
 @functools.cache
-def spec_doubles_brace_after_field():
-    """Whether, in a format spec after a nested field has opened, "{{" is a
-    literal "{" (3.12+): f"{x:{y}{{}" has the spec [y, "{"]. The tokenizer
-    leaves format-spec mode at the nested field and does not re-enter it, so
-    "}}" is not doubled there. 3.11 opens a field at every "{" in a spec."""
-    return _compile_error('f"{x:{y}{{}"') is None
-
-
-@functools.cache
 def conversion_name_checked_first():
     """Whether an invalid conversion name is refused where it is read, before
     the rest of its field (3.14.8 and 3.15, a backport): f"{x!z: is "invalid

@@ -1847,54 +1847,62 @@ def _read_and_compile(src):
     return macroexpand_then_compile(parse(src))
 
 
+def _spec_parts(field):
+    """A compiled field's format spec as a list: text as str, a nested field
+    as (its expression's name, its own spec parts or None)."""
+    parts = []
+    for value in field.format_spec.values:
+        if isinstance(value, ast.Constant):
+            parts.append(value.value)
+        else:
+            nested = None if value.format_spec is None else _spec_parts(value)
+            parts.append((value.value.id, nested))
+    return parts
+
+
 class TestBraceAfterNestedFieldInSpec:
     """In a format spec, after a nested field has opened, "{{" is a literal
-    "{" (3.12+) and "}" ends the spec even doubled; before one, every "{"
-    opens a field. compile() on the running interpreter is the oracle."""
+    "{" and "}" ends the spec even doubled; before one, every "{" opens a
+    field. The same reading on every interpreter (3.11's compile() opens a
+    field at every "{" in a spec)."""
 
     @pytest.mark.parametrize(
-        "src",
+        ["src", "spec", "after"],
         [
-            *_read_on_3_12_plus(
-                [
-                    'f"{x:{y}{{}"',
-                    'f"{x:{y}{{"',
-                    'f"{x:{y}{z}{{}"',
-                    'f"{x:{y}{{{z}}"',
-                    'f"{x:{y!r}{{}"',
-                    'f"""{x:{y}{{}"""',
-                    'f"{x:{y}{{ }"',
-                    'f"{x:{y}a{{b}}c}"',
-                    'f"{x:{y}{{{z}}}"',
-                    'f"{x:{y:{z}{{}}}"',
-                    'f"{x:{y}{{}}"',
-                    'f"{x:{y}}}"',
-                ]
-            ),
-            # 3.11 reads these as CPython does too.
-            'f"{x:{y}{{}}}"',
-            'f"{x:{y}}}}"',
-            'f"{x:a}}}"',
+            ('f"{x:{y}{{}"', [("y", None), "{"], []),
+            ('f"{x:{y}{z}{{}"', [("y", None), ("z", None), "{"], []),
+            ('f"{x:{y}{{{z}}"', [("y", None), "{", ("z", None)], []),
+            ('f"{x:{y!r}{{}"', [("y", None), "{"], []),
+            ('f"""{x:{y}{{}"""', [("y", None), "{"], []),
+            ('f"{x:{y}{{ }"', [("y", None), "{ "], []),
+            # "}" ends the spec, then "}}" is the literal's doubled brace.
+            ('f"{x:{y}{{}}}"', [("y", None), "{"], ["}"]),
+            ('f"{x:{y}}}}"', [("y", None)], ["}"]),
+            ('f"{x:a}}}"', ["a"], ["}"]),
         ],
     )
-    def test_reads_as_cpython_does(self, src):
-        try:
-            [expected] = ast.parse(src).body
-        except SyntaxError:
-            assert error_position(_read_and_compile, src) == python_error_position(src)
-            return
+    def test_a_doubled_brace_after_a_nested_field_is_text(self, src, spec, after):
         [stmt] = _read_and_compile(src)
-        assert ast.dump(stmt.value) == ast.dump(expected.value)
+        [field, *rest] = stmt.value.values
+        assert _spec_parts(field) == spec
+        assert [value.value for value in rest] == after
 
-    def test_3_12_style_reads_the_doubled_brace(self, monkeypatch):
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
-        monkeypatch.setattr(features, "spec_doubles_brace_after_field", lambda: True)
-        [stmt] = _read_and_compile('f"{x:{y}{{}"')
-        [field] = stmt.value.values
-        spec = field.format_spec.values
-        assert [type(v).__name__ for v in spec] == ["FormattedValue", "Constant"]
-        assert spec[0].value.id == "y"
-        assert spec[1].value == "{"
+    @pytest.mark.parametrize(
+        ["src", "col"],
+        [
+            ('f"{x:{y}a{{b}}c}"', 14),
+            ('f"{x:{y}{{{z}}}"', 15),
+            ('f"{x:{y:{z}{{}}}"', 16),
+            ('f"{x:{y}{{}}"', 12),
+            ('f"{x:{y}}}"', 10),
+        ],
+    )
+    def test_a_doubled_closing_brace_after_a_nested_field_is_not_text(self, src, col):
+        assert error_position(parse, src) == (
+            "f-string: single '}' is not allowed",
+            1,
+            col,
+        )
 
 
 class TestNumberLexingCost:
