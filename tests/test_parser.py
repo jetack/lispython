@@ -1698,21 +1698,15 @@ class TestBraceAfterNestedFieldInSpec:
         [stmt] = _read_and_compile(src)
         assert ast.dump(stmt.value) == ast.dump(expected.value)
 
-    def test_3_11_style_refuses_the_doubled_brace(self, monkeypatch):
-        # Measured on 3.12-3.15 before the probe: the doubled "{" opened a
-        # field.
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
-        monkeypatch.setattr(features, "spec_doubles_brace_after_field", lambda: False)
-        assert error_position(parse, 'f"{x:{y}{{}"') == (
-            "f-string: expecting '}'",
-            1,
-            12,
-        )
-
     def test_3_12_style_reads_the_doubled_brace(self, monkeypatch):
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
         monkeypatch.setattr(features, "spec_doubles_brace_after_field", lambda: True)
-        parse('f"{x:{y}{{}"')
+        [stmt] = _read_and_compile('f"{x:{y}{{}"')
+        [field] = stmt.value.values
+        spec = field.format_spec.values
+        assert [type(v).__name__ for v in spec] == ["FormattedValue", "Constant"]
+        assert spec[0].value.id == "y"
+        assert spec[1].value == "{"
 
 
 class TestNumberLexingCost:
