@@ -56,10 +56,7 @@ follows [Semantic Versioning](https://semver.org/).
   starred targets in one (`(= [*a *b] 1)`) are reported by Python's own
   compiler, with its message at the .lpy position; two starred are now
   positioned at the list or tuple rather than the second starred, and a bad
-  target after them in the same assignment is reported first. A starred
-  `del` target (`(del *a)`) is likewise Python's compiler's "can't use
-  starred expression here" at the starred, where lispython said "cannot
-  delete starred". On 3.15,
+  target after them in the same assignment is reported first. On 3.15,
   `(lazy-from json *)` (shipped with `lazy-from` in 0.5.0) is likewise
   Python's own "lazy from ... import * is not allowed".
 
