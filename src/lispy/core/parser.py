@@ -195,7 +195,7 @@ def _source_locator(src):
     return locate
 
 
-def scan_string_body(src, i, quote, raw, kind, spec=False, line_break=False):
+def scan_string_body(src, i, quote, raw, kind, doubled="{}", line_break=False):
     """The one scanner of string bodies: a plain string's whole body, and an
     f/t-string's literal text up to its next field, its end, or the end of a
     format spec.
@@ -208,8 +208,10 @@ def scan_string_body(src, i, quote, raw, kind, spec=False, line_break=False):
     line break no backslash escapes (a backslash escapes a whole \\r\\n, and a
     \\N{...} escape stops at a break in it, as ``_UNESCAPED_LINE_END_RE``
     reads it). For a plain string (``kind`` "string") braces are ordinary
-    characters. In a format spec (``spec``) no brace is doubled, as in
-    CPython: every ``{`` opens a field and the first ``}`` ends the spec. A
+    characters. ``doubled`` names the braces whose doubling is literal text:
+    both in a literal's text, none in a format spec's first segment, and
+    (3.12+) only ``{`` in a spec after a nested field (``_Lexer._doubled``);
+    any other doubled brace is read as a single one. A
     string reads as Python reads it, wherever it stands (a field included):
     a backslash and the character after it are one pair (raw too), so \\"
     never closes it.
@@ -276,7 +278,7 @@ def scan_string_body(src, i, quote, raw, kind, spec=False, line_break=False):
         elif c in "\r\n":
             return ["".join(buf), "line", i]
         elif src.startswith(c, i + 1):
-            if spec:
+            if c not in doubled:
                 return ["".join(buf), "field" if c == "{" else "close", i]
             buf.append(c)
             i += 2
@@ -876,7 +878,7 @@ class _Lexer:
             literal.quote,
             literal.raw,
             literal.kind,
-            spec is not None,
+            self._doubled(spec),
             spec is not None and self._spec_ends_at_line_break(spec),
         )
         if stop == "line":
@@ -928,6 +930,19 @@ class _Lexer:
         self._emit("{", "field-start", at, at + 1, record)
         self.stack.append(_FieldState(literal, at, record, in_code))
         self.pos = at + 1
+
+    @staticmethod
+    def _doubled(spec):
+        """The braces ``spec``'s text reads doubled as literal (None: a
+        literal's own text, both). CPython's tokenizer leaves format-spec
+        mode at a nested field's "{" and does not re-enter it when the field
+        closes (3.12+), so after one a "{{" is a literal "{" while "}" still
+        ends the spec, a "}}" doubling only at bracket depth 0."""
+        if spec is None:
+            return "{}"
+        if spec.nested and features.spec_doubles_brace_after_field():
+            return "{"
+        return ""
 
     def _spec_ends_at_line_break(self, spec):
         """Whether ``spec``'s text ends at a line break (no backslash before
