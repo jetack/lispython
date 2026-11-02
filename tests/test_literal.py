@@ -104,8 +104,8 @@ class TestInterpolatedStringScanner:
     @pytest.mark.parametrize(
         ["lpy", "msg", "at"],
         [
-            ('f"{}"', "f-string: valid expression required before '}'", "{"),
-            ('f"{x!}"', "f-string: missing conversion character", "!"),
+            ('f"{}"', "f-string: valid expression required before '}'", "}"),
+            ('f"{x!}"', "f-string: missing conversion character", "}"),
             (
                 'f"{x!z}"',
                 "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'",

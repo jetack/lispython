@@ -1235,10 +1235,185 @@ class TestSourceEndingInALiteral:
             monkeypatch.setattr(features, name, lambda: False)
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
         monkeypatch.setattr(features, probe, lambda: value)
+        # 3.12 reads a spec on after its line break, 3.13+ refuse the break.
+        refuses = features.single_quoted_spec_refuses_newline()
+        monkeypatch.setattr(
+            features, "spec_line_break_returns_to_code", lambda: not refuses
+        )
         assert error_position(parse, src) == errors[value]
 
 
+class TestFieldErrorPosition:
+    """Where CPython 3.12+ place an empty field expression or a missing
+    conversion: at the delimiter or the token after the "!", not at the
+    field's "{" or the "!". (3.11 places its own messages elsewhere in a
+    closed literal; a source ending in one is the whole literal's error.)"""
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            *_read_on_3_12_plus(
+                [
+                    'f"{}"',
+                    'f"{ }"',
+                    'f"{ = }"',
+                    'f"{!r}"',
+                    'f"{ :x}"',
+                    'f"""{\n}"""',
+                    'f"""{ \n }"""',
+                    'f"{x:{ }}"',
+                ]
+            ),
+            'f"{}',
+            'f"{ }',
+            'f"{!',
+            'f"{:',
+            pytest.param(
+                't"{ }"', marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14")
+            ),
+        ],
+    )
+    def test_an_empty_expression_is_refused_at_its_delimiter(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @pytest.mark.parametrize(
+        "src",
+        _read_on_3_12_plus(
+            [
+                'f"{x!}"',
+                'f"{x! }"',
+                'f"{x!  }"',
+                'f"{x! :x}"',
+                'f"""{x!\n}"""',
+                'f"{x!\\\n}"',
+                'f"{x=!}"',
+            ]
+        ),
+    )
+    def test_a_missing_conversion_is_refused_at_the_token_after_the_bang(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+
+class TestTokenizerErrorAfterAParserError:
+    """After an f/t-string error of CPython's parser, CPython tokenizes the
+    rest of the source, and a tokenizer error raised with no literal open
+    (3.11: outside the literal holding the parser's) is reported instead."""
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            'f"{x!z}" "b',
+            'f"""{x!z}""""',
+            'f"{x!}" "b',
+            'f"{x!:}" "b',
+            'f"{}" "b',
+            'f"{ }" "b',
+            'f"{!r}" "b',
+            'f"{:x}" "b',
+            'f"{x! r}" "b',
+            'f"{x!r a}" "b',
+            'f"{x!r"a"}" "b',
+            'f"{x!"a"}" "b',
+            'f"{x!f"a"}" "b',
+            'f"{x!z:a}" "b',
+            'f"{x!z:{y!q}}" "b',
+            'f"{x!z}" rb"b',
+            'f"{x!z}" b"""b',
+            'f"{x!z}" x"b',
+            'f"{x!z}" "a" "b',
+            'f"{x!z}" f"{y}" "b',
+            'f"{x!z}" f"{y!q}" "b',
+            'f"{x!z}"\n\n"b',
+            'f"{x!z}" \\\n"b',
+            '"a" f"{x!z}" "b',
+            # lispython's "expecting a single expression" is CPython's
+            # parser error for the same text too.
+            'f"{a b}" "c',
+            'f"{(a) b}" "c',
+        ],
+    )
+    def test_a_later_tokenizer_error_outside_a_literal_is_reported(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    CLOSED = pytest.mark.skipif(
+        not IN_PLACE, reason="3.11 reads its own messages in a closed literal"
+    )
+
+    @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            # 3.11 reports these later literals' whole tokens (below).
+            ('f"{x!z}" f"b', None),
+            ('f"{x!z}" f"{y', None),
+            ('f"{x!z}" f"{y\n"b', None),
+            ('f"{x!}', None),
+            pytest.param('f"{x!z}" f"""b', None, marks=CLOSED),
+            pytest.param('f"{f"{x!z}" "b"}"', None, marks=CLOSED),
+            # A comment: lispython's ";" is Python's "#".
+            pytest.param('f"{x!z}" ;"b', 'f"{x!z}" #"b', marks=CLOSED),
+        ],
+    )
+    def test_the_parser_error_stands_otherwise(self, lpy, py):
+        assert error_position(parse, lpy) == python_error_position(py or lpy)
+
+    # 3.11 differs from lispython on these, apart from the bracket: it checks
+    # a nested f-string's brackets, and refuses a single-quoted f-string's
+    # line break as its whole token unterminated.
+    NOT_ON_3_11 = pytest.mark.skipif(not IN_PLACE, reason="a separate 3.11 gap")
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # After the parser error, a closing bracket with none open in the
+            # field, or of the wrong kind, stops 3.12+'s tokenizer inside the
+            # literal: the parser error stands, never the "b after it.
+            'f"{x!r y)}" "b',
+            'f"{x!r y]}" "b',
+            'f"{x!r (]}" "b',
+            'f"{x!z (]}" "b',
+            'f"{x!r y(]}" "b',
+            'f"{x!r [)]}" "b',
+            'f"{(f"{x!r y}" ]}" "b',
+            'f"""{x!r (\n]}""" "b',
+            'f"{}{)}" "c',
+            'f"{x!z}{)}" "c',
+            'f"{x!}{)}" "c',
+            pytest.param('f"{x!r f"{)}"}" "b', marks=NOT_ON_3_11),
+            # Right after a conversion it is the parser's next token: the
+            # tokenizer raises first (3.14+ check an invalid name before).
+            'f"{x!r )}" "b',
+            'f"{x!z )}" "b',
+            'f"{x!z ]}" "b',
+            'f"{x! )}" "b',
+            'f"{x!r ]}" "b',
+            'f"{x!r )}"\n"b',
+            'f"{x!r\\\n)}" "b',
+            'f"{x!r \\q}" "b',
+            # After the code 3.12 reads in a spec past a line break.
+            pytest.param('f"{x:a\nb)}" "c', marks=NOT_ON_3_11),
+            pytest.param('f"{x:a\nb]}" "c', marks=NOT_ON_3_11),
+        ],
+    )
+    def test_a_closing_bracket_out_of_place_in_a_field(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
+    @pytest.mark.parametrize("src", ['f"{x!z}" f"b', 'f"{x!z}" f"{y'])
+    def test_3_11_reports_a_later_literal_s_whole_token(
+        self, monkeypatch, in_place, src
+    ):
+        # Measured on 3.12 and 3.11: a later literal that never closes is a
+        # tokenizer error inside a literal on 3.12+, one string token on 3.11.
+        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: in_place)
+        assert error_position(parse, src) == (
+            (TestSourceEndingInALiteral.NOT_CONVERSION.format("z"), 1, 6)
+            if in_place
+            else ("unterminated string literal (detected at line 1)", 1, 10)
+        )
+
+
 SPEC_REFUSES_NEWLINE = features.single_quoted_spec_refuses_newline()
+SPEC_BREAK_TO_CODE = features.spec_line_break_returns_to_code()
 
 
 class TestQuoteOrLineBreakInFormatSpec:
@@ -1309,15 +1484,136 @@ class TestQuoteOrLineBreakInFormatSpec:
         monkeypatch.setattr(
             features, "single_quoted_spec_refuses_newline", lambda: True
         )
+        monkeypatch.setattr(features, "spec_line_break_returns_to_code", lambda: False)
         assert error_position(parse, src) == (self.NEWLINE_IN_SPEC, *at)
 
-    @pytest.mark.skipif(
-        not IN_PLACE or SPEC_REFUSES_NEWLINE, reason="3.12 accepts the break"
+    # 3.12 ends a single-quoted spec's text at a line break in its first
+    # segment and reads the rest of the field as code.
+    CODE_AFTER_BREAK = pytest.mark.skipif(
+        not SPEC_BREAK_TO_CODE, reason="3.12 reads the spec after it as code"
     )
-    def test_3_12_accepts_a_closed_spec_line_break(self):
-        src = 'f"{x:ab\n}"'
-        compile(src, "<s>", "exec")
-        parse(src)
+    # [lispython source, Python source building the AST 3.12 builds for it]
+    CODE_SPECS = [
+        ('f"{x:ab\n}"', 'f"{x:ab}"'),
+        ('f"{x:ab\n  \n}"', 'f"{x:ab}"'),
+        ('f"{x:ab\n{y}}"', 'f"{x:ab{y}}"'),
+        ('f"{x:ab\n {y} {z} \n}"', 'f"{x:ab{y}{z}}"'),
+        ('f"{x:ab\n{y:}}"', 'f"{x:ab{y:}}"'),
+        ('f"{x:ab\n{y:\n}}"', 'f"{x:ab{y:}}"'),
+        ('f"{x:ab\n{y:{z}}}"', 'f"{x:ab{y:{z}}}"'),
+        ('f"{x:\n}"', 'f"{x:}"'),
+        ('f"{x:ab\n#c\n}"', 'f"{x:ab}"'),
+        ('f"{x:ab\n{y!r:{z}}}"', 'f"{x:ab{y!r:{z}}}"'),
+    ]
+
+    @staticmethod
+    def _dump(src):
+        [stmt] = macroexpand_then_compile(parse(src))
+        return ast.dump(stmt.value)
+
+    @CODE_AFTER_BREAK
+    @pytest.mark.parametrize("src", [lpy for [lpy, _] in CODE_SPECS])
+    def test_3_12_builds_the_spec_after_a_line_break_as_cpython(self, src):
+        assert self._dump(src) == ast.dump(ast.parse(src).body[0].value)
+
+    @CODE_AFTER_BREAK
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # A token where the field must end, CPython's parser's error.
+            'f"{x:a\nb}"',
+            'f"{x:a\n b}"',
+            'f"{x:a\n:b}"',
+            'f"{x:a\n!r}"',
+            'f"{x:a\n[}"',
+            'f"{x:a\n(}"',
+            'f"{x:a\n$}"',
+            'f"{x:a\n{y:b}}"',
+            'f"{x:a\n{y}b}"',
+            'f"{x:a\n{y}"z"}"',
+            'f"{x:a\n"z"}"',
+            'f"{x:a\nf"b',
+            'f"{x:a\nrb"z"}"',
+            'f"{x:a\nx"b',
+            'f"{x:a\n{y:a\nb}}"',
+            'f"{x:a\n{y:a\n#}}"',
+            'f"{x:a\n{y:b',
+            'f"{x:a\n{y:b}',
+            # ... after which the field reads on as an expression.
+            'f"{x:a\nb}" "c',
+            'f"{x:a\n{y:b}}" "c',
+            # ... behind a line break CPython stopped at before.
+            'f"a\nb{x:c\nd}"',
+            'f"a\nb{x:c\nd',
+            'f"{x:a\n{f"b\nc"}d',
+            # The tokenizer's own error at that token.
+            'f"{x:a\n\\x',
+            'f"{x:a\n\\x}"',
+            'f"{x:a\n \\x}"',
+            'f"{x:a\nb \\x}"',
+            'f"{x:a\n)}"',
+            'f"{x:a\n]"',
+            'f"{x:a\n"',
+            'f"{x:a\nb"',
+            "f\"{x:a\n'b",
+            # The end of the source: the innermost "{" is never closed.
+            'f"{x:a\n#}',
+            'f"{x:a\n#c"',
+            'f"{x:a\n#}"',
+            'f"{x:a\n{y}#}"',
+            'f"{f"{x:a\n#}"}"',
+            'f"{x:a\n#}" "c',
+            'f"{x:a\n{y:',
+            'f"{x:a\n{y',
+        ],
+    )
+    def test_3_12_refuses_what_follows_a_spec_s_line_break_as_cpython(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @staticmethod
+    def _as_3_12(monkeypatch):
+        for [probe, value] in [
+            ["fstring_fields_are_tokens", True],
+            ["single_quoted_spec_refuses_newline", False],
+            ["spec_line_break_returns_to_code", True],
+            ["conversion_name_checked_first", False],
+            ["expecting_brace_names_its_line", False],
+        ]:
+            monkeypatch.setattr(features, probe, lambda value=value: value)
+
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 builds another spec AST")
+    @pytest.mark.parametrize(["lpy", "py"], CODE_SPECS)
+    def test_the_3_12_spec_after_a_line_break_is_built(self, monkeypatch, lpy, py):
+        # 3.12's AST, on every interpreter (measured: each pair's sources
+        # build the same AST on 3.12).
+        self._as_3_12(monkeypatch)
+        assert self._dump(lpy) == ast.dump(ast.parse(py).body[0].value)
+
+    @pytest.mark.parametrize(
+        ["src", "error"],
+        [
+            ('f"{x:a\nb}"', ("f-string: expecting '}', or format specs", 2, 1)),
+            ('f"{x:a\n{y:b}}"', ("f-string: expecting '}', or format specs", 2, 4)),
+            (
+                'f"{x:a\nb}" "c',
+                ("unterminated string literal (detected at line 2)", 2, 5),
+            ),
+            ('f"{x:a\n#}"', ("'{' was never closed", 1, 3)),
+            ('f"{x:a\n)}"', ("f-string: unmatched ')'", 2, 1)),
+            (
+                'f"{x:a\n\\x}"',
+                ("unexpected character after line continuation character", 2, 2),
+            ),
+            (
+                'f"a\nb{x:c\nd}"',
+                ("unterminated f-string literal (detected at line 1)", 1, 1),
+            ),
+        ],
+    )
+    def test_3_12_s_errors_after_a_spec_s_line_break(self, monkeypatch, src, error):
+        # 3.12's measured messages, on every interpreter.
+        self._as_3_12(monkeypatch)
+        assert error_position(parse, src) == error
 
 
 class TestNumberLexingCost:

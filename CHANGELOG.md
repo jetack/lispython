@@ -35,6 +35,13 @@ follows [Semantic Versioning](https://semver.org/).
   (`f"{(g \"a")}"`). Its `{x=}` echo (and a t-string's expression text) now
   shows the source as written: `f"{(.get d \"k\")=}"` echoes
   `(.get d \"k\")=`, where it echoed `(.get d "k")=`.
+- On 3.12 a single-quoted literal's format spec continued after a line
+  break in its text is read as CPython 3.12 reads it: the line break and
+  what follows are no longer part of the spec (`f"{x:ab\n}"` formats with
+  `ab`, where it used `ab\n`), only blanks, comments and replacement fields
+  may follow before the `}`, and any other text there (`f"{x:a\nb}"`, which
+  was accepted) is CPython's "expecting '}', or format specs" error or its
+  tokenizer error.
 - An nREPL eval without `file` is named `<nrepl-N>` (a new N per eval)
   instead of `<nrepl>`, which can break a client that matches `<nrepl>` in
   error text.
@@ -91,6 +98,18 @@ follows [Semantic Versioning](https://semver.org/).
   its field's format spec where CPython checks it only once the field closes.
 - An f/t-string's closing quote inside a format spec (`f"{x:{y}"`) reports
   CPython 3.12+'s "expecting '}', or format specs" at the quote.
+- An empty replacement field ("valid expression required before '}'") is
+  reported where CPython 3.12+ report it: at the `}`, `!`, `:` or the `=` of
+  `{ = }`, not at the field's `{`. A missing conversion (`f"{x! }"`) is
+  reported at the token after the `!`, not at the `!`.
+- An error in an f/t-string's field (an empty expression, more than one
+  expression, a missing or invalid conversion, a token out of place after
+  `!`) gives way, as in CPython, to a later tokenizer error outside any
+  literal, such as a string that never closes: `f"{x!z}" "b` and
+  `f"{a b}" "c` report "unterminated string literal" at the last string. On
+  3.11 a later f-string that never closes does too. On 3.12+ a closing
+  bracket out of place in a field after the error keeps it (`f"{x!r y)}" "b`),
+  and one right after a conversion is CPython's "f-string: unmatched ')'".
 - Error positions count a lone CR as a line break, as CPython does (CRLF is
   one break), so a source with CR line endings reports the same line as
   `compile()`.
