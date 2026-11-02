@@ -39,6 +39,12 @@ follows [Semantic Versioning](https://semver.org/).
   f/t, names the line the source ends on in "(detected at line N)" on every
   version (a lispython string may span lines), where it named the string's
   first line break; a final `\r\n` starts no line on 3.11 either.
+- A plain string in an f/t-string field that never closes is "unterminated
+  string literal (detected at line N)" at the string token, its quote the
+  literal's or not, on every version; where its quote was the literal's,
+  3.12+ reported "f-string: expecting '}'" (3.15: "... to close '{' on line
+  N"). A name glued to the quote (`x"`) is part of the token, so the error is
+  at the name.
 
 ## [0.6.0] - 2026-11-02
 

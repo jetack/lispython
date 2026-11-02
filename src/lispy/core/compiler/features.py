@@ -9,12 +9,15 @@ must fail here with a lispython error, never as a CPython traceback or a
 silent mistranslation.
 
 AST shapes: where releases build the same form differently, a named
-capability probe below asks the running ``ast`` (or ``token``) module instead
-of comparing version numbers, so a backported change is followed automatically.  The
+capability probe below asks the running ``ast`` module instead of comparing
+version numbers, so a backported change is followed automatically.  The
 exception is ``compile_depth_follows_recursion_limit``, a version comparison
 through ``running_version()``: probing it would overflow the C stack.  The
-compiler calls the probes through
-this module (``features.probe()``), which is also how tests replace them.
+compiler calls the probes through this module (``features.probe()``), which
+is also how tests replace them.
+
+Nothing here decides how source reads or which error the reader reports:
+those are lispython's own, the same on every interpreter.
 
 No other ``sys.version_info`` comparison belongs in the compiler.  The one
 exception in the package is ``_PY312_PLUS`` in core/importer.py: it chooses
@@ -25,7 +28,6 @@ than a form or an AST shape, and runs before any lispython code is compiled.
 import ast
 import functools
 import sys
-import token
 from dataclasses import dataclass
 
 from lispy.core.errors import LispyCompileError
@@ -65,31 +67,6 @@ def interpolation_keeps_trailing_whitespace():
     """
     probe = ast.parse('t"{x }"', mode="eval").body
     return probe.values[0].str == "x "
-
-
-def _compile_error(src):
-    """The SyntaxError compile() raises for ``src``, or None."""
-    try:
-        compile(src, "<probe>", "exec")
-    except SyntaxError as error:
-        return error
-    return None
-
-
-@functools.cache
-def expecting_brace_names_its_line():
-    """Whether "expecting '}'" for a string closing the literal inside a
-    field names the field's line when the string starts on another one (3.15):
-    "f-string: expecting '}' to close '{' on line 1"."""
-    error = _compile_error('f"{\n"')
-    return error is not None and error.msg.endswith("on line 1")
-
-
-@functools.cache
-def t_string_prefix_exists():
-    """Whether t/T (with r/R) is a string prefix (3.14+): t"..." is then one
-    string token, never the name t before a string."""
-    return hasattr(token, "TSTRING_START")
 
 
 def compile_depth_follows_recursion_limit():

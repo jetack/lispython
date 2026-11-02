@@ -21,6 +21,7 @@ NOT_CONVERSION = (
     "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
 )
 CONVERSION_GAP = "f-string: conversion type must come right after the exclamation mark"
+UNTERMINATED_STRING = "unterminated string literal (detected at line {})"
 SPEC_NEWLINE = (
     "{0}: newlines are not allowed in format specifiers for single quoted {0}s"
 )
@@ -459,7 +460,7 @@ class TestFormatSpecChains:
     @pytest.mark.parametrize(["src", "col"], [('f"{x:{{"', 8), ('f"{x:{{}"', 9)])
     def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self, src, col):
         # The quote is a string in the inner field's expression.
-        assert error_position(parse, src) == ("f-string: expecting '}'", 1, col)
+        assert error_position(parse, src) == (UNTERMINATED_STRING.format(1), 1, col)
 
     def test_a_chain_of_empty_dicts_past_cpython_s_nesting_limit_parses(self):
         # CPython's tokenizer refuses this as "nested too deeply"; lispython
@@ -482,7 +483,7 @@ class TestFormatSpecChains:
 
     def test_a_string_after_a_deep_chain_is_read_where_it_is(self):
         assert error_position(parse, 'f"{x:{x:{x:{x}}}} {"') == (
-            "f-string: expecting '}'",
+            UNTERMINATED_STRING.format(1),
             1,
             20,
         )
@@ -903,18 +904,29 @@ class TestSourceEndingInALiteral:
             ('f"""a}', "f-string: single '}' is not allowed", 1, 6),
             ('f"a}\nb"', "f-string: single '}' is not allowed", 1, 4),
             ('f"a\\"}', "f-string: single '}' is not allowed", 1, 6),
-            ('f"{(b"a', "f-string: expecting '}'", 1, 5),
+            # A plain string in a field never closes the literal, its quote
+            # the literal's or not.
+            ('f"{(b"a', UNTERMINATED_STRING.format(1), 1, 5),
             (
                 'f"{("""a',
                 "unterminated triple-quoted string literal (detected at line 1)",
                 1,
                 5,
             ),
-            ('f"""{("""a', "f-string: expecting '}'", 1, 7),
-            ('f"{(rb"a', "f-string: expecting '}'", 1, 5),
-            ('f"ab{x"', "f-string: expecting '}'", 1, 7),
-            ('f"{("a\nb', "f-string: expecting '}'", 1, 5),
-            ('f"a{(b"x\nc', "f-string: expecting '}'", 1, 6),
+            (
+                'f"""{("""a',
+                "unterminated triple-quoted string literal (detected at line 1)",
+                1,
+                7,
+            ),
+            ('f"{(rb"a', UNTERMINATED_STRING.format(1), 1, 5),
+            # x" is one string token, with the prefix x.
+            ('f"ab{x"', UNTERMINATED_STRING.format(1), 1, 6),
+            ('f"{("a\nb', UNTERMINATED_STRING.format(2), 1, 5),
+            ('f"a{(b"x\nc', UNTERMINATED_STRING.format(2), 1, 6),
+            ('x = f"{(\nb"a', UNTERMINATED_STRING.format(2), 2, 1),
+            ('f"{x}{\n"a', UNTERMINATED_STRING.format(2), 2, 1),
+            ('f"{\n{x}{\n"a', UNTERMINATED_STRING.format(3), 3, 1),
             ('f"{f"abc', "unterminated f-string literal (detected at line 1)", 1, 4),
             (
                 'f"{f"""abc',
@@ -923,7 +935,7 @@ class TestSourceEndingInALiteral:
                 4,
             ),
             ('f"{f"{f"abc', "unterminated f-string literal (detected at line 1)", 1, 7),
-            ('f"{x} {"', "f-string: expecting '}'", 1, 8),
+            ('f"{x} {"', UNTERMINATED_STRING.format(1), 1, 8),
             pytest.param(
                 't"{(t"a',
                 "unterminated t-string literal (detected at line 1)",
@@ -1000,17 +1012,6 @@ class TestSourceEndingInALiteral:
             NOT_CONVERSION.format("z"),
             2,
             7,
-        )
-
-    @pytest.mark.parametrize("value", [True, False])
-    def test_each_expecting_brace_message_is_produced(self, monkeypatch, value):
-        monkeypatch.setattr(features, "expecting_brace_names_its_line", lambda: value)
-        assert error_position(parse, 'x = f"{(\nb"a') == (
-            "f-string: expecting '}' to close '{' on line 1"
-            if value
-            else "f-string: expecting '}'",
-            2,
-            1,
         )
 
 

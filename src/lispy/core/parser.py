@@ -3,7 +3,6 @@ import re
 from bisect import bisect_right
 from collections import deque
 
-from lispy.core.compiler import features
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import number_parts, string_literal_value
 from lispy.core.errors import LispyCompileError, compile_warning
@@ -469,13 +468,6 @@ class _Lexer:
         if kind == "string":
             [piece, stop, at] = scan_string_body(src, body, quote_text, raw, kind)
             error = None
-            # A name glued to the quote (x") is no prefix to CPython: the
-            # string starts at the quote.
-            string_start = (
-                start
-                if _string_prefix_kind(prefix) == "string" or not prefix
-                else quote_start
-            )
             if stop == "quote":
                 end = at + len(quote_text)
                 text = src[start:end] if escaped_in is None else prefix + quote
@@ -485,8 +477,10 @@ class _Lexer:
                 [end, text] = [len(src), prefix + quote]
                 error = self._escaped_error(escaped_in, quote_start, body)
             else:
+                # Wherever it stands, a field included (where a literal's own
+                # quote opens a string too).
                 [end, text] = [len(src), src[start:]]
-                error = self._string_eof_error(string_start, quote, body)
+                error = self._unterminated("string", quote, start, body)
             # Plain strings are a single token, carrying any error: the parser
             # raises it after the prefix check.
             self._emit(text, quote, start, end, error)
@@ -532,28 +526,6 @@ class _Lexer:
         self._fail(
             self._unterminated(literal.kind, literal.quote, literal.start, literal.body)
         )
-
-    def _string_eof_error(self, start, quote, body):
-        """The error of a plain string (at ``start``, its body at ``body``)
-        that the source ends in.
-
-        In a field whose literal has the same quote, CPython 3.12+ takes the
-        string's quote for the literal's closing one, inside the field:
-        "expecting '}'" at the string (3.15 names the field's line where the
-        string starts on another). Otherwise it is the string unterminated.
-        """
-        top = self.stack[-1] if self.stack else None
-        if top is not None and top.literal.quote == quote:
-            kind = top.literal.kind
-            msg = f"{kind}: expecting '}}'"
-            brace_line = self.locate(top.open)["lineno"]
-            if (
-                features.expecting_brace_names_its_line()
-                and self.locate(start)["lineno"] != brace_line
-            ):
-                msg += f" to close '{{' on line {brace_line}"
-            return self._error(msg, start, body)
-        return self._unterminated("string", quote, start, body)
 
     def _unterminated(self, kind, quote, start, body):
         """ "unterminated [triple-quoted ]{kind} literal (detected at line N)"
@@ -1230,18 +1202,6 @@ def interpolated_kind(prefix, node):
 
 
 conversion_dict = {"s": 115, "r": 114, "a": 97}
-
-
-def _string_prefix_kind(prefix):
-    """``"string"`` or ``"interpolated"`` where ``prefix`` glued to a quote
-    makes a string token on the running Python, else None (a name)."""
-    lowered = prefix.lower()
-    if lowered in ("r", "u", "b", "br", "rb"):
-        return "string"
-    interpolated = ["f", "fr", "rf"]
-    if features.t_string_prefix_exists():
-        interpolated += ["t", "tr", "rt"]
-    return "interpolated" if lowered in interpolated else None
 
 
 # A trailing "=" after one of these is part of an operator symbol, not a
