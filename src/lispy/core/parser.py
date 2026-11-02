@@ -567,9 +567,8 @@ class _Lexer:
             self._doubled(spec),
         )
         if spec is not None and len(literal.quote.replace("\\", "")) == 1:
-            line_break = _LINE_BREAK_RE.search(src, self.pos, at)
-            if line_break is not None:
-                brk = line_break.start()
+            brk = self._spec_line_break(self.pos, at)
+            if brk is not None:
                 msg = _SPEC_NEWLINE_MSG.format(literal.kind)
                 self._fail(self._error(msg, brk, brk + 1))
                 return
@@ -679,6 +678,21 @@ class _Lexer:
         self._emit(":", "field-spec-start", at, at + 1)
         field.spec = True
         self.pos = at + 1
+
+    def _spec_line_break(self, start, end):
+        """The index of the first line break in spec text ``src[start:end]``,
+        or None. A break after an odd run of backslashes is a continuation,
+        not a line break, raw literal or not (``f"{x:a\\<LF>b}"`` compiles, as
+        in Python); an even run escapes only the backslashes."""
+        src = self.src
+        for line_break in _LINE_BREAK_RE.finditer(src, start, end):
+            brk = line_break.start()
+            run = brk
+            while run > start and src[run - 1] == "\\":
+                run -= 1
+            if (brk - run) % 2 == 0:
+                return brk
+        return None
 
     def _conversion(self, field, bang):
         """The ``!conv`` at ``bang``: emits its token and returns the index of

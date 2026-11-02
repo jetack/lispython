@@ -1201,6 +1201,25 @@ class TestQuoteOrLineBreakInFormatSpec:
         assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
 
     @pytest.mark.parametrize(
+        ["lpy", "py"],
+        [
+            ('f"{x:a\\\nb}"', 'f"{x:a\\\nb}"'),
+            ('f"{x:\\\n}"', 'f"{x:\\\n}"'),
+            ('f"{x:\\\r\n}"', 'f"{x:\\\r\n}"'),
+            ('f"{x:{y}\\\n}"', 'f"{x:{y}\\\n}"'),
+            ('f"{x:\\\\\\\n}"', 'f"{x:\\\\\\\n}"'),
+            # A raw spec keeps the backslash and the break as text. Written
+            # with escapes, because 3.12's compile() drops that text.
+            ('rf"{x:\\\n}"', 'f"{x:\\\\\\n}"'),
+            ('rf"{x:a\\\nb}"', 'f"{x:a\\\\\\nb}"'),
+        ],
+    )
+    def test_a_backslash_continued_line_in_spec_text_is_no_line_break(self, lpy, py):
+        # An odd run of backslashes before the break continues the line, as
+        # Python reads the same source.
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
+
+    @pytest.mark.parametrize(
         ["src", "kind", "at"],
         [
             ('f"{x:\n>3}"', "f-string", (1, 6)),
@@ -1209,8 +1228,9 @@ class TestQuoteOrLineBreakInFormatSpec:
             ('f"{x:a\r}"', "f-string", (1, 7)),
             ('f"{x:a\r\n}"', "f-string", (1, 7)),
             ('f"{x!r:a\nb}"', "f-string", (1, 9)),
-            # A backslash before the break escapes nothing there.
-            ('f"{x:a\\\nb}"', "f-string", (1, 8)),
+            # An even run of backslashes escapes only itself, raw or not.
+            ('f"{x:\\\\\n}"', "f-string", (1, 8)),
+            ('rf"{x:\\\\\n}"', "f-string", (1, 9)),
             # In any segment: after a nested field, before the "}".
             ('f"{x:{y}a\n}"', "f-string", (1, 10)),
             ('f"{x:{y}\n}"', "f-string", (1, 9)),
