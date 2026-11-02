@@ -53,6 +53,11 @@ follows [Semantic Versioning](https://semver.org/).
   `(lazy-from json *)` (shipped with `lazy-from` in 0.5.0) is likewise
   Python's own "lazy from ... import * is not allowed".
 
+### Fixed
+
+- An invalid escape in a string (`"\d"`) warns at the .lpy file and line of
+  the string, where it named `<unknown>` line 1.
+
 ## [0.6.0] - 2026-11-02
 
 ### Added

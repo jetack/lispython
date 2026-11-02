@@ -3,9 +3,10 @@ import io
 import keyword
 import re
 import tokenize
+import warnings
 
 from lispy.core.compiler.features import require
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, compile_warning
 from lispy.core.nodes import GluedHead, Node, Symbol, atom_text
 from lispy.core.utils import binop_dict, boolop_dict, compare_dict, unaryop_dict
 
@@ -52,12 +53,20 @@ def literal_value(text, node):
 
     A malformed literal (``09``, a truncated ``\\x`` escape, non-ASCII bytes) is
     a LispyCompileError at ``node``, so every caller reports it at the token.
+    A warning it raises (an invalid escape) is re-issued by compile_warning
+    at ``node``, naming the .lpy file and line where literal_eval would name
+    ``<unknown>`` line 1, the text it was handed.
     """
     try:
-        return ast.literal_eval(text)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            value = ast.literal_eval(text)
     except (SyntaxError, ValueError) as err:
         msg = err.msg if isinstance(err, SyntaxError) else str(err)
         raise LispyCompileError(msg, node) from err
+    for warning in caught:
+        compile_warning(str(warning.message), warning.category, node.position_info)
+    return value
 
 
 def exact_p(node):

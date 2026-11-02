@@ -1,11 +1,12 @@
 import ast
 import re
 import sys
+import warnings
 
 import pytest
 
-from lispy.core.errors import LispyCompileError
-from lispy.tools import src_to_python_org
+from lispy.core.errors import LispyCompileError, compile_errors
+from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 from .utils import stmt_to_dump
 
@@ -357,6 +358,30 @@ class TestUnquotedFields:
     def test_written_field_keeps_its_text(self):
         scope = self.run('(= y 2)\n(defmacro dbg [] (return `f"{y=}"))\n(= s (dbg))')
         assert scope["s"] == "y=2"
+
+
+# 3.11 warns an invalid escape with DeprecationWarning, 3.12+ SyntaxWarning.
+ESCAPE_WARNING = DeprecationWarning if sys.version_info < (3, 12) else SyntaxWarning
+
+
+class TestInvalidEscapeWarning:
+    """An invalid escape warns at the .lpy string token, never at
+    ``<unknown>`` line 1, the text literal_eval was handed."""
+
+    @pytest.mark.parametrize(
+        "src", ['(= a 1)\n(print "\\d")', '(= a 1)\n(print f"\\d{a}")']
+    )
+    def test_warning_names_the_lpy_line(self, src):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with compile_errors("m.lpy", src):
+                macroexpand_then_compile(parse(src), {})
+        [warning] = caught
+        assert warning.category is ESCAPE_WARNING
+        # Python's own wording, which changes between versions, passes through.
+        assert "invalid escape sequence" in str(warning.message)
+        assert "\\d" in str(warning.message)
+        assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
 
 class TestPlainStringExtent:
