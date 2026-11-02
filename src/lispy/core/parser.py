@@ -141,10 +141,6 @@ _STRING_PREFIX_RE = re.compile("\\w*")
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
-# A single-quoted body up to its first newline (LF or lone CR) no backslash
-# escapes (3.11's "detected at line"): a backslash escapes the next character,
-# or a whole \r\n (3.11 continues the line there). Possessive, so linear.
-_UNESCAPED_LINE_END_RE = re.compile(r"(?:[^\\\r\n]++|\\\r\n|\\.)*+", re.DOTALL)
 # A line break in a single-quoted literal's format-spec text (_Lexer._body),
 # its kind both times: "t-string: ... single quoted t-strings".
 _SPEC_NEWLINE_MSG = (
@@ -350,9 +346,6 @@ class _Lexer:
         self.pos = 0
         self.previous = None  # the last token outside any field
         self.done = False
-        # The deprecated escaped string's error, which stays ahead of every
-        # version's own rule (whole_literal_error).
-        self.escaped_error = None
 
     def run(self):
         while not self.done:
@@ -492,12 +485,6 @@ class _Lexer:
                 [end, text] = [len(src), prefix + quote]
                 error = self._escaped_error(escaped_in, quote_start, body)
             else:
-                # An open literal's error is earlier in the source: before
-                # the string's own (and its prefix check).
-                error = self._literal_eof_error()
-                if error is not None:
-                    self._fail(error)
-                    return
                 [end, text] = [len(src), src[start:]]
                 error = self._string_eof_error(string_start, quote, body)
             # Plain strings are a single token, carrying any error: the parser
@@ -514,7 +501,7 @@ class _Lexer:
         literal = _LiteralState(
             kind, raw, quote_text, start, quote_start, body, escaped_in
         )
-        self._emit(prefix + quote, "interpolated-start", start, body, [prefix, literal])
+        self._emit(prefix + quote, "interpolated-start", start, body, prefix)
         self.stack.append(literal)
         self.pos = body
 
@@ -522,8 +509,7 @@ class _Lexer:
         """An escaped string met a bare " or the end of the source: at its
         opening quote."""
         msg = f'{kind}: a string opened with \\" closes only with \\"'
-        self.escaped_error = self._error(msg, quote_start, body)
-        return self.escaped_error
+        return self._error(msg, quote_start, body)
 
     def _deprecated(self, kind, quote_start, body):
         """The "deprecated" token of an escaped string that closed, at its
@@ -533,68 +519,23 @@ class _Lexer:
 
     def _eof(self):
         """The source ends in a literal's text or in a field (its expression,
-        conversion or format spec)."""
+        conversion or format spec): in literal text (a literal's own or a
+        format spec's) the innermost literal is unterminated; in a field's
+        expression or conversion lexing just stops, the parser's
+        ``_check_all_closed`` then reporting the innermost bracket or field
+        still open as never closed."""
         self.done = True
-        error = self._literal_eof_error()
-        if error is None:
-            error = self._state_eof_error()
-        if error is not None:
-            self._fail(error)
-
-    def _literal_eof_error(self):
-        """The error the open literals give at the end of the source, ahead
-        of anything lexed after them (a plain string's own error included),
-        or None: 3.11's outermost literal unterminated."""
-        if not self.stack or features.fstring_fields_are_tokens():
-            return None
-        return self._whole_literal_unterminated(self.stack[0])
-
-    def whole_literal_error(self, literal, error):
-        """3.11: the error that comes before ``error``, raised inside the
-        outermost literal ``literal`` (a ``_LiteralState``), or None.
-
-        3.11 lexes a whole f-string as one string token, ending at the first
-        quote of its own kind that no backslash escapes (a single-quoted one
-        also at a line break), before reading anything in it. A literal whose
-        token never closes so is "unterminated string literal", whatever
-        error lispython met inside it. The parser asks only on an error path
-        (``_parse_into``): one scan of the rest of the source.
-        """
-        if features.fstring_fields_are_tokens() or error is self.escaped_error:
-            return None
-        # The token's body is a plain string's (raw: no \N{...} to read),
-        # ended for a single-quoted one at its first unescaped line break.
-        quote = literal.quote
-        [_, stop, at] = scan_string_body(self.src, literal.body, quote, True, "string")
-        closes = stop == "quote" and (
-            len(quote) == 3 or at < self._text_end(quote, literal.body)
-        )
-        return None if closes else self._whole_literal_unterminated(literal)
-
-    def _whole_literal_unterminated(self, literal):
-        """3.11's whole-literal error for ``literal``, an outermost one."""
-        end = self._text_end(literal.quote, literal.body)
-        return self._unterminated(
-            "string", literal.quote, literal.start, literal.body, end
-        )
-
-    def _state_eof_error(self):
-        """The error for where the source ends, the open literals' line
-        breaks aside: in literal text (a literal's own or a format spec's)
-        the innermost literal is unterminated; in a field's expression or
-        conversion None, the parser's ``_check_all_closed`` then reporting
-        the innermost bracket or field still open as never closed."""
         top = self.stack[-1]
         if isinstance(top, _FieldState) and not top.spec:
-            return None
+            return
         literal = top if isinstance(top, _LiteralState) else top.literal
-        return self._unterminated(
-            literal.kind, literal.quote, literal.start, literal.body, len(self.src)
+        self._fail(
+            self._unterminated(literal.kind, literal.quote, literal.start, literal.body)
         )
 
     def _string_eof_error(self, start, quote, body):
         """The error of a plain string (at ``start``, its body at ``body``)
-        that the source ends in, the open literals' errors aside.
+        that the source ends in.
 
         In a field whose literal has the same quote, CPython 3.12+ takes the
         string's quote for the literal's closing one, inside the field:
@@ -612,36 +553,19 @@ class _Lexer:
             ):
                 msg += f" to close '{{' on line {brace_line}"
             return self._error(msg, start, body)
-        end = self._text_end(quote, body)
-        return self._unterminated("string", quote, start, body, end)
+        return self._unterminated("string", quote, start, body)
 
-    def _text_end(self, quote, body):
-        """Where CPython detects a string opened with ``quote`` (its body at
-        ``body``) unterminated: a single-quoted one at its first line break
-        no backslash escapes, else at the end of the source."""
-        if len(quote) == 1:
-            return _UNESCAPED_LINE_END_RE.match(self.src, body).end()
-        return len(self.src)
-
-    def _unterminated(self, kind, quote, start, body, end):
+    def _unterminated(self, kind, quote, start, body):
         """ "unterminated [triple-quoted ]{kind} literal (detected at line N)"
-        at the prefix (``start``) of a string opened with ``quote``, detected
-        at ``end``.
-
-        A line break ending the source starts no line: a final \\n or lone
-        \\r on every version, a final \\r\\n except where
-        ``final_crlf_starts_a_line`` (3.11)."""
+        at the prefix (``start``) of a string opened with ``quote``: N is the
+        line the source ends on, a final line break (\\n, \\r\\n or a lone
+        \\r) starting no line."""
         src = self.src
-        if end == len(src):
-            final = (
-                "\r\n"
-                if src.endswith("\r\n")
-                else src[-1:]
-                if src.endswith(("\n", "\r"))
-                else ""
-            )
-            if final and not (final == "\r\n" and features.final_crlf_starts_a_line()):
-                end -= len(final)
+        end = len(src)
+        if src.endswith("\r\n"):
+            end -= 2
+        elif src.endswith(("\n", "\r")):
+            end -= 1
         line = self.locate(end)["lineno"]
         triple = "triple-quoted " if len(quote) == 3 else ""
         return self._error(
@@ -1038,25 +962,8 @@ def _parse_into(src, rst):
     a pending prefix, and an f/t-string's literal, fields and format specs
     (``_Interpolated``/``_Field``), which the lexer's tokens build in place,
     so any nesting parses in one pass with no recursion.
-
-    An error raised inside an f/t-string is, on 3.11, that of a whole token
-    that never closes (``_Lexer.whole_literal_error``), asked only here, on
-    the error path.
     """
-    lexer = _Lexer(src)
-    tokens = deque(lexer.run())
-    stack = []
-    try:
-        _parse_tokens(src, tokens, stack, rst)
-    except LispyCompileError as raised:
-        outer = next((e for e in stack if isinstance(e, _Interpolated)), None)
-        error = None
-        if outer is not None:
-            error = lexer.whole_literal_error(outer.lexed, raised)
-        if error is None:
-            raise
-        raise error from None
-    return rst
+    return _parse_tokens(src, tokenize(src), [], rst)
 
 
 def _parse_tokens(src, tokens, stack, rst):
@@ -1280,8 +1187,7 @@ def _unary_op_wrap(signs, operand, position_info):
 
 def string_parse(token, tktype, position_info, extra):
     """A plain string token's node, or the stack entry an f/t-string opening
-    (``tktype`` "interpolated-start", ``extra`` its prefix and the lexer's
-    ``_LiteralState``) starts."""
+    (``tktype`` "interpolated-start", ``extra`` its prefix) starts."""
     if tktype != "interpolated-start":
         [prefix, *_] = token.split(tktype)
         node = String(token, **position_info)
@@ -1289,7 +1195,7 @@ def string_parse(token, tktype, position_info, extra):
         if extra is not None:
             raise extra
         return node
-    [prefix, lexed] = extra
+    prefix = extra
     node = String(token, **position_info)
     kind = interpolated_kind(prefix, node)
     if kind == "t-string":
@@ -1297,7 +1203,7 @@ def string_parse(token, tktype, position_info, extra):
         # version before any complaint about the literal's contents.
         if not _PARTIAL.get():
             require("t-string", node)
-    return _Interpolated(kind, kind, "r" in prefix.lower(), position_info, lexed)
+    return _Interpolated(kind, kind, "r" in prefix.lower(), position_info)
 
 
 def interpolated_kind(prefix, node):
@@ -1353,11 +1259,10 @@ class _Interpolated:
     field's format spec (always an ``f-string`` body; ``kind`` names the
     literal in error messages)."""
 
-    def __init__(self, symbol, kind, raw, position_info, lexed=None):
+    def __init__(self, symbol, kind, raw, position_info):
         self.symbol = symbol
         self.kind = kind
         self.raw = raw
-        self.lexed = lexed  # a literal's _LiteralState (None for a spec)
         self.start = [position_info["lineno"], position_info["col_offset"]]
         self.parts = []
         self.pending = None  # [value, position_info] of the literal text last read

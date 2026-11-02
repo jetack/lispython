@@ -16,7 +16,7 @@ from tests.utils import stmt_to_dump
 T_STRINGS = (
     tuple(features.running_version())[:2] >= features.FEATURES["t-string"].min_version
 )
-IN_PLACE = features.fstring_fields_are_tokens()
+NEEDS_3_14 = pytest.mark.skipif(not T_STRINGS, reason="t-strings need Python 3.14")
 NOT_CONVERSION = (
     "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
 )
@@ -24,20 +24,12 @@ CONVERSION_GAP = "f-string: conversion type must come right after the exclamatio
 SPEC_NEWLINE = (
     "{0}: newlines are not allowed in format specifiers for single quoted {0}s"
 )
-# 3.11's whole-literal error still comes first there.
-WHOLE_LITERAL_ON_3_11 = pytest.mark.skipif(
-    not IN_PLACE, reason="3.11 reports the whole literal first"
-)
 
 
 def error_position(read, src):
     with pytest.raises(SyntaxError) as info:
         read(src)
     return (info.value.msg, info.value.lineno, info.value.offset)
-
-
-def python_error_position(src):
-    return error_position(lambda s: compile(s, "<s>", "exec"), src)
 
 
 class TestParser:
@@ -139,20 +131,16 @@ class TestBrackets:
         assert (info.value.lineno, info.value.offset) == (1, col)
 
     @pytest.mark.parametrize(
-        "src",
-        [
-            "(\n]",
-            "a\n(\n\n]",
-            pytest.param(
-                'f"{(\n]}"',
-                marks=pytest.mark.skipif(
-                    not IN_PLACE, reason="3.11: the literal's token first"
-                ),
-            ),
-        ],
+        ["src", "line", "opening_line"],
+        [("(\n]", 2, 1), ("a\n(\n\n]", 4, 2), ('f"{(\n]}"', 2, 1)],
     )
-    def test_a_mismatch_names_the_opening_s_other_line(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_a_mismatch_names_the_opening_s_other_line(self, src, line, opening_line):
+        assert error_position(parse, src) == (
+            "closing parenthesis ']' does not match opening parenthesis '(' "
+            f"on line {opening_line}",
+            line,
+            1,
+        )
 
 
 class TestWrapperPrefix:
@@ -468,11 +456,10 @@ class TestFormatSpecChains:
         # CPython has no {{ or }} escape in a spec: { opens a field, } ends it.
         assert stmt_to_dump(lpy) == ast.dump(ast.parse(py or lpy))
 
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 ends the literal at the last quote")
-    @pytest.mark.parametrize("src", ['f"{x:{{"', 'f"{x:{{}"'])
-    def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self, src):
+    @pytest.mark.parametrize(["src", "col"], [('f"{x:{{"', 8), ('f"{x:{{}"', 9)])
+    def test_an_unclosed_doubled_brace_in_a_spec_is_a_field(self, src, col):
         # The quote is a string in the inner field's expression.
-        assert error_position(parse, src) == python_error_position(src)
+        assert error_position(parse, src) == ("f-string: expecting '}'", 1, col)
 
     def test_a_chain_of_empty_dicts_past_cpython_s_nesting_limit_parses(self):
         # CPython's tokenizer refuses this as "nested too deeply"; lispython
@@ -493,12 +480,12 @@ class TestFormatSpecChains:
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == at
 
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 ends the literal at the last quote")
     def test_a_string_after_a_deep_chain_is_read_where_it_is(self):
-        # CPython refuses the chain as nested too deeply, so the expected
-        # error is that of a field after one with no spec, at the quote.
-        [msg, _, _] = python_error_position('f"{x} {"')
-        assert error_position(parse, 'f"{x:{x:{x:{x}}}} {"') == (msg, 1, 20)
+        assert error_position(parse, 'f"{x:{x:{x:{x}}}} {"') == (
+            "f-string: expecting '}'",
+            1,
+            20,
+        )
 
     def test_the_first_of_two_errors_is_reported(self):
         # CPython's message, at the name.
@@ -737,288 +724,232 @@ class TestFieldsLexedInPlace:
 
 class TestSourceEndingInAFieldExpression:
     @pytest.mark.parametrize(
-        ["lpy", "py"],
+        ["src", "msg", "line", "col"],
         [
-            # The bare-quoted string takes \" as an escape, so it swallows )}
-            # and the closing quote. (g, ...) keeps the "(" in lispython's
-            # column; 3.11 lexes that Python text as other tokens.
-            pytest.param(
-                r'f"{(g "a\")}"',
-                r'f"{(g, "a\")}"',
-                marks=pytest.mark.skipif(
-                    not IN_PLACE, reason="3.11 reads the Python text differently"
-                ),
-            ),
-            ('f"{(', None),
-            ('f"{x', None),
-            ('(f"{x', None),
-            ('f"{x:{(', None),
-            ('f"{x} {y', None),
-            ('f"{x!r', None),
-            ('f"{x!', None),
-            ('f"{x! ', None),
-            ('f"""\n{\n[\n(x', None),
-            ('f"{x\n\n', None),
-            ('f"ab\\\n{x\n', None),
-            # 3.11's line rules: a final \n starts no line, a final \r\n does;
-            # a backslash escapes a whole \r\n, and escapes in a raw string too.
-            ('f"""{(\n x\n', None),
-            ('f"""{x\r\n y\r\n', None),
-            ('f"ab\\\r\n{x', None),
-            ('rf"a\\\n{x\n', None),
-            # A lone CR ends a line too (CRLF is one break).
-            ('f"a\\\r{x', None),
-            ('f"""{x\r y\r', None),
-            ('f"""{x\r\n\r\r\n \r', None),
-            pytest.param(
-                'f"{f"{(',
-                None,
-                marks=pytest.mark.skipif(
-                    not IN_PLACE, reason="3.11 ends the string at the inner quote"
-                ),
-            ),
-            pytest.param(
-                't"{(',
-                None,
-                marks=pytest.mark.skipif(not T_STRINGS, reason="needs Python 3.14"),
-            ),
-        ],
-        ids=[
-            "bare-string-swallows-the-field",
-            "innermost-bracket",
-            "field-brace",
-            "inside-a-bracket",
-            "spec-field",
-            "second-field",
-            "conversion",
-            "exclamation-mark",
-            "space-after-the-exclamation-mark",
-            "triple-multiline",
-            "single-newline",
-            "backslash-newline",
-            "final-lf",
-            "final-crlf",
-            "backslash-crlf",
-            "raw-backslash-newline",
-            "backslash-lone-cr",
-            "triple-lone-cr",
-            "mixed-breaks",
-            "nested-literal",
-            "t-string",
+            ('f"{(g "a\\")}"', "'(' was never closed", 1, 4),
+            ('f"{(', "'(' was never closed", 1, 4),
+            ('f"{x', "'{' was never closed", 1, 3),
+            ('(f"{x', "'{' was never closed", 1, 4),
+            ('f"{x:{(', "'(' was never closed", 1, 7),
+            ('f"{x} {y', "'{' was never closed", 1, 7),
+            ('f"{x!r', "'{' was never closed", 1, 3),
+            ('f"{x!', "'{' was never closed", 1, 3),
+            ('f"{x! ', "'{' was never closed", 1, 3),
+            ('f"""\n{\n[\n(x', "'(' was never closed", 4, 1),
+            ('f"{x\n\n', "'{' was never closed", 1, 3),
+            ('f"ab\\\n{x\n', "'{' was never closed", 2, 1),
+            ('f"""{(\n x\n', "'(' was never closed", 1, 6),
+            ('f"""{x\r\n y\r\n', "'{' was never closed", 1, 5),
+            ('f"ab\\\r\n{x', "'{' was never closed", 2, 1),
+            ('rf"a\\\n{x\n', "'{' was never closed", 2, 1),
+            ('f"a\\\r{x', "'{' was never closed", 2, 1),
+            ('f"""{x\r y\r', "'{' was never closed", 1, 5),
+            ('f"""{x\r\n\r\r\n \r', "'{' was never closed", 1, 5),
+            ('f"{f"{(', "'(' was never closed", 1, 7),
+            pytest.param('t"{(', "'(' was never closed", 1, 4, marks=NEEDS_3_14),
         ],
     )
-    def test_the_error_is_cpython_s(self, lpy, py):
-        assert error_position(parse, lpy) == python_error_position(py or lpy)
+    def test_the_innermost_open_bracket_is_never_closed(self, src, msg, line, col):
+        assert error_position(parse, src) == (msg, line, col)
 
-    @pytest.mark.parametrize(
-        ["src", "in_place", "whole_literal"],
-        [
-            # CPython 3.12+ refuses the chain as nested too deeply; lispython
-            # adds no nesting limit of its own.
-            ('f"{x:{x:{x:{x', (1, 12), (1, 1)),
-        ],
-        ids=["past-the-nesting-limit"],
-    )
-    def test_where_cpython_differs_the_field_rule_still_holds(
-        self, src, in_place, whole_literal
-    ):
-        expected = (
-            ("'{' was never closed", *in_place)
-            if IN_PLACE
-            else ("unterminated string literal (detected at line 1)", *whole_literal)
-        )
-        assert error_position(parse, src) == expected
-
-    @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
-    @pytest.mark.parametrize(
-        ["src", "errors"],
-        [
-            (
-                '(f"{x',
-                {
-                    True: ("'{' was never closed", 1, 4),
-                    False: ("unterminated string literal (detected at line 1)", 1, 2),
-                },
-            ),
-            (
-                'f"""{(\n x\n',
-                {
-                    True: ("'(' was never closed", 1, 6),
-                    False: (
-                        "unterminated triple-quoted string literal "
-                        "(detected at line 2)",
-                        1,
-                        1,
-                    ),
-                },
-            ),
-            (
-                'f"""{x\r\n y\r\n',
-                {
-                    True: ("'{' was never closed", 1, 5),
-                    False: (
-                        "unterminated triple-quoted string literal "
-                        "(detected at line 3)",
-                        1,
-                        1,
-                    ),
-                },
-            ),
-            (
-                'f"ab\\\r\n{x',
-                {
-                    True: ("'{' was never closed", 2, 1),
-                    False: ("unterminated string literal (detected at line 2)", 1, 1),
-                },
-            ),
-            (
-                'rf"a\\\n{x\n',
-                {
-                    True: ("'{' was never closed", 2, 1),
-                    False: ("unterminated string literal (detected at line 2)", 1, 1),
-                },
-            ),
-        ],
-        ids=["single", "triple-final-lf", "final-crlf", "backslash-crlf", "raw"],
-    )
-    def test_each_tokenizer_s_error_is_produced(
-        self, monkeypatch, in_place, src, errors
-    ):
-        # Both branches on every interpreter: CPython's measured messages.
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: in_place)
-        # 3.11, the one tokenizer counting a line after a final \r\n.
-        monkeypatch.setattr(features, "final_crlf_starts_a_line", lambda: not in_place)
-        assert error_position(parse, src) == errors[in_place]
-
-    def test_3_11_ends_an_unescaped_string_line_at_a_lone_cr(self, monkeypatch):
-        # Measured on 3.11's compile(): the line ends at the CR, so it is line
-        # 1 (a backslash-CR continues it, which the CPython-oracle test covers).
-        # Pins the body regex together with the locator's CR counting.
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
-        assert error_position(parse, 'f"ab\r{x') == (
-            "unterminated string literal (detected at line 1)",
-            1,
-            1,
-        )
-
-
-def _read_on_3_12_plus(srcs):
-    """Sources 3.11 reads otherwise: it ends a literal at the first quote of
-    its own kind, so a same-quote string or literal in a field closes it,
-    and it lexes a whole literal before reading its fields."""
-    mark = pytest.mark.skipif(
-        not IN_PLACE, reason="3.11 ends a literal at its first same quote"
-    )
-    return [pytest.param(src, marks=mark) for src in srcs]
-
-
-def _python_error_position_spelled(src):
-    # 3.12 spells one message "exclamanation"; lispython keeps the corrected
-    # spelling CPython 3.13+ use.
-    [msg, *at] = python_error_position(src)
-    return (msg.replace("exclamanation", "exclamation"), *at)
+    def test_a_spec_chain_past_cpython_s_nesting_limit_still_names_its_brace(self):
+        # CPython refuses the chain as nested too deeply; lispython adds no
+        # nesting limit of its own.
+        assert error_position(parse, 'f"{x:{x:{x:{x') == ("'{' was never closed", 1, 12)
 
 
 class TestSourceEndingInALiteral:
     """The end of the source inside a literal, a format spec, a conversion
-    or a plain string: CPython's error on the running interpreter."""
+    or a plain string."""
 
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "line", "col"],
         [
-            # A plain string, no literal open.
-            's = "abc',
-            's = b"abc',
-            's = "a\\\nb',
-            's = "a\\\n',
-            's = "a\\\r\n',
-            's = """a\r\nb\r\n',
-            's = """a\rb\r',
-            's = """a\\\r\n',
-            # A string in a field, of another quote than the literal's.
-            'f"""{("a',
-            'x = f"{(\nb"a',
-            'f"{x}{\n"a',
-            'f"{\n{x}{\n"a',
-            # A line break in a single-quoted literal's text.
-            'f"ab\n',
-            'f"{x}ab\n',
-            # Literal text.
-            's = f"abc',
-            's = rf"abc',
-            's = f"""abc\ny\n',
-            'x\ns = f"abc\n',
-            's = f"a\\\n',
-            'f"a\\\n',
-            'f"""a\\\n',
-            'f"""{f"abc',
-            'f"""{x:abc',
-            'f"""{x:',
-            'f"{x:{y}abc',
-            'f"{x:{y}',
-            'f"{x:{y:{z}a',
-            'f"{x\n}ab',
-            'f"{x!r}',
-            # A conversion.
-            'f"{x!r',
-            'f"{x!r ',
-            'f"{x!r\n',
-            'f"{x!r\\',
-            'f"{x!r\\\n',
-            'f"{x!',
-            'f"{x!\\',
-            'f"{x! z',
-            'f"{x! z ',
-            'f"{x! z\n',
-            'f"{x! r\\\n',
-            'f"{x! r ',
-            # A backslash escaping the end of the source in a spec.
-            'f"{x:a\\',
-            'f"{x:\\',
-            'rf"{x:a\\',
-            'f"{x!r:\\',
-            'f"{x:{y:a\\',
-            # An error inside a literal 3.11 finds unterminated as a whole.
-            'f"{x! z:',
-            'f"{x!z}',
-            'f"{x!z}a\nb',
-            'f"{x!r ;',
-            'f"{x!r (',
-            'f"{x!r=',
-            'f"{x! z',
-            'f"a}',
-            'f"""a}',
-            'f"a}\nb"',
-            'f"a\\"}',
-            # A line break in a field or literal that closed before the end.
-            *_read_on_3_12_plus(
-                [
-                    'f"{(b"a',
-                    'f"{("""a',
-                    'f"""{("""a',
-                    'f"{(rb"a',
-                    'f"ab{x"',
-                    'f"{("a\nb',
-                    'f"a{(b"x\nc',
-                    'f"{f"abc',
-                    'f"{f"""abc',
-                    'f"{f"{f"abc',
-                    'f"{x} {"',
-                ]
+            ('s = "abc', "unterminated string literal (detected at line 1)", 1, 5),
+            ('s = b"abc', "unterminated string literal (detected at line 1)", 1, 5),
+            ('s = "a\\\nb', "unterminated string literal (detected at line 2)", 1, 5),
+            ('s = "a\\\n', "unterminated string literal (detected at line 1)", 1, 5),
+            ('s = "a\\\r\n', "unterminated string literal (detected at line 1)", 1, 5),
+            (
+                's = """a\r\nb\r\n',
+                "unterminated triple-quoted string literal (detected at line 2)",
+                1,
+                5,
             ),
-            *[
-                pytest.param(
-                    src,
-                    marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
-                )
-                for src in ['t"{(t"a', 't"{x!z', 't"{x:a\n}']
-            ],
+            (
+                's = """a\rb\r',
+                "unterminated triple-quoted string literal (detected at line 2)",
+                1,
+                5,
+            ),
+            (
+                's = """a\\\r\n',
+                "unterminated triple-quoted string literal (detected at line 1)",
+                1,
+                5,
+            ),
+            ('f"""{("a', "unterminated string literal (detected at line 1)", 1, 7),
+            ('f"ab\n', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('f"{x}ab\n', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('s = f"abc', "unterminated f-string literal (detected at line 1)", 1, 5),
+            ('s = rf"abc', "unterminated f-string literal (detected at line 1)", 1, 5),
+            (
+                's = f"""abc\ny\n',
+                "unterminated triple-quoted f-string literal (detected at line 2)",
+                1,
+                5,
+            ),
+            (
+                'x\ns = f"abc\n',
+                "unterminated f-string literal (detected at line 2)",
+                2,
+                5,
+            ),
+            ('s = f"a\\\n', "unterminated f-string literal (detected at line 1)", 1, 5),
+            ('f"a\\\n', "unterminated f-string literal (detected at line 1)", 1, 1),
+            (
+                'f"""a\\\n',
+                "unterminated triple-quoted f-string literal (detected at line 1)",
+                1,
+                1,
+            ),
+            ('f"""{f"abc', "unterminated f-string literal (detected at line 1)", 1, 6),
+            (
+                'f"""{x:abc',
+                "unterminated triple-quoted f-string literal (detected at line 1)",
+                1,
+                1,
+            ),
+            (
+                'f"""{x:',
+                "unterminated triple-quoted f-string literal (detected at line 1)",
+                1,
+                1,
+            ),
+            ('f"{x:{y}abc', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('f"{x:{y}', "unterminated f-string literal (detected at line 1)", 1, 1),
+            (
+                'f"{x:{y:{z}a',
+                "unterminated f-string literal (detected at line 1)",
+                1,
+                1,
+            ),
+            ('f"{x\n}ab', "unterminated f-string literal (detected at line 2)", 1, 1),
+            ('f"{x!r}', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('f"{x!r', "'{' was never closed", 1, 3),
+            ('f"{x!r ', "'{' was never closed", 1, 3),
+            ('f"{x!r\n', "'{' was never closed", 1, 3),
+            ('f"{x!r\\', "'{' was never closed", 1, 3),
+            ('f"{x!r\\\n', "'{' was never closed", 1, 3),
+            ('f"{x!', "'{' was never closed", 1, 3),
+            ('f"{x!\\', "'{' was never closed", 1, 3),
+            (
+                'f"{x! z',
+                "f-string: conversion type must come right after the exclamation mark",
+                1,
+                5,
+            ),
+            (
+                'f"{x! z ',
+                "f-string: conversion type must come right after the exclamation mark",
+                1,
+                5,
+            ),
+            (
+                'f"{x! z\n',
+                "f-string: conversion type must come right after the exclamation mark",
+                1,
+                5,
+            ),
+            (
+                'f"{x! r\\\n',
+                "f-string: conversion type must come right after the exclamation mark",
+                1,
+                5,
+            ),
+            (
+                'f"{x! r ',
+                "f-string: conversion type must come right after the exclamation mark",
+                1,
+                5,
+            ),
+            ('f"{x:a\\', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('f"{x:\\', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('rf"{x:a\\', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('f"{x!r:\\', "unterminated f-string literal (detected at line 1)", 1, 1),
+            ('f"{x:{y:a\\', "unterminated f-string literal (detected at line 1)", 1, 1),
+            (
+                'f"{x! z:',
+                "f-string: conversion type must come right after the exclamation mark",
+                1,
+                5,
+            ),
+            (
+                'f"{x!z}',
+                "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+                1,
+                6,
+            ),
+            (
+                'f"{x!z}a\nb',
+                "f-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+                1,
+                6,
+            ),
+            ('f"{x!r ;', "f-string: expecting ':' or '}'", 1, 8),
+            ('f"{x!r (', "f-string: expecting ':' or '}'", 1, 8),
+            ('f"{x!r=', "f-string: expecting ':' or '}'", 1, 7),
+            ('f"a}', "f-string: single '}' is not allowed", 1, 4),
+            ('f"""a}', "f-string: single '}' is not allowed", 1, 6),
+            ('f"a}\nb"', "f-string: single '}' is not allowed", 1, 4),
+            ('f"a\\"}', "f-string: single '}' is not allowed", 1, 6),
+            ('f"{(b"a', "f-string: expecting '}'", 1, 5),
+            (
+                'f"{("""a',
+                "unterminated triple-quoted string literal (detected at line 1)",
+                1,
+                5,
+            ),
+            ('f"""{("""a', "f-string: expecting '}'", 1, 7),
+            ('f"{(rb"a', "f-string: expecting '}'", 1, 5),
+            ('f"ab{x"', "f-string: expecting '}'", 1, 7),
+            ('f"{("a\nb', "f-string: expecting '}'", 1, 5),
+            ('f"a{(b"x\nc', "f-string: expecting '}'", 1, 6),
+            ('f"{f"abc', "unterminated f-string literal (detected at line 1)", 1, 4),
+            (
+                'f"{f"""abc',
+                "unterminated triple-quoted f-string literal (detected at line 1)",
+                1,
+                4,
+            ),
+            ('f"{f"{f"abc', "unterminated f-string literal (detected at line 1)", 1, 7),
+            ('f"{x} {"', "f-string: expecting '}'", 1, 8),
+            pytest.param(
+                't"{(t"a',
+                "unterminated t-string literal (detected at line 1)",
+                1,
+                5,
+                marks=NEEDS_3_14,
+            ),
+            pytest.param(
+                't"{x!z',
+                "t-string: invalid conversion character 'z': expected 's', 'r', or 'a'",
+                1,
+                6,
+                marks=NEEDS_3_14,
+            ),
+            pytest.param(
+                't"{x:a\n}',
+                SPEC_NEWLINE.format("t-string"),
+                1,
+                7,
+                marks=NEEDS_3_14,
+            ),
         ],
     )
-    def test_the_error_is_cpython_s(self, src):
-        assert error_position(parse, src) == _python_error_position_spelled(src)
+    def test_the_error_is_where_the_source_ends(self, src, msg, line, col):
+        assert error_position(parse, src) == (msg, line, col)
 
-    @WHOLE_LITERAL_ON_3_11
     @pytest.mark.parametrize(
         ["src", "msg", "at"],
         [
@@ -1064,172 +995,109 @@ class TestSourceEndingInALiteral:
         assert len(parse('f"{x}a\n}}"')) == 1
         assert len(parse('f"{"a\nb"}"')) == 1
 
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
-    def test_a_plain_string_continued_by_a_backslash_records_no_break(self):
-        src = 'f"{"a\\\nb"}{x!z}"'
-        assert error_position(parse, src) == _python_error_position_spelled(src)
-
-    @pytest.mark.parametrize(
-        ["src", "triple"],
-        [
-            ('f"{}', ""),
-            ('f"{x!}', ""),
-            ('f"{a b}', ""),
-            ('f"{x!z:{y!q}}', ""),
-            ("f'''{}", "triple-quoted "),
-        ],
-    )
-    def test_3_11_reports_an_unclosed_whole_literal_first(
-        self, monkeypatch, src, triple
-    ):
-        # Measured on 3.11's compile(): the error inside (an empty field, a
-        # missing conversion, ...) never comes. The 3.11 branch runs on
-        # every interpreter, whose own columns for those errors differ.
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
-        assert error_position(parse, src) == (
-            f"unterminated {triple}string literal (detected at line 1)",
-            1,
-            1,
+    def test_a_plain_string_continued_by_a_backslash_is_read_on(self):
+        assert error_position(parse, 'f"{"a\\\nb"}{x!z}"') == (
+            NOT_CONVERSION.format("z"),
+            2,
+            7,
         )
 
-    def test_3_11_reads_inside_a_literal_its_token_closes(self, monkeypatch):
-        # 3.11's token ends at the first same quote, so the error inside
-        # stands (a single "}" is one on every interpreter).
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: False)
-        with pytest.raises(LispyCompileError) as info:
-            parse('f"a}"')
-        assert info.value.msg == "f-string: single '}' is not allowed"
-
-    @pytest.mark.parametrize(
-        ["probe", "src", "errors"],
-        [
-            (
-                "expecting_brace_names_its_line",
-                'x = f"{(\nb"a',
-                {
-                    True: ("f-string: expecting '}' to close '{' on line 1", 2, 1),
-                    False: ("f-string: expecting '}'", 2, 1),
-                },
-            ),
-            (
-                "final_crlf_starts_a_line",
-                's = """a\r\nb\r\n',
-                {
-                    True: (
-                        "unterminated triple-quoted string literal "
-                        "(detected at line 3)",
-                        1,
-                        5,
-                    ),
-                    False: (
-                        "unterminated triple-quoted string literal "
-                        "(detected at line 2)",
-                        1,
-                        5,
-                    ),
-                },
-            ),
-        ],
-        ids=["line", "crlf"],
-    )
     @pytest.mark.parametrize("value", [True, False])
-    def test_each_tokenizer_s_error_is_produced(
-        self, monkeypatch, probe, src, errors, value
-    ):
-        # Both branches on every interpreter, the other probes at 3.12's
-        # values: CPython's measured messages.
-        for name in ["expecting_brace_names_its_line", "final_crlf_starts_a_line"]:
-            monkeypatch.setattr(features, name, lambda: False)
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
-        monkeypatch.setattr(features, probe, lambda: value)
-        assert error_position(parse, src) == errors[value]
+    def test_each_expecting_brace_message_is_produced(self, monkeypatch, value):
+        monkeypatch.setattr(features, "expecting_brace_names_its_line", lambda: value)
+        assert error_position(parse, 'x = f"{(\nb"a') == (
+            "f-string: expecting '}' to close '{' on line 1"
+            if value
+            else "f-string: expecting '}'",
+            2,
+            1,
+        )
 
 
 class TestFieldErrorPosition:
-    """Where CPython 3.12+ place an empty field expression or a missing
-    conversion: at the delimiter or the token after the "!", not at the
-    field's "{" or the "!". (3.11 places its own messages elsewhere in a
-    closed literal; a source ending in one is the whole literal's error.)"""
+    """An empty field expression is refused at its delimiter (a leading "="
+    at the "="), a missing conversion at the token after the "!": never at
+    the field's "{" or the "!"."""
 
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "line", "col"],
         [
-            *_read_on_3_12_plus(
-                [
-                    'f"{}"',
-                    'f"{ }"',
-                    'f"{ = }"',
-                    'f"{!r}"',
-                    'f"{ :x}"',
-                    'f"""{\n}"""',
-                    'f"""{ \n }"""',
-                    'f"{x:{ }}"',
-                ]
-            ),
-            'f"{}',
-            'f"{ }',
-            'f"{!',
-            'f"{:',
+            ('f"{}"', "f-string: valid expression required before '}'", 1, 4),
+            ('f"{ }"', "f-string: valid expression required before '}'", 1, 5),
+            ('f"{ = }"', "f-string: valid expression required before '='", 1, 5),
+            ('f"{!r}"', "f-string: valid expression required before '!'", 1, 4),
+            ('f"{ :x}"', "f-string: valid expression required before ':'", 1, 5),
+            ('f"""{\n}"""', "f-string: valid expression required before '}'", 2, 1),
+            ('f"""{ \n }"""', "f-string: valid expression required before '}'", 2, 2),
+            ('f"{x:{ }}"', "f-string: valid expression required before '}'", 1, 8),
+            ('f"{}', "f-string: valid expression required before '}'", 1, 4),
+            ('f"{ }', "f-string: valid expression required before '}'", 1, 5),
+            ('f"{!', "f-string: valid expression required before '!'", 1, 4),
+            ('f"{:', "f-string: valid expression required before ':'", 1, 4),
             pytest.param(
-                't"{ }"', marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14")
+                't"{ }"',
+                "t-string: valid expression required before '}'",
+                1,
+                5,
+                marks=NEEDS_3_14,
             ),
         ],
     )
-    def test_an_empty_expression_is_refused_at_its_delimiter(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_an_empty_expression_is_refused_at_its_delimiter(self, src, msg, line, col):
+        assert error_position(parse, src) == (msg, line, col)
 
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "line", "col"],
         [
-            *_read_on_3_12_plus(
-                [
-                    'f"{=}"',
-                    'f"{=x}"',
-                    'f"{=!r}"',
-                    'f"{=:x}"',
-                    'f"{=!}"',
-                    'f"{ =}"',
-                    'f"x{=}y"',
-                    'f"{x:{=}}"',
-                    'f"{=\\\n}"',
-                    'f"""{\n=}"""',
-                ]
-            ),
-            'f"{=',
-            'f"{=}',
-            'f"{x:{=',
-            'f"""{=',
+            ('f"{=}"', "f-string: valid expression required before '='", 1, 4),
+            ('f"{=x}"', "f-string: valid expression required before '='", 1, 4),
+            ('f"{=!r}"', "f-string: valid expression required before '='", 1, 4),
+            ('f"{=:x}"', "f-string: valid expression required before '='", 1, 4),
+            ('f"{=!}"', "f-string: valid expression required before '='", 1, 4),
+            ('f"{ =}"', "f-string: valid expression required before '='", 1, 5),
+            ('f"x{=}y"', "f-string: valid expression required before '='", 1, 5),
+            ('f"{x:{=}}"', "f-string: valid expression required before '='", 1, 7),
+            ('f"{=\\\n}"', "f-string: valid expression required before '='", 1, 4),
+            ('f"""{\n=}"""', "f-string: valid expression required before '='", 2, 1),
+            ('f"{=', "f-string: valid expression required before '='", 1, 4),
+            ('f"{=}', "f-string: valid expression required before '='", 1, 4),
+            ('f"{x:{=', "f-string: valid expression required before '='", 1, 7),
+            ('f"""{=', "f-string: valid expression required before '='", 1, 6),
             pytest.param(
-                't"{=}"', marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14")
+                't"{=}"',
+                "t-string: valid expression required before '='",
+                1,
+                4,
+                marks=NEEDS_3_14,
             ),
         ],
     )
-    def test_a_leading_equals_is_an_empty_expression(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_a_leading_equals_is_an_empty_expression(self, src, msg, line, col):
+        assert error_position(parse, src) == (msg, line, col)
 
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages")
     def test_a_comment_before_a_leading_equals_emits_no_token(self):
-        # lispython's ";" comment is Python's "#".
-        assert error_position(parse, 'f"""{;c\n=}"""') == python_error_position(
-            'f"""{#c\n=}"""'
+        assert error_position(parse, 'f"""{;c\n=}"""') == (
+            "f-string: valid expression required before '='",
+            2,
+            1,
         )
 
     @pytest.mark.parametrize(
-        "src",
-        _read_on_3_12_plus(
-            [
-                'f"{x!}"',
-                'f"{x! }"',
-                'f"{x!  }"',
-                'f"{x! :x}"',
-                'f"""{x!\n}"""',
-                'f"{x!\\\n}"',
-                'f"{x=!}"',
-            ]
-        ),
+        ["src", "msg", "line", "col"],
+        [
+            ('f"{x!}"', "f-string: missing conversion character", 1, 6),
+            ('f"{x! }"', "f-string: missing conversion character", 1, 7),
+            ('f"{x!  }"', "f-string: missing conversion character", 1, 8),
+            ('f"{x! :x}"', "f-string: missing conversion character", 1, 7),
+            ('f"""{x!\n}"""', "f-string: missing conversion character", 2, 1),
+            ('f"{x!\\\n}"', "f-string: missing conversion character", 2, 1),
+            ('f"{x=!}"', "f-string: missing conversion character", 1, 7),
+        ],
     )
-    def test_a_missing_conversion_is_refused_at_the_token_after_the_bang(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_a_missing_conversion_is_refused_at_the_token_after_the_bang(
+        self, src, msg, line, col
+    ):
+        assert error_position(parse, src) == (msg, line, col)
 
 
 class TestFirstErrorInSourceOrder:
@@ -1284,30 +1152,31 @@ class TestConversion:
 
 class TestQuoteOrLineBreakInFormatSpec:
     """The literal's closing quote, or a single-quoted literal's line break,
-    inside a format spec: CPython's error on the running interpreter."""
+    inside a format spec: refused where it is, on every interpreter."""
 
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads the whole literal first")
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg", "line", "col"],
         [
-            'f"ab{x:{y}"',
-            'f"{x:{y}z"',
-            'f"{x:a{y}b"',
-            'f"{x:a}b{y:c"',
-            'f"{x:ab"',
-            'f"{x:"',
-            'f"{x!r:"',
-            'f"{x!r:{y}"',
-            'f"{x:{y:a}"',
-            'f"{x:{y}}{z:"',
-            'f"""{x:{y}"""',
-            'f"""{x:a"""',
-            'f"{x:{y}" + 1',
-            'f"{x:{y:{z}}"',
+            ('f"ab{x:{y}"', "f-string: expecting '}', or format specs", 1, 11),
+            ('f"{x:{y}z"', "f-string: expecting '}', or format specs", 1, 10),
+            ('f"{x:a{y}b"', "f-string: expecting '}', or format specs", 1, 11),
+            ('f"{x:a}b{y:c"', "f-string: expecting '}', or format specs", 1, 13),
+            ('f"{x:ab"', "f-string: expecting '}', or format specs", 1, 8),
+            ('f"{x:"', "f-string: expecting '}', or format specs", 1, 6),
+            ('f"{x!r:"', "f-string: expecting '}', or format specs", 1, 8),
+            ('f"{x!r:{y}"', "f-string: expecting '}', or format specs", 1, 11),
+            ('f"{x:{y:a}"', "f-string: expecting '}', or format specs", 1, 11),
+            ('f"{x:{y}}{z:"', "f-string: expecting '}', or format specs", 1, 13),
+            ('f"""{x:{y}"""', "f-string: expecting '}', or format specs", 1, 11),
+            ('f"""{x:a"""', "f-string: expecting '}', or format specs", 1, 9),
+            ('f"{x:{y}" + 1', "f-string: expecting '}', or format specs", 1, 9),
+            ('f"{x:{y:{z}}"', "f-string: expecting '}', or format specs", 1, 13),
         ],
     )
-    def test_the_closing_quote_in_a_spec_is_cpython_s(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_the_closing_quote_in_a_spec_is_refused_where_it_is(
+        self, src, msg, line, col
+    ):
+        assert error_position(parse, src) == (msg, line, col)
 
     @pytest.mark.parametrize(
         ["lpy", "py"],
@@ -1330,7 +1199,6 @@ class TestQuoteOrLineBreakInFormatSpec:
     def test_a_line_break_in_a_field_s_code_is_whitespace(self, lpy, py):
         assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
 
-    @WHOLE_LITERAL_ON_3_11
     @pytest.mark.parametrize(
         ["src", "kind", "at"],
         [
@@ -1360,7 +1228,6 @@ class TestQuoteOrLineBreakInFormatSpec:
     def test_a_line_break_in_single_quoted_spec_text_is_refused(self, src, kind, at):
         assert error_position(parse, src) == (SPEC_NEWLINE.format(kind), *at)
 
-    @WHOLE_LITERAL_ON_3_11
     @pytest.mark.parametrize(
         ["src", "triple", "at"],
         [
@@ -1380,7 +1247,6 @@ class TestQuoteOrLineBreakInFormatSpec:
             *at,
         )
 
-    @WHOLE_LITERAL_ON_3_11
     def test_a_line_break_right_after_the_exclamation_mark_is_refused(self):
         assert error_position(parse, 'f"{x!\nr}"') == (
             "f-string: conversion type must come right after the exclamation mark",

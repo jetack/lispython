@@ -67,19 +67,6 @@ def interpolation_keeps_trailing_whitespace():
     return probe.values[0].str == "x "
 
 
-@functools.cache
-def fstring_fields_are_tokens():
-    """Whether the tokenizer lexes f-string fields in place (PEP 701, 3.12).
-
-    Decides the error for a source ending inside a field's expression: where
-    True, the field's ``{`` is on the tokenizer's bracket stack, so it is
-    "'X' was never closed" at the innermost bracket still open, the ``{``
-    counting as one; where False (3.11), the whole f-string is one string
-    token, so it is "unterminated string literal" at the outermost one.
-    """
-    return hasattr(token, "FSTRING_START")
-
-
 def _compile_error(src):
     """The SyntaxError compile() raises for ``src``, or None."""
     try:
@@ -96,15 +83,6 @@ def expecting_brace_names_its_line():
     "f-string: expecting '}' to close '{' on line 1"."""
     error = _compile_error('f"{\n"')
     return error is not None and error.msg.endswith("on line 1")
-
-
-@functools.cache
-def final_crlf_starts_a_line():
-    """Whether a \\r\\n ending the source starts a line for a string literal's
-    "detected at line N" (3.11); 3.12+ count no line after it, as after a
-    final \\n or lone \\r on every version."""
-    error = _compile_error('s = """a\r\n')
-    return error is not None and error.msg.endswith("(detected at line 2)")
 
 
 @functools.cache

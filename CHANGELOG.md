@@ -32,6 +32,13 @@ follows [Semantic Versioning](https://semver.org/).
   text, or in a plain string spanning lines in a field, is reported where it
   is (`f"a\n}"`: "single '}' is not allowed" on line 2), no longer as the
   literal unterminated at the break.
+- On Python 3.11, f/t-string errors are those of every other version: the
+  error inside a literal at its own position (`f"{}"`: "valid expression
+  required before '}'"), where 3.11 reported the whole literal as an
+  unterminated string. An unterminated single-quoted string, plain or
+  f/t, names the line the source ends on in "(detected at line N)" on every
+  version (a lispython string may span lines), where it named the string's
+  first line break; a final `\r\n` starts no line on 3.11 either.
 
 ## [0.6.0] - 2026-11-02
 

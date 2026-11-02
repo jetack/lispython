@@ -384,18 +384,16 @@ class TestPlainStringExtent:
         assert scope["s"] == python["s"]
 
     @pytest.mark.parametrize(
-        ["lpy", "py"],
+        ["lpy", "kind"],
         [
-            ('(= s "abc', 's = "abc'),
-            ('(= s """abc"', 's = """abc"'),
-            ('(= s f"abc', 's = f"abc'),
+            ('(= s "abc', "string"),
+            ('(= s """abc"', "triple-quoted string"),
+            ('(= s f"abc', "f-string"),
         ],
     )
-    def test_unterminated(self, lpy, py):
-        # CPython's message, at the string's prefix (column 6 here).
-        with pytest.raises(SyntaxError) as python:
-            compile(py, "<s>", "exec")
+    def test_unterminated(self, lpy, kind):
+        # At the string's prefix (column 6 here).
         with pytest.raises(LispyCompileError) as info:
             compile_lpy(lpy)
-        assert info.value.msg == python.value.msg
+        assert info.value.msg == f"unterminated {kind} literal (detected at line 1)"
         assert (info.value.lineno, info.value.offset) == (1, 6)
