@@ -1139,6 +1139,18 @@ class TestSourceEndingInALiteral:
             # An error before the break stays.
             'f"{x!z}a\n}',
             *_read_on_3_12_plus(['f"{f"a\nb"}}', 'f"{f"a\nb"} \n}']),
+            # A plain string in a field spanning a line (CPython stops at it).
+            *_read_on_3_12_plus(
+                [
+                    'f"{"a\nb"}{)}"',
+                    'f"{b"a\nb"}{)}"',
+                    '''f"""{"a\nb"}{)}"""''',
+                    'f"{\n"a\nb"}{)}"',
+                    'f"{"a\r\nb"}{)}"',
+                    'f"{f"{"a\nb"}"}{)}"',
+                    'f"{"a\nb"}',
+                ]
+            ),
         ],
     )
     def test_an_error_after_a_literal_s_line_break_is_that_break_s(self, src):
@@ -1155,6 +1167,29 @@ class TestSourceEndingInALiteral:
 
     def test_a_literal_with_a_line_break_and_no_error_parses(self):
         assert len(parse('f"{x}a\n}}"')) == 1
+        assert len(parse('f"{"a\nb"}"')) == 1
+
+    @pytest.mark.parametrize(
+        "src",
+        _read_on_3_12_plus(
+            [
+                'f"{"a\nb":c\n}"',
+                'f"{"a\nb"}{y:d\n}"',
+                'f"{x:{"a\nb"}c}{y:d\n}"',
+            ]
+        ),
+    )
+    def test_a_plain_string_s_line_break_supersedes_a_spec_line_break_refusal(
+        self, src
+    ):
+        # CPython stops at the string's break, so the spec's later one is no
+        # refusal; lispython reads the multi-line string on.
+        assert len(parse(src)) == 1
+
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
+    def test_a_plain_string_continued_by_a_backslash_records_no_break(self):
+        src = 'f"{"a\\\nb"}{x!z}"'
+        assert error_position(parse, src) == _python_error_position_spelled(src)
 
     @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
     @pytest.mark.parametrize(

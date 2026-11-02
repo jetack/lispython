@@ -312,7 +312,8 @@ class _LiteralState:
         self.escaped_in = escaped_in
         # Outermost literal only (3.12+): [token index, error] of the first
         # line break CPython's tokenizer stops at in the literal text of it
-        # or of any literal nested in it, once one is lexed: the index of the
+        # or of any literal nested in it, or in a single-quoted plain string
+        # in a field of them, once one is lexed: the index of the
         # first token lexed from there, and that literal unterminated at the
         # break (_note_line_break, _Lexer.line_break_error).
         self.line_break = None
@@ -752,8 +753,28 @@ class _Lexer:
         if kind == "string":
             [piece, stop, at] = scan_string_body(src, body, quote_text, raw, kind)
             error = None
+            # A name glued to the quote (x") is no prefix to CPython: the
+            # string starts at the quote.
+            string_start = (
+                start
+                if _string_prefix_kind(prefix) == "string" or not prefix
+                else quote_start
+            )
             if stop == "quote":
                 end = at + len(quote_text)
+                if (
+                    escaped_in is None
+                    and self.stack
+                    and len(quote_text) == 1
+                    and features.fstring_fields_are_tokens()
+                    and self.stack[0].line_break is None
+                ):
+                    # CPython's tokenizer stops at a line break in it.
+                    stop_at = _UNESCAPED_LINE_END_RE.match(src, body, at).end()
+                    if stop_at < at and src[stop_at] in "\r\n":
+                        self._record_line_break(
+                            self._string_eof_error(string_start, quote, body)
+                        )
                 text = src[start:end] if escaped_in is None else prefix + quote
                 if escaped_in is not None:
                     text += piece + quote
@@ -768,13 +789,6 @@ class _Lexer:
                     self._fail(error)
                     return
                 [end, text] = [len(src), src[start:]]
-                # A name glued to the quote (x") is no prefix to CPython:
-                # the string starts at the quote.
-                string_start = (
-                    start
-                    if _string_prefix_kind(prefix) == "string" or not prefix
-                    else quote_start
-                )
                 error = self._string_eof_error(string_start, quote, body)
             # Plain strings are a single token, carrying any error: the parser
             # raises it after the prefix check.
@@ -1014,6 +1028,9 @@ class _Lexer:
         superseded by it, so no text is scanned once one is recorded: each
         character is read at most once more.
 
+        A single-quoted plain string in a field that spans a line records
+        one too (``_string``; CPython stops at it: ``_string_eof_error``).
+
         Returns the error to stop at, or None.
         """
         if len(literal.quote) != 1 or not features.fstring_fields_are_tokens():
@@ -1034,9 +1051,16 @@ class _Lexer:
         error = self._unterminated(
             literal.kind, literal.quote, literal.start, literal.body, at
         )
-        # The piece holding the break is the first token lexed after it.
-        root.line_break = [len(self.tokens), error]
+        self._record_line_break(error)
         return None
+
+    def _record_line_break(self, error):
+        """Record ``error`` as the outermost literal's first line break, if
+        none is recorded: the piece holding the break is the first token
+        lexed after it."""
+        root = self.stack[0]
+        if root.line_break is None:
+            root.line_break = [len(self.tokens), error]
 
     def _body(self, top):
         """Literal text of an f/t-string, or of a field's format spec, up to
