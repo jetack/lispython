@@ -1132,7 +1132,8 @@ class TestConversion:
             ('f"{x!z}"', NOT_CONVERSION.format("z"), (1, 6)),
             ('f"{x!zz}"', NOT_CONVERSION.format("zz"), (1, 6)),
             ('f"{x!z:{y!q}}"', NOT_CONVERSION.format("z"), (1, 6)),
-            ('f"{x!f"a"}"', NOT_CONVERSION.format("f"), (1, 6)),
+            # A name not made of string-prefix letters stays a name.
+            ('f"{x!ra"a"}"', NOT_CONVERSION.format("ra"), (1, 6)),
             # A token after the "!" that is no name is an invalid conversion,
             # a string that closes included.
             ('f"{x!"a"}"', "f-string: invalid conversion character", (1, 6)),
@@ -1156,13 +1157,45 @@ class TestConversion:
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
             (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
             ('f"{x! r}"', CONVERSION_GAP, (1, 5)),
-            ('f"{x!r"a"}"', "f-string: expecting ':' or '}'", (1, 7)),
             ('f"{x!r a}"', "f-string: expecting ':' or '}'", (1, 8)),
             ('f"{x!r (}"', "f-string: expecting ':' or '}'", (1, 8)),
         ],
     )
     def test_a_malformed_conversion_is_refused_where_it_is(self, src, msg, at):
         assert error_position(parse, src) == (msg, *at)
+
+    @pytest.mark.parametrize(
+        ["src", "msg"],
+        [
+            ('f"{x!r"abc"}"', "f-string: invalid conversion character"),
+            ('f"{x!rb"a"}"', "f-string: invalid conversion character"),
+            ('f"{x!b"a"}"', "f-string: invalid conversion character"),
+            ('f"{x!u"a"}"', "f-string: invalid conversion character"),
+            ('f"{x!Rb"a"}"', "f-string: invalid conversion character"),
+            ('f"{x!r"""a"""}"', "f-string: invalid conversion character"),
+            ('f"{x!r""}"', "f-string: invalid conversion character"),
+            # An f/t-string's body is not read, closed or not.
+            ('f"{x!f"a"}"', "f-string: invalid conversion character"),
+            ('f"{x!rf"a"}"', "f-string: invalid conversion character"),
+            ('f"{x!f"a', "f-string: invalid conversion character"),
+            ('f"{x!f"{', "f-string: invalid conversion character"),
+            ('f"{x!t"a"}"', "f-string: invalid conversion character"),
+            # A plain string is read: one that never closes is unterminated.
+            ('f"{x!r"abc', UNTERMINATED_STRING.format(1)),
+            # The prefix is checked first.
+            ('f"{x!bt"a"}"', "'b' and 't' prefixes are incompatible"),
+            ('f"{x!ub"a"}"', "invalid string prefix 'ub'"),
+            ('f"{x!rr"a"}"', "invalid string prefix 'rr'"),
+            pytest.param(
+                't"{x!r"a"}"',
+                "t-string: invalid conversion character",
+                marks=NEEDS_3_14,
+            ),
+        ],
+    )
+    def test_a_prefix_glued_to_a_quote_after_the_mark_is_the_string_s(self, src, msg):
+        # Refused at the prefix, as CPython 3.14+ read the string token.
+        assert error_position(parse, src) == (msg, 1, 6)
 
     @pytest.mark.parametrize("src", ['f"{x!r}"', 'f"{x!r }"', 'f"{x!r :>3}"'])
     def test_blanks_may_follow_the_name(self, src):

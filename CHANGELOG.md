@@ -34,8 +34,13 @@ follows [Semantic Versioning](https://semver.org/).
   first; with no name after the `!`, a `}` or `:` next is "missing
   conversion character", a `)` or `]` "unmatched ')'" or "unmatched ']'",
   and any other token (`f"{x!"a"}"`) "invalid conversion character", at
-  that token, a quote there opening a string as anywhere in a field;
-  anything but blanks, `:` or `}` after the name is "expecting ':' or '}'"
+  that token, a quote there opening a string as anywhere in a field. A
+  string prefix glued to the quote is part of that string (`!r"a"`,
+  `!f"a"`: "invalid conversion character" at the prefix, an f/t-string's
+  body unread, an invalid prefix such as `!bt"a"` refused first), as
+  CPython 3.14+ read it, where `!r"a"` said "expecting ':' or '}'" after the
+  `r`; a name of other letters stays a conversion (`!ra"a"`). Anything but
+  blanks, `:` or `}` after the name is "expecting ':' or '}'"
   there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.

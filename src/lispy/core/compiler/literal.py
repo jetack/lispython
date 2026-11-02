@@ -166,6 +166,12 @@ _PLAIN_STRING_PREFIXES = ("", "r", "u", "b", "br", "rb")
 _QUOTES = ('"""', "'''", '"', "'")
 
 
+def check_plain_string_prefix(prefix, node):
+    """Refuse, at ``node``, a prefix no plain string literal may carry."""
+    if prefix.lower() not in _PLAIN_STRING_PREFIXES:
+        raise LispyCompileError(f"invalid string prefix {prefix!r}", node)
+
+
 def string_literal_value(prefix, body, node):
     """The value of a string literal's body, as CPython computes it from source.
 
@@ -206,8 +212,7 @@ def string_node_value(string):
     quote = next((q for q in _QUOTES if rest.startswith(q) and rest.endswith(q)), None)
     if quote is None or len(rest) < 2 * len(quote):
         raise LispyCompileError(f"invalid string literal {token}", string)
-    if prefix.lower() not in _PLAIN_STRING_PREFIXES:
-        raise LispyCompileError(f"invalid string prefix {prefix!r}", string)
+    check_plain_string_prefix(prefix, string)
     return string_literal_value(prefix, rest[len(quote) : -len(quote)], string)
 
 

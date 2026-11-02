@@ -4,7 +4,11 @@ from bisect import bisect_right
 from collections import deque
 
 from lispy.core.compiler.features import require
-from lispy.core.compiler.literal import number_parts, string_literal_value
+from lispy.core.compiler.literal import (
+    check_plain_string_prefix,
+    number_parts,
+    string_literal_value,
+)
 from lispy.core.errors import LispyCompileError, compile_warning
 from lispy.core.nodes import *
 from lispy.core.nodes import (
@@ -148,6 +152,10 @@ _BRACKETED_FIELD_TOKEN_RE = re.compile(
 _TOKEN_LABELS = [label for [_, label] in _token_patterns(False)]
 _NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
 _STRING_PREFIX_RE = re.compile("\\w*")
+# The letters CPython's tokenizer reads as a string prefix when glued to a
+# quote; after a field's "!" a name of them is the string's prefix, any other
+# name a conversion (!ra"a" is the conversion ra).
+_PREFIX_LETTERS = "bBrRuUfFtT"
 # Where a string body scan has to look: an escape, a quote, and (in an f/t
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
@@ -718,12 +726,15 @@ class _Lexer:
         at the ``!``; with no name, the next token is refused there: a ``}``
         or ``:`` is "missing conversion character", a ``)`` or ``]``
         "unmatched", and any other token "invalid conversion character", as
-        Python 3.12+ word each. A quote there opens a string as anywhere in a
-        field (``_string``): one that never closes is that string's
-        unterminated error, as in ``f"{x "``. A name other than s, r or a is
-        refused where it is read. After the name only blanks
-        (``_skip_blanks``) may stand before the ``:`` or ``}``; anything else
-        is refused where it is.
+        Python 3.12+ word each. A string there is that token, a name of
+        string-prefix letters glued to its quote included (``!r"a"``, as
+        CPython 3.14+ read it): the prefix is checked first (``bt``, ``ub``
+        refused at it), an f/t-string's body is never read, and a plain
+        string is scanned as anywhere in a field (``_string``), one that
+        never closes being that string's unterminated error, as in
+        ``f"{x "``. Any other name than s, r or a is refused where it is
+        read. After the name only blanks (``_skip_blanks``) may stand before
+        the ``:`` or ``}``; anything else is refused where it is.
         """
         src = self.src
         n = len(src)
@@ -732,27 +743,33 @@ class _Lexer:
         while name_end < n and (src[name_end].isalnum() or src[name_end] == "_"):
             name_end += 1
         name = src[bang + 1 : name_end]
+        at = bang + 1 if name else self._skip_blanks(bang + 1)
+        token = _FIELD_TOKEN_RE.match(src, at) if at < n else None
+        string = token is not None and _TOKEN_LABELS[token.lastindex - 1] == "string"
+        if name and string:
+            string = _STRING_PREFIX_RE.match(token.group()).group() == name
+            string = string and not name.strip(_PREFIX_LETTERS)
         if not name:
-            at = self._skip_blanks(bang + 1)
             if at == n:
                 self._eof()
-            elif src[at].isalnum() or src[at] == "_":
+                return None
+            if src[at].isalnum() or src[at] == "_":
                 msg = "conversion type must come right after the exclamation mark"
                 self._fail(self._error(f"{kind}: {msg}", bang, bang + 1))
-            elif src[at] in "}:":
+                return None
+            if src[at] in "}:":
                 msg = f"{kind}: missing conversion character"
                 self._fail(self._error(msg, at, at + 1))
-            elif src[at] in ")]":
+                return None
+            if src[at] in ")]":
                 msg = f"{kind}: unmatched '{src[at]}'"
                 self._fail(self._error(msg, at, at + 1))
-            else:
-                token = _FIELD_TOKEN_RE.match(src, at)
-                if _TOKEN_LABELS[token.lastindex - 1] == "string":
-                    self._string(at, token.group())
-                    if self.done:
-                        return None
-                msg = f"{kind}: invalid conversion character"
-                self._fail(self._error(msg, at, at + 1))
+                return None
+        if string or not name:
+            if string and not self._string_after_bang(at, token.group()):
+                return None
+            msg = f"{kind}: invalid conversion character"
+            self._fail(self._error(msg, at, at + 1))
             return None
         if name not in conversion_dict:
             msg = (
@@ -770,6 +787,29 @@ class _Lexer:
             return None
         self._emit(src[bang:name_end], "field-conversion", bang, name_end, name)
         return rest
+
+    def _string_after_bang(self, at, opening):
+        """The string token ``opening`` at ``at``, right after a field's
+        ``!`` or the blanks after it: False where lexing has stopped at an
+        invalid prefix or at the plain string's own error, else True, the
+        caller refusing the conversion.
+
+        Its prefix is checked by the prefix rule's homes (interpolated_kind,
+        check_plain_string_prefix), at the prefix. An f/t-string's body is
+        never read: CPython 3.14+ refuse the conversion at its prefix
+        whatever follows (``f"{x!f"a`` never closed).
+        """
+        prefix = _STRING_PREFIX_RE.match(opening).group()
+        node = String('""', **self.locate(at, at + max(len(prefix), 1)))
+        try:
+            if interpolated_kind(prefix, node) is not None:
+                return True
+            check_plain_string_prefix(prefix, node)
+        except LispyCompileError as error:
+            self._fail(error)
+            return False
+        self._string(at, opening)
+        return not self.done
 
     def _skip_blanks(self, i):
         """Past the whitespace and backslash continuations (a backslash before
