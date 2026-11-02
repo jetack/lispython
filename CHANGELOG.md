@@ -8,25 +8,30 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- On Python 3.11, a doubled brace in a format spec after a nested field is
+  read as on every other version, a literal brace: `f"{x:{y}{{}"` compiles
+  to the spec `{y}` followed by `{`, where it was an error.
 - A line break in a single-quoted f/t-string's format-spec text, in any
   segment, is a compile error at the break on every Python version
   (`f"{x:ab\n}"`: "newlines are not allowed in format specifiers for single
-  quoted f-strings"), as it was on 3.13+ only. On 3.12 the text after such a
-  break was read as code and the field compiled; on 3.11 it was reported as
-  an unterminated string. A line break elsewhere in a field stands wherever
-  code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
+  quoted f-strings"), as it was on 3.13+ only. This refuses source that
+  compiled before: on 3.11 such a break was read as spec text
+  (`f"{x:ab\nc}"`, `f"{x!r:\n}"`, `f"{x:{y:\n}}"` all compiled), and on
+  3.12 the text after it was read as code. A backslash before the break
+  (an odd run of them, raw literal or not) continues the line and is no
+  line break (`f"{x:a\<newline>b}"`). A line break elsewhere in a field
+  stands wherever code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
   the `!`, and a triple-quoted literal's spec text keeps it as text. A source
   ending in format-spec text is the literal unterminated on every version.
 - An f/t-string error is the first error in the source, on every Python
   version: nothing after it is read, so a later unterminated string or
   unmatched bracket no longer replaces it (`f"{x!z}" "b` reports the
-  invalid conversion, where 3.12+ reported the string). A conversion is
-  checked where it is read: an invalid name (`!z`) is refused at once, even
+  invalid conversion, where every version reported the string). A
+  conversion is checked where it is read: an invalid name (`!z`) is refused at once, even
   where 3.12 and 3.13 reported an error later in the field first; with no
   name after the `!`, a `}` or `:` next is "missing conversion character"
   and any other token (`f"{x!"a"}"`) "invalid conversion character", at
-  that token, where 3.11 reported both as invalid with the expected names
-  appended; anything but blanks, `:` or `}` after the name is "expecting
+  that token; anything but blanks, `:` or `}` after the name is "expecting
   ':' or '}'" there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.
