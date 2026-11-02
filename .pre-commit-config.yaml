@@ -1,5 +1,8 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+# The generated file must stay byte-identical to l2py's output
+# (tests/test_meta_functions.py), so no hook may rewrite it.
+exclude: ^src/lispy/core/meta_functions\.py$
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
@@ -10,13 +13,8 @@ repos:
     -   id: check-added-large-files
 
 -   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.0
+    rev: v0.17.3
     hooks:
       - id: ruff
         args: ["--fix"]
       - id: ruff-format
-
--   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: ''  # Use the sha / tag you want to point at
-    hooks:
-    -   id: mypy

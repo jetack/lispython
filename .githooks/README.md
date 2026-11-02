@@ -36,4 +36,4 @@ exec uv run --frozen --extra dev pre-commit run --hook-stage pre-commit
 
 pre-commit is in the `dev` extra, so `uv run` needs `--extra dev` to provide it. (Or use `pre-commit` from the active venv.) Never run `pre-commit install`.
 
-No such shim exists yet, so commits currently run no pre-commit checks.
+The tracked shim `.githooks/pre-commit` does exactly this, so every commit runs the hooks of `.pre-commit-config.yaml` (whitespace and EOF fixers, ruff with `--fix`, ruff-format) on the staged files. A hook that rewrites files fails the commit; re-stage and commit again. `src/lispy/core/meta_functions.py` is excluded from every hook: it is generated and must stay byte-identical to l2py's output.
