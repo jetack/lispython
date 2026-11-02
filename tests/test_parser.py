@@ -1101,6 +1101,36 @@ class TestSourceEndingInALiteral:
     def test_the_error_is_cpython_s(self, src):
         assert error_position(parse, src) == _python_error_position_spelled(src)
 
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # Lexed errors, the source ending in the literal or not.
+            'f"a\n}',
+            'f"a\n}"',
+            'f"a\nb}',
+            'f"{x:{y}a\n}}',
+            'f"a\n{x:a\n}}',
+            'f"a\n{x:a\n"',
+            # A conversion checked when its field closes.
+            'f"a\n{x!z}',
+            'f"a\n{x!z}"',
+            'f"a\n{x=!z}',
+            'f"a\n{x!}',
+            # Raised by the parser.
+            'f"a\n{)',
+            'f"a\n{x:{)',
+            'f"a\n{x!r:{)',
+            # An error before the break stays.
+            'f"{x!z}a\n}',
+            *_read_on_3_12_plus(['f"{f"a\nb"}}', 'f"{f"a\nb"} \n}']),
+        ],
+    )
+    def test_an_error_after_a_literal_s_line_break_is_that_break_s(self, src):
+        assert error_position(parse, src) == _python_error_position_spelled(src)
+
+    def test_a_literal_with_a_line_break_and_no_error_parses(self):
+        assert len(parse('f"{x}a\n}}"')) == 1
+
     @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
     @pytest.mark.parametrize(
         "src",
