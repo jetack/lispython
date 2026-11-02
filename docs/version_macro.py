@@ -1,5 +1,6 @@
 import tomllib
 
+
 def define_env(env):
     try:
         with open("pyproject.toml", "rb") as f:

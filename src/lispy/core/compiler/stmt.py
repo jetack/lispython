@@ -67,9 +67,7 @@ def assign_compile(sexp):
         raise form_error(sexp, "is missing its value")
     for [i, x] in enumerate(sexp.operands):
         if isinstance(x, Annotation) and i != 1:
-            raise form_error(
-                x, "takes an annotation only right after one target", "="
-            )
+            raise form_error(x, "takes an annotation only right after one target", "=")
     if isinstance(body[0], Annotation):
         [annotation, *value] = body
         if len(value) > 1:
@@ -83,7 +81,7 @@ def assign_compile(sexp):
             # name a, which Python records in __annotations__ like a bare a.
             simple=int(isinstance(target_node, ast.Name)),
             **value_dict,
-            **sexp.position_info
+            **sexp.position_info,
         )
     else:
         [*targets, value] = [target, *body]
@@ -91,9 +89,7 @@ def assign_compile(sexp):
         for x in targets:
             target_nodes.append((yield target_compile(x, "assign")))
         return ast.Assign(
-            targets=target_nodes,
-            value=(yield expr_steps(value)),
-            **sexp.position_info
+            targets=target_nodes, value=(yield expr_steps(value)), **sexp.position_info
         )
 
 
@@ -113,7 +109,7 @@ def augassign_compile(sexp):
         target=(yield target_compile(target, "augassign")),
         op=op(),
         value=value,
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -180,9 +176,7 @@ def importfrom_compile(sexp, lazy=False):
     form = str(op)
     is_lazy = lazy_kwargs(sexp, lazy)
     if not args or len(args) % 2:
-        raise LispyCompileError(
-            f"({form} ...) takes module and [names] pairs", sexp
-        )
+        raise LispyCompileError(f"({form} ...) takes module and [names] pairs", sexp)
     modules = [import_name(module, form) for module in args[::2]]
     namess = args[1::2]
     for names in namess:
@@ -195,9 +189,7 @@ def importfrom_compile(sexp, lazy=False):
         # CPython's own static checks on `lazy from`, with its messages.
         for [module, names] in zip(modules, namess):
             if names == "*":
-                raise LispyCompileError(
-                    "lazy from ... import * is not allowed", sexp
-                )
+                raise LispyCompileError("lazy from ... import * is not allowed", sexp)
             if atom_text(module) == "__future__":
                 raise LispyCompileError(
                     "lazy from __future__ import is not allowed", sexp
@@ -213,7 +205,7 @@ def importfrom_compile(sexp, lazy=False):
             names=parse_names(names, form, from_p=True),
             level=level,
             **is_lazy,
-            **merge_position_infos(module_pos_info, names.position_info)
+            **merge_position_infos(module_pos_info, names.position_info),
         )
         for [[module, level, module_pos_info], names] in zip(module_level, namess)
     ]
@@ -229,7 +221,7 @@ def if_stmt_compile(sexp):
         test=(yield expr_steps(test)),
         body=(yield stmt_list_steps([then])),
         orelse=(yield stmt_list_steps(orelse)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -265,7 +257,7 @@ def while_compile(sexp):
         test=(yield expr_steps(test)),
         body=(yield stmt_list_steps(then)),
         orelse=(yield stmt_list_steps(orelse)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -282,7 +274,7 @@ def for_compile(sexp, async_p=False):
         iter=(yield expr_steps(iterable)),
         body=(yield stmt_list_steps(then)),
         orelse=(yield stmt_list_steps(orelse)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -347,7 +339,7 @@ def parse_except(handler):
             ast.Tuple(
                 elts=(yield expr_list_steps(types)),
                 ctx=ast.Load(),
-                **bracket.position_info
+                **bracket.position_info,
             )
             if len(types) > 1
             else (yield expr_steps(types[0]))
@@ -425,7 +417,7 @@ def try_compile(sexp):
         handlers=handlers,
         orelse=(yield stmt_list_steps(orelse)),
         finalbody=(yield stmt_list_steps(finalbody)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -453,23 +445,19 @@ def with_compile(sexp, async_p=False):
     form = str(sexp.op)
     [[items], body] = form_parts(sexp, ("items",))
     if not isinstance(items, Bracket) or not len(items):
-        raise form_error(
-            items, f"expects a non-empty [context ...], got {items}", form
-        )
+        raise form_error(items, f"expects a non-empty [context ...], got {items}", form)
     if not body:
         raise form_error(sexp, "needs a body")
     return (ast.AsyncWith if async_p else ast.With)(
         items=(yield with_items_parse(items, form)),
         body=(yield stmt_list_steps(body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
 def signed_number_p(sexp):
     return (
-        isinstance(sexp, Paren)
-        and len(sexp) == 2
-        and atom_text(sexp.op) in ("+", "-")
+        isinstance(sexp, Paren) and len(sexp) == 2 and atom_text(sexp.op) in ("+", "-")
     )
 
 
@@ -547,10 +535,8 @@ def match_sequence_parse(sexp):
             )
         patterns.append(
             ast.MatchStar(
-                **{}
-                if atom_text(name) == "_"
-                else {"name": symbol_name(name)},
-                **elt.position_info
+                **{} if atom_text(name) == "_" else {"name": symbol_name(name)},
+                **elt.position_info,
             )
         )
     return {"patterns": patterns}
@@ -644,9 +630,7 @@ def pattern_parse(sexp):
     if atom_text(sexp) in ("True", "False", "None") and constant_p(sexp):
         return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
     if bracket_p(sexp):
-        return ast.MatchSequence(
-            **(yield match_sequence_parse(sexp)), **position_info
-        )
+        return ast.MatchSequence(**(yield match_sequence_parse(sexp)), **position_info)
     if brace_p(sexp):
         return ast.MatchMapping(**(yield match_mapping_parse(sexp)), **position_info)
     if paren_p(sexp) and sexp.op == "|":
@@ -682,7 +666,7 @@ def case_parse(case):
         pattern = ast.MatchAs(
             pattern=pattern,
             name=name,
-            **merge_position_infos(pattern_expr.position_info, body[1].position_info)
+            **merge_position_infos(pattern_expr.position_info, body[1].position_info),
         )
         body = body[2:]
     guard_dict = {}
@@ -813,7 +797,7 @@ def type_alias_compile(sexp):
         name=name_compile(head, ast.Store),
         type_params=type_params,
         value=(yield expr_steps(value)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -821,9 +805,7 @@ DECORATABLE = ("def", "async-def", "class", "deco")
 
 
 def deco_compile(sexp, decorator_list):
-    [[decorator, def_statement], rest] = form_parts(
-        sexp, ("decorator", "definition")
-    )
+    [[decorator, def_statement], rest] = form_parts(sexp, ("decorator", "definition"))
     if rest:
         raise form_error(sexp, "takes one decorator and one definition")
     if not clause_p(def_statement, DECORATABLE):
@@ -874,7 +856,7 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
             (yield expr_list_steps(decorator_list)) if decorator_list else []
         ),
         returns=(yield expr_steps(ann.value)) if ann else None,
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -931,7 +913,7 @@ def classdef_compile(sexp, decorator_list):
         decorator_list=(
             (yield expr_list_steps(decorator_list)) if decorator_list else []
         ),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 

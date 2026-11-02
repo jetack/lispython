@@ -13,28 +13,34 @@ class TestMatchMethods:
     def test_match_value(self):
         assert stmt_to_dump("""
 (match x
-  (case "Relevant" ...))""") == ast.dump(ast.parse("""
+  (case "Relevant" ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case "Relevant":
-        ..."""))
+        ...""")
+        )
 
     def test_match_singleton(self):
         assert stmt_to_dump("""
 (match x
   (case None
-     ...))""") == ast.dump(ast.parse("""
+     ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case None:
-        ..."""))
+        ...""")
+        )
 
     def test_match_sequence(self):
         assert stmt_to_dump("""
 (match x
   (case [1 2]
-     ...))""") == ast.dump(ast.parse("""
+     ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case [1, 2]:
-        ..."""))
+        ...""")
+        )
 
     def test_match_star(self):
         assert stmt_to_dump("""
@@ -42,12 +48,14 @@ match x:
   (case [1 2 *rest]
      ...)
   (case [*_]
-    ...))""") == ast.dump(ast.parse("""
+    ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case [1, 2, *rest]:
         ...
     case [*_]:
-        ..."""))
+        ...""")
+        )
 
     def test_match_mapping(self):
         assert stmt_to_dump("""
@@ -55,12 +63,14 @@ match x:
   (case {1 _ 2 _}
     ...)
   (case {**rest}
-    ...))""") == ast.dump(ast.parse("""
+    ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case {1: _, 2: _}:
         ...
     case {**rest}:
-        ..."""))
+        ...""")
+        )
 
     def test_match_class(self):
         assert stmt_to_dump("""
@@ -68,12 +78,14 @@ match x:
   (case (Point2D 0 0)
     ...)
   (case (Point3D :x 0 :y 0 :z 0)
-    ...))""") == ast.dump(ast.parse("""
+    ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case Point2D(0, 0):
         ...
     case Point3D(x=0, y=0, z=0):
-        ..."""))
+        ...""")
+        )
 
     def test_match_as(self):
         assert stmt_to_dump("""
@@ -81,28 +93,30 @@ match x:
   (case [x] as y
     ...)
   (case _
-    ...))""") == ast.dump(ast.parse("""
+    ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case [x] as y:
         ...
     case _:
-        ..."""))
+        ...""")
+        )
 
     def test_match_or(self):
         assert stmt_to_dump("""
 (match x
   (case (| [x] y)
-    ...))""") == ast.dump(ast.parse("""
+    ...))""") == ast.dump(
+            ast.parse("""
 match x:
     case [x] | (y):
-        ..."""))
-
+        ...""")
+        )
 
 
 SIGNED = "pattern can sign only a number literal, got"
 PATTERN_USAGE = (
-    "a name, _, a literal, a dotted name, [sequence], {mapping}, "
-    "(| ...) or (Class ...)"
+    "a name, _, a literal, a dotted name, [sequence], {mapping}, (| ...) or (Class ...)"
 )
 
 
@@ -388,8 +402,7 @@ class TestImportNames:
             ('(from "json" [a])', '(from ...) expects a name, got "json"', '"'),
             (
                 "(import json[x])",
-                "json[...] is only valid as a def/class/type name; "
-                "use (sub json ...)",
+                "json[...] is only valid as a def/class/type name; use (sub json ...)",
                 "j",
             ),
         ],
@@ -735,9 +748,7 @@ class TestFormArity:
 
     def test_deco_stacks(self):
         # Compared piecewise: FunctionDef dumps differ by version (type_params).
-        [got] = macroexpand_then_compile(
-            parse("(deco [a b] (deco c (def f [] (g))))")
-        )
+        [got] = macroexpand_then_compile(parse("(deco [a b] (deco c (def f [] (g))))"))
         [want] = ast.parse("@a\n@b\n@c\ndef f():\n    g()").body
         assert ast.dump(ast.Module(got.decorator_list, [])) == ast.dump(
             ast.Module(want.decorator_list, [])

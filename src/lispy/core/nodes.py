@@ -886,7 +886,7 @@ class FStrExpr(Wrapper):
             Keyword(Symbol("debug")),
             Constant("None") if debug is None else String(repr(debug)),
             *text_args,
-            **position_info
+            **position_info,
         )
 
     @property
@@ -979,8 +979,7 @@ class GluedHead(Node):
 
         text = str(self.head)
         return LispyCompileError(
-            f"{text}[...] is only valid as a def/class/type name; "
-            f"use (sub {text} ...)",
+            f"{text}[...] is only valid as a def/class/type name; use (sub {text} ...)",
             self,
         )
 

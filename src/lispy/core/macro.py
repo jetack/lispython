@@ -12,6 +12,7 @@ from lispy.core.utils import trampoline
 
 __macro_namespace: dict[str, Callable[[Node], ast.AST]] = {}
 
+
 def _unwrap_literal(node):
     if isinstance(node, Constant):
         try:
@@ -60,6 +61,7 @@ def require_macro(sexp, scope, include_meta=True):
         eval(code, scope)
     except (ModuleNotFoundError, ImportError):
         import sys
+
         module_name = str(sexp.list[1])
         print(
             f"l2py: warning: could not load macros from '{module_name}' "

@@ -55,10 +55,32 @@ def merge_position_infos(*position_infos):
 # stmt_compile.
 STATEMENT_HEADS = frozenset(
     {
-        "do", "=", "del", "pass", "import", "from", "lazy-import", "lazy-from",
-        "if", "while", "for", "break", "continue", "raise", "assert", "try",
-        "with", "deco", "def", "return", "global", "nonlocal", "class",
-        "async-def", "async-for", "async-with",
+        "do",
+        "=",
+        "del",
+        "pass",
+        "import",
+        "from",
+        "lazy-import",
+        "lazy-from",
+        "if",
+        "while",
+        "for",
+        "break",
+        "continue",
+        "raise",
+        "assert",
+        "try",
+        "with",
+        "deco",
+        "def",
+        "return",
+        "global",
+        "nonlocal",
+        "class",
+        "async-def",
+        "async-for",
+        "async-with",
     }
     | augassignop_dict.keys()
 )
@@ -132,8 +154,7 @@ FORM_USAGE = {
     **{op: f"({op} value...)" for op in boolop_dict},
     **{op: f"({op} a b...)" for op in compare_dict},
     "slice": (
-        "[: stop], [: start stop] or [: start stop step], "
-        "_ or None for a default"
+        "[: stop], [: start stop] or [: start stop step], _ or None for a default"
     ),
     "dict": "{key value ... **mapping}",
     "comprehension": (

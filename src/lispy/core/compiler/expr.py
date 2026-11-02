@@ -62,9 +62,7 @@ def unaryop_p(sexp):
 def unaryop_compile(sexp):
     [op, operand] = sexp.list
     return ast.UnaryOp(
-        unaryop_dict[atom_text(op)](),
-        (yield expr_steps(operand)),
-        **sexp.position_info
+        unaryop_dict[atom_text(op)](), (yield expr_steps(operand)), **sexp.position_info
     )
 
 
@@ -94,7 +92,7 @@ def boolop_compile(sexp):
     return ast.BoolOp(
         boolop_dict[atom_text(op)](),
         (yield expr_list_steps(args)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -111,7 +109,7 @@ def compare_compile(sexp):
         left=left,
         ops=[compare_dict[atom_text(op)]() for i in range(len(comparators))],
         comparators=comparators,
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -138,7 +136,7 @@ def call_args_parse(given):
                 ast.keyword(
                     arg=name,
                     value=(yield expr_steps(keyword_value(arg, q))),
-                    **arg.position_info
+                    **arg.position_info,
                 )
             )
         elif doublestarred_p(arg):
@@ -179,7 +177,7 @@ def ifexp_compile(sexp):
         test=(yield expr_steps(test)),
         body=(yield expr_steps(body)),
         orelse=(yield expr_steps(orelse)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -218,7 +216,7 @@ def methodcall_compile(sexp):
         value=(yield expr_steps(instance)),
         attr=method_name(method),
         ctx=ast.Load(),
-        **merge_position_infos(method.position_info, instance.position_info)
+        **merge_position_infos(method.position_info, instance.position_info),
     )
     return ast.Call(func=func, args=args, keywords=keywords, **sexp.position_info)
 
@@ -338,7 +336,7 @@ def namedexpr_compile(sexp):
     return ast.NamedExpr(
         target=(yield target_compile(target, "walrus")),
         value=(yield expr_steps(value)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -364,7 +362,7 @@ def subscript_compile(sexp, ctx):
             value=rst,
             slice=(yield subscript_slice_compile(slice)),
             ctx=ast.Load(),
-            **merge_position_infos(op_pos, slice.position_info)
+            **merge_position_infos(op_pos, slice.position_info),
         )
     rst.ctx = ctx()
     return rst
@@ -427,7 +425,7 @@ def gen_exp_compile(sexp):
     return ast.GeneratorExp(
         elt=(yield comprehension_elt_compile(elt)),
         generators=(yield parse_comprehensions(generator_body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -484,7 +482,9 @@ def def_args_parse(sexp, annotated=True):
         arg = q.popleft()
         text = atom_text(arg)
         if kwarg is not None:
-            raise LispyCompileError("parameters cannot follow var-keyword parameter", arg)
+            raise LispyCompileError(
+                "parameters cannot follow var-keyword parameter", arg
+            )
         if text == "/":
             if slash is not None:
                 raise LispyCompileError("/ may appear only once", arg)
@@ -548,7 +548,7 @@ def lambda_compile(sexp):
     return ast.Lambda(
         args=(yield def_args_parse(args, annotated=False)),
         body=(yield expr_steps(body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -606,14 +606,14 @@ def f_str_value_compile(sexp):
         value=(yield expr_steps(sexp.value)),
         conversion=sexp.conversion,
         **(yield format_spec_dict(sexp)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
 def f_string_compile(sexp):
     return ast.JoinedStr(
         values=(yield interpolated_values(sexp, f_str_value_compile)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -628,7 +628,7 @@ def interpolation_compile(sexp):
         ),
         conversion=sexp.conversion,
         **(yield format_spec_dict(sexp)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -636,7 +636,7 @@ def t_string_compile(sexp):
     require("t-string", sexp)
     return ast.TemplateStr(
         values=(yield interpolated_values(sexp, interpolation_compile)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -644,9 +644,7 @@ def refuse_empty_form(sexp):
     """The one refusal of an empty (): an expression, a statement (through
     paren_compiler) or a match pattern (pattern_parse) reads its head."""
     if paren_p(sexp) and not len(sexp):
-        raise LispyCompileError(
-            "() is an empty form; use (,) for an empty tuple", sexp
-        )
+        raise LispyCompileError("() is an empty form; use (,) for an empty tuple", sexp)
 
 
 # Which compiler a non-empty () goes to: the first predicate that holds wins,
@@ -701,7 +699,13 @@ def slice_compile(sexp):
     [_, *args] = sexp.list
     if not 1 <= len(args) <= 3:
         raise form_error(sexp, "takes one to three operands", "slice")
-    [lower, upper, step] = args if len(args) == 3 else args + ["_"] if len(args) == 2 else ["_"] + args + ["_"]
+    [lower, upper, step] = (
+        args
+        if len(args) == 3
+        else args + ["_"]
+        if len(args) == 2
+        else ["_"] + args + ["_"]
+    )
     args_dict = {}
     if lower != "None" and lower != "_":
         args_dict["lower"] = yield expr_steps(lower)
@@ -717,7 +721,7 @@ def list_comp_compile(sexp):
     return ast.ListComp(
         elt=(yield comprehension_elt_compile(elt)),
         generators=(yield parse_comprehensions(generator_body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -769,7 +773,7 @@ def dict_comp_compile(sexp):
         key=(yield expr_steps(key)),
         value=(yield expr_steps(value)),
         generators=(yield parse_comprehensions(generator_body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -780,7 +784,7 @@ def dict_unpack_comp_compile(sexp):
     return ast.DictComp(
         key=(yield expr_steps(unpacked.value)),
         generators=(yield parse_comprehensions(generator_body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -789,7 +793,7 @@ def set_comp_compile(sexp):
     return ast.SetComp(
         elt=(yield comprehension_elt_compile(elt)),
         generators=(yield parse_comprehensions(generator_body)),
-        **sexp.position_info
+        **sexp.position_info,
     )
 
 
@@ -797,12 +801,13 @@ def brace_compiler(sexp):
     return (
         dict_compile(sexp)
         if len(sexp) < 1
-        else (
-            set_comp_compile if atom_text(sexp.op) == "," else dict_comp_compile
-        )(sexp)
+        else (set_comp_compile if atom_text(sexp.op) == "," else dict_comp_compile)(
+            sexp
+        )
         if len(sexp) > 2 and atom_text(sexp[2]) in ("for", "async-for")
         else dict_unpack_comp_compile(sexp)
-        if doublestarred_p(sexp[0]) and len(sexp) > 1
+        if doublestarred_p(sexp[0])
+        and len(sexp) > 1
         and atom_text(sexp[1]) in ("for", "async-for")
         else set_compile(sexp)
         if atom_text(sexp.op) == ","
@@ -821,9 +826,7 @@ def metaindicator_compile(sexp):
                 sexp.value.generator_expression(isinstance(sexp, QuasiQuote))
             )
         )
-    form = (
-        "~@ (unquote-splice)" if isinstance(sexp, UnquoteSplice) else "~ (unquote)"
-    )
+    form = "~@ (unquote-splice)" if isinstance(sexp, UnquoteSplice) else "~ (unquote)"
     raise LispyCompileError(f"{form} is only allowed inside a quasiquote", sexp)
 
 

@@ -25,9 +25,7 @@ class TestAsThread:
         assert result == "((__x_0 := 0), __x_0 + 1)[-1]"
 
     def test_multiple_forms(self):
-        result = src_to_python_org(
-            PREAMBLE + "(as-> 0 x (+ x 10) (* 2 x) (str x))"
-        )
+        result = src_to_python_org(PREAMBLE + "(as-> 0 x (+ x 10) (* 2 x) (str x))")
         assert result == (
             "((__x_0 := 0), (__x_0 := (__x_0 + 10)), (__x_0 := (2 * __x_0)), "
             "str(__x_0))[-1]"
@@ -123,8 +121,7 @@ class TestAsThreadRenamesOnlyReferences:
 
     def test_quote_call_is_an_ordinary_call(self):
         assert (
-            self.compile("(as-> 1 x (quote x))")
-            == "((__x_0 := 1), quote(__x_0))[-1]"
+            self.compile("(as-> 1 x (quote x))") == "((__x_0 := 1), quote(__x_0))[-1]"
         )
 
     def test_shadowing_lambda_body_kept(self):
@@ -198,12 +195,12 @@ class TestAsThreadDottedAndFormatSpec:
         )
 
     def test_fstring_format_spec_renamed(self):
-        src = "(= x 9)\n(= out (as-> 5 x f\"{1:{x}}\"))"
+        src = '(= x 9)\n(= out (as-> 5 x f"{1:{x}}"))'
         assert "{1:{__x_0}}" in self.compile(src)
         assert run(src)["out"] == "    1"
 
     def test_fstring_format_spec_dotted_renamed(self):
-        src = "(= x 9)\n(= out (as-> 5 x f\"{1:{x.real}}\"))"
+        src = '(= x 9)\n(= out (as-> 5 x f"{1:{x.real}}"))'
         assert "{1:{__x_0.real}}" in self.compile(src)
         assert run(src)["out"] == "    1"
 
