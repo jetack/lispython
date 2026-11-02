@@ -22,9 +22,11 @@ follows [Semantic Versioning](https://semver.org/).
   unmatched bracket no longer replaces it (`f"{x!z}" "b` reports the
   invalid conversion, where 3.12+ reported the string). A conversion is
   checked where it is read: an invalid name (`!z`) is refused at once, even
-  where 3.12 and 3.13 reported an error later in the field first; nothing
-  after the `!` (`f"{x!"a"}"`) is "missing conversion character" at the
-  next token; anything but blanks, `:` or `}` after the name is "expecting
+  where 3.12 and 3.13 reported an error later in the field first; with no
+  name after the `!`, a `}` or `:` next is "missing conversion character"
+  and any other token (`f"{x!"a"}"`) "invalid conversion character", at
+  that token, where 3.11 reported both as invalid with the expected names
+  appended; anything but blanks, `:` or `}` after the name is "expecting
   ':' or '}'" there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.

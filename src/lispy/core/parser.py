@@ -699,8 +699,9 @@ class _Lexer:
         the ``}`` or ``:`` after it, or None where lexing has stopped.
 
         The name comes right after the ``!``: a name after a gap is refused
-        at the ``!``, and nothing there is "missing conversion character" at
-        the next token. A name other than s, r or a is refused where it is
+        at the ``!``; with no name, a ``}`` or ``:`` next is "missing
+        conversion character" there, and any other token "invalid conversion
+        character". A name other than s, r or a is refused where it is
         read. After the name only blanks (``_skip_blanks``) may stand before
         the ``:`` or ``}``; anything else is refused where it is.
         """
@@ -718,8 +719,11 @@ class _Lexer:
             elif src[at].isalnum() or src[at] == "_":
                 msg = "conversion type must come right after the exclamation mark"
                 self._fail(self._error(f"{kind}: {msg}", bang, bang + 1))
-            else:
+            elif src[at] in "}:":
                 msg = f"{kind}: missing conversion character"
+                self._fail(self._error(msg, at, at + 1))
+            else:
+                msg = f"{kind}: invalid conversion character"
                 self._fail(self._error(msg, at, at + 1))
             return None
         if name not in conversion_dict:
