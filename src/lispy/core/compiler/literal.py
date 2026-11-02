@@ -197,13 +197,13 @@ def number_pattern_expr(text, sexp):
 
 
 # Prefixes of a plain (non-interpolated) string literal, lower-cased.
-_PLAIN_STRING_PREFIXES = ("", "r", "u", "b", "br", "rb")
+PLAIN_STRING_PREFIXES = ("", "r", "u", "b", "br", "rb")
 _QUOTES = ('"""', "'''", '"', "'")
 
 
 def check_plain_string_prefix(prefix, node):
     """Refuse, at ``node``, a prefix no plain string literal may carry."""
-    if prefix.lower() not in _PLAIN_STRING_PREFIXES:
+    if prefix.lower() not in PLAIN_STRING_PREFIXES:
         raise LispyCompileError(f"invalid string prefix {prefix!r}", node)
 
 

@@ -22,8 +22,8 @@ follows [Semantic Versioning](https://semver.org/).
   line break (`f"{x:a\<newline>b}"`). A line break elsewhere in a field
   stands wherever code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
   the `!`, and a triple-quoted literal's spec text keeps it as text. So does
-  a backslash continuation in a field's code (`f"{x\<newline>+1}"` compiles,
-  as on 3.12+, where the backslash was lexed into a symbol). A source
+  a backslash continuation in a field's code (`f"{(+ x\<newline>1)}"`
+  compiles, as on 3.12+, where the backslash was lexed into a symbol). A source
   ending in format-spec text is the literal unterminated on every version.
 - An f/t-string error is the first error in the source, on every Python
   version: nothing after it is read, so a later unterminated string or
@@ -35,11 +35,14 @@ follows [Semantic Versioning](https://semver.org/).
   conversion character", a `)` or `]` "unmatched ')'" or "unmatched ']'",
   and any other token (`f"{x!"a"}"`) "invalid conversion character", at
   that token, a quote there opening a string as anywhere in a field. A
-  string prefix glued to the quote is part of that string (`!r"a"`,
-  `!f"a"`: "invalid conversion character" at the prefix, an f/t-string's
-  body unread, an invalid prefix such as `!bt"a"` refused first), as
-  CPython 3.14+ read it, where `!r"a"` said "expecting ':' or '}'" after the
-  `r`; a name of other letters stays a conversion (`!ra"a"`). Anything but
+  string prefix glued to the quote is part of that string, as CPython 3.14+
+  read it: `!r"a"` and `!f"a"` are "invalid conversion character" at the
+  prefix, an f/t-string's body unread; an invalid prefix (`!bt"a"`,
+  `!ub"a"`) is refused at the prefix, where it was "expecting ':' or '}'"
+  after the name; a plain string that never closes (`!r"a`) is
+  unterminated, where it was "expecting '}'". A name of other letters, or
+  repeating one, is a conversion (`!ra"a"`, `!rr"a"`: "invalid conversion
+  character 'ra'"). Anything but
   blanks, `:` or `}` after the name is "expecting ':' or '}'"
   there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal

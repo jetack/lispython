@@ -1132,8 +1132,12 @@ class TestConversion:
             ('f"{x!z}"', NOT_CONVERSION.format("z"), (1, 6)),
             ('f"{x!zz}"', NOT_CONVERSION.format("zz"), (1, 6)),
             ('f"{x!z:{y!q}}"', NOT_CONVERSION.format("z"), (1, 6)),
-            # A name not made of string-prefix letters stays a name.
+            # A name not made of string-prefix letters, or repeating one,
+            # stays a name.
             ('f"{x!ra"a"}"', NOT_CONVERSION.format("ra"), (1, 6)),
+            ('f"{x!rr"a"}"', NOT_CONVERSION.format("rr"), (1, 6)),
+            ('f"{x!Rr"a"}"', NOT_CONVERSION.format("Rr"), (1, 6)),
+            ('f"{x!rbrb"a"}"', NOT_CONVERSION.format("rbrb"), (1, 6)),
             # A token after the "!" that is no name is an invalid conversion,
             # a string that closes included.
             ('f"{x!"a"}"', "f-string: invalid conversion character", (1, 6)),
@@ -1185,7 +1189,7 @@ class TestConversion:
             # The prefix is checked first.
             ('f"{x!bt"a"}"', "'b' and 't' prefixes are incompatible"),
             ('f"{x!ub"a"}"', "invalid string prefix 'ub'"),
-            ('f"{x!rr"a"}"', "invalid string prefix 'rr'"),
+            ('f"{x!uR"a"}"', "invalid string prefix 'uR'"),
             pytest.param(
                 't"{x!r"a"}"',
                 "t-string: invalid conversion character",
