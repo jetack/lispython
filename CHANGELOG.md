@@ -85,6 +85,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- On 3.12+ an error after a line break in a single-quoted f/t-string's text
+  (`f"a\n}"`, `f"a\n{x!z}"`, `f"a\n{)`) reports CPython's "unterminated
+  f-string literal (detected at line N)" for that literal, as `compile()`
+  does, whether or not the literal later closes: CPython's tokenizer stops
+  at the break. A multi-line literal with no error still compiles.
 - A comment ends at a lone CR as at LF and CRLF, as in CPython. A CR-only
   source (`; c\r(f 1)`) used to lose every form after a comment.
 - A source ending inside a string, an f/t-string, a format spec or a
