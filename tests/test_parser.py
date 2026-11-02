@@ -1345,6 +1345,13 @@ class TestFieldErrorPosition:
     def test_a_leading_equals_is_an_empty_expression(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages")
+    def test_a_comment_before_a_leading_equals_emits_no_token(self):
+        # lispython's ";" comment is Python's "#".
+        assert error_position(parse, 'f"""{;c\n=}"""') == python_error_position(
+            'f"""{#c\n=}"""'
+        )
+
     @pytest.mark.parametrize(
         "src",
         _read_on_3_12_plus(

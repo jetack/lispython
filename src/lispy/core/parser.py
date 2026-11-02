@@ -540,9 +540,10 @@ class _Lexer:
         this as soon as the parser sees the two tokens, before anything later
         in the literal. It is a parser error, so lexing reads on past it (a
         tokenizer error outside any literal still replaces it); ``==`` is one
-        token and not this case. Whitespace, comments and line continuations
-        emit no token, so ``len(self.tokens) == field.first`` means nothing
-        precedes the "=".
+        token and not this case. Whitespace and comments emit no token, so
+        ``len(self.tokens) == field.first`` means nothing precedes the "=".
+        A backslash continuation before it is lexed as a symbol, not yet read
+        as CPython reads it, so that case is not refused here.
         """
         if len(self.tokens) != field.first or self.src.startswith("=", at + 1):
             return False
@@ -1092,9 +1093,6 @@ class _Lexer:
         )
         if debug:
             self._drop_debug_equals(field, last - 1)
-        # Where CPython places an empty expression's error: at the "=" of
-        # {x=}, else at the delimiter.
-        delimiter = last - 1 if debug else at
         self._emit(
             src[at],
             "field-expression-end",
@@ -1105,7 +1103,7 @@ class _Lexer:
                 "end": at,
                 "debug": last - 1 if debug else None,  # the "=" of {x=}
                 "echo": self.locate(expr_start, at),
-                "delimiter": self.locate(delimiter, delimiter + 1),
+                "delimiter": self.locate(at, at + 1),
             },
         )
         if src[at] == "}":
@@ -1850,7 +1848,7 @@ class _Field:
 
     def end_expression(self, src, data):
         if not self.list:
-            delimiter = "=" if data["debug"] is not None else src[data["end"]]
+            delimiter = src[data["end"]]
             raise _interpolation_error(
                 self.owner.kind,
                 f"valid expression required before {delimiter!r}",

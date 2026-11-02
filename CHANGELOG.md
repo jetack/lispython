@@ -87,10 +87,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 - A replacement field whose expression starts with a bare `=` (`f"{=}"`,
   `f"{=x}"`, `f"{=!r}"`, a source ending at `f"{=`) is refused with CPython
-  3.12+'s "valid expression required before '='" at the `=`, as compile() does,
-  where it was refused only later as "= is not a valid Python name", as a
-  missing conversion, or as "expecting '}'"; it is now refused when the source
-  is read, so also inside quoted code.
+  3.12+'s "valid expression required before '='" at the `=`, as compile() does
+  (3.11 gives a closed literal that message too, as for `f"{}"`; a source
+  ending inside the literal gets 3.11's whole-literal error). It was refused
+  only by the compile step ("= is not a valid Python name") or as a missing
+  conversion (`f"{=!}"`), and `f"{=` gave "'{' was never closed". It is now
+  refused when the source is read, so also inside quoted code.
 - On 3.12+ a format spec reads `{{` as a literal `{` once a nested field has
   opened in it, as CPython does (`f"{x:{y}{{}"`); `}` still ends the spec.
 - On 3.12+ an error after a line break in a single-quoted f/t-string's text
