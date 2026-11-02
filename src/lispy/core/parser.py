@@ -336,11 +336,14 @@ class _FieldState:
         "code",
         "piece_owed",
         "error",
+        "first",
     )
 
-    def __init__(self, literal, open_brace, record, in_code=False):
+    def __init__(self, literal, open_brace, record, in_code=False, first=0):
         self.literal = literal
         self.open = open_brace
+        # Index of the first token the expression can emit (right after "{").
+        self.first = first
         # The opening of each bracket open in the expression, innermost last.
         self.brackets = []
         self.spec = False
@@ -492,6 +495,8 @@ class _Lexer:
         start = m.start()
         if field is not None and not field.brackets:
             c = src[start]
+            if c == "=" and self._leading_equals(field, start):
+                return
             if c in ":}" or (c == "!" and not src.startswith("=", start + 1)):
                 self._delimiter(field, start)
                 return
@@ -526,6 +531,25 @@ class _Lexer:
                 first = tail[:2] if glued else [len(self.tokens) - 1, start]
                 field.tail = [*first, end, tktype]
         self.pos = end
+
+    def _leading_equals(self, field, at):
+        """Refuse a bare "=" as the first token of ``field``'s expression
+        (True: handled, lexing resumes after it).
+
+        CPython's grammar rule ``invalid_replacement_field: '{' '='`` raises
+        this as soon as the parser sees the two tokens, before anything later
+        in the literal. It is a parser error, so lexing reads on past it (a
+        tokenizer error outside any literal still replaces it); ``==`` is one
+        token and not this case. Whitespace, comments and line continuations
+        emit no token, so ``len(self.tokens) == field.first`` means nothing
+        precedes the "=".
+        """
+        if len(self.tokens) != field.first or self.src.startswith("=", at + 1):
+            return False
+        msg = f"{field.literal.kind}: valid expression required before '='"
+        self._emit_error(_parser_level(self._error(msg, at, at + 1)))
+        self.pos = at + 1
+        return True
 
     def _note_closer(self, field, at):
         """Record the tokenizer error of the closing bracket at ``at`` in
@@ -928,7 +952,8 @@ class _Lexer:
     def _open_field(self, literal, at, in_code):
         record = {}
         self._emit("{", "field-start", at, at + 1, record)
-        self.stack.append(_FieldState(literal, at, record, in_code))
+        first = len(self.tokens)
+        self.stack.append(_FieldState(literal, at, record, in_code, first))
         self.pos = at + 1
 
     @staticmethod

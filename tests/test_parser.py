@@ -1317,6 +1317,36 @@ class TestFieldErrorPosition:
 
     @pytest.mark.parametrize(
         "src",
+        [
+            *_read_on_3_12_plus(
+                [
+                    'f"{=}"',
+                    'f"{=x}"',
+                    'f"{=!r}"',
+                    'f"{=:x}"',
+                    'f"{=!}"',
+                    'f"{ =}"',
+                    'f"x{=}y"',
+                    'f"{x:{=}}"',
+                    'f"{=\\\n}"',
+                    'f"""{\n=}"""',
+                    'f"{=}" "b',
+                ]
+            ),
+            'f"{=',
+            'f"{=}',
+            'f"{x:{=',
+            'f"""{=',
+            pytest.param(
+                't"{=}"', marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14")
+            ),
+        ],
+    )
+    def test_a_leading_equals_is_an_empty_expression(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @pytest.mark.parametrize(
+        "src",
         _read_on_3_12_plus(
             [
                 'f"{x!}"',
