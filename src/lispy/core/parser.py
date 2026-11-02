@@ -762,19 +762,8 @@ class _Lexer:
             )
             if stop == "quote":
                 end = at + len(quote_text)
-                if (
-                    escaped_in is None
-                    and self.stack
-                    and len(quote_text) == 1
-                    and features.fstring_fields_are_tokens()
-                    and self.stack[0].line_break is None
-                ):
-                    # CPython's tokenizer stops at a line break in it.
-                    stop_at = _UNESCAPED_LINE_END_RE.match(src, body, at).end()
-                    if stop_at < at and src[stop_at] in "\r\n":
-                        self._record_line_break(
-                            self._string_eof_error(string_start, quote, body)
-                        )
+                if escaped_in is None:  # the \" spelling is lispython's own
+                    self._note_string_line_break(string_start, quote, body, at)
                 text = src[start:end] if escaped_in is None else prefix + quote
                 if escaped_in is not None:
                     text += piece + quote
@@ -1240,10 +1229,29 @@ class _Lexer:
             quote = src[quote_at]
         body = quote_at + len(quote)
         raw = "r" in src[start:quote_at].lower()
-        [_, stop, _] = scan_string_body(src, body, quote, raw, "string")
+        [_, stop, at] = scan_string_body(src, body, quote, raw, "string")
         if stop == "quote":
+            self._note_string_line_break(start, quote, body, at)
             return None
         return self._literal_eof_error() or self._string_eof_error(start, quote, body)
+
+    def _note_string_line_break(self, start, quote, body, at):
+        """Record a line break in the closed plain string at ``start`` (body
+        ``src[body:at]``) in a literal's field: CPython's tokenizer stops at
+        it (``_string_eof_error``), so it supersedes what follows. Every
+        place a closed plain string is met calls this, before emitting the
+        parser-level error it would otherwise precede."""
+        if not (
+            self.stack
+            and len(quote) == 1
+            and features.fstring_fields_are_tokens()
+            and self.stack[0].line_break is None
+        ):
+            return
+        src = self.src
+        stop_at = _UNESCAPED_LINE_END_RE.match(src, body, at).end()
+        if stop_at < at and src[stop_at] in "\r\n":
+            self._record_line_break(self._string_eof_error(start, quote, body))
 
     def _quote_in_spec_error(self, spec, at):
         """The literal's closing quote, at ``at``, inside ``spec``'s format

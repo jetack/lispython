@@ -1149,6 +1149,16 @@ class TestSourceEndingInALiteral:
                     'f"{"a\r\nb"}{)}"',
                     'f"{f"{"a\nb"}"}{)}"',
                     'f"{"a\nb"}',
+                    # After a "!" the string is met by the conversion reader.
+                    'f"{x!"a\nb"}"',
+                    'f"{x!r"a\nb"}"',
+                    'f"{x! "a\nb"}"',
+                    'f"{x!s "a\nb"}"',
+                    'f"{x!r "a\nb"}"',
+                    'f"{x!z"a\nb"}"',
+                    # 3.12 reads a spec past its line break as code.
+                    'f"{x:a\n"b\nc"}"',
+                    'f"{x!r:a\n"b\nc"}{)}"',
                 ]
             ),
         ],
