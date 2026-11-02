@@ -7,14 +7,14 @@ from lispy.tools import l2py_s
 def test_include_meta_flag_false():
     src = "(defmacro m [x] x)"
     out = l2py_s(src, include_meta=False)
-    # When include_meta is False, the defmacro form itself should not appear in the output
+    # With include_meta False, the defmacro form itself is absent from the output
     assert "defmacro" not in out and "def m" not in out
 
 
 def test_include_meta_flag_true():
     src = "(defmacro m [x] x)"
     out = l2py_s(src, include_meta=True)
-    # When include_meta is True, there should be some Python produced for the macro definition
+    # With include_meta True, some Python is produced for the macro definition
     assert "def" in out or "__macro_namespace" in out
 
 

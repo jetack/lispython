@@ -6,7 +6,7 @@ from lispy.tools import l2py_s, macroexpand_then_compile, parse
 
 
 class TestMetaFunctionsSync:
-    """Test that core/meta_functions.py matches the transpiled result of core_meta_functions.lpy"""
+    """core/meta_functions.py matches the transpiled core_meta_functions.lpy."""
 
     def test_meta_functions_in_sync(self):
         """core/meta_functions.py should match transpiled core_meta_functions.lpy"""
@@ -14,10 +14,10 @@ class TestMetaFunctionsSync:
         lpy_path = osp.join(base_dir, "src", "lispy", "core_meta_functions.lpy")
         py_path = osp.join(base_dir, "src", "lispy", "core", "meta_functions.py")
 
-        with open(lpy_path, "r") as f:
+        with open(lpy_path) as f:
             lpy_src = f.read()
 
-        with open(py_path, "r") as f:
+        with open(py_path) as f:
             py_contents = f.read()
 
         transpiled = l2py_s(lpy_src, no_lispy=True)

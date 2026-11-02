@@ -1,6 +1,5 @@
 import ast
-import importlib
-from typing import Callable, Dict
+from collections.abc import Callable
 
 from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import constant_compile, string_node_value
@@ -11,7 +10,7 @@ from lispy.core.nodes import *
 from lispy.core.nodes import atom_text, macro_expansion_nodes
 from lispy.core.utils import trampoline
 
-__macro_namespace: Dict[str, Callable[[Node], ast.AST]] = {}
+__macro_namespace: dict[str, Callable[[Node], ast.AST]] = {}
 
 def _unwrap_literal(node):
     if isinstance(node, Constant):
@@ -62,7 +61,11 @@ def require_macro(sexp, scope, include_meta=True):
     except (ModuleNotFoundError, ImportError):
         import sys
         module_name = str(sexp.list[1])
-        print(f"l2py: warning: could not load macros from '{module_name}' (module not found)", file=sys.stderr)
+        print(
+            f"l2py: warning: could not load macros from '{module_name}' "
+            "(module not found)",
+            file=sys.stderr,
+        )
     return transformed if include_meta else None
 
 
@@ -140,7 +143,7 @@ def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=
 
 def sexp_list_expand(sexp_list, scope, include_meta=True):
     return filter(
-        lambda x: not x is None,
+        lambda x: x is not None,
         map(lambda x: macroexpand(x, scope, include_meta=include_meta), sexp_list),
     )
 
