@@ -71,5 +71,22 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Generated from core_meta_functions.lpy by l2py (tests/test_meta_functions.py checks
+# it byte for byte), so its shape is the transpiler's, not ruff's.
+"src/lispy/core/meta_functions.py" = ["E", "F", "I", "UP"]
+# The compiler modules share one namespace on purpose (`from ... import *`).
+"src/lispy/core/compiler/*.py" = ["F403", "F405"]
+"src/lispy/core/macro.py" = ["F403", "F405"]
+"src/lispy/core/parser.py" = ["F403", "F405"]
+# Package __init__ imports run for their side effects or re-export.
+"src/lispy/__init__.py" = ["F401"]
+"src/lispy/lsp/__init__.py" = ["F401"]
+"src/lispy/macros/__init__.py" = ["F401", "F403"]
+
+[tool.ruff.format]
+# Generated file (see above); the docs' fenced "python" blocks hold LisPython.
+exclude = ["src/lispy/core/meta_functions.py", "docs/**/*.md"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["lispy"]

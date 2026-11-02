@@ -57,7 +57,6 @@ class TestCompareMethods:
         assert src_to_python_org("(> 1 2 3)") == "1 > 2 > 3"
 
 
-
 class TestNumberAfterPrefix:
     """``*1``, ``**1`` and ``:1`` read a Constant, so every consumer of a
     prefixed operand either handles it or refuses at it: never a raw
@@ -103,7 +102,12 @@ class TestNumberAfterPrefix:
 
     @pytest.mark.parametrize(
         ("src", "py"),
-        [("(def g [a ^1] 1)", "def g(a: 1):\n    1"), ("(f *1)", "f(*1)"), ("(f **1)", "f(**1)"), ("[*1]", "[*1]")],
+        [
+            ("(def g [a ^1] 1)", "def g(a: 1):\n    1"),
+            ("(f *1)", "f(*1)"),
+            ("(f **1)", "f(**1)"),
+            ("[*1]", "[*1]"),
+        ],
     )
     def test_star_of_a_number_compiles(self, src, py):
         assert src_to_python_org(src) == py
@@ -190,9 +194,7 @@ class TestAttributeNeedsAnAttribute:
         assert_refused_at(src, "(. ...) is missing its attr: (. value attr...)", at)
 
     def test_attribute_with_an_attr_still_compiles(self):
-        assert stmt_to_dump("(= (. a b) ^int 1)") == ast.dump(
-            ast.parse("a.b: int = 1")
-        )
+        assert stmt_to_dump("(= (. a b) ^int 1)") == ast.dump(ast.parse("a.b: int = 1"))
 
 
 class TestExpressionFormArity:

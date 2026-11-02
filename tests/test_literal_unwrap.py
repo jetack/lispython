@@ -14,7 +14,9 @@ PREAMBLE = "(require lispy.macros *)\n"
 
 class TestLiteralUnwrapInMacro:
     def test_number_is_int(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro repeat-n [n *body]
   (= stmts [])
   (for _ in (range n)
@@ -23,22 +25,28 @@ class TestLiteralUnwrapInMacro:
 
 (repeat-n 3 (print "hello"))
 """
+        )
         result = src_to_python_org(src)
         assert result.count("print('hello')") == 3
 
     def test_string_is_str(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro greet [name]
   (= upper (.upper name))
   (return `(print ~upper)))
 
 (greet "world")
 """
+        )
         result = src_to_python_org(src)
         assert "WORLD" in result
 
     def test_bool_is_bool(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro if-flag [flag *body]
   (if flag
       (return `(do ~@body))
@@ -46,11 +54,14 @@ class TestLiteralUnwrapInMacro:
 
 (if-flag True (print "yes"))
 """
+        )
         result = src_to_python_org(src)
         assert "print('yes')" in result
 
     def test_none_is_none(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro maybe-wrap [val]
   (if (is val None)
       (return `(print "nothing"))
@@ -58,26 +69,33 @@ class TestLiteralUnwrapInMacro:
 
 (maybe-wrap None)
 """
+        )
         result = src_to_python_org(src)
         assert "nothing" in result
 
     def test_symbol_stays_as_node(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro my-inc [x]
   (return `(+ ~x 1)))
 
 (my-inc y)
 """
+        )
         result = src_to_python_org(src)
         assert "y + 1" in result
 
     def test_expression_stays_as_node(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro my-twice [expr]
   (return `(+ ~expr ~expr)))
 
 (my-twice (+ a b))
 """
+        )
         result = src_to_python_org(src)
         assert "a + b + (a + b)" in result
 
@@ -101,7 +119,9 @@ class TestRawValueInExpansion:
         assert src_to_python_org(PREAMBLE + src) == expected
 
     def test_raw_value_inserted_into_nested_paren(self):
-        src = PREAMBLE + """
+        src = (
+            PREAMBLE
+            + """
 (defmacro put-in [x]
   (= inner `(g))
   (inner.list.insert 1 x)
@@ -109,6 +129,7 @@ class TestRawValueInExpansion:
 
 (put-in 5)
 """
+        )
         assert src_to_python_org(src) == "f(g(5))"
 
     def test_converted_value_takes_the_macro_call_position(self):
@@ -239,11 +260,14 @@ class TestScalarDataRoundTrip:
 
 # No literal spells these; each must compile to its very value, never to a
 # call of float/complex, which a user binding would shadow.
-INEXACT_DEFS = PREAMBLE + """
+INEXACT_DEFS = (
+    PREAMBLE
+    + """
 (import math)
 (defmacro ret-nan [] (return math.nan))
 (defmacro ret-signed-cx [] (return (complex 0.0 -0.0)))
 """
+)
 
 
 INEXACT = [
@@ -325,9 +349,7 @@ class TestInexactScalarData:
         # value exact without naming float or complex.
         rebuilt = data_to_generator_expression(value).generator_expression()
         tree = ast.fix_missing_locations(ast.Expression(expr_compile(rebuilt)))
-        assert {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} == {
-            "Constant"
-        }
+        assert {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} == {"Constant"}
         scope = {"Constant": Constant, "float": int, "complex": int}
         made = eval(compile(tree, "<rebuild>", "eval"), scope)
         assert same_value(compiled_value(made), value)

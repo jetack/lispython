@@ -27,7 +27,9 @@ def gensym(prefix="gensym"):
     if isinstance(prefix, Symbol):
         prefix = prefix.name
     elif not isinstance(prefix, str):
-        raise TypeError(f"gensym prefix must be a Symbol or string, got {type(prefix).__name__}")
+        raise TypeError(
+            f"gensym prefix must be a Symbol or string, got {type(prefix).__name__}"
+        )
     suffix = "_" + str(_gensym_counter)
     sym = Symbol("__" + prefix + suffix)
     if not _identifier_p(sym.name):
