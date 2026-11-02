@@ -21,7 +21,9 @@ follows [Semantic Versioning](https://semver.org/).
   (an odd run of them, raw literal or not) continues the line and is no
   line break (`f"{x:a\<newline>b}"`). A line break elsewhere in a field
   stands wherever code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
-  the `!`, and a triple-quoted literal's spec text keeps it as text. A source
+  the `!`, and a triple-quoted literal's spec text keeps it as text. So does
+  a backslash continuation in a field's code (`f"{(+ x\<newline>1)}"`
+  compiles, as on 3.12+, where the backslash was lexed into a symbol). A source
   ending in format-spec text is the literal unterminated on every version.
 - An f/t-string error is the first error in the source, on every Python
   version: nothing after it is read, so a later unterminated string or
@@ -32,8 +34,15 @@ follows [Semantic Versioning](https://semver.org/).
   first; with no name after the `!`, a `}` or `:` next is "missing
   conversion character", a `)` or `]` "unmatched ')'" or "unmatched ']'",
   and any other token (`f"{x!"a"}"`) "invalid conversion character", at
-  that token, a quote there opening a string as anywhere in a field;
-  anything but blanks, `:` or `}` after the name is "expecting ':' or '}'"
+  that token, a quote there opening a string as anywhere in a field. A
+  string prefix glued to the quote is part of that string, as CPython 3.14+
+  read it: `!r"a"` and `!f"a"` are "invalid conversion character" at the
+  prefix, an f/t-string's body unread; an invalid prefix (`!bt"a"`,
+  `!ub"a"`) is refused at the prefix; a plain string that never closes
+  (`!r"a`) is unterminated. A name of other letters, or repeating one, is a
+  conversion (`!ra"a"`, `!rr"a"`: "invalid conversion character 'ra'").
+  0.6.0 worded and placed these differently by Python version. Anything but
+  blanks, `:` or `}` after the name is "expecting ':' or '}'"
   there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.
@@ -66,6 +75,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 - An invalid escape in a string (`"\d"`) warns at the .lpy file and line of
   the string, where it named `<unknown>` line 1.
+- A malformed number glued to a keyword (`(= a 1if)`, `0x1for`, `1jor`) is
+  CPython's "invalid decimal literal" ("invalid hexadecimal literal",
+  "invalid imaginary literal", ...) at the token, where it said "invalid
+  syntax" and 0.6.0 also printed a stray "<unknown>:1: SyntaxWarning:
+  invalid decimal literal"; a digit-led symbol (`1.else`, `1__0`) says the
+  same where it said "is not a valid Python name". A number token Python
+  reads as two (`406E-9.8J`) is "invalid number literal" at the token, where
+  it said "invalid syntax".
 
 ## [0.6.0] - 2026-11-02
 

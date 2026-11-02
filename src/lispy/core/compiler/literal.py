@@ -56,27 +56,90 @@ def literal_value(text, node, malformed=False):
     A warning it raises (an invalid escape) is re-issued by compile_warning
     at ``node``, naming the .lpy file and line where literal_eval would name
     ``<unknown>`` line 1, the text it was handed; one raised before an error
-    (``1if``: "invalid decimal literal") is dropped, the error standing for
-    it. ``malformed`` says ``text`` is a number token number_parts rejected.
+    (``1if``: "invalid decimal literal") becomes the error's message
+    (_literal_eval). ``malformed`` says ``text`` is a number token
+    number_parts rejected: its error keeps only wording of the token
+    (_number_wording), else is "invalid number literal".
     """
-    caught = []
     try:
-        if malformed or "\\" in text:
-            # Only an escape or a malformed number makes literal_eval warn.
-            # catch_warnings swaps the process-wide filters (not thread-safe,
-            # and it resets the warning registry a REPL, nREPL or LSP session
-            # keeps), so it is entered only for text that can warn.
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                value = ast.literal_eval(text)
-        else:
-            value = ast.literal_eval(text)
+        # Only an escape or a malformed number makes literal_eval warn.
+        # catch_warnings swaps the process-wide filters (not thread-safe, and
+        # it resets the warning registry a REPL, nREPL or LSP session keeps),
+        # so it is entered only for text that can warn.
+        [value, caught] = _literal_eval(text, malformed or "\\" in text)
     except (SyntaxError, ValueError) as err:
         msg = err.msg if isinstance(err, SyntaxError) else str(err)
+        if malformed:
+            # 406E-9.8J is "invalid syntax", 1e+7145.J "malformed node":
+            # how CPython parses the text, no word for the token.
+            msg = _number_wording(msg) or f"invalid number literal {text}"
         raise LispyCompileError(msg, node) from err
     for warning in caught:
         compile_warning(str(warning.message), warning.category, node.position_info)
     return value
+
+
+def _literal_eval(text, record):
+    """``[ast.literal_eval(text), warnings]``, the warnings recorded only with
+    ``record``.
+
+    A SyntaxError raised after a SyntaxWarning takes the first such warning's
+    message: CPython's word for the malformed token (``1if``, ``0x1for``:
+    "invalid decimal literal", "invalid hexadecimal literal"), what
+    compile() raises for it under ``-W error``, where the error itself says
+    "invalid syntax". The one home of that wording, for number tokens
+    (literal_value) and digit-led names (python_name).
+    """
+    caught = []
+    try:
+        if not record:
+            return [ast.literal_eval(text), caught]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            return [ast.literal_eval(text), caught]
+    except SyntaxError as err:
+        warned = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+        if warned:
+            err.msg = str(warned[0].message)
+        raise
+
+
+def _number_wording(msg):
+    """``msg`` where it words the number token itself ("invalid decimal
+    literal", "invalid digit '9' in octal literal", "leading zeros in decimal
+    integer literals ...", "invalid character ... (U+0661)" for a non-ASCII
+    digit), else None.
+
+    ⚠️ Any other message ("invalid syntax" for 1.0.0, "'{' was never
+    closed") says how CPython parses the text as Python source, which a
+    lispython token never is worded by.
+    """
+    return msg if "literal" in msg or msg.startswith("invalid character") else None
+
+
+# A text shaped as one number or a complex's two parts, ASCII, each part with
+# at most one ".": the only digit-led names literal_eval is asked about.
+# ⚠️ No part may repeat an operator or a ".", because Python parses each
+# repeat as one more nesting level (1-...-x, 1+...+1, 1e5.real.real...),
+# and literal_eval then overflows (RecursionError, MemoryError).
+_NUMBER_PART = "[0-9][0-9A-Za-z_]*(?:\\.[0-9A-Za-z_]*)?"
+_NUMBER_SHAPE_RE = re.compile(f"{_NUMBER_PART}(?:[+-]{_NUMBER_PART})?")
+
+
+def _malformed_number_message(text):
+    """CPython's word for a number-shaped ``text`` that is no name
+    (``1.else``, ``1__0``: "invalid decimal literal"), or None where the text
+    has no number shape (``1-x``, ``1=x``) or literal_eval does not word the
+    token (``1.0.0``)."""
+    if not _NUMBER_SHAPE_RE.fullmatch(text):
+        return None
+    try:
+        _literal_eval(text, True)
+    except SyntaxError as err:
+        return _number_wording(err.msg)
+    except (ValueError, TypeError):
+        return None
+    return None
 
 
 def exact_p(node):
@@ -162,8 +225,14 @@ def number_pattern_expr(text, sexp):
 
 
 # Prefixes of a plain (non-interpolated) string literal, lower-cased.
-_PLAIN_STRING_PREFIXES = ("", "r", "u", "b", "br", "rb")
+PLAIN_STRING_PREFIXES = ("", "r", "u", "b", "br", "rb")
 _QUOTES = ('"""', "'''", '"', "'")
+
+
+def check_plain_string_prefix(prefix, node):
+    """Refuse, at ``node``, a prefix no plain string literal may carry."""
+    if prefix.lower() not in PLAIN_STRING_PREFIXES:
+        raise LispyCompileError(f"invalid string prefix {prefix!r}", node)
 
 
 def string_literal_value(prefix, body, node):
@@ -206,8 +275,7 @@ def string_node_value(string):
     quote = next((q for q in _QUOTES if rest.startswith(q) and rest.endswith(q)), None)
     if quote is None or len(rest) < 2 * len(quote):
         raise LispyCompileError(f"invalid string literal {token}", string)
-    if prefix.lower() not in _PLAIN_STRING_PREFIXES:
-        raise LispyCompileError(f"invalid string prefix {prefix!r}", string)
+    check_plain_string_prefix(prefix, string)
     return string_literal_value(prefix, rest[len(quote) : -len(quote)], string)
 
 
@@ -252,7 +320,7 @@ def python_name(name, node):
         msg = (
             f"{text} is an operator and cannot be used as a name"
             if text in OPERATOR_TEXTS
-            else f"{text} is not a valid Python name"
+            else _malformed_number_message(text) or f"{text} is not a valid Python name"
         )
         raise LispyCompileError(msg, node)
     return name

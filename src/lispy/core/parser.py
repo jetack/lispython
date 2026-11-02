@@ -4,7 +4,12 @@ from bisect import bisect_right
 from collections import deque
 
 from lispy.core.compiler.features import require
-from lispy.core.compiler.literal import number_parts, string_literal_value
+from lispy.core.compiler.literal import (
+    PLAIN_STRING_PREFIXES,
+    check_plain_string_prefix,
+    number_parts,
+    string_literal_value,
+)
 from lispy.core.errors import LispyCompileError, compile_warning
 from lispy.core.nodes import *
 from lispy.core.nodes import (
@@ -55,6 +60,9 @@ _FORM_END = "\\s\\)\\}\\],;"
 _LINE_BREAK_CHARS = "\\r\\n"
 # What ends a symbol token.
 _SYMBOL_STOP = _FORM_END + '\\"\\['
+# A line continuation in a field: a backslash before a line break or the end
+# of the source (_token_patterns).
+_FIELD_CONTINUATION = "\\\\(?:\\r\\n|\\r|\\n|\\Z)"
 
 
 def _token_patterns(in_field, field_level=False):
@@ -66,6 +74,11 @@ def _token_patterns(in_field, field_level=False):
     deprecated spelling of a field's string from before 3.12, which only the
     same escaped quote closes (_Lexer._string). A symbol stops before \\"
     (a\\"b).
+
+    In a field a backslash before a line break or the end of the source is a
+    line continuation, as CPython 3.12+ read it there: it lexes as spaces
+    and ends any form before it, so x\\<LF>+1 is the symbol x and the number +1
+    (``_FIELD_CONTINUATION``; _Lexer._skip_blanks skips it the same way).
 
     At the field's own level (``field_level``, outside its brackets) the
     expression ends at a delimiter (``:``, ``}``, or ``!`` not before ``=``):
@@ -79,6 +92,9 @@ def _token_patterns(in_field, field_level=False):
     past every field, so each field would rescan the rest of the source.
     """
     end = "$|:|!(?!=)" if field_level else "$"
+    if in_field:
+        # A continuation ends a form as whitespace does.
+        end = f"{_FIELD_CONTINUATION}|{end}"
     # In a field a symbol also stops before \" (see above), so ^* before it
     # is a bad prefix, reported ahead of anything in the escaped string.
     quote = '(?:\\\\"){3}|\\\\"|' if in_field else ""
@@ -116,13 +132,14 @@ def _token_patterns(in_field, field_level=False):
         # field's own level a lone ":" or "!" matches too, so the lexer sees
         # the delimiter where a token starts.
         [
-            f'(?:{char}|\\\\(?!"))++' + ("|[:!]" if field_level else "")
+            f'(?:{char}|\\\\(?!["{_LINE_BREAK_CHARS}]|\\Z))++'
+            + ("|[:!]" if field_level else "")
             if in_field
             else f"[^{_SYMBOL_STOP}]+",
             "symbol",
         ],
         ["\\n", "new-line"],
-        [" +", "spaces"],
+        [f"(?: |{_FIELD_CONTINUATION})++" if in_field else " +", "spaces"],
     ]
 
 
@@ -136,6 +153,13 @@ _BRACKETED_FIELD_TOKEN_RE = re.compile(
 _TOKEN_LABELS = [label for [_, label] in _token_patterns(False)]
 _NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
 _STRING_PREFIX_RE = re.compile("\\w*")
+# The f- and t-string prefixes, lower-cased (interpolated_kind).
+_F_STRING_PREFIXES = ("f", "rf", "fr")
+_T_STRING_PREFIXES = ("t", "rt", "tr")
+# The letters of every string prefix, lower-cased (_prefix_name_p).
+_PREFIX_LETTERS = frozenset(
+    "".join(PLAIN_STRING_PREFIXES + _F_STRING_PREFIXES + _T_STRING_PREFIXES)
+)
 # Where a string body scan has to look: an escape, a quote, and (in an f/t
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
@@ -641,8 +665,12 @@ class _Lexer:
         """
         src = self.src
         expr_start = field.open + 1
-        last = at  # past the expression's last non-space character
-        while last > expr_start and src[last - 1].isspace():
+        # Past the expression's last character that is neither whitespace nor
+        # a line continuation's backslash ({x=\<LF>} is debug, as in Python).
+        last = at
+        while last > expr_start and (
+            src[last - 1].isspace() or (src[last - 1] == "\\" and src[last] in "\r\n")
+        ):
             last -= 1
         # Python's {x=}: a final "=" not ending an operator (x==, x<=).
         debug = (
@@ -702,12 +730,16 @@ class _Lexer:
         at the ``!``; with no name, the next token is refused there: a ``}``
         or ``:`` is "missing conversion character", a ``)`` or ``]``
         "unmatched", and any other token "invalid conversion character", as
-        Python 3.12+ word each. A quote there opens a string as anywhere in a
-        field (``_string``): one that never closes is that string's
-        unterminated error, as in ``f"{x "``. A name other than s, r or a is
-        refused where it is read. After the name only blanks
-        (``_skip_blanks``) may stand before the ``:`` or ``}``; anything else
-        is refused where it is.
+        Python 3.12+ word each. A string there is that token, a name of
+        string-prefix letters glued to its quote included (``!r"a"``, as
+        CPython 3.14+ read it; ``_prefix_name_p``): the prefix is checked
+        first (``bt``, ``ub`` refused at it), an f/t-string's body is never
+        read, and a plain
+        string is scanned as anywhere in a field (``_string``), one that
+        never closes being that string's unterminated error, as in
+        ``f"{x "``. Any other name than s, r or a is refused where it is
+        read. After the name only blanks (``_skip_blanks``) may stand before
+        the ``:`` or ``}``; anything else is refused where it is.
         """
         src = self.src
         n = len(src)
@@ -716,27 +748,33 @@ class _Lexer:
         while name_end < n and (src[name_end].isalnum() or src[name_end] == "_"):
             name_end += 1
         name = src[bang + 1 : name_end]
+        at = bang + 1 if name else self._skip_blanks(bang + 1)
+        token = _FIELD_TOKEN_RE.match(src, at) if at < n else None
+        string = token is not None and _TOKEN_LABELS[token.lastindex - 1] == "string"
+        if name and string:
+            string = _STRING_PREFIX_RE.match(token.group()).group() == name
+            string = string and _prefix_name_p(name)
         if not name:
-            at = self._skip_blanks(bang + 1)
             if at == n:
                 self._eof()
-            elif src[at].isalnum() or src[at] == "_":
+                return None
+            if src[at].isalnum() or src[at] == "_":
                 msg = "conversion type must come right after the exclamation mark"
                 self._fail(self._error(f"{kind}: {msg}", bang, bang + 1))
-            elif src[at] in "}:":
+                return None
+            if src[at] in "}:":
                 msg = f"{kind}: missing conversion character"
                 self._fail(self._error(msg, at, at + 1))
-            elif src[at] in ")]":
+                return None
+            if src[at] in ")]":
                 msg = f"{kind}: unmatched '{src[at]}'"
                 self._fail(self._error(msg, at, at + 1))
-            else:
-                token = _FIELD_TOKEN_RE.match(src, at)
-                if _TOKEN_LABELS[token.lastindex - 1] == "string":
-                    self._string(at, token.group())
-                    if self.done:
-                        return None
-                msg = f"{kind}: invalid conversion character"
-                self._fail(self._error(msg, at, at + 1))
+                return None
+        if string or not name:
+            if string and not self._string_after_bang(at, token.group()):
+                return None
+            msg = f"{kind}: invalid conversion character"
+            self._fail(self._error(msg, at, at + 1))
             return None
         if name not in conversion_dict:
             msg = (
@@ -754,6 +792,29 @@ class _Lexer:
             return None
         self._emit(src[bang:name_end], "field-conversion", bang, name_end, name)
         return rest
+
+    def _string_after_bang(self, at, opening):
+        """The string token ``opening`` at ``at``, right after a field's
+        ``!`` or the blanks after it: False where lexing has stopped at an
+        invalid prefix or at the plain string's own error, else True, the
+        caller refusing the conversion.
+
+        Its prefix is checked by the prefix rule's homes (interpolated_kind,
+        check_plain_string_prefix), at the prefix. An f/t-string's body is
+        never read: CPython 3.14+ refuse the conversion at its prefix
+        whatever follows (``f"{x!f"a`` never closed).
+        """
+        prefix = _STRING_PREFIX_RE.match(opening).group()
+        node = String('""', **self.locate(at, at + max(len(prefix), 1)))
+        try:
+            if interpolated_kind(prefix, node) is not None:
+                return True
+            check_plain_string_prefix(prefix, node)
+        except LispyCompileError as error:
+            self._fail(error)
+            return False
+        self._string(at, opening)
+        return not self.done
 
     def _skip_blanks(self, i):
         """Past the whitespace and backslash continuations (a backslash before
@@ -1217,7 +1278,7 @@ def interpolated_kind(prefix, node):
     """
     lowered = prefix.lower()
     if "t" in lowered:
-        if lowered in ("t", "rt", "tr"):
+        if lowered in _T_STRING_PREFIXES:
             return "t-string"
         for other in "fbu":
             if other in lowered:
@@ -1226,9 +1287,18 @@ def interpolated_kind(prefix, node):
                 )
     elif "f" not in lowered:
         return None
-    elif lowered in ("f", "rf", "fr"):
+    elif lowered in _F_STRING_PREFIXES:
         return "f-string"
     raise LispyCompileError(f"invalid string prefix {prefix!r}", node)
+
+
+def _prefix_name_p(name):
+    """Whether a name glued to a quote after a field's ``!`` is the string's
+    prefix, as CPython 3.14+'s tokenizer reads it: prefix letters, none
+    repeated in any case (``!ub"a"`` a prefix, refused as one; ``!rr"a"``
+    and ``!ra"a"`` conversion names)."""
+    lowered = name.lower()
+    return len(set(lowered)) == len(lowered) and set(lowered) <= _PREFIX_LETTERS
 
 
 conversion_dict = {"s": 115, "r": 114, "a": 97}

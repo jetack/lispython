@@ -384,26 +384,75 @@ class TestInvalidEscapeWarning:
         assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
     @pytest.mark.parametrize(
-        ["src", "col"],
+        ["src", "msg", "col"],
         [
-            ("(= a 1if)", 6),
-            ("(= a 0x1for)", 6),
-            ("(= a 1jor)", 6),
-            ("(= a 1in2)", 6),
-            ("(= a 0b1and)", 6),
-            ("(= a 1e5if)", 6),
-            ("(match x (case 1if 2))", 16),
+            ("(= a 1if)", "invalid decimal literal", 6),
+            ("(= a 1else)", "invalid decimal literal", 6),
+            ("(= a 1e5if)", "invalid decimal literal", 6),
+            ("(= a 1in2)", "invalid decimal literal", 6),
+            ("(= a 0x1for)", "invalid hexadecimal literal", 6),
+            ("(= a 1jor)", "invalid imaginary literal", 6),
+            ("(= a 0b1and)", "invalid binary literal", 6),
+            ("(= a 0o7in)", "invalid octal literal", 6),
+            ("(match x (case 1if 2))", "invalid decimal literal", 16),
+            ("(match x (case 0x1for 2))", "invalid hexadecimal literal", 16),
+            # Digit-led symbols, refused as names: worded the same.
+            ("(= a 1.else)", "invalid decimal literal", 6),
+            ("(= a 1.e5if)", "invalid decimal literal", 6),
+            ("(= a 1__0)", "invalid decimal literal", 6),
+            ("(= a 1_)", "invalid decimal literal", 6),
+            ("(= a 1+2jif)", "invalid imaginary literal", 6),
+            ("(match x (case 1__0 2))", "invalid decimal literal", 16),
+            # A number token CPython reads as more than one token.
+            ("(= a 406E-9.8J)", "invalid number literal 406E-9.8J", 6),
+            ("(= a 1e+7.J)", "invalid number literal 1e+7.J", 6),
+            # No SyntaxError from literal_eval: still no valid name.
+            ("(= a 1-x)", "1-x is not a valid Python name", 6),
         ],
     )
-    def test_a_malformed_number_is_one_positioned_error_and_no_warning(self, src, col):
+    def test_a_malformed_number_is_one_positioned_error_and_no_warning(
+        self, src, msg, col
+    ):
         # literal_eval warns "invalid decimal literal" (naming <unknown>
-        # line 1) before raising; the error at the token stands for both.
+        # line 1) before raising "invalid syntax": the error at the token
+        # takes the warning's word, as compile() raises it under -W error.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with pytest.raises(LispyCompileError) as info:
                 stmt_to_dump(src)
         assert [str(w.message) for w in caught] == []
-        assert (info.value.lineno, info.value.offset) == (1, col)
+        assert (info.value.msg, info.value.lineno, info.value.offset) == (msg, 1, col)
+
+    @pytest.mark.usefixtures("time_bound")
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # No number shape: literal_eval would overflow its parser on
+            # either (RecursionError or MemoryError, by version).
+            "1" + "-" * 7000 + "x",
+            "+".join(["1"] * 3001),
+            # Nor an attribute chain, each "." one more level.
+            "1e5" + ".real" * 3000,
+            "1e5" + ".real" * 100000,
+            "1j" + ".imag" * 3000,
+            "1-1e5" + ".real" * 3000,
+            # Number-shaped, but CPython's word is no word for a token.
+            "1.0.0",
+            "1..2",
+            # Parsed as Python, "invalid syntax" or "'{' was never closed".
+            "1=x",
+            "1:x",
+            "1{",
+        ],
+        ids=lambda name: name if len(name) < 20 else f"{name[:12]}...({len(name)})",
+    )
+    def test_a_digit_led_name_not_worded_as_a_token_is_no_valid_name(self, name):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump(f"(= a {name})")
+        # Compared apart, so a failure does not print a 500 kB name.
+        worded = info.value.msg == f"{name} is not a valid Python name"
+        assert worded, info.value.msg[:120]
+        assert (info.value.lineno, info.value.offset) == (1, 6)
 
     def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
         # Swapping the warning filters resets every "warn once" registry, so a
