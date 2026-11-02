@@ -80,7 +80,8 @@ def main() -> int:
     )
     sdist = f"lispython-{version}.tar.gz"
     wheel = f"lispython-{version}-py3-none-any.whl"
-    found = sorted(p.name for p in dist.iterdir())
+    # `uv build` drops a .gitignore into its output dir; it is not uploaded.
+    found = sorted(p.name for p in dist.iterdir() if p.name != ".gitignore")
     errors: list[str] = []
     if found != sorted([sdist, wheel]):
         errors.append(f"dist must hold exactly {sdist} and {wheel}, found {found}")
