@@ -3,9 +3,10 @@ import io
 import keyword
 import re
 import tokenize
+import warnings
 
 from lispy.core.compiler.features import require
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, compile_warning
 from lispy.core.nodes import GluedHead, Node, Symbol, atom_text
 from lispy.core.utils import binop_dict, boolop_dict, compare_dict, unaryop_dict
 
@@ -47,17 +48,35 @@ def _apply_signs(value, signs):
     return value
 
 
-def literal_value(text, node):
+def literal_value(text, node, malformed=False):
     """``ast.literal_eval(text)``, the only evaluation of literal text.
 
     A malformed literal (``09``, a truncated ``\\x`` escape, non-ASCII bytes) is
     a LispyCompileError at ``node``, so every caller reports it at the token.
+    A warning it raises (an invalid escape) is re-issued by compile_warning
+    at ``node``, naming the .lpy file and line where literal_eval would name
+    ``<unknown>`` line 1, the text it was handed; one raised before an error
+    (``1if``: "invalid decimal literal") is dropped, the error standing for
+    it. ``malformed`` says ``text`` is a number token number_parts rejected.
     """
+    caught = []
     try:
-        return ast.literal_eval(text)
+        if malformed or "\\" in text:
+            # Only an escape or a malformed number makes literal_eval warn.
+            # catch_warnings swaps the process-wide filters (not thread-safe,
+            # and it resets the warning registry a REPL, nREPL or LSP session
+            # keeps), so it is entered only for text that can warn.
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                value = ast.literal_eval(text)
+        else:
+            value = ast.literal_eval(text)
     except (SyntaxError, ValueError) as err:
         msg = err.msg if isinstance(err, SyntaxError) else str(err)
         raise LispyCompileError(msg, node) from err
+    for warning in caught:
+        compile_warning(str(warning.message), warning.category, node.position_info)
+    return value
 
 
 def exact_p(node):
@@ -84,7 +103,7 @@ def constant_compile(constant):
     if parts is None:
         # Not a signed number token (number_parts): a malformed literal.
         # CPython's own message for a malformed number ("leading zeros ...").
-        value = literal_value(text, constant)
+        value = literal_value(text, constant, malformed=True)
         if type(value) not in (int, float, complex):
             raise LispyCompileError(f"invalid number literal {text}", constant)
         return ast.Constant(value=value, **constant.position_info)
@@ -116,7 +135,7 @@ def number_pattern_expr(text, sexp):
     parts = number_parts(text)
     if parts is None:
         # CPython's own message for a malformed number ("leading zeros ...").
-        literal_value(text.lstrip("+-"), sexp)
+        literal_value(text.lstrip("+-"), sexp, malformed=True)
     if parts is None or len(parts[0]) > 1:
         return None
     [signs, real, op, imag] = parts

@@ -9,12 +9,15 @@ must fail here with a lispython error, never as a CPython traceback or a
 silent mistranslation.
 
 AST shapes: where releases build the same form differently, a named
-capability probe below asks the running ``ast`` (or ``token``) module instead
-of comparing version numbers, so a backported change is followed automatically.  The
+capability probe below asks the running ``ast`` module instead of comparing
+version numbers, so a backported change is followed automatically.  The
 exception is ``compile_depth_follows_recursion_limit``, a version comparison
 through ``running_version()``: probing it would overflow the C stack.  The
-compiler calls the probes through
-this module (``features.probe()``), which is also how tests replace them.
+compiler calls the probes through this module (``features.probe()``), which
+is also how tests replace them.
+
+Nothing here decides how source reads or which error the reader reports:
+those are lispython's own, the same on every interpreter.
 
 No other ``sys.version_info`` comparison belongs in the compiler.  The one
 exception in the package is ``_PY312_PLUS`` in core/importer.py: it chooses
@@ -25,7 +28,6 @@ than a form or an AST shape, and runs before any lispython code is compiled.
 import ast
 import functools
 import sys
-import token
 from dataclasses import dataclass
 
 from lispy.core.errors import LispyCompileError
@@ -65,99 +67,6 @@ def interpolation_keeps_trailing_whitespace():
     """
     probe = ast.parse('t"{x }"', mode="eval").body
     return probe.values[0].str == "x "
-
-
-@functools.cache
-def fstring_fields_are_tokens():
-    """Whether the tokenizer lexes f-string fields in place (PEP 701, 3.12).
-
-    Decides the error for a source ending inside a field's expression: where
-    True, the field's ``{`` is on the tokenizer's bracket stack, so it is
-    "'X' was never closed" at the innermost bracket still open, the ``{``
-    counting as one; where False (3.11), the whole f-string is one string
-    token, so it is "unterminated string literal" at the outermost one.
-    """
-    return hasattr(token, "FSTRING_START")
-
-
-def _compile_error(src):
-    """The SyntaxError compile() raises for ``src``, or None."""
-    try:
-        compile(src, "<probe>", "exec")
-    except SyntaxError as error:
-        return error
-    return None
-
-
-@functools.cache
-def single_quoted_spec_refuses_newline():
-    """Whether a line break in a single-quoted f-string's format spec is an
-    error of its own: "newlines are not allowed in format specifiers for
-    single quoted f-strings" (3.13+). 3.12 accepts one
-    (``spec_line_break_returns_to_code``). (3.11 refuses the probe as an
-    unterminated string, hence the message check.)"""
-    error = _compile_error('f"{x:\n}"')
-    return error is not None and error.msg.startswith(
-        "f-string: newlines are not allowed"
-    )
-
-
-@functools.cache
-def spec_line_break_returns_to_code():
-    """Whether a line break in a single-quoted f-string's format spec ends
-    the spec's text, the tokenizer reading the rest of the field as code
-    (3.12): in f"{x:a\\n#}" the "#" then starts a comment that runs past the
-    "}", so the field's "{" is never closed. 3.13+ refuse the break; 3.11
-    finds the whole literal unterminated."""
-    error = _compile_error('f"{x:a\n#}"')
-    return error is not None and error.msg == "'{' was never closed"
-
-
-@functools.cache
-def spec_doubles_brace_after_field():
-    """Whether, in a format spec after a nested field has opened, "{{" is a
-    literal "{" (3.12+): f"{x:{y}{{}" has the spec [y, "{"]. The tokenizer
-    leaves format-spec mode at the nested field and does not re-enter it, so
-    "}}" is not doubled there. 3.11 opens a field at every "{" in a spec."""
-    return _compile_error('f"{x:{y}{{}"') is None
-
-
-@functools.cache
-def conversion_name_checked_first():
-    """Whether an invalid conversion name is refused where it is read, before
-    the rest of its field (3.14.8 and 3.15, a backport): f"{x!z: is "invalid
-    conversion character 'z'". 3.12 and 3.13 check it only once the field
-    has closed, so an error or the end of the source in the field's format
-    spec comes first."""
-    error = _compile_error('f"{x!z:')
-    return error is not None and error.msg.startswith(
-        "f-string: invalid conversion character 'z'"
-    )
-
-
-@functools.cache
-def expecting_brace_names_its_line():
-    """Whether "expecting '}'" for a string closing the literal inside a
-    field names the field's line when the string starts on another one (3.15):
-    "f-string: expecting '}' to close '{' on line 1"."""
-    error = _compile_error('f"{\n"')
-    return error is not None and error.msg.endswith("on line 1")
-
-
-@functools.cache
-def final_crlf_starts_a_line():
-    """Whether a \\r\\n ending the source starts a line for a string literal's
-    "detected at line N" (3.11); 3.12+ count no line after it, as after a
-    final \\n or lone \\r on every version."""
-    error = _compile_error('s = """a\r\n')
-    return error is not None and error.msg.endswith("(detected at line 2)")
-
-
-@functools.cache
-def t_string_prefix_exists():
-    """Whether t/T (with r/R) is a string prefix (3.14+): t"..." is then one
-    string token, never the name t before a string."""
-    return hasattr(token, "TSTRING_START")
 
 
 def compile_depth_follows_recursion_limit():

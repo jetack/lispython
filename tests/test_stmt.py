@@ -3,7 +3,7 @@ import enum
 
 import pytest
 
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, compile_errors
 from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 from .utils import stmt_to_dump
@@ -667,8 +667,6 @@ class TestFormArity:
             ("(= (f) 1)", "cannot assign to function call", "(f)"),
             ("(= (+ a b) 1)", "cannot assign to expression", "(+ a b)"),
             ("(= a (f) 1)", "cannot assign to function call", "(f)"),
-            ("(= *a 1)", "starred assignment target must be in a list or tuple", "*a"),
-            ("(= [*a *b] 1)", "multiple starred expressions in assignment", "*b"),
             ("(= [a 1] 2)", "cannot assign to literal", "1"),
             (
                 "(= (, a b) ^int 1)",
@@ -679,7 +677,12 @@ class TestFormArity:
             ("(+= 1 2)", "'literal' is an illegal expression for augmented", "1"),
             ("(+= [] 1)", "'list' is an illegal expression for augmented", "[]"),
             ("(del 1)", "cannot delete literal", "1"),
+            # CPython's parser's message; compile() of a non-name starred
+            # target is an unpositioned ValueError.
             ("(del *a)", "cannot delete starred", "*a"),
+            ("(del *1)", "cannot delete starred", "*1"),
+            ("(del *(f))", "cannot delete starred", "*(f)"),
+            ("(del a *1)", "cannot delete starred", "*1"),
             ("(for 1 in xs 2)", "cannot assign to literal", "1"),
             ("(with [a as 1] 2)", "cannot assign to literal", "1"),
             ("(raise from)", "from is a Python keyword and cannot be used as", "from"),
@@ -700,6 +703,26 @@ class TestFormArity:
     def test_bad_target_name_or_empty_form_refused_at_itself(self, form, msg, at):
         with pytest.raises(LispyCompileError) as info:
             stmt_to_dump("(do\n  " + form + ")")
+        assert info.value.msg.startswith(msg)
+        assert_at(info.value, form, at)
+
+    @pytest.mark.parametrize(
+        ("form", "msg", "at"),
+        [
+            ("(= *a 1)", "starred assignment target must be in a list or tuple", "*a"),
+            ("(for *a in xs 1)", "starred assignment target must be in a list", "*a"),
+            ("(= [*a *b] 1)", "multiple starred expressions in assignment", "[*a *b]"),
+        ],
+    )
+    def test_starred_target_refused_by_compile_at_the_lpy_position(self, form, msg, at):
+        # compile() owns these refusals; the target must reach it as built,
+        # positioned in the .lpy source, and come out as a compile error.
+        source = "(= z 1)\n  " + form + "\n"
+        with pytest.raises(LispyCompileError) as info:
+            with compile_errors("m.lpy", source):
+                body = macroexpand_then_compile(parse(source), {})
+                compile(ast.Module(body, []), "m.lpy", "exec")
+        assert isinstance(info.value.__cause__, SyntaxError)
         assert info.value.msg.startswith(msg)
         assert_at(info.value, form, at)
 

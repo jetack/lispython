@@ -1,11 +1,12 @@
 import ast
 import re
 import sys
+import warnings
 
 import pytest
 
-from lispy.core.errors import LispyCompileError
-from lispy.tools import src_to_python_org
+from lispy.core.errors import LispyCompileError, compile_errors
+from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
 
 from .utils import stmt_to_dump
 
@@ -359,6 +360,64 @@ class TestUnquotedFields:
         assert scope["s"] == "y=2"
 
 
+# 3.11 warns an invalid escape with DeprecationWarning, 3.12+ SyntaxWarning.
+ESCAPE_WARNING = DeprecationWarning if sys.version_info < (3, 12) else SyntaxWarning
+
+
+class TestInvalidEscapeWarning:
+    """An invalid escape warns at the .lpy string token, never at
+    ``<unknown>`` line 1, the text literal_eval was handed."""
+
+    @pytest.mark.parametrize(
+        "src", ['(= a 1)\n(print "\\d")', '(= a 1)\n(print f"\\d{a}")']
+    )
+    def test_warning_names_the_lpy_line(self, src):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with compile_errors("m.lpy", src):
+                macroexpand_then_compile(parse(src), {})
+        [warning] = caught
+        assert warning.category is ESCAPE_WARNING
+        # Python's own wording, which changes between versions, passes through.
+        assert "invalid escape sequence" in str(warning.message)
+        assert "\\d" in str(warning.message)
+        assert (warning.filename, warning.lineno) == ("m.lpy", 2)
+
+    @pytest.mark.parametrize(
+        ["src", "col"],
+        [
+            ("(= a 1if)", 6),
+            ("(= a 0x1for)", 6),
+            ("(= a 1jor)", 6),
+            ("(= a 1in2)", 6),
+            ("(= a 0b1and)", 6),
+            ("(= a 1e5if)", 6),
+            ("(match x (case 1if 2))", 16),
+        ],
+    )
+    def test_a_malformed_number_is_one_positioned_error_and_no_warning(self, src, col):
+        # literal_eval warns "invalid decimal literal" (naming <unknown>
+        # line 1) before raising; the error at the token stands for both.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(LispyCompileError) as info:
+                stmt_to_dump(src)
+        assert [str(w.message) for w in caught] == []
+        assert (info.value.lineno, info.value.offset) == (1, col)
+
+    def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
+        # Swapping the warning filters resets every "warn once" registry, so a
+        # REPL session would repeat warnings it already showed after each
+        # string it compiles.
+        registry = {}
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("default")
+            warnings.warn_explicit("once", UserWarning, "f", 1, registry=registry)
+            stmt_to_dump('(= s "plain") (= n 1.5)')
+            warnings.warn_explicit("once", UserWarning, "f", 1, registry=registry)
+        assert len(caught) == 1
+
+
 class TestPlainStringExtent:
     """Plain strings end where CPython's do: the f/t-string scanner finds them."""
 
@@ -384,18 +443,16 @@ class TestPlainStringExtent:
         assert scope["s"] == python["s"]
 
     @pytest.mark.parametrize(
-        ["lpy", "py"],
+        ["lpy", "kind"],
         [
-            ('(= s "abc', 's = "abc'),
-            ('(= s """abc"', 's = """abc"'),
-            ('(= s f"abc', 's = f"abc'),
+            ('(= s "abc', "string"),
+            ('(= s """abc"', "triple-quoted string"),
+            ('(= s f"abc', "f-string"),
         ],
     )
-    def test_unterminated(self, lpy, py):
-        # CPython's message, at the string's prefix (column 6 here).
-        with pytest.raises(SyntaxError) as python:
-            compile(py, "<s>", "exec")
+    def test_unterminated(self, lpy, kind):
+        # At the string's prefix (column 6 here).
         with pytest.raises(LispyCompileError) as info:
             compile_lpy(lpy)
-        assert info.value.msg == python.value.msg
+        assert info.value.msg == f"unterminated {kind} literal (detected at line 1)"
         assert (info.value.lineno, info.value.offset) == (1, 6)

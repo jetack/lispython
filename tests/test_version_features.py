@@ -830,25 +830,26 @@ class TestLazyImportRefused:
         assert err.msg == LAZY_MSG[lpy[1:].split()[0]].format(running)
         assert (err.lineno, err.offset) == (1, 1)
 
-    @pytest.mark.parametrize(
-        ["lpy", "msg"],
-        [
-            ("(lazy-from json *)", "lazy from ... import * is not allowed"),
-            (
-                "(lazy-from os [path] json *)",
-                "lazy from ... import * is not allowed",
-            ),
-            (
-                "(lazy-from __future__ [annotations])",
-                "lazy from __future__ import is not allowed",
-            ),
-        ],
-    )
-    def test_static_restrictions_like_python(self, lpy, msg, monkeypatch):
+    def test_lazy_future_import_refused(self, monkeypatch):
+        # compile() accepts a lazy __future__ ImportFrom, so lispython refuses it.
         monkeypatch.setattr(features, "running_version", lambda: (3, 15, 0))
-        err = refusal("\n " + lpy)
-        assert err.msg == msg
+        err = refusal("\n (lazy-from __future__ [annotations])")
+        assert err.msg == "lazy from __future__ import is not allowed"
         assert (err.lineno, err.offset) == (2, 2)
+
+    @needs_315
+    @pytest.mark.parametrize(
+        "lpy", ["(lazy-from json *)", "(lazy-from os [path] json *)"]
+    )
+    def test_lazy_star_import_refused_by_compile(self, lpy):
+        # compile() owns this refusal: the star import reaches it, positioned.
+        src = "\n " + lpy
+        with pytest.raises(LispyCompileError) as info:
+            with compile_errors("m.lpy", src):
+                compile(ast.Module(compile_src(src), []), "m.lpy", "exec")
+        assert isinstance(info.value.__cause__, SyntaxError)
+        assert info.value.msg == "lazy from ... import * is not allowed"
+        assert info.value.lineno == 2
 
 
 # --------------------------------------------------------------------------

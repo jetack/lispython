@@ -912,10 +912,10 @@ def test_nested_case_patterns_compile_in_linear_time(pattern, scope):
 @pytest.mark.parametrize(
     "target, msg, col",
     [
-        # A tuple's elements are all checked before its own starred check...
+        # Two starred in one tuple are compile()'s refusal, raised only after
+        # lispython's walk has found nothing, so a bad element after them wins.
         ("(, *a *b (f))", "cannot assign to function call", 13),
-        # ...which comes before the elements after that tuple.
-        ("(, (, *a *b) (f))", "multiple starred expressions in assignment", 13),
+        ("(, (, *a *b) (f))", "cannot assign to function call", 17),
         ("(, (f) (, *a *b))", "cannot assign to function call", 7),
         ("[a *(f) 1]", "cannot assign to function call", 8),
     ],

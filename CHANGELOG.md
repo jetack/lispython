@@ -6,6 +6,67 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- On Python 3.11, a doubled brace in a format spec after a nested field is
+  read as on every other version, a literal brace: `f"{x:{y}{{}"` compiles
+  to the spec `{y}` followed by `{`, where it was an error.
+- A line break in a single-quoted f/t-string's format-spec text, in any
+  segment, is a compile error at the break on every Python version
+  (`f"{x:ab\n}"`: "newlines are not allowed in format specifiers for single
+  quoted f-strings"), as it was on 3.13+ only. This refuses source that
+  compiled before: on 3.11 such a break was read as spec text
+  (`f"{x:ab\nc}"`, `f"{x!r:\n}"`, `f"{x:{y:\n}}"` all compiled), and on
+  3.12 the text after it was read as code. A backslash before the break
+  (an odd run of them, raw literal or not) continues the line and is no
+  line break (`f"{x:a\<newline>b}"`). A line break elsewhere in a field
+  stands wherever code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
+  the `!`, and a triple-quoted literal's spec text keeps it as text. A source
+  ending in format-spec text is the literal unterminated on every version.
+- An f/t-string error is the first error in the source, on every Python
+  version: nothing after it is read, so a later unterminated string or
+  unmatched bracket no longer replaces it (`f"{x!z}" "b` reports the
+  invalid conversion, where every version reported the string). A
+  conversion is checked where it is read: an invalid name (`!z`) is refused
+  at once, even where 3.12 and 3.13 reported an error later in the field
+  first; with no name after the `!`, a `}` or `:` next is "missing
+  conversion character", a `)` or `]` "unmatched ')'" or "unmatched ']'",
+  and any other token (`f"{x!"a"}"`) "invalid conversion character", at
+  that token, a quote there opening a string as anywhere in a field;
+  anything but blanks, `:` or `}` after the name is "expecting ':' or '}'"
+  there. The literal's closing quote in a format spec is
+  "expecting '}', or format specs" at the quote, the escaped `\"` literal
+  included.
+- On Python 3.12+, an error after a line break in a single-quoted f/t-string's
+  text, or in a plain string spanning lines in a field, is reported where it
+  is (`f"a\n}"`: "single '}' is not allowed" on line 2), no longer as the
+  literal unterminated at the break.
+- On Python 3.11, f/t-string errors are those of every other version: the
+  error inside a literal at its own position (`f"{}"`: "valid expression
+  required before '}'"), where 3.11 reported the whole literal as an
+  unterminated string. An unterminated single-quoted string, plain or
+  f/t, names the line the source ends on in "(detected at line N)" on every
+  version (a lispython string may span lines), where it named the string's
+  first line break; a final `\r\n` starts no line on 3.11 either.
+- A plain string in an f/t-string field that never closes is "unterminated
+  string literal (detected at line N)" at the string token, its quote the
+  literal's or not, on every version; where its quote was the literal's,
+  3.12+ reported "f-string: expecting '}'" (3.15: "... to close '{' on line
+  N"). A name glued to the quote (`x"`) is part of the token, so the error is
+  at the name.
+- A starred assignment target outside a list or tuple (`(= *a 1)`) and two
+  starred targets in one (`(= [*a *b] 1)`) are reported by Python's own
+  compiler, with its message at the .lpy position; two starred are now
+  positioned at the list or tuple rather than the second starred, and a bad
+  target after them in the same assignment is reported first. On 3.15,
+  `(lazy-from json *)` (shipped with `lazy-from` in 0.5.0) is likewise
+  Python's own "lazy from ... import * is not allowed".
+
+### Fixed
+
+- An invalid escape in a string (`"\d"`) warns at the .lpy file and line of
+  the string, where it named `<unknown>` line 1.
+
 ## [0.6.0] - 2026-11-02
 
 ### Added

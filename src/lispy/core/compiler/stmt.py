@@ -186,10 +186,10 @@ def importfrom_compile(sexp, lazy=False):
                 names,
             )
     if lazy:
-        # CPython's own static checks on `lazy from`, with its messages.
-        for [module, names] in zip(modules, namess):
-            if names == "*":
-                raise LispyCompileError("lazy from ... import * is not allowed", sexp)
+        # CPython's parser refuses `lazy from __future__`, but compile()
+        # takes its AST, so lispython refuses it here with that message.
+        # `lazy from ... import *` compile() refuses itself, positioned.
+        for module in modules:
             if atom_text(module) == "__future__":
                 raise LispyCompileError(
                     "lazy from __future__ import is not allowed", sexp
