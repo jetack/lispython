@@ -383,6 +383,28 @@ class TestInvalidEscapeWarning:
         assert "\\d" in str(warning.message)
         assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
+    @pytest.mark.parametrize(
+        ["src", "col"],
+        [
+            ("(= a 1if)", 6),
+            ("(= a 0x1for)", 6),
+            ("(= a 1jor)", 6),
+            ("(= a 1in2)", 6),
+            ("(= a 0b1and)", 6),
+            ("(= a 1e5if)", 6),
+            ("(match x (case 1if 2))", 16),
+        ],
+    )
+    def test_a_malformed_number_is_one_positioned_error_and_no_warning(self, src, col):
+        # literal_eval warns "invalid decimal literal" (naming <unknown>
+        # line 1) before raising; the error at the token stands for both.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(LispyCompileError) as info:
+                stmt_to_dump(src)
+        assert [str(w.message) for w in caught] == []
+        assert (info.value.lineno, info.value.offset) == (1, col)
+
     def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
         # Swapping the warning filters resets every "warn once" registry, so a
         # REPL session would repeat warnings it already showed after each
