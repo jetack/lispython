@@ -127,6 +127,22 @@ class TestBrackets:
         assert info.value.msg == msg
         assert (info.value.lineno, info.value.offset) == (1, col)
 
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "(\n]",
+            "a\n(\n\n]",
+            pytest.param(
+                'f"{(\n]}"',
+                marks=pytest.mark.skipif(
+                    not IN_PLACE, reason="3.11: the literal's token first"
+                ),
+            ),
+        ],
+    )
+    def test_a_mismatch_names_the_opening_s_other_line(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
 
 class TestWrapperPrefix:
     """An opening or meta-indicator takes one of ^, *, ** as its wrapper; ^
@@ -1473,6 +1489,63 @@ class TestTokenizerErrorAfterAParserError:
     def test_a_closing_bracket_out_of_place_in_a_field(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 is a separate gap")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            'f"{x!z}" )',
+            'f"{x!z}"\n(\n]',
+            'f"{=}" )',
+            'f"{}" )',
+            'f"{x:a\nb}" )',
+        ],
+    )
+    def test_a_closing_bracket_out_of_place_outside_a_literal(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 is a separate gap")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # The scan ends at a backslash that continues no line, or at an
+            # indentation CPython's tokenizer refuses: the parser error
+            # stands, never the later error.
+            'f"{x!z}" \\x )',
+            'f"{x:ab" \\x )',
+            'f"{x!z}"\n  x\n y )',
+            'f"{x!z}"\n\tx\n        y )',
+            # ... but not at a continued line, or at a bracket's, blank or
+            # comment line, or at a level still open.
+            'f"{x!z}"\n  x\\\n y )',
+            'f"{x!z}" (\n  x\n y ))',
+            'f"{x!z}"\n  x\n \n  )',
+            'f"{x!z}"\n  x\n    y\n  )',
+            # Python's lexical rules: "#" starts a comment to the end of the
+            # line (a blank line; its backslash and brackets are ignored),
+            # and ";" is code.
+            'f"{x!z}"\n  x\n #c\n  )',
+            'f"{x!z}" #\\x\n )',
+            'f"{x!z}"\n  x\n #\\\n  )',
+            'f"{x!z}" x #c (\n )',
+            'f"{x!z}"\n  x\n ;c\n  )',
+            'f"{x!z}"\n  x\n  ;a\\\n y )',
+            # A backslash continuation in the indentation: the first one's
+            # column is the line's, except column 0; a line ending in "#"
+            # after it is blank; a backslash there continuing nothing stops
+            # the scan, inside brackets too.
+            'f"{x!z}"\n  x\n \\\n   y\n  )',
+            'f"{x!z}"\n  x\n\\\n y )',
+            'f"{x!z}"\n  x\n \\\n#c\n  )',
+            'f"{x!z}" (\n\\x\n ))',
+            # At most 100 indentation levels.
+            'f"{x!z}"\n' + "".join(" " * i + "x\n" for i in range(1, 100)) + ")",
+            'f"{x!z}"\n' + "".join(" " * i + "x\n" for i in range(1, 101)) + ")",
+        ],
+        ids=lambda src: repr(src) if len(src) < 40 else f"{src.count(chr(10))} lines",
+    )
+    def test_the_scan_ends_where_cpython_s_tokenizer_stops_silently(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
     @pytest.mark.parametrize("in_place", [True, False], ids=["3.12+", "3.11"])
     @pytest.mark.parametrize("src", ['f"{x!z}" f"b', 'f"{x!z}" f"{y'])
     def test_3_11_reports_a_later_literal_s_whole_token(
@@ -1517,6 +1590,39 @@ class TestQuoteOrLineBreakInFormatSpec:
         ],
     )
     def test_the_closing_quote_in_a_spec_is_cpython_s(self, src):
+        assert error_position(parse, src) == python_error_position(src)
+
+    @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads the whole literal first")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            # The quote ends the literal: lexing resumes after it.
+            'f"{x:ab" "a',
+            'f"""{x:ab""" "a',
+            # The field's "{" stays on CPython's bracket stack.
+            'f"{x:{y}" )',
+            'f"{x:ab"\n)',
+            'f"{x:ab" ( ) )',
+            'f"{x:ab" } "a',
+            'f"{x:ab" } )',
+            'f"{x:{y:ab"}} "a',
+            'f"{x:{y:ab"}}} "a',
+            # A nested literal's quote closes only that literal.
+            'f"{f"{x:ab"}" "a',
+            'f"{f"{x:ab"}" )',
+            # The parser error stands: no later error, or one with a literal
+            # open.
+            'f"{x:ab" "a"',
+            'f"{x:ab" f"{" "b',
+            'f"{(f"{x:ab")}" "a',
+            'f"{f"{x:ab"}}" "a',
+            pytest.param(
+                't"{x:ab" "a',
+                marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
+            ),
+        ],
+    )
+    def test_a_tokenizer_error_after_the_quote_takes_its_place(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
     @pytest.mark.skipif(
