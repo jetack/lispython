@@ -384,26 +384,41 @@ class TestInvalidEscapeWarning:
         assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
     @pytest.mark.parametrize(
-        ["src", "col"],
+        ["src", "msg", "col"],
         [
-            ("(= a 1if)", 6),
-            ("(= a 0x1for)", 6),
-            ("(= a 1jor)", 6),
-            ("(= a 1in2)", 6),
-            ("(= a 0b1and)", 6),
-            ("(= a 1e5if)", 6),
-            ("(match x (case 1if 2))", 16),
+            ("(= a 1if)", "invalid decimal literal", 6),
+            ("(= a 1else)", "invalid decimal literal", 6),
+            ("(= a 1e5if)", "invalid decimal literal", 6),
+            ("(= a 1in2)", "invalid decimal literal", 6),
+            ("(= a 0x1for)", "invalid hexadecimal literal", 6),
+            ("(= a 1jor)", "invalid imaginary literal", 6),
+            ("(= a 0b1and)", "invalid binary literal", 6),
+            ("(= a 0o7in)", "invalid octal literal", 6),
+            ("(match x (case 1if 2))", "invalid decimal literal", 16),
+            ("(match x (case 0x1for 2))", "invalid hexadecimal literal", 16),
+            # Digit-led symbols, refused as names: worded the same.
+            ("(= a 1.else)", "invalid decimal literal", 6),
+            ("(= a 1.e5if)", "invalid decimal literal", 6),
+            ("(= a 1__0)", "invalid decimal literal", 6),
+            ("(= a 1_)", "invalid decimal literal", 6),
+            ("(= a 1+2jif)", "invalid imaginary literal", 6),
+            ("(match x (case 1__0 2))", "invalid decimal literal", 16),
+            # No SyntaxError from literal_eval: still no valid name.
+            ("(= a 1-x)", "1-x is not a valid Python name", 6),
         ],
     )
-    def test_a_malformed_number_is_one_positioned_error_and_no_warning(self, src, col):
+    def test_a_malformed_number_is_one_positioned_error_and_no_warning(
+        self, src, msg, col
+    ):
         # literal_eval warns "invalid decimal literal" (naming <unknown>
-        # line 1) before raising; the error at the token stands for both.
+        # line 1) before raising "invalid syntax": the error at the token
+        # takes the warning's word, as compile() raises it under -W error.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with pytest.raises(LispyCompileError) as info:
                 stmt_to_dump(src)
         assert [str(w.message) for w in caught] == []
-        assert (info.value.lineno, info.value.offset) == (1, col)
+        assert (info.value.msg, info.value.lineno, info.value.offset) == (msg, 1, col)
 
     def test_a_literal_without_a_backslash_keeps_the_warning_registry(self):
         # Swapping the warning filters resets every "warn once" registry, so a

@@ -56,27 +56,62 @@ def literal_value(text, node, malformed=False):
     A warning it raises (an invalid escape) is re-issued by compile_warning
     at ``node``, naming the .lpy file and line where literal_eval would name
     ``<unknown>`` line 1, the text it was handed; one raised before an error
-    (``1if``: "invalid decimal literal") is dropped, the error standing for
-    it. ``malformed`` says ``text`` is a number token number_parts rejected.
+    (``1if``: "invalid decimal literal") becomes the error's message
+    (_literal_eval). ``malformed`` says ``text`` is a number token
+    number_parts rejected.
     """
-    caught = []
     try:
-        if malformed or "\\" in text:
-            # Only an escape or a malformed number makes literal_eval warn.
-            # catch_warnings swaps the process-wide filters (not thread-safe,
-            # and it resets the warning registry a REPL, nREPL or LSP session
-            # keeps), so it is entered only for text that can warn.
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                value = ast.literal_eval(text)
-        else:
-            value = ast.literal_eval(text)
+        # Only an escape or a malformed number makes literal_eval warn.
+        # catch_warnings swaps the process-wide filters (not thread-safe, and
+        # it resets the warning registry a REPL, nREPL or LSP session keeps),
+        # so it is entered only for text that can warn.
+        [value, caught] = _literal_eval(text, malformed or "\\" in text)
     except (SyntaxError, ValueError) as err:
         msg = err.msg if isinstance(err, SyntaxError) else str(err)
         raise LispyCompileError(msg, node) from err
     for warning in caught:
         compile_warning(str(warning.message), warning.category, node.position_info)
     return value
+
+
+def _literal_eval(text, record):
+    """``[ast.literal_eval(text), warnings]``, the warnings recorded only with
+    ``record``.
+
+    A SyntaxError raised after a SyntaxWarning takes the first such warning's
+    message: CPython's word for the malformed token (``1if``, ``0x1for``:
+    "invalid decimal literal", "invalid hexadecimal literal"), what
+    compile() raises for it under ``-W error``, where the error itself says
+    "invalid syntax". The one home of that wording, for number tokens
+    (literal_value) and digit-led names (python_name).
+    """
+    caught = []
+    try:
+        if not record:
+            return [ast.literal_eval(text), caught]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            return [ast.literal_eval(text), caught]
+    except SyntaxError as err:
+        warned = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+        if warned:
+            err.msg = str(warned[0].message)
+        raise
+
+
+def _malformed_number_message(text):
+    """What literal_eval says of digit-led ``text`` that is no name (``1.else``,
+    ``1__0``: "invalid decimal literal"), or None where it raises no
+    SyntaxError (``1-x``)."""
+    if not text[:1].isdigit():
+        return None
+    try:
+        _literal_eval(text, True)
+    except SyntaxError as err:
+        return err.msg
+    except (ValueError, TypeError):
+        return None
+    return None
 
 
 def exact_p(node):
@@ -257,7 +292,7 @@ def python_name(name, node):
         msg = (
             f"{text} is an operator and cannot be used as a name"
             if text in OPERATOR_TEXTS
-            else f"{text} is not a valid Python name"
+            else _malformed_number_message(text) or f"{text} is not a valid Python name"
         )
         raise LispyCompileError(msg, node)
     return name

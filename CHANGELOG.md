@@ -73,6 +73,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 - An invalid escape in a string (`"\d"`) warns at the .lpy file and line of
   the string, where it named `<unknown>` line 1.
+- A malformed number glued to a keyword (`(= a 1if)`, `0x1for`, `1jor`) is
+  CPython's "invalid decimal literal" ("invalid hexadecimal literal",
+  "invalid imaginary literal", ...) at the token, where it said "invalid
+  syntax" and 0.6.0 also printed a stray "<unknown>:1: SyntaxWarning:
+  invalid decimal literal"; a digit-led symbol (`1.else`, `1__0`) says the
+  same where it said "is not a valid Python name".
 
 ## [0.6.0] - 2026-11-02
 
