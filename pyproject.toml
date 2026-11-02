@@ -28,7 +28,6 @@ Repository = "https://github.com/jetack/lispython"
 lpy = "lispy:run"
 l2py = "lispy:l2py"
 lpy-lsp = "lispy.lsp:main"
-test = "pytest:main"
 
 [project.optional-dependencies]
 dev = [
