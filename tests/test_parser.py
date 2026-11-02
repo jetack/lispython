@@ -956,19 +956,6 @@ class TestSourceEndingInALiteral:
             'f"ab\n',
             'f"{x}ab\n',
             'f"{x}ab\n{y',
-            'f"{x:{y}a\nb',
-            # ... or in a format spec.
-            'f"{x:abc\n',
-            'f"{x:abc\ny',
-            'f"{x:a\n{y}',
-            'f"{x:\n',
-            'f"{x:abc\n(',
-            'f"{x:abc\n\ny',
-            'f"{x:abc\n ',
-            'f"{x:abc\n{y',
-            'f"{x:a\\\nb',
-            'f"{x:\n\n{y}a\nb',
-            'f"{x:ab\n{y\n',
             # Literal text.
             's = f"abc',
             's = rf"abc',
@@ -985,12 +972,6 @@ class TestSourceEndingInALiteral:
             'f"{x:{y:{z}a',
             'f"{x\n}ab',
             'f"{x!r}',
-            # A format spec's first segment.
-            'f"{x:abc',
-            'f"{x:',
-            'f"{x:{y:ab',
-            'f"{x!r:',
-            'f"{x!r:a\n',
             # A conversion.
             'f"{x!r',
             'f"{x!r ',
@@ -1009,29 +990,13 @@ class TestSourceEndingInALiteral:
             'f"{x!z\n',
             'f"{x!zz',
             'f"{x!z\\',
-            'f"{x!z:',
             'f"{x!z:{y',
             # A backslash escaping the end of the source in a spec.
             'f"{x:a\\',
             'f"{x:\\',
-            'f"{x:\\\n',
-            'f"{x:\\\r\n',
-            'f"{x:a\\\r',
             'rf"{x:a\\',
             'f"{x!r:\\',
             'f"{x:{y:a\\',
-            'f"{x:a\\\n',
-            'f"{x:a\\\nb\\',
-            'f"{x:a\\\nb',
-            'f"{x:a\\\nb\n',
-            'f"{x:a\\b',
-            'f"{x:a\\\\',
-            # After a spec's line break 3.12 skips comments and continuations.
-            'f"{x:a\n#c',
-            'f"{x:a\n\\',
-            'f"{x:a\n\\\n',
-            'f"{x:a\n#c\nb',
-            'f"{x:a\n\\\nb',
             # An error inside a literal 3.11 finds unterminated as a whole.
             'f"{x! z:',
             'f"{x!z}',
@@ -1047,26 +1012,8 @@ class TestSourceEndingInALiteral:
             'f"a\\"}',
             'f"""{x!""',
             # A line break in a field or literal that closed before the end.
-            'f"{x:a\n}',
-            'f"{x:a\n}b',
-            'f"{x:a\n#c\n}',
-            'f"{x:a\n}{y:b\n}',
-            'f"{x:{y:a\n}}',
-            'f"{x:a\n}\n',
-            'f"{x:a\n}b\nc',
-            'f"{x:a\n}{',
-            'f"{x:a\n}{y',
-            'f"{x:{y:a\n}',
-            'f"ab{x:a\n}',
             'f"a\nb{x:c\n}',
             'f"a\nb{x:c\n',
-            'f"{x:a\n}{y:c\n',
-            'f"{x:a\nb}',
-            'f"{x:a\nb}c',
-            'f"{x:a\n b}',
-            'f"{x:a\n{y}}',
-            'f"{x:a\n{y}b}',
-            'f"{x:a\n}{f"b\nc"}',
             *_read_on_3_12_plus(
                 [
                     'f"{(b"a',
@@ -1079,7 +1026,6 @@ class TestSourceEndingInALiteral:
                     'f"{f"abc',
                     'f"{f"""abc',
                     'f"{f"{f"abc',
-                    'f"{f"{x:ab',
                     'f"{x!r"',
                     'f"{x!b"',
                     'f"{x!rb"',
@@ -1097,9 +1043,6 @@ class TestSourceEndingInALiteral:
                     'f"{x} {"',
                     'f"{f"a\nb"}',
                     'f"{f"a\nb"}c',
-                    'f"{f"{x:a\n}"}',
-                    'f"{f"{x:a\n}"',
-                    'f"{x:{f"{y:a\n}"}}',
                     'f"{f"a\nb"}{x:c\n}',
                     'f"{f"a\nb{x:c\n}',
                     'f"""a\n{f"b\nc{x:d\n}"',
@@ -1110,7 +1053,7 @@ class TestSourceEndingInALiteral:
                     src,
                     marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
                 )
-                for src in ['t"{x:abc', 't"ab\n{x', 't"{(t"a', 't"{x!z', 't"{x:a\n}']
+                for src in ['t"ab\n{x', 't"{(t"a', 't"{x!z', 't"{x:a\n}']
             ],
         ],
     )
@@ -1124,7 +1067,6 @@ class TestSourceEndingInALiteral:
             'f"a\n}',
             'f"a\n}"',
             'f"a\nb}',
-            'f"{x:{y}a\n}}',
             'f"a\n{x:a\n}}',
             'f"a\n{x:a\n"',
             # A conversion checked when its field closes.
@@ -1156,9 +1098,6 @@ class TestSourceEndingInALiteral:
                     'f"{x!s "a\nb"}"',
                     'f"{x!r "a\nb"}"',
                     'f"{x!z"a\nb"}"',
-                    # 3.12 reads a spec past its line break as code.
-                    'f"{x:a\n"b\nc"}"',
-                    'f"{x!r:a\n"b\nc"}{)}"',
                 ]
             ),
         ],
@@ -1178,23 +1117,6 @@ class TestSourceEndingInALiteral:
     def test_a_literal_with_a_line_break_and_no_error_parses(self):
         assert len(parse('f"{x}a\n}}"')) == 1
         assert len(parse('f"{"a\nb"}"')) == 1
-
-    @pytest.mark.parametrize(
-        "src",
-        _read_on_3_12_plus(
-            [
-                'f"{"a\nb":c\n}"',
-                'f"{"a\nb"}{y:d\n}"',
-                'f"{x:{"a\nb"}c}{y:d\n}"',
-            ]
-        ),
-    )
-    def test_a_plain_string_s_line_break_supersedes_a_spec_line_break_refusal(
-        self, src
-    ):
-        # CPython stops at the string's break, so the spec's later one is no
-        # refusal; lispython reads the multi-line string on.
-        assert len(parse(src)) == 1
 
     @pytest.mark.skipif(not IN_PLACE, reason="3.11 reads its own messages here")
     def test_a_plain_string_continued_by_a_backslash_records_no_break(self):
@@ -1247,16 +1169,6 @@ class TestSourceEndingInALiteral:
             parse('f"a}"')
         assert info.value.msg == "f-string: single '}' is not allowed"
 
-    def test_a_spec_newline_error_exists_only_where_fields_are_tokens(self):
-        # 3.11 refuses the probe's text too, as an unterminated string.
-        assert features.fstring_fields_are_tokens() or not (
-            features.single_quoted_spec_refuses_newline()
-        )
-
-    NEWLINE_IN_SPEC = (
-        "f-string: newlines are not allowed in format specifiers for single "
-        "quoted f-strings"
-    )
     NOT_CONVERSION = (
         "f-string: invalid conversion character {!r}: expected 's', 'r', or 'a'"
     )
@@ -1265,16 +1177,11 @@ class TestSourceEndingInALiteral:
         ["probe", "src", "errors"],
         [
             (
-                "single_quoted_spec_refuses_newline",
-                'f"{x:abc',
-                {True: (NEWLINE_IN_SPEC, 1, 9), False: ("'{' was never closed", 1, 3)},
-            ),
-            (
                 "conversion_name_checked_first",
                 'f"{x!z:',
                 {
                     True: (NOT_CONVERSION.format("z"), 1, 6),
-                    False: ("'{' was never closed", 1, 3),
+                    False: ("unterminated f-string literal (detected at line 1)", 1, 1),
                 },
             ),
             (
@@ -1313,7 +1220,6 @@ class TestSourceEndingInALiteral:
             ),
         ],
         ids=[
-            "spec-newline",
             "conversion-then-spec",
             "conversion-in-spec",
             "line",
@@ -1327,7 +1233,6 @@ class TestSourceEndingInALiteral:
         # Both branches on every interpreter, the other probes at 3.12's
         # values: CPython's measured messages.
         for name in [
-            "single_quoted_spec_refuses_newline",
             "conversion_name_checked_first",
             "expecting_brace_names_its_line",
             "final_crlf_starts_a_line",
@@ -1335,11 +1240,6 @@ class TestSourceEndingInALiteral:
             monkeypatch.setattr(features, name, lambda: False)
         monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
         monkeypatch.setattr(features, probe, lambda: value)
-        # 3.12 reads a spec on after its line break, 3.13+ refuse the break.
-        refuses = features.single_quoted_spec_refuses_newline()
-        monkeypatch.setattr(
-            features, "spec_line_break_returns_to_code", lambda: not refuses
-        )
         assert error_position(parse, src) == errors[value]
 
 
@@ -1526,9 +1426,6 @@ class TestTokenizerErrorAfterAParserError:
             'f"{x!r )}"\n"b',
             'f"{x!r\\\n)}" "b',
             'f"{x!r \\q}" "b',
-            # After the code 3.12 reads in a spec past a line break.
-            pytest.param('f"{x:a\nb)}" "c', marks=NOT_ON_3_11),
-            pytest.param('f"{x:a\nb]}" "c', marks=NOT_ON_3_11),
         ],
     )
     def test_a_closing_bracket_out_of_place_in_a_field(self, src):
@@ -1542,7 +1439,6 @@ class TestTokenizerErrorAfterAParserError:
             'f"{x!z}"\n(\n]',
             'f"{=}" )',
             'f"{}" )',
-            'f"{x:a\nb}" )',
         ],
     )
     def test_a_closing_bracket_out_of_place_outside_a_literal(self, src):
@@ -1606,10 +1502,6 @@ class TestTokenizerErrorAfterAParserError:
         )
 
 
-SPEC_REFUSES_NEWLINE = features.single_quoted_spec_refuses_newline()
-SPEC_BREAK_TO_CODE = features.spec_line_break_returns_to_code()
-
-
 class TestQuoteOrLineBreakInFormatSpec:
     """The literal's closing quote, or a single-quoted literal's line break,
     inside a format spec: CPython's error on the running interpreter."""
@@ -1670,177 +1562,92 @@ class TestQuoteOrLineBreakInFormatSpec:
     def test_a_tokenizer_error_after_the_quote_takes_its_place(self, src):
         assert error_position(parse, src) == python_error_position(src)
 
-    @pytest.mark.skipif(
-        not SPEC_REFUSES_NEWLINE, reason="3.12 reads the spec after it as code"
+    # 3.11's whole-literal error still comes first there.
+    WHOLE_LITERAL_ON_3_11 = pytest.mark.skipif(
+        not IN_PLACE, reason="3.11 reports the whole literal first"
     )
+    SPEC_NEWLINE = (
+        "{0}: newlines are not allowed in format specifiers for single quoted {0}s"
+    )
+
     @pytest.mark.parametrize(
-        "src",
+        ["lpy", "py"],
         [
-            'f"{x:ab\n}"',
-            'f"{x:\n}"',
-            'f"{x!r:a\nb}"',
-            'f"{x:{y:\n}}"',
-            'f"{x:ab\r}"',
-            'f"{x:ab\r\n}"',
-            'f"{x:ab\n"',
-            'f"{x:ab\n}" f"{"',
-            'f"{x:a\n}{1 1}"',
-            'f"{f"{x:a\n}"}"',
-            'f"{x:a\n{y}}"',
+            # A field is code: a line break stands wherever whitespace may.
+            ('f"{\nx\n}"', 'f"{x}"'),
+            ('f"{x\n!r}"', 'f"{x!r}"'),
+            ('f"{x!r\n}"', 'f"{x!r}"'),
+            ('f"{x\n:>3}"', 'f"{x:>3}"'),
+            ('f"{x\n=}"', 'f"x\\n={x!r}"'),
+            ('f"{x=\n}"', 'f"x=\\n{x!r}"'),
+            # A nested field in a spec is code too.
+            ('f"{x:{\ny}}"', 'f"{x:{y}}"'),
+            ('f"{x:{y\n}}"', 'f"{x:{y}}"'),
+            # A triple-quoted literal's spec text reads a line break as text.
+            ('f"""{x:a\nb}"""', 'f"{x:a\\nb}"'),
+            ('f"""{x:{y}\n}"""', 'f"{x:{y}\\n}"'),
+        ],
+    )
+    def test_a_line_break_in_a_field_s_code_is_whitespace(self, lpy, py):
+        assert stmt_to_dump(lpy) == ast.dump(ast.parse(py))
+
+    @WHOLE_LITERAL_ON_3_11
+    @pytest.mark.parametrize(
+        ["src", "kind", "at"],
+        [
+            ('f"{x:\n>3}"', "f-string", (1, 6)),
+            ('f"{x:a\n}"', "f-string", (1, 7)),
+            ('f"{x:a\nb}"', "f-string", (1, 7)),
+            ('f"{x:a\r}"', "f-string", (1, 7)),
+            ('f"{x:a\r\n}"', "f-string", (1, 7)),
+            ('f"{x!r:a\nb}"', "f-string", (1, 9)),
+            # A backslash before the break escapes nothing there.
+            ('f"{x:a\\\nb}"', "f-string", (1, 8)),
+            # In any segment: after a nested field, before the "}".
+            ('f"{x:{y}a\n}"', "f-string", (1, 10)),
+            ('f"{x:{y}\n}"', "f-string", (1, 9)),
+            ('f"{x:{y:a\n}}"', "f-string", (1, 10)),
+            # The first error in the source, the end of it included.
+            ('f"{x:abc\n', "f-string", (1, 9)),
+            ('f"{x:a\n}{1 1}"', "f-string", (1, 7)),
             pytest.param(
-                't"{x:ab\n}"',
+                't"{x:a\n}"',
+                "t-string",
+                (1, 7),
                 marks=pytest.mark.skipif(not T_STRINGS, reason="needs 3.14"),
             ),
         ],
     )
-    def test_a_line_break_in_a_spec_is_refused_where_it_is(self, src):
-        assert error_position(parse, src) == python_error_position(src)
+    def test_a_line_break_in_single_quoted_spec_text_is_refused(self, src, kind, at):
+        assert error_position(parse, src) == (self.SPEC_NEWLINE.format(kind), *at)
 
-    NEWLINE_IN_SPEC = TestSourceEndingInALiteral.NEWLINE_IN_SPEC
-
+    @WHOLE_LITERAL_ON_3_11
     @pytest.mark.parametrize(
-        ["src", "at"],
+        ["src", "triple", "at"],
         [
-            ('f"{x:ab\n}"', (1, 8)),
-            ('f"{x:a\n}{1 1}"', (1, 7)),
+            ('f"{x:abc', "", (1, 1)),
+            ('f"{x:', "", (1, 1)),
+            ('f"{x!r:', "", (1, 1)),
+            ('f"{x:{y:ab', "", (1, 1)),
+            ('f"""{x:a\nb', "triple-quoted ", (1, 1)),
         ],
     )
-    def test_3_13_refuses_a_spec_line_break(self, monkeypatch, src, at):
-        # 3.13's measured messages, on every interpreter.
-        monkeypatch.setattr(features, "fstring_fields_are_tokens", lambda: True)
-        monkeypatch.setattr(
-            features, "single_quoted_spec_refuses_newline", lambda: True
+    def test_the_source_ending_in_spec_text_leaves_the_literal_open(
+        self, src, triple, at
+    ):
+        line = src.count("\n") + 1
+        assert error_position(parse, src) == (
+            f"unterminated {triple}f-string literal (detected at line {line})",
+            *at,
         )
-        monkeypatch.setattr(features, "spec_line_break_returns_to_code", lambda: False)
-        assert error_position(parse, src) == (self.NEWLINE_IN_SPEC, *at)
 
-    # 3.12 ends a single-quoted spec's text at a line break in its first
-    # segment and reads the rest of the field as code.
-    CODE_AFTER_BREAK = pytest.mark.skipif(
-        not SPEC_BREAK_TO_CODE, reason="3.12 reads the spec after it as code"
-    )
-    # [lispython source, Python source building the AST 3.12 builds for it]
-    CODE_SPECS = [
-        ('f"{x:ab\n}"', 'f"{x:ab}"'),
-        ('f"{x:ab\n  \n}"', 'f"{x:ab}"'),
-        ('f"{x:ab\n{y}}"', 'f"{x:ab{y}}"'),
-        ('f"{x:ab\n {y} {z} \n}"', 'f"{x:ab{y}{z}}"'),
-        ('f"{x:ab\n{y:}}"', 'f"{x:ab{y:}}"'),
-        ('f"{x:ab\n{y:\n}}"', 'f"{x:ab{y:}}"'),
-        ('f"{x:ab\n{y:{z}}}"', 'f"{x:ab{y:{z}}}"'),
-        ('f"{x:\n}"', 'f"{x:}"'),
-        ('f"{x:ab\n#c\n}"', 'f"{x:ab}"'),
-        ('f"{x:ab\n{y!r:{z}}}"', 'f"{x:ab{y!r:{z}}}"'),
-    ]
-
-    @staticmethod
-    def _dump(src):
-        [stmt] = macroexpand_then_compile(parse(src))
-        return ast.dump(stmt.value)
-
-    @CODE_AFTER_BREAK
-    @pytest.mark.parametrize("src", [lpy for [lpy, _] in CODE_SPECS])
-    def test_3_12_builds_the_spec_after_a_line_break_as_cpython(self, src):
-        assert self._dump(src) == ast.dump(ast.parse(src).body[0].value)
-
-    @CODE_AFTER_BREAK
-    @pytest.mark.parametrize(
-        "src",
-        [
-            # A token where the field must end, CPython's parser's error.
-            'f"{x:a\nb}"',
-            'f"{x:a\n b}"',
-            'f"{x:a\n:b}"',
-            'f"{x:a\n!r}"',
-            'f"{x:a\n[}"',
-            'f"{x:a\n(}"',
-            'f"{x:a\n$}"',
-            'f"{x:a\n{y:b}}"',
-            'f"{x:a\n{y}b}"',
-            'f"{x:a\n{y}"z"}"',
-            'f"{x:a\n"z"}"',
-            'f"{x:a\nf"b',
-            'f"{x:a\nrb"z"}"',
-            'f"{x:a\nx"b',
-            'f"{x:a\n{y:a\nb}}"',
-            'f"{x:a\n{y:a\n#}}"',
-            'f"{x:a\n{y:b',
-            'f"{x:a\n{y:b}',
-            # ... after which the field reads on as an expression.
-            'f"{x:a\nb}" "c',
-            'f"{x:a\n{y:b}}" "c',
-            # ... behind a line break CPython stopped at before.
-            'f"a\nb{x:c\nd}"',
-            'f"a\nb{x:c\nd',
-            'f"{x:a\n{f"b\nc"}d',
-            # The tokenizer's own error at that token.
-            'f"{x:a\n\\x',
-            'f"{x:a\n\\x}"',
-            'f"{x:a\n \\x}"',
-            'f"{x:a\nb \\x}"',
-            'f"{x:a\n)}"',
-            'f"{x:a\n]"',
-            'f"{x:a\n"',
-            'f"{x:a\nb"',
-            "f\"{x:a\n'b",
-            # The end of the source: the innermost "{" is never closed.
-            'f"{x:a\n#}',
-            'f"{x:a\n#c"',
-            'f"{x:a\n#}"',
-            'f"{x:a\n{y}#}"',
-            'f"{f"{x:a\n#}"}"',
-            'f"{x:a\n#}" "c',
-            'f"{x:a\n{y:',
-            'f"{x:a\n{y',
-        ],
-    )
-    def test_3_12_refuses_what_follows_a_spec_s_line_break_as_cpython(self, src):
-        assert error_position(parse, src) == python_error_position(src)
-
-    @staticmethod
-    def _as_3_12(monkeypatch):
-        for [probe, value] in [
-            ["fstring_fields_are_tokens", True],
-            ["single_quoted_spec_refuses_newline", False],
-            ["spec_line_break_returns_to_code", True],
-            ["conversion_name_checked_first", False],
-            ["expecting_brace_names_its_line", False],
-        ]:
-            monkeypatch.setattr(features, probe, lambda value=value: value)
-
-    @pytest.mark.skipif(not IN_PLACE, reason="3.11 builds another spec AST")
-    @pytest.mark.parametrize(["lpy", "py"], CODE_SPECS)
-    def test_the_3_12_spec_after_a_line_break_is_built(self, monkeypatch, lpy, py):
-        # 3.12's AST, on every interpreter (measured: each pair's sources
-        # build the same AST on 3.12).
-        self._as_3_12(monkeypatch)
-        assert self._dump(lpy) == ast.dump(ast.parse(py).body[0].value)
-
-    @pytest.mark.parametrize(
-        ["src", "error"],
-        [
-            ('f"{x:a\nb}"', ("f-string: expecting '}', or format specs", 2, 1)),
-            ('f"{x:a\n{y:b}}"', ("f-string: expecting '}', or format specs", 2, 4)),
-            (
-                'f"{x:a\nb}" "c',
-                ("unterminated string literal (detected at line 2)", 2, 5),
-            ),
-            ('f"{x:a\n#}"', ("'{' was never closed", 1, 3)),
-            ('f"{x:a\n)}"', ("f-string: unmatched ')'", 2, 1)),
-            (
-                'f"{x:a\n\\x}"',
-                ("unexpected character after line continuation character", 2, 2),
-            ),
-            (
-                'f"a\nb{x:c\nd}"',
-                ("unterminated f-string literal (detected at line 1)", 1, 1),
-            ),
-        ],
-    )
-    def test_3_12_s_errors_after_a_spec_s_line_break(self, monkeypatch, src, error):
-        # 3.12's measured messages, on every interpreter.
-        self._as_3_12(monkeypatch)
-        assert error_position(parse, src) == error
+    @WHOLE_LITERAL_ON_3_11
+    def test_a_line_break_right_after_the_exclamation_mark_is_refused(self):
+        assert error_position(parse, 'f"{x!\nr}"') == (
+            "f-string: conversion type must come right after the exclamation mark",
+            1,
+            5,
+        )
 
 
 def _read_and_compile(src):

@@ -90,30 +90,6 @@ def _compile_error(src):
 
 
 @functools.cache
-def single_quoted_spec_refuses_newline():
-    """Whether a line break in a single-quoted f-string's format spec is an
-    error of its own: "newlines are not allowed in format specifiers for
-    single quoted f-strings" (3.13+). 3.12 accepts one
-    (``spec_line_break_returns_to_code``). (3.11 refuses the probe as an
-    unterminated string, hence the message check.)"""
-    error = _compile_error('f"{x:\n}"')
-    return error is not None and error.msg.startswith(
-        "f-string: newlines are not allowed"
-    )
-
-
-@functools.cache
-def spec_line_break_returns_to_code():
-    """Whether a line break in a single-quoted f-string's format spec ends
-    the spec's text, the tokenizer reading the rest of the field as code
-    (3.12): in f"{x:a\\n#}" the "#" then starts a comment that runs past the
-    "}", so the field's "{" is never closed. 3.13+ refuse the break; 3.11
-    finds the whole literal unterminated."""
-    error = _compile_error('f"{x:a\n#}"')
-    return error is not None and error.msg == "'{' was never closed"
-
-
-@functools.cache
 def conversion_name_checked_first():
     """Whether an invalid conversion name is refused where it is read, before
     the rest of its field (3.14.8 and 3.15, a backport): f"{x!z: is "invalid

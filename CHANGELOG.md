@@ -6,6 +6,18 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A line break in a single-quoted f/t-string's format-spec text, in any
+  segment, is a compile error at the break on every Python version
+  (`f"{x:ab\n}"`: "newlines are not allowed in format specifiers for single
+  quoted f-strings"), as it was on 3.13+ only. On 3.12 the text after such a
+  break was read as code and the field compiled; on 3.11 it was reported as
+  an unterminated string. A line break elsewhere in a field stands wherever
+  code takes whitespace (`f"{x\n!r}"`, `f"{x:{\ny}}"`), except right after
+  the `!`, and a triple-quoted literal's spec text keeps it as text. A source
+  ending in format-spec text is the literal unterminated on every version.
+
 ## [0.6.0] - 2026-11-02
 
 ### Added
