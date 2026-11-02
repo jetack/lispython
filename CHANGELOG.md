@@ -27,13 +27,14 @@ follows [Semantic Versioning](https://semver.org/).
   version: nothing after it is read, so a later unterminated string or
   unmatched bracket no longer replaces it (`f"{x!z}" "b` reports the
   invalid conversion, where every version reported the string). A
-  conversion is checked where it is read: an invalid name (`!z`) is refused at once, even
-  where 3.12 and 3.13 reported an error later in the field first; with no
-  name after the `!`, a `}` or `:` next is "missing conversion character"
-  a `)` or `]` "unmatched ')'", a quote that can only end the literal
-  (`f"{x!"`) "expecting '}'", and any other token (`f"{x!"a"}"`) "invalid
-  conversion character", at that token; anything but blanks, `:` or `}` after the name is "expecting
-  ':' or '}'" there. The literal's closing quote in a format spec is
+  conversion is checked where it is read: an invalid name (`!z`) is refused
+  at once, even where 3.12 and 3.13 reported an error later in the field
+  first; with no name after the `!`, a `}` or `:` next is "missing
+  conversion character", a `)` or `]` "unmatched ')'" or "unmatched ']'",
+  and any other token (`f"{x!"a"}"`) "invalid conversion character", at
+  that token, a quote there opening a string as anywhere in a field;
+  anything but blanks, `:` or `}` after the name is "expecting ':' or '}'"
+  there. The literal's closing quote in a format spec is
   "expecting '}', or format specs" at the quote, the escaped `\"` literal
   included.
 - On Python 3.12+, an error after a line break in a single-quoted f/t-string's

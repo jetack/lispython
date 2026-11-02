@@ -1133,17 +1133,26 @@ class TestConversion:
             ('f"{x!zz}"', NOT_CONVERSION.format("zz"), (1, 6)),
             ('f"{x!z:{y!q}}"', NOT_CONVERSION.format("z"), (1, 6)),
             ('f"{x!f"a"}"', NOT_CONVERSION.format("f"), (1, 6)),
-            # A token after the "!" that is no name is an invalid conversion.
+            # A token after the "!" that is no name is an invalid conversion,
+            # a string that closes included.
             ('f"{x!"a"}"', "f-string: invalid conversion character", (1, 6)),
+            ('f"{x!"a"', "f-string: invalid conversion character", (1, 6)),
             ('f"{x! "a"}"', "f-string: invalid conversion character", (1, 7)),
             ('f"{x!!}"', "f-string: invalid conversion character", (1, 6)),
             ('f"{x!(}"', "f-string: invalid conversion character", (1, 6)),
-            # Python's own words for a closer, or a quote that ends the literal.
+            # Python's own words for a closer.
             ('f"{x!)}"', "f-string: unmatched ')'", (1, 6)),
             ('f"{x!]}"', "f-string: unmatched ']'", (1, 6)),
             ('f"{x! )}"', "f-string: unmatched ')'", (1, 7)),
-            ('f"{x!"', "f-string: expecting '}'", (1, 6)),
-            ('f"""{x!"""', "f-string: expecting '}'", (1, 8)),
+            # A quote opens a string, as anywhere in a field (f"{x "): one
+            # that never closes is unterminated, an escaped quote no closer.
+            ('f"{x!"', UNTERMINATED_STRING.format(1), (1, 6)),
+            ('(= a f"{x!"\\")', UNTERMINATED_STRING.format(1), (1, 11)),
+            (
+                'f"""{x!"""',
+                "unterminated triple-quoted string literal (detected at line 1)",
+                (1, 8),
+            ),
             ('f"""{x!" """', "f-string: invalid conversion character", (1, 8)),
             (r'f"{f\"{x!"r"}\"}"', "f-string: invalid conversion character", (1, 10)),
             ('f"{x! r}"', CONVERSION_GAP, (1, 5)),
