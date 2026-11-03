@@ -278,7 +278,13 @@ class TestMalformedPatterns:
 
     @pytest.mark.parametrize(
         ("pattern", "at"),
-        [("if", "if"), ("[if]", "if"), ("a.if", "a.if"), ("(a.if 1)", "a.if")],
+        [
+            ("if", "if"),
+            ("[if]", "if"),
+            ("a.if", "a.if"),
+            ("(a.if 1)", "a.if"),
+            ("(a.if :a)", "a.if"),
+        ],
     )
     def test_keyword_name_refused_at_itself(self, pattern, at):
         form = f"(match x (case {pattern} 1))"

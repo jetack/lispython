@@ -8,6 +8,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A number-shaped digit-led symbol in a match pattern (value pattern,
+  mapping-pattern key, class-pattern class name or `:attr` keyword:
+  `(case 1.5if ...)`, `1.else`, `(1.5if)`, `(a.b :1.5if k)`) and a
+  malformed number token as a class name (`(1else :a b)`) are now refused
+  with the malformed-number message they get everywhere else ("invalid
+  decimal literal"; `0x1for` gives "invalid hexadecimal literal"), instead
+  of a pattern error ("pattern expected", "class pattern needs a class
+  name", "class pattern expects an attribute name after :"). A class
+  pattern's head is refused before its operands.
 - On Python 3.11, a doubled brace in a format spec after a nested field is
   read as on every other version, a literal brace: `f"{x:{y}{{}"` compiles
   to the spec `{y}` followed by `{`, where it was an error.

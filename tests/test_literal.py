@@ -403,6 +403,15 @@ class TestInvalidEscapeWarning:
             ("(= a 1_)", "invalid decimal literal", 6),
             ("(= a 1+2jif)", "invalid imaginary literal", 6),
             ("(match x (case 1__0 2))", "invalid decimal literal", 16),
+            ("(match x (case 1.5if 2))", "invalid decimal literal", 16),
+            ("(match x (case 1.else 2))", "invalid decimal literal", 16),
+            ("(match x (case 1.e5if 2))", "invalid decimal literal", 16),
+            ("(match x (case {1.5if 2} 2))", "invalid decimal literal", 17),
+            ("(match x (case (1.5if) 2))", "invalid decimal literal", 17),
+            ("(match x (case (1else :a b) 2))", "invalid decimal literal", 17),
+            ("(match x (case (a.b :1.5if k) 2))", "invalid decimal literal", 22),
+            # The head is refused before the operands are read.
+            ("(match x (case (1.5if :a) 2))", "invalid decimal literal", 17),
             # A number token CPython reads as more than one token.
             ("(= a 406E-9.8J)", "invalid number literal 406E-9.8J", 6),
             ("(= a 1e+7.J)", "invalid number literal 1e+7.J", 6),
@@ -422,6 +431,23 @@ class TestInvalidEscapeWarning:
                 stmt_to_dump(src)
         assert [str(w.message) for w in caught] == []
         assert (info.value.msg, info.value.lineno, info.value.offset) == (msg, 1, col)
+
+    @pytest.mark.parametrize(
+        ["pattern", "prefix"],
+        [
+            ("a..b", "pattern expected, got"),
+            ("1.0.0", "pattern expected, got"),
+            ("(a..b)", "class pattern needs a class name, got"),
+            ("(1)", "class pattern needs a class name, got"),
+            ("(a.b :a..c k)", "class pattern expects an attribute name after :"),
+        ],
+    )
+    def test_a_dotted_pattern_without_a_number_shape_keeps_the_pattern_error(
+        self, pattern, prefix
+    ):
+        with pytest.raises(LispyCompileError) as info:
+            stmt_to_dump(f"(match x (case {pattern} 2))")
+        assert info.value.msg.startswith(prefix)
 
     @pytest.mark.usefixtures("time_bound")
     @pytest.mark.parametrize(
