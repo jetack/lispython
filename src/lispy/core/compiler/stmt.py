@@ -24,6 +24,7 @@ from lispy.core.compiler.expr import (
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
+    constant_compile,
     malformed_number_p,
     module_path,
     name_compile,
@@ -577,7 +578,9 @@ def match_mapping_parse(sexp):
 def match_class_parse(sexp):
     """``(Class pattern... :attr pattern...)``, positional patterns first."""
     cls = sexp.op
-    if not name_or_attr_p(cls):
+    if constant_p(cls):
+        constant_compile(cls)  # a malformed number token (1else) raises its own error
+    if not (name_or_attr_p(cls) or malformed_number_p(cls)):
         raise form_error(cls, f"needs a class name, got {cls}", "class pattern")
     q = deque(sexp.operands)
     patterns = []
@@ -590,7 +593,7 @@ def match_class_parse(sexp):
                 raise form_error(
                     arg, f"has {arg} without a pattern after it", "class pattern"
                 )
-            if not plain_name_p(arg.value):
+            if not (plain_name_p(arg.value) or malformed_number_p(arg.value)):
                 raise form_error(
                     arg,
                     f"expects an attribute name after :, got {arg.value}",
