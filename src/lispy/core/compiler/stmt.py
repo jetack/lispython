@@ -582,6 +582,9 @@ def match_class_parse(sexp):
         constant_compile(cls)  # a malformed number token (1else) raises its own error
     if not (name_or_attr_p(cls) or malformed_number_p(cls)):
         raise form_error(cls, f"needs a class name, got {cls}", "class pattern")
+    cls_expr = name_compile(
+        cls, ast.Load
+    )  # the head's error comes before any operand's
     q = deque(sexp.operands)
     patterns = []
     kwd_attrs = []
@@ -606,7 +609,7 @@ def match_class_parse(sexp):
         else:
             patterns.append((yield pattern_parse(arg)))
     return {
-        "cls": name_compile(cls, ast.Load),
+        "cls": cls_expr,
         "patterns": patterns,
         "kwd_attrs": kwd_attrs,
         "kwd_patterns": kwd_patterns,

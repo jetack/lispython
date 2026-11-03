@@ -410,6 +410,8 @@ class TestInvalidEscapeWarning:
             ("(match x (case (1.5if) 2))", "invalid decimal literal", 17),
             ("(match x (case (1else :a b) 2))", "invalid decimal literal", 17),
             ("(match x (case (a.b :1.5if k) 2))", "invalid decimal literal", 22),
+            # The head is refused before the operands are read.
+            ("(match x (case (1.5if :a) 2))", "invalid decimal literal", 17),
             # A number token CPython reads as more than one token.
             ("(= a 406E-9.8J)", "invalid number literal 406E-9.8J", 6),
             ("(= a 1e+7.J)", "invalid number literal 1e+7.J", 6),
