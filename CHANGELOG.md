@@ -8,6 +8,9 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A number-shaped digit-led symbol in a match pattern or mapping-pattern key
+  (`(case 1.5if ...)`, `1.else`, `1.e5if`) is now refused as "invalid decimal
+  literal", as it is everywhere else, instead of "pattern expected".
 - On Python 3.11, a doubled brace in a format spec after a nested field is
   read as on every other version, a literal brace: `f"{x:{y}{{}"` compiles
   to the spec `{y}` followed by `{`, where it was an error.

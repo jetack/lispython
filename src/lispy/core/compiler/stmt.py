@@ -24,6 +24,7 @@ from lispy.core.compiler.expr import (
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
+    malformed_number_p,
     module_path,
     name_compile,
     name_or_attr_p,
@@ -504,7 +505,9 @@ def value_pattern_expr(sexp, kind):
     """The expression of a value pattern or mapping key: a literal or a dotted
     name (``a.b``, which Python reads as a value, never a capture). Anything
     else is refused at ``sexp`` as no ``kind``."""
-    if dotted_name_p(sexp) and name_or_attr_p(sexp):
+    # A number-shaped digit-led symbol (``1.5if``) is worded as a malformed
+    # number wherever it appears: name_compile raises that through python_name.
+    if dotted_name_p(sexp) and (name_or_attr_p(sexp) or malformed_number_p(sexp)):
         return name_compile(sexp, ast.Load)
     if literal_pattern_p(sexp):
         return (yield literal_pattern_expr(sexp))

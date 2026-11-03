@@ -376,6 +376,13 @@ def name_or_attr_p(sexp):
     )
 
 
+def malformed_number_p(sexp):
+    """A symbol python_name words as a malformed number (``1.5if``)."""
+    return (
+        type(sexp) is Symbol and _malformed_number_message(atom_text(sexp)) is not None
+    )
+
+
 def name_compile(symbol, ctx):
     """A Name, or an Attribute chain for a dotted symbol, every part through
     python_name. ``ctx`` is the undotted name's, else the last attribute's;
