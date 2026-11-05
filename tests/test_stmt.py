@@ -218,6 +218,7 @@ class TestMalformedPatterns:
             ("{**r 1}", f"{MAP} has **r before its end", "**r"),
             ('{**r "a" 1}', f"{MAP} has **r before its end", "**r"),
             ("{**r **s}", f"{MAP} has **r before its end", "**r"),
+            ("{**r **1}", f"{MAP} has **r before its end", "**r"),
             ("{**_}", f"{MAP} expects a name after **, got _", "**_"),
             ("{**1}", f"{MAP} expects a name after **, got 1", "**1"),
             ("{**x.y}", f"{MAP} expects a name after **, got x.y", "**x.y"),
