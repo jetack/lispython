@@ -67,6 +67,16 @@ def test_document_symbols(buffer):
     assert [s.name for s in symbols] == ["foo", "bar"]
 
 
+def test_lazy_imports_are_outline_modules():
+    symbols = server.document_symbol(
+        ls_with("(lazy-import json)\n(lazy-from os [sep])\n"), position(0, 0)
+    )
+    assert [(s.name, s.kind) for s in symbols] == [
+        ("json", server.lsp.SymbolKind.Module),
+        ("os", server.lsp.SymbolKind.Module),
+    ]
+
+
 def test_definition_hover_and_references(buffer):
     ls = ls_with(buffer)
     [location] = server.definition(ls, position(1, 14))

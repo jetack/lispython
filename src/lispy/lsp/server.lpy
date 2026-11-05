@@ -341,11 +341,15 @@ or an extra usage line names no usage key."
     (except [Exception]
       (pass))))
 
+(= FROM-HEADS (, "from" "lazy-from"))
+(= IMPORT-ONLY-HEADS (, "import" "lazy-import"))
+(= IMPORT-HEADS (+ IMPORT-ONLY-HEADS FROM-HEADS))
+
 (def find-import-target [node workspace-folders]
   "Given an import/from/require node, resolve where the imported name is defined."
   (= form (. node op value))
   (cond
-    (in form (, "from" "lazy-from"))
+    (in form FROM-HEADS)
     (do ;; (from module [names...])
         (if (< (len node) 3)
             (return None))
@@ -355,7 +359,7 @@ or an extra usage line names no usage key."
             (return fpath))
         (return None))
 
-    (in form (, "import" "lazy-import"))
+    (in form IMPORT-ONLY-HEADS)
     (do ;; (import module)
         (if (< (len node) 2)
             (return None))
@@ -376,8 +380,6 @@ or an extra usage line names no usage key."
         (return None))
 
     (return None)))
-
-(= IMPORT-HEADS (, "import" "from" "lazy-import" "lazy-from"))
 
 (def buffer-import-bindings [node]
   "The [name symbol] pairs an import form binds, by the compiler's own rule
@@ -627,7 +629,7 @@ or an extra usage line names no usage key."
               :range (node-range node)
               :selection-range (node-range (sub node 1)))))
 
-      (in form (, "import" "from"))
+      (in form IMPORT-HEADS)
       (do (if (< (len node) 2) (continue))
           (.append symbols
             (lsp.DocumentSymbol
