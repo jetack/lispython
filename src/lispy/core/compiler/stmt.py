@@ -547,31 +547,40 @@ def match_sequence_parse(sexp):
 
 
 def match_mapping_parse(sexp):
-    """``{key pattern... **rest}``: **rest once, last, a plain name."""
+    """``{key pattern... **rest}``: **rest once, last, a plain name.
+
+    One left-to-right walk, so the first error in source order is the one met.
+    """
     items = list(sexp.list)
-    rst = {}
-    if items and doublestarred_p(items[-1]):
-        rest = items.pop()
-        if not plain_name_p(rest.value) or atom_text(rest.value) == "_":
-            raise form_error(
-                rest, f"expects a name after **, got {rest.value}", "mapping pattern"
-            )
-        rst["rest"] = symbol_name(rest.value)
-    for item in items:
+    last = len(items) - 1
+    rst = {"keys": [], "patterns": []}
+    i = 0
+    while i <= last:
+        item = items[i]
         if doublestarred_p(item):
-            raise form_error(item, f"has {item} before its end", "mapping pattern")
-    if len(items) % 2:
-        raise form_error(
-            items[-1],
-            f"has key {items[-1]} without a pattern after it",
-            "mapping pattern",
-        )
-    rst["keys"] = []
-    for key in items[::2]:
-        rst["keys"].append((yield value_pattern_expr(key, "mapping pattern")))
-    rst["patterns"] = []
-    for pattern in items[1::2]:
-        rst["patterns"].append((yield pattern_parse(pattern)))
+            if i < last:
+                raise form_error(item, f"has {item} before its end", "mapping pattern")
+            if not plain_name_p(item.value) or atom_text(item.value) == "_":
+                raise form_error(
+                    item,
+                    f"expects a name after **, got {item.value}",
+                    "mapping pattern",
+                )
+            rst["rest"] = symbol_name(item.value)
+            break
+        # A key with nothing but the trailing **rest after it lacks a pattern;
+        # a **item in the middle is reported at itself once the key compiles.
+        if i == last or (i + 1 == last and doublestarred_p(items[last])):
+            raise form_error(
+                item, f"has key {item} without a pattern after it", "mapping pattern"
+            )
+        rst["keys"].append((yield value_pattern_expr(item, "mapping pattern")))
+        if doublestarred_p(items[i + 1]):
+            raise form_error(
+                items[i + 1], f"has {items[i + 1]} before its end", "mapping pattern"
+            )
+        rst["patterns"].append((yield pattern_parse(items[i + 1])))
+        i += 2
     return rst
 
 
