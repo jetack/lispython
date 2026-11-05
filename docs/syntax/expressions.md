@@ -284,8 +284,9 @@ del obj.attr
 import os.path
 ```
 Every part is an ordinary name, so hyphens become underscores (`a.b-c` is
-`a.b_c`). The dotted name must be one token that starts with a name: `.a`,
-`a.` and `a..b` are errors, and `a.b[0]` is refused (use `(sub a.b 0)`).
+`a.b_c`). The dotted name must be one token that starts with a name: `a.`
+and `a..b` are errors, a lone `.a` as a value is an error (`(.a obj)` is the
+method-call form below), and `a.b[0]` is refused (use `(sub a.b 0)`).
 
 ### `(. obj attr)`
 The object may be any expression, which a dotted name cannot be: a literal,
