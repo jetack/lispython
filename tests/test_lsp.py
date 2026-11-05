@@ -67,6 +67,16 @@ def test_document_symbols(buffer):
     assert [s.name for s in symbols] == ["foo", "bar"]
 
 
+def test_lazy_imports_are_outline_modules():
+    symbols = server.document_symbol(
+        ls_with("(lazy-import json)\n(lazy-from os [sep])\n"), position(0, 0)
+    )
+    assert [(s.name, s.kind) for s in symbols] == [
+        ("json", server.lsp.SymbolKind.Module),
+        ("os", server.lsp.SymbolKind.Module),
+    ]
+
+
 def test_definition_hover_and_references(buffer):
     ls = ls_with(buffer)
     [location] = server.definition(ls, position(1, 14))
@@ -292,3 +302,54 @@ def test_headless_forms_are_no_hover_or_completion_entry():
     # A headless kind ("method call", "slice") is no word a user types.
     assert not (set(HEADLESS_FORMS) & set(server.SPECIAL_FORM_DOCS))
     assert ".method" not in server.SPECIAL_FORM_DOCS
+
+
+class TestImportBindings:
+    """The definition index and go-to-definition bind exactly the names
+    Python binds for an import (import_bindings), keyed by source spelling."""
+
+    BOUND = {
+        "(import os.path as p)": {"p"},
+        "(import os.path)": {"os"},
+        "(from os.path [join as pjoin])": {"pjoin"},
+        "(from os.path [join] my-mod *)": {"join"},
+        "(from my-mod [a-b as c-d e-f])": {"c-d", "e-f"},
+    }
+    REFUSED = [
+        "(import os.path :as p)",
+        "(from os.path [join :as pjoin])",
+        "(import)",
+        "(from os.path)",
+        "(import (f) as p)",
+        "(from os.path [join as])",
+    ]
+
+    @pytest.mark.parametrize("source", sorted(BOUND))
+    def test_index_holds_exactly_the_bound_names(self, source):
+        defs = server.collect_definitions(parse(source), URI)
+        assert set(defs) == self.BOUND[source]
+
+    @pytest.mark.parametrize("source", sorted(BOUND))
+    def test_find_import_for_name_agrees_with_the_index(self, source):
+        tree = parse(source)
+        candidates = {"os", "os.path", "p", "join", "pjoin", "my-mod"}
+        candidates |= {"a-b", "c-d", "e-f", "a_b", "c_d"}
+        found = {n for n in candidates if server.find_import_for_name(tree, n)}
+        assert found == self.BOUND[source]
+
+    def test_an_alias_is_located_at_the_alias(self):
+        [loc] = server.collect_definitions(parse("(import os.path as p)"), URI)["p"]
+        assert (loc.range.start.character, loc.range.end.character) == (19, 20)
+
+    @pytest.mark.parametrize("source", REFUSED)
+    def test_a_form_the_compiler_refuses_binds_nothing(self, source):
+        tree = parse(source, partial=True)
+        assert server.collect_definitions(tree, URI) == {}
+        assert server.find_import_for_name(tree, "p") is None
+        assert server.find_import_for_name(tree, "pjoin") is None
+
+    def test_lazy_import_binds_on_a_python_without_it(self, monkeypatch):
+        monkeypatch.setattr(features, "running_version", lambda: (3, 11, 13))
+        tree = parse("(lazy-import os.path as p)\n(lazy-from os [sep])", partial=True)
+        assert set(server.collect_definitions(tree, URI)) == {"p", "sep"}
+        assert server.find_import_for_name(tree, "sep") is not None

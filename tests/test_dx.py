@@ -114,7 +114,7 @@ def test_signature_help_never_raises_on_a_mid_edit_buffer(source):
 
 WORKSPACE_FILE = """\
 (import os)
-(from os.path [join :as pjoin])
+(from os.path [join as pjoin])
 (def load-config [path] (for line in [1] (pass)) 1)
 (async-def fetch [] None)
 (defmacro unless-config [x] x)
