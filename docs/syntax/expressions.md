@@ -258,14 +258,61 @@ t"Hello, {2 * name!r:>12}!"  # interpolations[0].expression == "(* 2 name)"
 ```
 
 ## Attribute
+Two forms read an attribute: a dotted name, and `(. obj attr)`.
+
+### Dotted Name
+A name with dots in it is Python's attribute access. It chains, and it works
+anywhere a name does: as a value, a call head, an assignment or `del` target,
+and in `import`.
+
+LisPy version
+```python
+a.b.c
+(obj.method arg :kwarg value)
+(= obj.attr 1)
+(+= obj.count 1)
+(del obj.attr)
+(import os.path)
+```
+Python version
+```python
+a.b.c
+obj.method(arg, kwarg=value)
+obj.attr = 1
+obj.count += 1
+del obj.attr
+import os.path
+```
+Every part is an ordinary name, so hyphens become underscores (`a.b-c` is
+`a.b_c`). The dotted name must be one token that starts with a name: `a.`
+and `a..b` are errors, a lone `.a` as a value is an error (`(.a obj)` is the
+method-call form below), and `a.b[0]` is refused (use `(sub a.b 0)`).
+
+### `(. obj attr)`
+The object may be any expression, which a dotted name cannot be: a literal,
+call, subscription or other form on the left of the dot is not read as
+attribute access (`(f).x` and `"s".upper` are errors). `(. obj attr)` takes
+the attribute names after the object, so more than one chains them.
+
 LisPy version
 ```python
 (. obj attr)
+(. obj a b)
+(. (f) attr)
+(. (sub items 0) attr)
+(. "text" upper)
 ```
 Python version
 ```python
 obj.attr
+obj.a.b
+f().attr
+items[0].attr
+"text".upper
 ```
+Each attribute must be a plain name, so `(. obj (method))` is an error: to
+call a method on an expression use the method-call form below.
+
 ## Method Call
 LisPy version
 ```python
