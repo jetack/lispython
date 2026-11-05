@@ -13,9 +13,9 @@
 (from pygls.lsp.server [LanguageServer])
 
 (from lispy.core.nodes *)
-(from lispy.core.errors [compile-errors])
+(from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.parser [parse tokenize])
-(from lispy.core.compiler.stmt [type-alias-p])
+(from lispy.core.compiler.stmt [import-bindings type-alias-p])
 (from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
@@ -113,8 +113,8 @@ or an extra usage line names no usage key."
   {;; Forms outside FORM-USAGE
    "defmacro"  "```\n(defmacro name [args] body...)\n```\n\nDefine a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression."
    "do"        "```\n(do body...)\n```\n\nA statement block grouping several statements where one statement is expected (e.g. an `if` branch); not an expression."
-   "import"    "```\n(import module)\n(import module :as alias)\n```\n\nImport a module."
-   "from"      "```\n(from module [names...])\n(from module [name :as alias ...])\n```\n\nImport specific names from a module."
+   "import"    "```\n(import module)\n(import module as alias)\n```\n\nImport a module."
+   "from"      "```\n(from module [names...])\n(from module [name as alias ...])\n```\n\nImport specific names from a module."
    "require"   "```\n(require module)\n(require module *)\n(require module [names...])\n```\n\nImport macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none."
    "return"    "```\n(return value)\n```\n\nReturn a value from a function."
    "pass"      "```\n(pass)\n```\n\nNo-op placeholder statement."
@@ -345,7 +345,7 @@ or an extra usage line names no usage key."
   "Given an import/from/require node, resolve where the imported name is defined."
   (= form (. node op value))
   (cond
-    (== form "from")
+    (in form (, "from" "lazy-from"))
     (do ;; (from module [names...])
         (if (< (len node) 3)
             (return None))
@@ -355,7 +355,7 @@ or an extra usage line names no usage key."
             (return fpath))
         (return None))
 
-    (== form "import")
+    (in form (, "import" "lazy-import"))
     (do ;; (import module)
         (if (< (len node) 2)
             (return None))
@@ -377,6 +377,17 @@ or an extra usage line names no usage key."
 
     (return None)))
 
+(= IMPORT-HEADS (, "import" "from" "lazy-import" "lazy-from"))
+
+(def buffer-import-bindings [node]
+  "The [name symbol] pairs an import form binds, by the compiler's own rule
+   (import-bindings). The buffer may be mid-edit: a form the compiler would
+   reject binds nothing rather than raising."
+  (try
+    (return (import-bindings node))
+    (except [LispyCompileError]
+      (return []))))
+
 (def find-import-for-name [tree name]
   "Find the import/from/require node that imports a given name."
   (for node in tree
@@ -386,18 +397,10 @@ or an extra usage line names no usage key."
         (continue))
     (= form (ife (isinstance node.op Symbol) node.op.value ""))
     (cond
-      (== form "from")
-      (do ;; (from module [names...])
-          (for child in (sub node.list [: 1 None])
-            (if (isinstance child Bracket)
-                (for item in child.list
-                  (if (and (isinstance item Symbol) (== item.value name))
-                      (return node))))))
-      (== form "import")
-      (do ;; (import module) or (import module as alias)
-          (for child in (sub node.list [: 1 None])
-            (if (and (isinstance child Symbol) (== child.value name))
-                (return node))))
+      (in form IMPORT-HEADS)
+      (for [bound _] in (buffer-import-bindings node)
+        (if (== bound name)
+            (return node)))
       (== form "require")
       (do ;; the compiler's own rule decides which names this form registers
           ;; The buffer may be mid-edit: a require the compiler would
@@ -756,17 +759,10 @@ or an extra usage line names no usage key."
                                :defs defs :symbols symbols
                                :in-function in-function))
 
-      (in form (, "import" "from"))
-      (do (for child in (sub node.list [: 1 None])
-            (cond
-              (and (isinstance child Symbol) (not-in child.value (, "as" "*")))
-              (do (= loc (lsp.Location :uri uri :range (node-range child)))
-                  (.append (.setdefault defs child.value []) loc))
-              (isinstance child Bracket)
-              (for item in child.list
-                (if (and (isinstance item Symbol) (!= item.value "as"))
-                    (do (= loc (lsp.Location :uri uri :range (node-range item)))
-                        (.append (.setdefault defs item.value []) loc)))))))
+      (in form IMPORT-HEADS)
+      (for [name name-node] in (buffer-import-bindings node)
+        (= loc (lsp.Location :uri uri :range (node-range name-node)))
+        (.append (.setdefault defs name []) loc))
 
       ;; Default: recurse into nested paren forms
       (do (collect-definitions

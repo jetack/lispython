@@ -135,13 +135,15 @@ def import_name(sexp, form, dotted=True):
     return sexp
 
 
-def parse_names(names, form, from_p=False):
-    """The aliases of an import's names: ``name`` or ``name as alias``.
+def import_aliases(names, form, from_p=False):
+    """The one parse of an import's names: ``name`` or ``name as alias``.
 
-    Every part goes through the name model.
+    Returns ``(alias, name, asname)`` per name: the ``ast.alias`` and the
+    Symbols spelling the name and its alias (None when there is none). ``*``
+    is one alias with no Symbols. Every part goes through the name model.
     """
     if names == "*":
-        return [ast.alias(name="*", **names.position_info)]
+        return [(ast.alias(name="*", **names.position_info), None, None)]
     rst = []
     q = deque(names)
     while q:
@@ -149,10 +151,12 @@ def parse_names(names, form, from_p=False):
         aliased = len(q) > 1 and q[0] == "as"
         name = symbol_name(n) if from_p else module_path(n)[0]
         alias = ast.alias(name=name, **n.position_info)
+        asname = None
         if aliased:
             q.popleft()
-            alias.asname = symbol_name(import_name(q.popleft(), form, dotted=False))
-        rst.append(alias)
+            asname = import_name(q.popleft(), form, dotted=False)
+            alias.asname = symbol_name(asname)
+        rst.append((alias, n, asname))
     return rst
 
 
@@ -163,20 +167,28 @@ def lazy_kwargs(sexp, lazy):
     return {"is_lazy": 0} if features.import_has_is_lazy() else {}
 
 
-def import_compile(sexp, lazy=False):
+def import_parse(sexp):
+    """``(import a b as c ...)``: the import_aliases of its names."""
     [op, *names] = sexp.list
-    is_lazy = lazy_kwargs(sexp, lazy)
     if not names:
         raise LispyCompileError(f"({op} ...) needs at least one module name", sexp)
+    return import_aliases(names, str(op))
+
+
+def import_compile(sexp, lazy=False):
+    is_lazy = lazy_kwargs(sexp, lazy)
     return ast.Import(
-        names=parse_names(names, str(op)), **is_lazy, **sexp.position_info
+        names=[alias for alias, _, _ in import_parse(sexp)],
+        **is_lazy,
+        **sexp.position_info,
     )
 
 
-def importfrom_compile(sexp, lazy=False):
+def importfrom_parse(sexp, lazy=False):
+    """``(from m [names] m2 * ...)``: per module, ``[module, level, position
+    info, names node, import_aliases of the names]``."""
     [op, *args] = sexp.list
     form = str(op)
-    is_lazy = lazy_kwargs(sexp, lazy)
     if not args or len(args) % 2:
         raise LispyCompileError(f"({form} ...) takes module and [names] pairs", sexp)
     modules = [import_name(module, form) for module in args[::2]]
@@ -202,15 +214,57 @@ def importfrom_compile(sexp, lazy=False):
         for module in modules
     ]
     return [
+        [module, level, pos_info, names, import_aliases(names, form, from_p=True)]
+        for [[module, level, pos_info], names] in zip(module_level, namess)
+    ]
+
+
+def importfrom_compile(sexp, lazy=False):
+    is_lazy = lazy_kwargs(sexp, lazy)
+    return [
         ast.ImportFrom(
             module=module,
-            names=parse_names(names, form, from_p=True),
+            names=[alias for alias, _, _ in aliases],
             level=level,
             **is_lazy,
-            **merge_position_infos(module_pos_info, names.position_info),
+            **merge_position_infos(pos_info, names.position_info),
         )
-        for [[module, level, module_pos_info], names] in zip(module_level, namess)
+        for [module, level, pos_info, names, aliases] in importfrom_parse(sexp, lazy)
     ]
+
+
+def import_bindings(sexp):
+    """The names an import form binds, as ``[source name, Symbol]`` pairs.
+
+    The one home of that rule, read off the compiler's own parse, so the LSP
+    indexes exactly what Python binds: ``(import a.b)`` binds ``a``,
+    ``(import a.b as c)`` and ``(from m [x as c])`` bind only ``c``, and
+    ``(from m [x])`` binds ``x``; ``*`` binds nothing knowable. The Symbol is
+    the alias when there is one, else the name; names keep their source
+    spelling (``my-mod``), as the LSP's index does. ``sexp`` is an import,
+    from, lazy-import or lazy-from form. The lazy forms' version gate is not
+    applied: it refuses the AST on an older Python, not the binding. A
+    malformed form raises LispyCompileError, as compiling it would.
+    """
+    form = atom_text(sexp.op)
+    from_p = form in ("from", "lazy-from")
+    aliases = (
+        [
+            alias
+            for *_, clause in importfrom_parse(sexp, lazy=form == "lazy-from")
+            for alias in clause
+        ]
+        if from_p
+        else import_parse(sexp)
+    )
+    bindings = []
+    for _, name, asname in aliases:
+        if asname is not None:
+            bindings.append([atom_text(asname), asname])
+        elif name is not None:
+            text = atom_text(name)
+            bindings.append([text if from_p else text.split(".")[0], name])
+    return bindings
 
 
 def if_p(sexp):
