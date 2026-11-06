@@ -129,12 +129,17 @@ def test_backend_setting(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "init_options", [{"backend": "off"}, {"backend": "no-such"}, None]
+    "init_options, installed",
+    [({"backend": "off"}, True), ({"backend": "no-such"}, True), (None, False)],
 )
-def test_off_never_spawns(init_options, project, tmp_path, spawned, monkeypatch):
-    # Defect: an off, unknown or (the default on a plain install) missing
-    # backend still starts a process, or a request on it raises.
-    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: None)
+def test_off_never_spawns(
+    init_options, installed, project, tmp_path, fake_argv, spawned, monkeypatch
+):
+    # Defect: an off or unknown backend starts the installed default in its
+    # place, the default starts on a plain install, or a request on an off
+    # backend raises.
+    argv = fake_argv if installed else None
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: argv)
     folder = SimpleNamespace(uri=project.as_uri())
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
     backends.configure(init_options)
@@ -273,7 +278,8 @@ def test_running_backend_follows_the_buffer(project, tmp_path, fake_argv):
         finally:
             await backends.shutdown_all()
 
-    run_bounded(scenario())
+    # Bounds the poll for the pushed text too.
+    run_bounded(scenario(), timeout=10)
 
 
 # ---------------------------------------------------------------------------
