@@ -1429,6 +1429,106 @@
                            :package package :name name :import-root import-root
                            :generation generation)))
 
+;; Cursor-view compiles are scheduled apart from compile-latest's diagnostics
+;; loop on purpose: that loop keeps only a document's latest run, while a
+;; cursor view is asked at a position by many handlers at once, and every live
+;; caller of the latest version gets the view it asked for.
+
+(class CursorCompile []
+  "One cursor-view compile of a document: args, cursor-view's arguments
+   (generation, read on the loop, included); waiters, the futures of the
+   callers awaiting its view."
+  (def __init__ [self args]
+    (= self.args args)
+    (= self.waiters [])))
+
+(def _live-waiters-p [entry]
+  (return (any ((not (.done waiter)) for waiter in entry.waiters))))
+
+(class CursorCompiles []
+  "A document's cursor-view compiles: version, the latest version asked;
+   pending, args -> the CursorCompile not yet started, all of that version;
+   running, the one in flight (its thread cannot be stopped), or None;
+   task, the task running them one after another, or None."
+  (def __init__ [self]
+    (= self.version None)
+    (= self.pending {})
+    (= self.running None)
+    (= self.task None)))
+
+;; uri -> the CursorCompiles of a document with a cursor-view compile pending
+;; or running; dropped once it has neither.
+(= CURSOR-COMPILES {})
+
+(def scheduled-cursor-view [uri version source line col name package import-root]
+  "A future of cursor-view at the 1-based line and code-point col of
+   document uri's source at version, of its own for each caller, so a
+   timeout or cancellation of one caller never stops the compile others
+   wait for.  Per document one compile runs at a time (run-cursor-compiles);
+   a request with the same arguments as one pending or running shares its
+   view, and one at another version gives every waiter of a pending older
+   compile None.  A pending compile whose callers all gave up is never
+   started, so abandoned keystrokes queue no compiles behind a slow one."
+  (= future (.create-future (asyncio.get-running-loop)))
+  (= args (, uri version source line col name package import-root
+             view-cache.generation))
+  (= state (.get CURSOR-COMPILES uri))
+  (if (is state None)
+      (do (= state (CursorCompiles))
+          (= (sub CURSOR-COMPILES uri) state)))
+  (if (and (is-not state.running None) (== state.running.args args))
+      (do (.append state.running.waiters future)
+          (return future)))
+  (if (!= version state.version)
+      (do (for entry in (.values state.pending)
+            (for waiter in entry.waiters
+              (if (not (.done waiter))
+                  (.set-result waiter None))))
+          (.clear state.pending)
+          (= state.version version)))
+  (for [key entry] in (list (.items state.pending))
+    (if (not (_live-waiters-p entry))
+        (del (sub state.pending key))))
+  (= entry (.setdefault state.pending args (CursorCompile args)))
+  (.append entry.waiters future)
+  (if (is state.task None)
+      (= state.task (asyncio.ensure-future (run-cursor-compiles uri state))))
+  (return future))
+
+(async-def run-cursor-compiles [uri state]
+  "Run state's pending cursor-view compiles in order, each in a thread,
+   skipping one with no live waiter, and hand each live waiter its view or
+   its exception; then forget the document's state."
+  (try
+    (while state.pending
+      (= args (next (iter state.pending)))
+      (= entry (.pop state.pending args))
+      (if (not (_live-waiters-p entry))
+          (continue))
+      (= state.running entry)
+      (= error None)
+      (try
+        (= view (await (asyncio.to-thread cursor-view *args)))
+        (except [Exception as e]
+          (= error e)))
+      ;; Left set when the task is cancelled, so its waiters are cancelled.
+      (= state.running None)
+      (for waiter in entry.waiters
+        (cond (.done waiter)
+              (continue)
+              (is error None)
+              (.set-result waiter view)
+              True
+              (.set-exception waiter error))))
+    (finally
+      (= state.task None)
+      (for entry in (+ (list (.values state.pending))
+                       (ife (is state.running None) [] [state.running]))
+        (for waiter in entry.waiters
+          (.cancel waiter)))
+      (if (is (.get CURSOR-COMPILES uri) state)
+          (del (sub CURSOR-COMPILES uri))))))
+
 (def generated-position [view :offset 0]
   "view.cursor, offset code points along its line, as an LSP Position over
    view.text, in UTF-16 units: the backend client negotiates no position
@@ -1604,8 +1704,8 @@
   (if (is path None)
       (return (, None None)))
   (= [name package import-root] (module-names path))
-  (= making (asyncio.to-thread cursor-view doc.uri doc.version doc.source line col
-                               name package import-root view-cache.generation))
+  (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
+                                   name package import-root))
   (try
     (= view (await (ife (is deadline None) making (asyncio.wait-for making timeout))))
     (except [TimeoutError]
@@ -1673,8 +1773,16 @@
 (def document-snapshot [doc]
   "doc's text, version and position codec as they are now.  A handler that
    awaits reads the buffer from the snapshot, never from the live document,
-   which an edit during the await changes under the cursor it computed."
-  (return (TextDocument doc.uri doc.source
+   which an edit during the await changes under the cursor it computed.
+   A document that is not open is read from disk (pygls); one that cannot
+   be read (missing, not UTF-8) is snapshot as empty text, so a handler
+   gives its general or empty answer instead of raising."
+  (try
+    (= source doc.source)
+    ;; UnicodeDecodeError is a ValueError.
+    (except [(, OSError ValueError)]
+      (= source "")))
+  (return (TextDocument doc.uri source
                         :version (getattr doc "version" None)
                         :position-codec (getattr doc "position_codec" None))))
 
