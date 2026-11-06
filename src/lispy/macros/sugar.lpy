@@ -1,16 +1,38 @@
+;; Every macro's docstring is its documentation (LSP hover, the docs site's
+;; form reference, llms.txt): the first line is the usage, then a blank line,
+;; then the description. lispy.form_docs reads it; tests/test_docs.py refuses
+;; a macro without one.
+
 (defmacro cond [*body]
+  "(cond test then test then ... else)
+
+  Nested `if` statements: each test/then pair is one branch (`elif` after the
+  first) and a trailing odd operand is the final `else`. It is a statement and
+  yields no value: use `conde` for a value, and `(do ...)` for a branch of
+  several forms."
   (if (< (len body) 4)
       (return `(if ~@body))
       (do (= [test then *orelse] body)
           (return `(if ~test ~then (cond ~@orelse))))))
 
 (defmacro conde [*body]
+  "(conde test then test then ... else)
+
+  The expression form of `cond`: a chain of `ife` whose trailing odd operand is
+  the final else. Always give the else: with an even number of operands the
+  last test is never evaluated and its then is the else."
   (if (<= (len body) 2)
       (return (sub body -1))
       (do (= [test then *orelse] body)
           (return `(ife ~test ~then (conde ~@orelse))))))
 
 (defmacro -> [x *fs]
+  "(-> value form ...)
+
+  Thread-first: insert `value` as the first argument of the first form, that
+  result as the first argument of the next, and so on. A form that is not a
+  parenthesised call, such as a bare name, is called with the value:
+  `(-> x f (g 2))` is `g(f(x), 2)`."
   (if (== 0 (len fs))
       (return x))
   (= [f *rest] fs)
@@ -20,6 +42,13 @@
       (return `(-> (~f ~x) ~@rest))))
 
 (defmacro ->> [x *fs]
+  "(->> value form ...)
+
+  Thread-last: insert `value` as the last argument of the first form, that
+  result as the last argument of the next, and so on. A form that is not a
+  parenthesised call, such as a bare name, is called with the value, but the
+  steps after it then thread first instead of last: write every step as a
+  parenthesised call."
   (if (== 0 (len fs))
       (return x))
   (= [f *rest] fs)
@@ -37,6 +66,11 @@
 ;; := in some positions (e.g. a comprehension's iterable, annotations,
 ;; type-alias values); there it is a loud compile error, so bind the value first.
 (defmacro as-> [expr name *forms]
+  "(as-> value name form ...)
+
+  Bind `name` to `value`, then to each form's result in turn, and yield the
+  last result, so `name` can stand anywhere in a form. An expression: each
+  form is evaluated once, left to right, in the caller's scope."
   (if (== 0 (len forms))
       (return expr))
   (= sym (gensym (str name)))
@@ -47,22 +81,45 @@
   (return `(sub (, ~@steps) -1)))
 
 (defmacro fn [*body]
+  "(fn [args] body)
+
+  Alias of `lambda`: an anonymous function whose body is one expression."
   (return `(lambda ~@body)))
 
 (defmacro comment [*body]
+  "(comment body...)
+
+  Ignore the body: nothing in it is compiled or evaluated, and the form
+  expands to `None`."
   (pass))
 
 (defmacro when [condition *body]
+  "(when test body...)
+
+  An `if` statement with no else, whose branch runs every body form in order.
+  A statement: it yields no value."
   (return `(if ~condition (do ~@body))))
 
 (defmacro inc [elt]
+  "(inc value)
+
+  The expression `value + 1`; `value` itself is left unchanged."
   (return `(+ ~elt 1)))
 
 (defmacro dec [elt]
+  "(dec value)
+
+  The expression `value - 1`; `value` itself is left unchanged."
   (return `(- ~elt 1)))
 
 (defmacro ++ [elt]
+  "(++ target)
+
+  The statement `target += 1`."
   (return `(+= ~elt 1)))
 
 (defmacro -- [elt]
+  "(-- target)
+
+  The statement `target -= 1`."
   (return `(-= ~elt 1)))

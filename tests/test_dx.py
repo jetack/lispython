@@ -90,6 +90,22 @@ def test_signature_help_of_a_special_form_is_its_documented_form():
     assert signature_at("(ife x |") == FORM_USAGE["ife"]
 
 
+def test_signature_help_of_a_required_built_in_macro_is_its_docstring_usage():
+    assert signature_at("(require lispy.macros *)\n(fn |") == "(fn [args] body)"
+    assert signature_at("(fn |") is None
+    assert (
+        signature_at("(require lispy.macros)\n(lispy.macros.fn |") == "(fn [args] body)"
+    )
+
+
+def test_signature_help_of_a_plain_call_does_not_parse_the_buffer(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("parsed the buffer")
+
+    monkeypatch.setattr(server, "parse", refuse)
+    assert signature_at("(len x|)") == LEN
+
+
 @pytest.mark.parametrize(
     ["marked", "expected"],
     [

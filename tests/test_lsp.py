@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import lispy.macros
+from lispy import form_docs
 from lispy.core.compiler import features
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
 from lispy.core.parser import parse
@@ -252,14 +254,31 @@ class TestRequireSelection:
     @pytest.mark.parametrize(
         "form",
         [
-            "(require m foo)",
-            "(require m [a] b)",
-            '(require m "ab")',
-            "(require m :as x)",
+            "(require lispy.macros foo)",
+            "(require lispy.macros [a] b)",
+            '(require lispy.macros "ab")',
+            "(require lispy.macros :as x)",
+            "(require)",
         ],
     )
     def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
-        assert self._find(form + "\n(print 1)", "print") is None
+        # The module is a built-in macro module, so only the malformed
+        # selection stands between the buffer and a hover on `cond`.
+        tree = parse(form + "\n(cond)")
+        assert server.find_import_for_name(tree, "print") is None
+        assert server.builtin_macro_doc(tree, "cond") is None
+
+    def test_bare_require_of_the_built_in_macros_is_qualified_only(self):
+        tree = parse("(require lispy.macros)\n(cond)")
+        assert server.builtin_macro_doc(tree, "cond") is None
+        assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
+
+
+def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
+    items = server.general_items(SimpleNamespace(source="", uri=URI))
+    keywords = {i.label for i in items if i.detail == "keyword"}
+    # Beyond the macros, only `gensym` (a function inside defmacro bodies).
+    assert keywords - {"gensym"} == set(lispy.macros.__macro_namespace)
 
 
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,
@@ -268,13 +287,13 @@ FORM_KEYS = sorted(k for k in FORM_USAGE if k not in HEADLESS_FORMS)
 
 
 def test_hand_written_docs_do_not_shadow_form_usage():
-    assert not (set(server.HAND_WRITTEN_DOCS) & set(FORM_USAGE))
-    server.refuse_shadowing(server.HAND_WRITTEN_DOCS, FORM_USAGE)
+    assert not (set(form_docs.HAND_WRITTEN_DOCS) & set(FORM_USAGE))
+    form_docs.refuse_shadowing(form_docs.HAND_WRITTEN_DOCS, FORM_USAGE)
 
 
 def test_a_hand_written_entry_shadowing_form_usage_is_refused():
     with pytest.raises(RuntimeError, match="shadows FORM_USAGE entries: .*'del'"):
-        server.refuse_shadowing({"del": "Delete."}, {"del": "(del x)"})
+        form_docs.refuse_shadowing({"del": "Delete."}, {"del": "(del x)"})
 
 
 @pytest.mark.parametrize("key", FORM_KEYS)
@@ -283,19 +302,21 @@ def test_form_hover_usage_is_the_compilers(key):
     lines = re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1).split("\n")
     assert lines.count(FORM_USAGE[key]) == 1
     others = [line for line in lines if line != FORM_USAGE[key]]
-    assert others == ([server.EXTRA_USAGE[key]] if key in server.EXTRA_USAGE else [])
+    assert others == (
+        [form_docs.EXTRA_USAGE[key]] if key in form_docs.EXTRA_USAGE else []
+    )
 
 
 def test_form_prose_must_match_form_usage():
     with pytest.raises(RuntimeError, match="no prose for .*'del'"):
-        server.form_docs({"del": "(del x)"}, {}, {})
+        form_docs.form_docs({"del": "(del x)"}, {}, {})
     with pytest.raises(RuntimeError, match="no usage for .*'zap'"):
-        server.form_docs({}, {"zap": "Zap."}, {})
+        form_docs.form_docs({}, {"zap": "Zap."}, {})
 
 
 def test_an_extra_usage_key_without_form_usage_is_refused():
     with pytest.raises(RuntimeError, match="EXTRA-USAGE.*'zap'"):
-        server.form_docs({"del": "(del x)"}, {"del": "Del."}, {"zap": "(zap)"})
+        form_docs.form_docs({"del": "(del x)"}, {"del": "Del."}, {"zap": "(zap)"})
 
 
 def test_def_hover_shows_the_compilers_arguments():
@@ -309,6 +330,40 @@ def test_or_operator_and_or_pattern_share_one_entry():
     block = re.search(r"```\n(.+?)\n```", doc, re.DOTALL).group(1)
     assert block == "(| a b ...)\n" + FORM_USAGE["|"]
     assert "or-pattern" in doc
+
+
+def test_an_undocumented_statement_head_is_refused():
+    with pytest.raises(RuntimeError, match="no form docs: .*'zap'"):
+        form_docs.refuse_undocumented({"zap"}, {})
+
+
+class TestBuiltinMacroHover:
+    """Hover on a built-in macro shows its docstring, where the buffer
+    requires it (the compiler's require rule)."""
+
+    @staticmethod
+    def _hover(source, line, character):
+        hover = run_hover(ls_with(source), position(line, character))
+        return None if hover is None else hover.contents.value
+
+    def test_hover_shows_the_docstring_usage_and_prose(self):
+        text = self._hover("(require lispy.macros *)\n(cond x 1 y 2)", 1, 2)
+        usage = re.search(r"```\n(.+?)\n```", text, re.DOTALL).group(1)
+        assert usage == "(cond test then test then ... else)"
+        assert "*(built-in macro)*" in text
+        assert "`conde`" in text
+
+    def test_qualified_require_names_the_macro_by_module(self):
+        source = "(require lispy.macros)\n(lispy.macros.inc x)"
+        assert "(inc value)" in self._hover(source, 1, 3)
+
+    @pytest.mark.parametrize(
+        "source",
+        ["(cond x 1 y 2)", "(require lispy.macros [when])\n(cond x 1 y 2)"],
+    )
+    def test_no_macro_hover_where_the_buffer_does_not_require_it(self, source):
+        line = source.count("\n")
+        assert self._hover(source, line, 2) is None
 
 
 def test_headless_forms_are_no_hover_or_completion_entry():

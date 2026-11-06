@@ -20,9 +20,12 @@
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
 (from lispy.core.compiler.literal [identifier-p])
-(from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
+;; Hover, signature help and completion read the form docs from their one
+;; home, which the docs site reads too.
+(from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
+                       TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [ViewCache module-names open-form-closers partial-span
                              py-name source-prefix view-at-cursor])
 (from lispy.lsp.backend [Backends])
@@ -34,134 +37,6 @@
 ;; ---------------------------------------------------------------------------
 
 (= server (LanguageServer "lpy-lsp" "v0.1.0"))
-
-;; ---------------------------------------------------------------------------
-;; Special-form documentation (for hover)
-;; ---------------------------------------------------------------------------
-
-;; Statement and expression forms: the usage line is FORM-USAGE (the
-;; compiler's own error-message table), so hover and compile errors cannot
-;; drift apart. Only the explanatory sentence is written here, keyed by
-;; FORM-USAGE key.
-(= FORM-PROSE
-  {"def"       "Define a function. Arguments are given in a bracket list. An optional docstring can follow the argument list."
-   "async-def" "Define an async function (coroutine)."
-   "class"     "Define a class. Bases are given in a bracket list."
-   "if"        "Conditional statement. Compiles to Python `if/else`."
-   "while"     "While loop."
-   "for"       "For loop. `target` is bound to each element of `iterable`."
-   "async-for" "Async for loop — use inside `async-def`."
-   "match"     "Structural pattern matching (Python 3.10+)."
-   "case"      "One arm of a `match`: a pattern, an optional `as` name and `if` guard, then the body."
-   "try"       "Try/except/finally statement."
-   "except"    "Exception handler clause of a `try`."
-   "except*"   "Exception-group handler clause of a `try` (Python 3.11+)."
-   "else"      "Clause of a `try` that runs when no exception was raised."
-   "finally"   "Clause of a `try` that always runs on exit."
-   "with"      "Context manager statement."
-   "async-with" "Async context manager — use inside `async-def`."
-   "="         "Assignment statement."
-   "raise"     "Raise an exception."
-   "assert"    "Assert that a condition is true."
-   "del"       "Delete a name or item."
-   "global"    "Declare names as global variables."
-   "nonlocal"  "Declare names as nonlocal variables."
-   "deco"      "Apply a decorator to the following function/class definition."
-   "|"         "Bitwise OR as an operator; inside a `case`, an or-pattern matching any alternative."
-   ":="        "Walrus operator (assignment expression)."
-   "."         "Attribute access (`obj.attr`); `(. obj a b)` is `obj.a.b`."
-   "ife"       "Ternary conditional expression (`then if test else else`)."
-   "sub"       "Subscript access (`obj[index]`); more indexes subscript again."
-   "lambda"    "Anonymous function (lambda expression)."
-   "await"     "Await a coroutine."
-   "yield"     "Yield a value from a generator."
-   "yield-from" "Yield all values from a sub-generator."
-   "and"       "Logical AND (short-circuit)."
-   "or"        "Logical OR (short-circuit)."
-   "=="        "Equality test."
-   "!="        "Inequality test."
-   "<"         "Less than."
-   "<="        "Less than or equal."
-   ">"         "Greater than."
-   ">="        "Greater than or equal."
-   "is"        "Identity test (`x is y`)."
-   "is-not"    "Negated identity test (`x is not y`)."
-   "in"        "Membership test (`x in y`)."
-   "not-in"    "Negated membership test (`x not in y`)."})
-
-(for op in augassignop-dict
-  (= (sub FORM-PROSE op) f"Augmented assignment (`target {op} value`)."))
-
-;; Extra usage lines shown above the FORM_USAGE line, for a key that is also
-;; an ordinary call: `|` is the n-ary bitwise-OR operator as well as the
-;; or-pattern. Signature help uses the whole code block as its label.
-(= EXTRA-USAGE {"|" "(| a b ...)"})
-
-(def form-docs [usage prose extras]
-  "Hover entries for the FORM-USAGE forms; raises if usage and prose disagree
-or an extra usage line names no usage key."
-  (= usage-keys (set usage))
-  (for kind in HEADLESS-FORMS
-    (.discard usage-keys kind))
-  (= missing (- usage-keys (set prose)))
-  (= extra (- (set prose) usage-keys))
-  (if (or missing extra)
-      (raise (RuntimeError f"FORM-PROSE out of sync with FORM_USAGE: no prose for {(sorted missing)}, no usage for {(sorted extra)}")))
-  (= orphans (- (set extras) (set usage)))
-  (if orphans
-      (raise (RuntimeError f"EXTRA-USAGE names keys with no FORM_USAGE entry: {(sorted orphans)}")))
-  (= docs {})
-  (for key in prose
-    (= lines (+ (ife (in key extras) [(sub extras key)] []) [(sub usage key)]))
-    (= (sub docs key) f"```\n{(.join "\n" lines)}\n```\n\n{(sub prose key)}"))
-  (return docs))
-
-(= HAND-WRITTEN-DOCS
-  {;; Forms outside FORM-USAGE
-   "defmacro"  "```\n(defmacro name [args] body...)\n```\n\nDefine a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression."
-   "do"        "```\n(do body...)\n```\n\nA statement block grouping several statements where one statement is expected (e.g. an `if` branch); not an expression."
-   "import"    "```\n(import module)\n(import module as alias)\n```\n\nImport a module."
-   "from"      "```\n(from module [names...])\n(from module [name as alias ...])\n```\n\nImport specific names from a module."
-   "require"   "```\n(require module)\n(require module *)\n(require module [names...])\n```\n\nImport macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none."
-   "return"    "```\n(return value)\n```\n\nReturn a value from a function."
-   "pass"      "```\n(pass)\n```\n\nNo-op placeholder statement."
-   "break"     "```\n(break)\n```\n\nBreak out of a loop."
-   "continue"  "```\n(continue)\n```\n\nContinue to the next loop iteration."
-   ;; Expression forms
-   ","         "```\n(, a b c)\n```\n\nTuple literal."
-   "fn"        "```\n(fn [args] body)\n```\n\nLambda alias — same as `lambda`."
-   ;; Operators
-   "+"  "Arithmetic addition / unary positive."
-   "-"  "Arithmetic subtraction / unary negative."
-   "*"  "Arithmetic multiplication / iterable unpacking."
-   "/"  "True division."
-   "//" "Floor (integer) division."
-   "%"  "Modulo (remainder)."
-   "**" "Exponentiation."
-   "@"  "Matrix multiplication."
-   "<<" "Bitwise left shift."
-   ">>" "Bitwise right shift."
-   "^"  "Bitwise XOR."
-   "&"  "Bitwise AND."
-   "~"  "Bitwise NOT / unquote (inside quasiquote)."
-   "not" "Logical NOT."
-   ;; Macro-related
-   "'"  "Quote — prevent evaluation; return the form as data."
-   "`"  "Quasiquote — like quote but allows unquote (`~`) splicing."
-   "~@" "Unquote-splice — splice a list into a quasiquote."
-   "f-string" "```\nf\"text {expr} more\"\n```\n\nFormatted string literal (f-string)."})
-
-;; A hand-written entry sharing a key with FORM-USAGE would silently override
-;; the derived one in the merge below, so it is refused here.
-(def refuse-shadowing [hand-written usage]
-  "Raises if a hand-written entry shares a key with usage."
-  (= shadowed (& (set hand-written) (set usage)))
-  (if shadowed
-      (raise (RuntimeError f"HAND-WRITTEN-DOCS shadows FORM_USAGE entries: {(sorted shadowed)}"))))
-
-(refuse-shadowing HAND-WRITTEN-DOCS FORM-USAGE)
-
-(= SPECIAL-FORM-DOCS {**(form-docs FORM-USAGE FORM-PROSE EXTRA-USAGE) **HAND-WRITTEN-DOCS})
 
 ;; ---------------------------------------------------------------------------
 ;; Python builtins introspection
@@ -402,6 +277,29 @@ or an extra usage line names no usage key."
     (except [LispyCompileError]
       (return []))))
 
+(def require-registered-name [node name]
+  "The name, in the required module, of the macro a (require ...) node
+   registers as `name`, or None when it registers no such name. The
+   compiler's own rule (require-selection) decides; the buffer may be
+   mid-edit, so a require the compiler would reject registers nothing."
+  (try
+    (= [kind names] (require-selection (sub node.list [: 2 None])))
+    (except [(, TypeError ValueError)]
+      (return None)))
+  (cond
+    ;; (require module): macros are registered as module.name
+    (== kind REQUIRE-QUALIFIED)
+    (do (= prefix (ife (> (len node) 1) (+ (str (sub node 1)) ".") None))
+        (if (and prefix (.startswith name prefix))
+            (return (sub name [: (len prefix) None]))))
+    ;; (require module *): every macro, names unknown without importing
+    (== kind REQUIRE-ALL)
+    (return name)
+    ;; (require module [a b]): exactly those; [] imports nothing
+    (in name names)
+    (return name))
+  (return None))
+
 (def find-import-for-name [tree name]
   "Find the import/from/require node that imports a given name."
   (for node in tree
@@ -415,26 +313,30 @@ or an extra usage line names no usage key."
       (for [bound _] in (buffer-import-bindings node)
         (if (== bound name)
             (return node)))
-      (== form "require")
-      (do ;; the compiler's own rule decides which names this form registers
-          ;; The buffer may be mid-edit: a require the compiler would
-          ;; reject binds nothing rather than raising.
-          (try
-            (= [kind names] (require-selection (sub node.list [: 2 None])))
-            (except [(, TypeError ValueError)]
-              (continue)))
-          (cond
-            ;; (require module): macros are registered as module.name
-            (== kind REQUIRE-QUALIFIED)
-            (if (and (> (len node) 1)
-                     (.startswith name (+ (str (sub node 1)) ".")))
-                (return node))
-            ;; (require module *): every macro, names unknown without importing
-            (== kind REQUIRE-ALL)
-            (return node)
-            ;; (require module [a b]): exactly those; [] imports nothing
-            (in name names)
-            (return node)))))
+      (and (== form "require")
+           (is-not (require-registered-name node name) None))
+      (return node)))
+  (return None))
+
+(def builtin-macro-name-p [name]
+  "Whether `name` could be a built-in macro in some buffer: its last dotted
+   part (a qualified (require module) call is module.name) is one. A cheap
+   test to make before parsing the buffer for builtin-macro-doc."
+  (return (in (sub (.rpartition name ".") 2) BUILTIN-MACROS)))
+
+(def builtin-macro-doc [tree name]
+  "The hover markdown of the built-in macro `name` refers to, or None: only
+   where the buffer requires it from the built-in macro modules, since a
+   file without that require has no such macro (`fn` is then just a name)."
+  (for node in tree
+    (if (and (isinstance node Paren)
+             (> (len node) 1)
+             (isinstance node.op Symbol)
+             (== node.op.value "require")
+             (in (str (sub node 1)) BUILTIN-MACRO-MODULES))
+        (do (= macro (require-registered-name node name))
+            (if (in macro BUILTIN-MACROS)
+                (return (hover-markdown (sub BUILTIN-MACROS macro)))))))
   (return None))
 
 ;; ---------------------------------------------------------------------------
@@ -869,10 +771,9 @@ or an extra usage line names no usage key."
       (return [])))
   (return (walk-symbols tree))))
 
-;; Not in SPECIAL-FORM-DOCS: `type` is also the builtin, so the alias doc applies
-;; only where type-alias-p (the compiler's own test) accepts the form.
-(= TYPE-ALIAS-DOC
-   "```\n(type Name value)\n(type Name[T] value)\n```\n\nDefine a type alias (Python 3.12+).")
+;; TYPE-ALIAS-DOC is not in SPECIAL-FORM-DOCS: `type` is also the builtin, so
+;; the alias doc applies only where type-alias-p (the compiler's own test)
+;; accepts the form.
 
 (def alias-keyword-p [nodes target]
   "True when target is the `type` of a (type NAME value) alias statement."
@@ -890,11 +791,13 @@ or an extra usage line names no usage key."
 
 (def form-hover [tree target]
   "lispython's own hover of Symbol target, or None: the alias doc on the
-   type of a type alias, else a special form's doc.  It answers before any
-   backend, which knows no lispython form."
+   type of a type alias, else a special form's doc, else the docstring of a
+   built-in macro the buffer requires.  It answers before any backend,
+   which knows no lispython form."
   (if (and (== target.value "type") (alias-keyword-p tree target))
       (return (markdown-hover TYPE-ALIAS-DOC target)))
-  (= doc-text (.get SPECIAL-FORM-DOCS target.value))
+  (= doc-text (or (.get SPECIAL-FORM-DOCS target.value)
+                  (builtin-macro-doc tree target.value)))
   (if doc-text
       (return (markdown-hover doc-text target)))
   (return None))
@@ -1068,45 +971,51 @@ or an extra usage line names no usage key."
                   (lsp.Position :line pos.line :character pos.character)))
   (return (, (+ server-pos.line 1) server-pos.character)))
 
-(def local-signature-help [func-name]
-  "lispython's own SignatureHelp for a call of func-name (None: no call): a
-   special form's documented usage, else a Python builtin's BUILTIN-INFO
-   signature, else None."
+(def form-signature-help [source func-name]
+  "lispython's own SignatureHelp for a form headed func-name (None: no head),
+   or None: a special form's documented usage, else the docstring usage of
+   a built-in macro the buffer source requires.  The buffer is parsed only
+   when func-name could name a built-in macro (builtin-macro-name-p)."
   (if (is func-name None)
       (return None))
-  ;; 1. Special forms
-  (= doc-text (.get SPECIAL-FORM-DOCS func-name))
-  (if doc-text
-      (do (= m (re.search "```\\n(.+?)\\n```" doc-text re.DOTALL))
-          (= sig-text (ife m (.strip (.group m 1)) func-name))
-          (return (lsp.SignatureHelp
+  (= doc-text (or (.get SPECIAL-FORM-DOCS func-name)
+                  (and (builtin-macro-name-p func-name)
+                       (builtin-macro-doc (parse source :partial True) func-name))))
+  (if (not doc-text)
+      (return None))
+  (= m (re.search "```\\n(.+?)\\n```" doc-text re.DOTALL))
+  (return (lsp.SignatureHelp
             :signatures [(lsp.SignatureInformation
-                           :label sig-text
+                           :label (ife m (.strip (.group m 1)) func-name)
                            :documentation (lsp.MarkupContent
-                             :kind lsp.MarkupKind.Markdown
-                             :value doc-text))]))))
+                                            :kind lsp.MarkupKind.Markdown
+                                            :value doc-text))])))
 
-  ;; 2. Python builtins
-  (= builtin-name (.replace func-name "-" "_"))
-  (= bi (.get BUILTIN-INFO builtin-name))
-  (if bi
-      (do (= sig (.get bi "signature" func-name))
-          (= doc-str (.get bi "doc" ""))
-          (return (lsp.SignatureHelp
+(def builtin-signature-help [func-name]
+  "The BUILTIN-INFO SignatureHelp of a call of func-name, or None: the
+   answer when neither lispython nor a backend gives one."
+  (if (is func-name None)
+      (return None))
+  (= bi (.get BUILTIN-INFO (.replace func-name "-" "_")))
+  (if (not bi)
+      (return None))
+  (= doc-str (.get bi "doc" ""))
+  (return (lsp.SignatureHelp
             :signatures [(lsp.SignatureInformation
-                           :label sig
+                           :label (.get bi "signature" func-name)
                            :documentation (ife doc-str
                                               (lsp.MarkupContent
                                                 :kind lsp.MarkupKind.Markdown
                                                 :value doc-str)
-                                              None))]))))
-
-  (return None))
+                                              None))])))
 
 ;; The innermost open form decides, not the innermost named one: in
 ;; (print ((. x sort) |)) the call being typed is the method's, which only
 ;; the backend knows, while (print (when x |)) is inside a form no backend
-;; knows, so the local answer (none) stands rather than print's.
+;; knows, so the local answer (when's usage where the buffer requires it,
+;; else none) stands rather than print's.  lispython's own forms answer
+;; first (form-signature-help); a macro the buffer defines has no usage to
+;; show, and the backend is not asked about it (signature-request).
 (deco (server.feature
         lsp.TEXT_DOCUMENT_SIGNATURE_HELP
         (lsp.SignatureHelpOptions :trigger-characters ["("]))
@@ -1117,17 +1026,24 @@ or an extra usage line names no usage key."
   (if (not heads)
       (return None))
   (= head (sub heads -1))
-  (if (not-in head SPECIAL-FORM-DOCS)
-      (do (try
-            (= result (await (backend-signature-help
-                               doc line col head
-                               :offsets (label-offset-support ls))))
-            (except [Exception]
-              (.debug logger "backend signature help failed" :exc-info True)
-              (= result None)))
-          (if (is-not result None)
-              (return result))))
-  (return (local-signature-help (innermost-named heads)))))
+  (= local (form-signature-help doc.source head))
+  (if (is-not local None)
+      (return local))
+  (try
+    (= result (await (backend-signature-help
+                       doc line col head
+                       :offsets (label-offset-support ls))))
+    (except [Exception]
+      (.debug logger "backend signature help failed" :exc-info True)
+      (= result None)))
+  (if (is-not result None)
+      (return result))
+  (= name (innermost-named heads))
+  (if (is-not name head)
+      (do (= local (form-signature-help doc.source name))
+          (if (is-not local None)
+              (return local))))
+  (return (builtin-signature-help name))))
 
 ;; ---------------------------------------------------------------------------
 ;; Member completion
@@ -1573,13 +1489,10 @@ or an extra usage line names no usage key."
 ;; Completion
 ;; ---------------------------------------------------------------------------
 
-(= _LPY-KEYWORDS
-   ["defn" "cond" "conde" "ife" "when" "unless"
-    "do" "deco" "require" "fn" "match" "case"
-    "async-def" "async-for" "async-with"
-    "yield-from" "except*"
-    "->" "->>" "as->"
-    "gensym" "pprint"])
+;; The names offered as "keyword" beyond the special forms: the built-in macros
+;; (BUILTIN-MACROS, never a hand list) and `gensym`, a function that exists
+;; only inside defmacro bodies.
+(= _LPY-KEYWORDS [*BUILTIN-MACROS "gensym"])
 
 (def local-completion [doc line col :insert-replace False]
   "lispython's own completion at the 1-based line and code-point column:
