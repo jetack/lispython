@@ -15,10 +15,12 @@ import json
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import textwrap
 import threading
 import time
+import tomllib
 from types import SimpleNamespace
 
 import pytest
@@ -652,9 +654,9 @@ pytestmark_lsp = pytest.mark.skipif(
 class LspSession:
     """lpy-lsp in a subprocess, initialized over project."""
 
-    def __init__(self, tmp_path, fake_script, project):
+    def __init__(self, tmp_path, fake_script, project, launcher=LAUNCHER):
         self.launcher = tmp_path / "launch_lsp.py"
-        self.launcher.write_text(LAUNCHER)
+        self.launcher.write_text(launcher)
         self.fake_script = fake_script
         self.project = project
         self.uri = (project / "main.lpy").as_uri()
@@ -907,3 +909,171 @@ def test_locate_places_each_backend_location(project, tmp_path):
     # mapped through its shadow on disk (not what the backend read).
     client._docs[main_uri][3] = None
     assert place(root / "main.py") is None
+
+
+# ---------------------------------------------------------------------------
+# Real backend: pyrefly
+# ---------------------------------------------------------------------------
+
+needs_pyrefly = pytest.mark.skipif(
+    backend.backend_argv("pyrefly") is None,
+    reason="pyrefly is not installed (the lsp extra)",
+)
+
+# A valid value for every project rule key the view root's pyrefly.toml takes
+# over, so the real pyrefly can say whether each is a key it knows.
+PYREFLY_RULES = {
+    "preset": "strict",
+    "python-version": "3.12",
+    "python-platform": "linux",
+    "replace-imports-with-any": ["foo.*"],
+    "ignore-missing-imports": ["bar.*"],
+    "replace-untyped-imports-with-any": ["baz.*"],
+    "infer-with-first-use": False,
+    "check-unannotated-defs": False,
+    "infer-return-types": "checked",
+    "strict-callable-subtyping": True,
+    "treat-all-caps-as-final": True,
+    "untyped-def-behavior": "check-and-infer-return-type",
+    "permissive-ignores": True,
+    "enabled-ignores": ["pyrefly", "type"],
+    "type-ignore-unknown-tag-behavior": "suppress",
+    "spec-compliant-overloads": True,
+    "legacy-overload-expansion": True,
+}
+
+
+@needs_pyrefly
+def test_real_pyrefly_reads_the_written_config(project, tmp_path):
+    # Defects: the view root's pyrefly.toml holds a key pyrefly does not
+    # know or a value it cannot read (it warns and drops the key, or falls
+    # back to its own auto configuration), its interpreter is not this
+    # LSP's, or its search path is mangled on the way to TOML.
+    assert set(PYREFLY_RULES) == pv._PYREFLY_RULE_KEYS
+    (project / "pyrefly.toml").write_text(
+        # JSON spells these values (str, bool, list of str) as TOML does.
+        "".join(
+            f"{key} = {json.dumps(value)}\n" for key, value in PYREFLY_RULES.items()
+        )
+        + '[errors]\nbad-assignment = "warn"\n'
+    )
+    root = view_root(project, tmp_path)
+    pv.write_shadows(str(project), os.fspath(root))
+    path = pv.write_pyrefly_config(str(project), root)
+    with open(path, "rb") as f:
+        written = tomllib.load(f)
+    assert {key: written[key] for key in PYREFLY_RULES} == PYREFLY_RULES
+    found = subprocess.run(
+        [
+            backend.backend_argv("pyrefly")[0],
+            "dump-config",
+            "--color",
+            "never",
+            "-c",
+            path,
+        ],
+        cwd=os.fspath(root),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = found.stdout + found.stderr
+    assert found.returncode == 0, output
+    assert "Extra keys" not in output
+    assert "failed to parse" not in output
+    assert f"Using interpreter: {sys.executable}\n" in output
+    [search] = [
+        line.split(": ", 1)[1]
+        for line in output.splitlines()
+        if "Search path (from config file)" in line
+    ]
+    assert json.loads(search) == written["search-path"] == [str(project.resolve())]
+
+
+@needs_pyrefly
+def test_real_pyrefly_starts_and_follows_the_projects_config(project, tmp_path):
+    # Defects: _pyrefly-argv does not start an LSP over stdio, or pyrefly's
+    # initialize result fails to read (lsprotocol's notebook filter), so
+    # every request answers None; or the view root gets no pyrefly.toml
+    # (pyrefly then migrates the pyrightconfig.json beside it), so the
+    # project's own pyrefly severities never reach the buffer.
+    (project / "pyrefly.toml").write_text('[errors]\nunknown-name = "warn"\n')
+    source = "(import pygls)\n(= y pygls.uris)\n(print undefined-name)\n"
+    client = backend.BackendClient(
+        view_root(project, tmp_path), backend.backend_argv("pyrefly"), name="pyrefly"
+    )
+    uri = (project / "main.lpy").as_uri()
+    view = pv.compile_view(source)
+    line, character = locate(view.text, "uris")
+
+    async def scenario():
+        heard = asyncio.Event()
+        client.on_diagnostics = lambda lpy_uri: heard.set()
+        try:
+            hover = await client.request(
+                lsp.TEXT_DOCUMENT_HOVER,
+                hover_params(client.backend_uri(uri), line, character),
+                uri=uri,
+                text=view.text,
+            )
+            client.push_buffer(uri, source, view)
+            await asyncio.wait_for(heard.wait(), 20)
+            return hover, client.diagnostics_for(uri, view.text)
+        finally:
+            await client.shutdown()
+
+    hover, diagnostics = run_bounded(scenario(), timeout=60)
+    assert hover is not None and "Module[pygls.uris]" in hover.contents.value
+    [found] = [d for d, _ in diagnostics if d.code == "unknown-name"]
+    assert found.severity == lsp.DiagnosticSeverity.Warning
+
+
+# Runs lispython's LSP with its real backends, and one extra request,
+# lispy-test/backendPid, the pid of a document's running backend, or None.
+REAL_LAUNCHER = textwrap.dedent(
+    """\
+    import lispy  # noqa: F401
+
+    from lispy.lsp.server import backends, server
+
+
+    @server.feature("lispy-test/backendPid")
+    def backend_pid(ls, params):
+        uri = params["uri"] if isinstance(params, dict) else params.uri
+        client = backends.client_for(uri)
+        if client is None or not client.running:
+            return None
+        return client.process.pid
+
+
+    server.start_io()
+    """
+)
+
+
+@needs_pyrefly
+@pytestmark_lsp
+def test_real_pyrefly_exits_when_the_lsp_is_killed(tmp_path, project):
+    # Defect: pyrefly outlives a killed LSP.  pyrefly ignores the
+    # initialize processId and exits only on its stdin's EOF, so a process
+    # that keeps the write end of its stdin (a wrapper between the LSP and
+    # pyrefly, a leaked descriptor) leaves it running for good.
+    session = LspSession(tmp_path, "unused", project, launcher=REAL_LAUNCHER)
+
+    async def scenario():
+        pid = None
+        try:
+            await session.start({"backend": "pyrefly"})
+            while pid is None:
+                pid = await session.client.protocol.send_request_async(
+                    "lispy-test/backendPid", {"uri": session.uri}
+                )
+                await asyncio.sleep(0.05)
+            session.client._server.kill()
+            assert await wait_gone(pid, timeout=10)
+        finally:
+            if pid is not None:
+                kill_quietly(pid)
+            await session.stop()
+
+    run_bounded(scenario(), timeout=60)

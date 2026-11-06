@@ -1403,19 +1403,34 @@
   (= (sub rules "reportInvalidStringEscapeSequence") "none")
   (return rules))
 
+(def _search-paths [project-root root import-roots]
+  "The backend's search paths for the view root root of project-root (both
+   absolute), in order: the view-root counterpart of every import root
+   strictly inside the project (ShadowManifest.import-roots; <view>/src in
+   a src layout; one above the project, which lies inside a package, is
+   left out), so import pkg finds the shadows before any real directory of
+   uncompiled .lpy; then those import roots themselves, so what the view
+   lacks of one (a pure-.py package, a top-level .py or .pyi, an extension
+   module beside the shadowed packages) still resolves; then the project
+   and its .venv site-packages.  The one list of every backend's config."
+  (= roots [])
+  (for import-root in (or import-roots [])
+    (= import-root (osp.abspath import-root))
+    (if (and (!= import-root project-root) (not (in import-root roots))
+             (is-not (_view-dir project-root root import-root) None))
+        (.append roots import-root)))
+  (= paths (+ [(_view-dir project-root root import-root) for import-root in roots]
+              roots
+              [project-root]))
+  (.extend paths (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
+                                              "site-packages"))))
+  (return paths))
+
 (def write-pyright-config [project-root view-root :import-roots None :check-types True]
   "Write view-root's pyrightconfig.json when it changed: the project's
    rule settings (_rule-settings; check-types false, as when no diagnostic
-   is forwarded, turns checking off), the search paths, and
-   the environment of this process's interpreter.  The search paths are,
-   in order, the view-root counterpart of every import root strictly inside
-   the project (ShadowManifest.import-roots; <view>/src in a src layout;
-   one above the project, which lies inside a package, is left out),
-   so import pkg finds the shadows before any real directory of uncompiled
-   .lpy; then those import roots themselves, so what the view lacks of one
-   (a pure-.py package, a top-level .py or .pyi, an extension module beside
-   the shadowed packages) still resolves; then the project and its .venv
-   site-packages.  pyright's config has no interpreter path; it takes a
+   is forwarded, turns checking off), the search paths (_search-paths, as
+   extraPaths), and the environment of this process's interpreter.  pyright's config has no interpreter path; it takes a
    virtualenv as venvPath (its parent) and venv (its name), so a base
    interpreter is left to the backend's own discovery and to
    ViewRoot.python, sent as python.pythonPath.  A view root that overlaps
@@ -1424,25 +1439,153 @@
   (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
-  (= roots [])
-  (for import-root in (or import-roots [])
-    (= import-root (osp.abspath import-root))
-    (if (and (!= import-root project-root) (not (in import-root roots))
-             (is-not (_view-dir project-root root import-root) None))
-        (.append roots import-root)))
-  (= extra (+ [(_view-dir project-root root import-root) for import-root in roots]
-              roots
-              [project-root]))
-  (.extend extra (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
-                                              "site-packages"))))
   ;; Every server of the project shares the view root: two run with
   ;; different pythonDiagnostics, the last to write decides its checking.
   (= config (_rule-settings project-root check-types))
-  (= (sub config "extraPaths") extra)
+  (= (sub config "extraPaths") (_search-paths project-root root import-roots))
   (if (!= sys.prefix sys.base-prefix)
       (do (= (sub config "venvPath") (osp.dirname sys.prefix))
           (= (sub config "venv") (osp.basename sys.prefix))))
   (= path (osp.join root PYRIGHT-CONFIG))
   (with [(_view-root-lock root)]
     (_write-if-changed root path (+ (json.dumps config :indent 2 :sort-keys True) "\n")))
+  (return path))
+
+(= PYREFLY-CONFIG "pyrefly.toml")
+
+;; The project's pyrefly settings the view root's pyrefly.toml takes over:
+;; these, and errors (its per-code severities) while checking.  Never a path
+;; or tooling setting (project-includes/-excludes, search-path,
+;; site-packages-path, python-interpreter-path and the other interpreter
+;; keys, typeshed-path, baseline*, extends, sub-config, whose matches are
+;; path globs, build-system, output-format, min-severity,
+;; ignore-errors-in-generated-code, ...): the view root owns every path, the
+;; project's would name directories pyrefly reads instead of the shadows,
+;; and the LSP owns what is reported.  infer-param-types-from-docstring is
+;; documented, but pyrefly 1.4.1 rejects it as an unknown key.
+(= _PYREFLY-RULE-KEYS (frozenset ["preset" "python-version" "python-platform"
+                                  "replace-imports-with-any" "ignore-missing-imports"
+                                  "replace-untyped-imports-with-any" "infer-with-first-use"
+                                  "check-unannotated-defs" "infer-return-types"
+                                  "strict-callable-subtyping" "treat-all-caps-as-final"
+                                  "untyped-def-behavior" "permissive-ignores"
+                                  "enabled-ignores" "type-ignore-unknown-tag-behavior"
+                                  "spec-compliant-overloads" "legacy-overload-expansion"]))
+
+;; The preset of a project with no pyrefly config of its own: the one
+;; pyrefly check runs over such a project.  pyrefly would migrate the
+;; project's pyright or mypy config there; that migration is not mirrored.
+(= DEFAULT-PYREFLY-PRESET "basic")
+
+(def _project-pyrefly-config [project-root]
+  "The project's own pyrefly settings, as a dict: its pyrefly.toml, else
+   [tool.pyrefly] of its pyproject.toml, as pyrefly finds them; None when it
+   has none or the file that holds them is malformed."
+  (= path (osp.join project-root PYREFLY-CONFIG))
+  (try
+    (if (osp.isfile path)
+        (with [(open path "rb") as f]
+          (return (tomllib.load f))))
+    (= path (osp.join project-root "pyproject.toml"))
+    (if (not (osp.isfile path))
+        (return None))
+    (with [(open path "rb") as f]
+      (= config (.get (.get (tomllib.load f) "tool" {}) "pyrefly")))
+    (return (ife (isinstance config dict) config None))
+    (except [(, OSError ValueError AttributeError)]
+      (.debug logger "lispython view: no pyrefly settings read from %s" path
+              :exc-info True)
+      (return None))))
+
+(def _pyrefly-rule-settings [project-root check-types]
+  "The rule settings of the view root's pyrefly.toml: the project's rule
+   keys (_PYREFLY-RULE-KEYS) and, with check-types, its errors table; preset
+   DEFAULT-PYREFLY-PRESET when the project has no pyrefly config, none
+   (pyrefly's own default preset) when it has one that sets none.  Without
+   check-types (no diagnostic is forwarded) the preset is off and the
+   project's errors are left out, since they would turn codes back on for
+   nobody; its other settings (python-version, ...) stay, since hover and
+   completion follow them.  pyrefly flags no invalid string escape, so
+   nothing is forced here as the pyright config forces one."
+  (= project (_project-pyrefly-config project-root))
+  (= rules (ife (is project None) {"preset" DEFAULT-PYREFLY-PRESET} {}))
+  (for [key value] in (.items (or project {}))
+    (if (or (in key _PYREFLY-RULE-KEYS) (and check-types (== key "errors")))
+        (= (sub rules key) value)))
+  (if (not check-types)
+      (= (sub rules "preset") "off"))
+  (return rules))
+
+(def _toml-string [value]
+  "value as a TOML basic string, or None when TOML cannot hold it (a lone
+   surrogate).  json.dumps' escapes are TOML's, except that it leaves DEL,
+   which TOML must escape; ensure_ascii is off because it escapes a
+   character above U+FFFF as a surrogate pair, which TOML refuses."
+  (try
+    (.encode value "utf-8")
+    (except [UnicodeEncodeError]
+      (return None)))
+  (return (.replace (json.dumps value :ensure-ascii False) "\x7f" "\\u007f")))
+
+(def _toml-value [value]
+  "value as TOML when it is a str, bool, int or list of str TOML can hold,
+   else None: a value of any other shape is dropped, never written as
+   something it is not."
+  (cond (isinstance value bool)
+        (return (ife value "true" "false"))
+        (isinstance value int)
+        (return (str value))
+        (isinstance value str)
+        (return (_toml-string value))
+        (isinstance value list)
+        (do (= items [(ife (isinstance item str) (_toml-string item) None)
+                      for item in value])
+            (if (in None items)
+                (return None))
+            (return (+ "[" (.join ", " items) "]"))))
+  (return None))
+
+(def _pyrefly-toml [config]
+  "config as TOML text, keys sorted: every value _toml-value can write, and
+   the errors table (code -> severity str or bool) last, as its own table;
+   an entry of any other shape is left out."
+  (= lines [])
+  (for key in (sorted config)
+    (= text (ife (== key "errors") None (_toml-value (sub config key))))
+    (if (is-not text None)
+        (.append lines f"{key} = {text}")))
+  (= errors (.get config "errors"))
+  (if (isinstance errors dict)
+      (do (.append lines "[errors]")
+          (for code in (sorted (code for code in errors if (isinstance code str)))
+            (= severity (sub errors code))
+            (= key (_toml-string code))
+            (= text (ife (isinstance severity (, str bool)) (_toml-value severity) None))
+            (if (and (is-not key None) (is-not text None))
+                (.append lines f"{key} = {text}")))))
+  (return (+ (.join "\n" lines) "\n")))
+
+(def write-pyrefly-config [project-root view-root :import-roots None :check-types True
+                          :python None]
+  "Write view-root's pyrefly.toml when it changed: the project's rule
+   settings (_pyrefly-rule-settings; check-types false turns checking off),
+   the search paths (_search-paths, the list pyright's extraPaths is, as
+   search-path), and python as python-interpreter-path (default
+   view-root's ViewRoot.python, else this process's interpreter), since
+   pyrefly otherwise queries the python3 on PATH for its site-packages.  A pyrefly.toml wins
+   over a pyrightconfig.json in the same directory.  A view root that
+   overlaps the project is a ValueError; the write holds the view root's
+   lock.  Returns the path."
+  (_refuse-overlap project-root view-root)
+  (= project-root (osp.abspath project-root))
+  (= root (osp.abspath (os.fspath view-root)))
+  ;; Every server of the project shares the view root: two run with
+  ;; different pythonDiagnostics, the last to write decides its checking.
+  (= config (_pyrefly-rule-settings project-root check-types))
+  (= (sub config "search-path") (_search-paths project-root root import-roots))
+  (= (sub config "python-interpreter-path")
+     (ife (is python None) (getattr view-root "python" sys.executable) python))
+  (= path (osp.join root PYREFLY-CONFIG))
+  (with [(_view-root-lock root)]
+    (_write-if-changed root path (_pyrefly-toml config)))
   (return path))

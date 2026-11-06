@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import warnings
 from types import SimpleNamespace
 
@@ -984,6 +985,140 @@ class TestShadows:
         assert "venv" not in json.loads(
             open(pv.write_pyright_config(str(project), str(root))).read()
         )
+
+    def pyrefly_config(self, project, root, **settings):
+        path = pv.write_pyrefly_config(str(project), str(root), **settings)
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+
+    def test_pyrefly_config_takes_the_projects_rules_never_its_paths(self, tmp_path):
+        # Defects: the project's own preset, Python and error severities
+        # never reach pyrefly; a path or tooling setting is copied, so
+        # pyrefly reads the project's directories, interpreter or baseline
+        # instead of the view's; [tool.pyrefly] is not read; a malformed
+        # file fails the write instead of reading as no settings.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyrefly.toml").write_text(
+            'preset = "strict"\n'
+            'python-version = "3.12"\n'
+            'ignore-missing-imports = ["vendored.*"]\n'
+            "check-unannotated-defs = false\n"
+            'search-path = ["/not/the/view"]\n'
+            'python-interpreter-path = "/other/python"\n'
+            'project-excludes = ["**/gen"]\n'
+            'baseline = "baseline.json"\n'
+            'min-severity = "error"\n'
+            "[errors]\n"
+            'bad-assignment = "warn"\n'
+            "unknown-name = false\n"
+            "[[sub-config]]\n"
+            'matches = "tests/**"\n'
+        )
+        assert self.pyrefly_config(project, root) == {
+            "preset": "strict",
+            "python-version": "3.12",
+            "ignore-missing-imports": ["vendored.*"],
+            "check-unannotated-defs": False,
+            "errors": {"bad-assignment": "warn", "unknown-name": False},
+            "search-path": [str(project)],
+            "python-interpreter-path": sys.executable,
+        }
+        # pyrefly.toml wins over pyproject.toml, as for pyrefly.
+        (project / "pyproject.toml").write_text(
+            '[tool.pyrefly]\npreset = "legacy"\npython-platform = "win32"\n'
+        )
+        assert self.pyrefly_config(project, root)["preset"] == "strict"
+        (project / "pyrefly.toml").unlink()
+        config = self.pyrefly_config(project, root)
+        assert (config["preset"], config["python-platform"]) == ("legacy", "win32")
+        # A malformed file is no settings, never a failed write.
+        (project / "pyproject.toml").write_text("[tool.pyrefly\n")
+        assert self.pyrefly_config(project, root)["preset"] == "basic"
+
+    def test_pyrefly_default_preset_only_without_a_project_config(self, tmp_path):
+        # Defects: a project with no pyrefly config runs pyrefly's own
+        # stricter default instead of the basic preset pyrefly check runs on
+        # it; or a project whose pyrefly config sets no preset is pinned to
+        # basic, silently weaker than the default its own pyrefly runs.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        (project / "pyproject.toml").write_text('[project]\nname = "p"\n')
+        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        (project / "pyproject.toml").write_text(
+            '[tool.pyrefly]\npython-version = "3.12"\n'
+        )
+        config = self.pyrefly_config(project, root)
+        assert "preset" not in config
+        assert config["python-version"] == "3.12"
+
+    def test_pyrefly_config_checks_nothing_without_diagnostics(self, tmp_path):
+        # Defect: with pythonDiagnostics false pyrefly still checks every
+        # open buffer, at the project's preset, or the project's errors
+        # table turns codes back on under preset off, for nobody.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyrefly.toml").write_text(
+            'preset = "strict"\npython-version = "3.12"\n'
+            '[errors]\nunknown-name = "error"\n'
+        )
+        config = self.pyrefly_config(project, root, check_types=False)
+        assert config["preset"] == "off"
+        assert "errors" not in config
+        # Hover and completion still follow the project's Python.
+        assert config["python-version"] == "3.12"
+
+    def test_pyrefly_search_path_is_pyrights(self, tmp_path):
+        # Defect: the two backends' search paths drift apart, so a module
+        # one resolves (a shadowed src package, a .venv package) the other
+        # does not.
+        project, root = tmp_path / "project", tmp_path / "view"
+        (project / "src" / "pkg").mkdir(parents=True)
+        site = project / ".venv" / "lib" / "python3.99" / "site-packages"
+        site.mkdir(parents=True)
+        roots = [str(project / "src"), str(tmp_path)]
+        extra = json.loads(
+            open(
+                pv.write_pyright_config(str(project), str(root), import_roots=roots)
+            ).read()
+        )["extraPaths"]
+        assert extra == [
+            str(root / "src"),
+            str(project / "src"),
+            str(project),
+            str(site),
+        ]
+        assert self.pyrefly_config(project, root, import_roots=roots)[
+            "search-path"
+        ] == (extra)
+
+    def test_pyrefly_config_is_toml_for_any_path_and_value(self, tmp_path):
+        # Defects: the hand-written TOML breaks on a path TOML must escape
+        # (a quote, a backslash, DEL, a control character) or on one JSON
+        # escapes as a surrogate pair (a character above U+FFFF), so pyrefly
+        # cannot read its config; a project value of a shape the writer does
+        # not know is written as something else instead of left out.
+        project = tmp_path / 'p "q" \\ é 😀 \x7f\t'
+        root = tmp_path / "view"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[tool.pyrefly]\n"
+            "python-version = 3.12\n"
+            'enabled-ignores = ["pyrefly", 1]\n'
+            'python-platform = "linux"\n'
+            "[tool.pyrefly.errors]\n"
+            '"bad-assignment" = "warn"\n'
+            '"unknown-name" = 0\n'
+            '"code with \\" quote" = true\n'
+        )
+        config = self.pyrefly_config(project, root, python='/py "x"\\ 😀')
+        assert config == {
+            "python-platform": "linux",
+            "errors": {"bad-assignment": "warn", 'code with " quote': True},
+            "search-path": [str(project)],
+            "python-interpreter-path": '/py "x"\\ 😀',
+        }
 
 
 def next_tick():

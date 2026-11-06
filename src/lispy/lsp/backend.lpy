@@ -11,6 +11,7 @@
 (require lispy.macros *)
 
 (import asyncio)
+(import attrs)
 (import importlib.util)
 (import logging)
 (import os)
@@ -22,10 +23,11 @@
 
 (from lsprotocol [types as lsp])
 (from pygls.lsp.client [LanguageClient])
+(from pygls.protocol [default-converter])
 (from pygls.uris [to-fs-path])
 
-(from lispy.lsp.python-view [ShadowManifest view-path view-root-for write-pyright-config
-                             write-shadows])
+(from lispy.lsp.python-view [ShadowManifest view-path view-root-for write-pyrefly-config
+                             write-pyright-config write-shadows])
 
 (= logger (logging.getLogger __name__))
 
@@ -104,6 +106,15 @@
 (= BACKENDS {"basedpyright" _basedpyright-argv
              "pyrefly" _pyrefly-argv})
 
+;; Backend name -> the writer of its config file in the view root; any other
+;; name (a test's fake) takes pyrightconfig.json.
+(= CONFIG-WRITERS {"basedpyright" write-pyright-config
+                   "pyrefly" write-pyrefly-config})
+
+(def config-writer [name]
+  "The function writing backend name's config file into a view root."
+  (return (.get CONFIG-WRITERS name write-pyright-config)))
+
 ;; Backends whose definition answer for a name with no declarations walks up
 ;; the parse tree to the enclosing call or operator and answers for it
 ;; (basedpyright's DefinitionProviderBase.getDefinitionsForNode), so an
@@ -149,11 +160,24 @@
 ;; One backend process
 ;; ---------------------------------------------------------------------------
 
+(def _converter []
+  "pygls' converter, able to read a notebook filter with no notebook.
+   lsprotocol's own hook for a filter's notebook does not cover the
+   optional one of a filter with cells, so the initialize result of a
+   backend whose notebookDocumentSync selects cells (pyrefly) fails to
+   structure and the backend never starts."
+  (= converter (default-converter))
+  (= notebook (. (attrs.fields lsp.NotebookCellTextDocumentFilter) notebook type))
+  (.register-structure-hook converter
+    (. (attrs.fields lsp.NotebookDocumentFilterWithCells) notebook type)
+    (fn [value _] (ife (is value None) None (.structure converter value notebook))))
+  (return converter))
+
 (class _Client [LanguageClient]
   "pygls' LanguageClient for one backend process, reporting the process's
    exit to its BackendClient."
   (def __init__ [self owner]
-    (.__init__ (super) "lpy-lsp-backend" "v0.1.0")
+    (.__init__ (super) "lpy-lsp-backend" "v0.1.0" :converter-factory _converter)
     (= self.owner owner))
 
   (async-def server-exit [self server]
@@ -272,9 +296,10 @@
 
 (class BackendClient []
   "The Python backend of one project, over its ViewRoot view-root.  argv
-   starts it; None is the off backend, which never spawns.  The process
-   starts on the first request (request), after the view root's shadows and
-   pyrightconfig.json are written; a process that exits without shutdown is
+   starts it; None is the off backend, which never spawns.  name is the
+   backend argv runs (a BACKENDS key).  The process starts on the first
+   request (request), after the view root's shadows and name's config file
+   (config-writer) are written; a process that exits without shutdown is
    restarted by the next request, once (MAX-SPAWNS), and a second death
    leaves the backend off.  state is idle (not started), running, dead
    (waiting for its restart), off or closed (after shutdown); process is
@@ -284,12 +309,13 @@
    view is synced back.  Its diagnostics are kept only for a full view's
    text (_diagnostics-published, diagnostics-for).  definition-walks-up is
    True for a backend in DEFINITION-WALKS-UP."
-  (def __init__ [self view-root argv :manifest None :check-types True
-                 :definition-walks-up False]
+  (def __init__ [self view-root argv :name DEFAULT-BACKEND :manifest None
+                 :check-types True :definition-walks-up False]
     (= self.view-root view-root)
+    (= self.name name)
     (= self.project-root (osp.realpath view-root.project-root))
     (= self.argv argv)
-    ;; write-pyright-config's: False when no diagnostic is forwarded.
+    ;; The config writer's: False when no diagnostic is forwarded.
     (= self.check-types check-types)
     (= self.definition-walks-up definition-walks-up)
     (= self.manifest (ife (is manifest None) (ShadowManifest) manifest))
@@ -344,15 +370,15 @@
     (return (.as-uri (pathlib.Path shadow))))
 
   (def _prepare-view-root [self]
-    "Write the view root's shadows and pyrightconfig.json.  They compile every
-     .lpy of the project (its macros run), so callers run this in a thread,
-     off the event loop."
+    "Write the view root's shadows and the backend's config file.  They
+     compile every .lpy of the project (its macros run), so callers run
+     this in a thread, off the event loop."
     (= root (os.fspath self.view-root))
     (os.makedirs root :exist-ok True)
     (write-shadows self.project-root root :manifest self.manifest)
-    (write-pyright-config self.project-root root
-                          :import-roots self.manifest.import-roots
-                          :check-types self.check-types))
+    ((config-writer self.name) self.project-root self.view-root
+                               :import-roots self.manifest.import-roots
+                               :check-types self.check-types))
 
   (def _start-task [self]
     "The task starting the backend: the one in progress, else a new one when
@@ -441,7 +467,10 @@
     (await (asyncio.wait-for
              (.initialize-async client
                (lsp.InitializeParams
-                 ;; The backend exits when this process does, even killed.
+                 ;; basedpyright exits when this process does, even killed,
+                 ;; by watching this pid.  pyrefly ignores it and exits when
+                 ;; its stdin reaches EOF, which a killed process's pipe
+                 ;; gives as long as nothing else holds the pipe's write end.
                  :process-id (os.getpid)
                  :root-uri root-uri
                  :workspace-folders [(lsp.WorkspaceFolder :uri root-uri :name "lispython-view")]
@@ -881,6 +910,7 @@
                 (.configure self None))
             (= client (BackendClient (view-root-for root :cache-home self.cache-home)
                                      (backend-argv self.name)
+                                     :name self.name
                                      :check-types self.forwards-diagnostics
                                      :definition-walks-up
                                      (in self.name DEFINITION-WALKS-UP)))
