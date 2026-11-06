@@ -1,28 +1,20 @@
 """Completion through the real Python backend (basedpyright).
 
-The tests share one basedpyright process over one tmp project, on one event
-loop in a background thread (a basedpyright start costs about a second and
-400 MB); each test points the server at it and gets a fresh view cache. The
-document is a real pygls TextDocument, so lines and the position codec are
-the ones the server uses. ``|`` in a source marks the cursor.
+The tests share the session's basedpyright over one tmp project
+(``real_backends``, ``lsp_buffer`` in conftest.py); each test points the
+server at it and gets a fresh view cache. ``|`` in a source marks the cursor.
 """
 
-import asyncio
 import importlib
-import itertools
-import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 from lsprotocol import types as lsp
-from pygls.workspace import TextDocument
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 
 server = importlib.import_module("lispy.lsp.server")
 backend = importlib.import_module("lispy.lsp.backend")
-pv = importlib.import_module("lispy.lsp.python_view")
 
 pytestmark = pytest.mark.skipif(
     backend.backend_argv("basedpyright") is None,
@@ -38,48 +30,6 @@ CLASS = (
 )
 
 
-@pytest.fixture(scope="module")
-def loop():
-    event_loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=event_loop.run_forever, daemon=True)
-    thread.start()
-    yield event_loop
-    event_loop.call_soon_threadsafe(event_loop.stop)
-    thread.join(10)
-    event_loop.close()
-
-
-def on_loop(event_loop, coroutine, timeout=60):
-    return asyncio.run_coroutine_threadsafe(coroutine, event_loop).result(timeout)
-
-
-@pytest.fixture(scope="module")
-def project(tmp_path_factory):
-    root = tmp_path_factory.mktemp("completion-project")
-    (root / "main.lpy").write_text("(= y 1)\n")
-    return root
-
-
-def make_backends(project, cache, name):
-    backends = backend.Backends(
-        lambda: [SimpleNamespace(uri=project.as_uri())], cache_home=str(cache)
-    )
-    backends.configure({"backend": name})
-    return backends
-
-
-@pytest.fixture(scope="module")
-def real_backends(loop, project, tmp_path_factory):
-    backends = make_backends(project, tmp_path_factory.mktemp("cache"), "basedpyright")
-    yield backends
-    on_loop(loop, backends.shutdown_all())
-
-
-@pytest.fixture
-def off_backends(project, tmp_path):
-    return make_backends(project, tmp_path / "cache", "off")
-
-
 def capabilities(insert_replace):
     return lsp.ClientCapabilities(
         text_document=lsp.TextDocumentClientCapabilities(
@@ -93,29 +43,19 @@ def capabilities(insert_replace):
 
 
 @pytest.fixture
-def complete(loop, project, real_backends, monkeypatch):
+def complete(lsp_buffer, run_on_loop, real_backends):
     """complete(source) -> (line, character, items) at the | of source."""
-    monkeypatch.setattr(server, "view_cache", pv.ViewCache())
-    versions = itertools.count(1)
-    uri = (project / "main.lpy").as_uri()
 
     def run(source, backends=real_backends, insert_replace=True):
-        monkeypatch.setattr(server, "backends", backends)
-        before, after = source.split("|")
-        line = before.count("\n")
-        character = len(before) - (before.rfind("\n") + 1)
-        document = TextDocument(uri, before + after, version=next(versions))
-        run.document = document
-        ls = SimpleNamespace(
-            workspace=SimpleNamespace(get_text_document=lambda uri: document),
-            client_capabilities=capabilities(insert_replace),
+        ls, uri, position = lsp_buffer(
+            source, backends, client_capabilities=capabilities(insert_replace)
         )
+        run.document = lsp_buffer.document
         params = lsp.CompletionParams(
-            text_document=lsp.TextDocumentIdentifier(uri=uri),
-            position=lsp.Position(line=line, character=character),
+            text_document=lsp.TextDocumentIdentifier(uri=uri), position=position
         )
-        result = on_loop(loop, server.completion(ls, params))
-        return line, character, result.items
+        result = run_on_loop(server.completion(ls, params))
+        return position.line, position.character, result.items
 
     return run
 
@@ -206,11 +146,11 @@ def kinds_of(items, label):
 
 
 @pytest.fixture
-def idle(loop, project, tmp_path):
+def idle(run_on_loop, make_backends, backend_project, tmp_path):
     """A Backends of its own whose basedpyright has not started."""
-    backends = make_backends(project, tmp_path / "idle-cache", "basedpyright")
-    yield backends, backends.available_client((project / "main.lpy").as_uri())
-    on_loop(loop, backends.shutdown_all())
+    backends = make_backends(tmp_path / "idle-cache", "basedpyright")
+    yield backends, backends.available_client((backend_project / "main.lpy").as_uri())
+    run_on_loop(backends.shutdown_all())
 
 
 def wait_running(client, seconds=30):
@@ -244,15 +184,19 @@ def test_an_imported_class_is_one_class_item(complete, idle, monkeypatch):
     assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Class]
 
 
-def test_auto_import_completions_are_off(complete, loop, project, real_backends):
+def test_auto_import_completions_are_off(
+    complete, run_on_loop, backend_project, real_backends
+):
     # Defect: the backend offers symbols the buffer never imports, with an
     # import edit on a generated line (and their kinds).
     complete("(import os)\nos.pa|")
-    client = real_backends.available_client((project / "main.lpy").as_uri())
+    client = real_backends.available_client((backend_project / "main.lpy").as_uri())
     document = server.TextDocument(
-        (project / "main.lpy").as_uri(), "(= default-x 1)\n(defau)", version=None
+        (backend_project / "main.lpy").as_uri(),
+        "(= default-x 1)\n(defau)",
+        version=None,
     )
-    _, items = on_loop(loop, server.backend_answer(client, document, 2, 6, None))
+    _, items = run_on_loop(server.backend_answer(client, document, 2, 6, None))
     assert "default_x" in {item.label for item in items}  # it did answer
     assert "defaultdict" not in {item.label for item in items}
 
@@ -260,35 +204,16 @@ def test_auto_import_completions_are_off(complete, loop, project, real_backends)
 LOCAL_MEMBERS = {"__init__", "my-x", "f"}
 
 
-@pytest.fixture
-def requests(project, real_backends, monkeypatch):
-    """The completion requests sent to the shared backend, and a way to set
-    its answer."""
-    client = real_backends.available_client((project / "main.lpy").as_uri())
-    sent = []
-    real_request = client.request
-    answer = {}
-
-    async def request(method, params, **kwargs):
-        sent.append(method)
-        if "during" in answer:
-            answer["during"]()
-        if "value" in answer:
-            return answer["value"]
-        return await real_request(method, params, **kwargs)
-
-    monkeypatch.setattr(client, "request", request)
-    return SimpleNamespace(sent=sent, answer=answer)
-
-
 @pytest.mark.parametrize(
     "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
 )
-def test_a_backend_with_no_items_gives_the_local_members(complete, requests, empty):
+def test_a_backend_with_no_items_gives_the_local_members(
+    complete, backend_requests, empty
+):
     # Defect: an empty backend answer is returned as is: no completion.
-    requests.answer["value"] = empty
+    backend_requests.answer["value"] = empty
     labels = set(by_label(complete(CLASS.format("self.|"))[2]))
-    assert requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
     assert labels == LOCAL_MEMBERS
 
 
@@ -301,22 +226,26 @@ def test_backend_off_gives_the_local_members(complete, off_backends, monkeypatch
     assert (labels, views) == (LOCAL_MEMBERS, [])
 
 
-def test_a_buffer_that_does_not_compile_gives_the_local_members(complete, requests):
+def test_a_buffer_that_does_not_compile_gives_the_local_members(
+    complete, backend_requests
+):
     # An earlier refused form: neither the buffer nor its prefix compiles,
     # so there is no view to ask the backend about.
     labels = set(by_label(complete("(def)\n" + CLASS.format("self.|"))[2]))
-    assert (labels, requests.sent) == (LOCAL_MEMBERS, [])
+    assert (labels, backend_requests.sent) == (LOCAL_MEMBERS, [])
     # The backend does answer the same buffer once it compiles.
     labels = set(by_label(complete(CLASS.format("self.|"))[2]))
-    assert "__class__" in labels and requests.sent
+    assert "__class__" in labels and backend_requests.sent
 
 
-def test_an_edit_during_the_request_never_moves_the_answer(complete, requests):
+def test_an_edit_during_the_request_never_moves_the_answer(complete, backend_requests):
     # Defect: the handler reads the live document after its awaits, so an
     # edit made meanwhile (here: the buffer emptied) gives the old cursor
     # column against the new text: the range starts at column 0 and the
     # typed my- is lost from the filterText.
-    requests.answer["during"] = lambda: setattr(complete.document, "_source", "")
+    backend_requests.answer["during"] = lambda: setattr(
+        complete.document, "_source", ""
+    )
     line, character, items = complete(CLASS.format("self.my-|"))
     item = by_label(items)["my-x"]
     assert item.filter_text == "my-x"

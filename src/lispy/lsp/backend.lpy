@@ -215,7 +215,17 @@
                        :hover (lsp.HoverClientCapabilities
                                 :content-format [lsp.MarkupKind.Markdown
                                                  lsp.MarkupKind.PlainText])
-                       :signature-help (lsp.SignatureHelpClientCapabilities)
+                       ;; Parameters as offsets into the label: the server
+                       ;; maps them through its relabel (python-to-buffer),
+                       ;; where a parameter's own text could match twice.
+                       :signature-help (lsp.SignatureHelpClientCapabilities
+                                         :signature-information
+                                         (lsp.ClientSignatureInformationOptions
+                                           :documentation-format [lsp.MarkupKind.Markdown
+                                                                  lsp.MarkupKind.PlainText]
+                                           :parameter-information
+                                           (lsp.ClientSignatureParameterInformationOptions
+                                             :label-offset-support True)))
                        :definition (lsp.DefinitionClientCapabilities)
                        :references (lsp.ReferenceClientCapabilities))
       :workspace (lsp.WorkspaceClientCapabilities
