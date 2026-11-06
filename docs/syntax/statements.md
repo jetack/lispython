@@ -23,6 +23,65 @@ def function_name(arg1, arg2, *args, kwarg1=value1, kwarg2=value2, **kwargs):
 ### Async Function Definitions
 Use `async-def` instead of `def`.
 
+### `deco`
+Decorates the definition (`def`, `async-def` or `class`) it wraps: `(deco decorator definition)` for one decorator, `(deco [d1 d2] definition)` for several, applied top to bottom as in Python. A decorator is any expression, a call included.
+
+LisPy version
+```python
+(deco my-decorator
+  (def f [x] (return x)))
+
+(deco [d1 (d2 1)]
+  (def g [x] (return x)))
+
+(deco register
+  (class A []
+    (pass)))
+```
+Python version
+```python
+@my_decorator
+def f(x):
+    return x
+
+
+@d1
+@d2(1)
+def g(x):
+    return x
+
+
+@register
+class A:
+    pass
+```
+
+## `return`
+`(return)` returns `None`; `(return value)` returns the value. It takes at most one value: return several as a tuple with `(, a b)`.
+
+LisPy version
+```python
+(def f [x]
+  (return x))
+(def g []
+  (return))
+(def h [x y]
+  (return (, x y)))
+```
+Python version
+```python
+def f(x):
+    return x
+
+
+def g():
+    return
+
+
+def h(x, y):
+    return (x, y)
+```
+
 ## Class Definition
 LisPy version
 ```python

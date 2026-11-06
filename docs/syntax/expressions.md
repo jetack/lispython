@@ -27,6 +27,24 @@ Python version
 ```python
 -n
 ```
+#### `not`
+LisPy version
+```python
+(not expr)
+```
+Python version
+```python
+not expr
+```
+#### `~`
+LisPy version
+```python
+(~ n)
+```
+Python version
+```python
+~n
+```
 ### Comparison Operators
 #### `==`
 LisPy version
@@ -46,6 +64,78 @@ Python version
 ```python
 expr1 > expr2 > expr3 > ...
 ```
+#### `!=`
+LisPy version
+```python
+(!= expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 != expr2 != expr3 != ...
+```
+#### `<`
+LisPy version
+```python
+(< expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 < expr2 < expr3 < ...
+```
+#### `<=`
+LisPy version
+```python
+(<= expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 <= expr2 <= expr3 <= ...
+```
+#### `>=`
+LisPy version
+```python
+(>= expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 >= expr2 >= expr3 >= ...
+```
+#### `is`
+LisPy version
+```python
+(is expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 is expr2 is expr3 is ...
+```
+#### `is-not`
+LisPy version
+```python
+(is-not expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 is not expr2 is not expr3 is not ...
+```
+#### `in`
+LisPy version
+```python
+(in expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 in expr2 in expr3 in ...
+```
+#### `not-in`
+LisPy version
+```python
+(not-in expr1 expr2 expr3 ...)
+```
+Python version
+```python
+expr1 not in expr2 not in expr3 not in ...
+```
 
 ## `:=`
 LisPy version
@@ -64,7 +154,7 @@ Statement forms (`do`, `=`, `+=`, `if`, `return`, `def`, ...) cannot appear insi
 LisPy version
 ```python
 (lambda [arg1 arg2 ...] body)
-# or syntactic sugar fn
+; or the built-in macro fn (needs (require lispy.macros *))
 (fn [arg1 arg2 ...] body)
 ```
 Python version
