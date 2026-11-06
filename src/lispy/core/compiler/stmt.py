@@ -297,16 +297,25 @@ def loop_parse(sexp, header):
 
     ``header`` names the operands before the body, in order: ``("test",)``
     for while, ``("target", ("in", "iterable"))`` for for, whose optional
-    ``in`` before the iterable is skipped. A trailing ``(else ...)`` holds the
-    else body. Python has no bodiless loop, so an empty body is refused.
+    ``in`` before the iterable is skipped. A trailing ``(else ...)`` is the
+    third part (its clause, or None); it is compiled by ``loop_else_steps``.
+    Python has no bodiless loop, so an empty body is refused.
     """
     [parts, body] = form_parts(sexp, header)
-    orelse = []
+    orelse = None
     if len(body) and clause_p(body[-1], ("else",)):
-        orelse = body.pop().operands
+        orelse = body.pop()
     if not body:
         raise form_error(sexp, "needs a body")
     return parts, body, orelse
+
+
+def loop_else_steps(clause):
+    """The statements of a loop's ``(else ...)`` clause (None: no clause); a
+    clause with no statement is refused, as try's is."""
+    if clause is None:
+        return []
+    return (yield required_body_steps(clause, clause.operands))
 
 
 def while_p(sexp):
@@ -318,7 +327,7 @@ def while_compile(sexp):
     return ast.While(
         test=(yield expr_steps(test)),
         body=(yield required_body_steps(sexp, then)),
-        orelse=(yield stmt_list_steps(orelse)),
+        orelse=(yield loop_else_steps(orelse)),
         **sexp.position_info,
     )
 
@@ -335,7 +344,7 @@ def for_compile(sexp, async_p=False):
         target=(yield target_compile(target, "assign")),
         iter=(yield expr_steps(iterable)),
         body=(yield required_body_steps(sexp, then)),
-        orelse=(yield stmt_list_steps(orelse)),
+        orelse=(yield loop_else_steps(orelse)),
         **sexp.position_info,
     )
 
@@ -479,10 +488,12 @@ def try_compile(sexp):
     return (ast.TryStar if star else ast.Try)(
         body=(yield required_body_steps(sexp, body)),
         handlers=handlers,
-        orelse=(yield required_body_steps(orelse, orelse.operands)) if orelse else [],
+        orelse=(yield required_body_steps(orelse, orelse.operands))
+        if orelse is not None
+        else [],
         finalbody=(
             (yield required_body_steps(finalbody, finalbody.operands))
-            if finalbody
+            if finalbody is not None
             else []
         ),
         **sexp.position_info,

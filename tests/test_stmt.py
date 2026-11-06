@@ -915,6 +915,8 @@ class TestBodyEmptiedByDo:
             ("(try 1 (finally (do)))", "(finally ...) needs a body"),
             ("(try 1 (except E 2) (else (do)))", "(else ...) needs a body"),
             ("(match x (case 1 (do)))", "(case ...) needs a body"),
+            ("(while x 1 (else (do)))", "(else ...) needs a body"),
+            ("(for a in b 1 (else))", "(else ...) needs a body"),
             ("(def f [] (do))", "(def ...) needs a body"),
             ("(def f [])", "(def ...) needs a body"),
             ("(async-def f [] (do))", "(async-def ...) needs a body"),
