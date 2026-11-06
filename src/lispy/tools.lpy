@@ -496,7 +496,7 @@
     (= tb tb.tb_next))
   (return (.rstrip (.join "" (traceback.format-exception (type e) e tb)))))
 
-(def nrepl-eval [src scope :filename None :line 1 :column 1 :whole-file False :opt-out False]
+(def nrepl-eval [src scope :filename None :line 1 :column 1 :whole-file False]
   "Evaluate LisPython source, capturing stdout/stderr and return value.
 
   filename, line and column say where src sits in the editor's buffer (the
@@ -505,14 +505,17 @@
   source is padded to that position before parsing, so compile errors,
   tracebacks and linecache all use buffer lines and columns.  whole-file
   marks src as the entire file (load-file), so it starts at line 1, column
-  1.  opt-out: src is a unit of a file's own scope, whose first form may
-  narrow its built-in macros (compile-unit); a session eval only adds.
+  1.  Source naming a file at its line 1, column 1 (a load-file, or a
+  region at the file's start) starts the file's unit, whose first form may
+  narrow its built-in macros (compile-unit); any other eval only adds,
+  since editor clients send file, line and column with every region.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
   (_nrepl-buffer-position line "line" NREPL-MAX-POSITION-LINE)
   (_nrepl-buffer-position column "column" NREPL-MAX-POSITION-COLUMN)
   (if (and whole-file (!= (, line column) (, 1 1)))
       (raise (ValueError "a whole file starts at line 1, column 1")))
+  (= file-start (and (is-not filename None) (== (, line column) (, 1 1))))
   (if (is filename None)
       (= filename (+ "<nrepl-" (str (next _NREPL-EVAL-IDS)) ">")))
   (if (not (isinstance filename str))
@@ -529,7 +532,7 @@
     (_nrepl-register-source filename src line column whole-file)
     ;; Compile every statement before running any (see eval-and-print).
     (with [(compile-errors filename padded)]
-      (= stl (compile-unit (parse padded) scope :opt-out opt-out))
+      (= stl (compile-unit (parse padded) scope :opt-out file-start))
       (= codes [])
       (for st stl
         (with [(compile-nesting-errors [st])]
@@ -568,7 +571,7 @@
       (sys.path.insert 0 script-dir))
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
-  (return (nrepl-eval src scope :filename file-path :whole-file True :opt-out True)))
+  (return (nrepl-eval src scope :filename file-path :whole-file True)))
 
 ;; A file's own scope (Clojure's namespace of a file): evals naming a file and
 ;; load-files run in it, never in the session scope, so a file's definitions
@@ -876,8 +879,7 @@
                                   (_nrepl-request-scope msg "file" scope)
                                   :filename file
                                   :line (ife (is line None) 1 line)
-                                  :column (ife (is column None) 1 column)
-                                  :opt-out (isinstance file str)))
+                                  :column (ife (is column None) 1 column)))
             (= (sub result "op") "eval-result")
             (return result))
 

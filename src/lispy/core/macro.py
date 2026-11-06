@@ -49,9 +49,12 @@ def define_macro(sexp, scope, include_meta=True):
     transformed = defmacro_transform(sexp)
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
-    body = macroexpand_then_compile(
-        [transformed], scope, include_meta=include_meta, check_bindings=False
-    )
+    # Binding checks stay on: a parameter or local named like an active macro
+    # is a binding the body's (name ...) would expand past, and lpy and the
+    # importer refuse it when they compile this same form as the module's
+    # code (include_meta). The generated ___defmacro_temp___ name never
+    # clashes.
+    body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
     with compile_nesting_errors(body):
         code = compile(ast.Interactive(body=body), "macro-defining", "single")
     eval(code, scope)
@@ -183,8 +186,8 @@ def active_macro_kind(scope):
 def macroexpand_then_compile(sexp_list, scope, include_meta=True, check_bindings=True):
     """Expand and compile each form in turn. With check_bindings, binding a
     name that is a macro in scope at that point is a compile error
-    (check_binding); defmacro and require turn it off for the code they
-    generate and run at compile time."""
+    (check_binding); require turns it off for the import it generates and
+    runs at compile time."""
     token = ACTIVE_MACROS.set(active_macro_kind(scope) if check_bindings else None)
     try:
         return stmt_list_compile(
@@ -259,17 +262,33 @@ def _drop_prelude(scope):
             del namespace[name]
 
 
+def _restore_prelude(scope):
+    """Re-add every prelude entry scope's macros lack (an earlier unit's
+    opt-out dropped it); a macro the scope defined under a prelude name
+    stays."""
+    namespace = scope.setdefault("__macro_namespace", {})
+    for name, macro in scope.get(PRELUDE_KEY, {}).items():
+        namespace.setdefault(name, macro)
+
+
 def compile_unit(forms, scope, *, opt_out=True, include_meta=True):
     """Compile one unit of source (a module, a REPL input, an editor view)
     to a list of Python statements, expanding macros in scope.
 
     The one entry point of compilation: scope gets the prelude macros first.
-    With opt_out (module semantics), a unit whose first form is
+    With opt_out (module semantics: the unit starts its module or file), the
+    unit starts from the whole prelude again, even in a persistent scope an
+    earlier unit opted out of (an nREPL file scope reloaded after its first
+    form changed), and a unit whose first form is
     ``(require lispy.macros <selection>)`` keeps only that selection of them;
     elsewhere (a REPL session's later inputs) such a require only adds.
+    A reload keeps the macros and names an earlier load of the scope
+    defined, stale ones included, as a Clojure namespace keeps its vars.
     """
     forms = list(forms)
     seed_prelude(scope)
-    if opt_out and _opt_out_form_p(forms):
-        _drop_prelude(scope)
+    if opt_out:
+        _restore_prelude(scope)
+        if _opt_out_form_p(forms):
+            _drop_prelude(scope)
     return macroexpand_then_compile(forms, scope, include_meta=include_meta)

@@ -344,8 +344,9 @@ def symbol_name(sexp):
 # slot (parameters, def/class names, imports, except, patterns, type
 # parameters). core/macro.py sets the value around compiling a unit's
 # forms: a callable from a Python name to "built-in" (a prelude macro),
-# "macro" (any other) or None. None outside a unit, and while defmacro or
-# require compile their own generated code, means no check.
+# "macro" (any other) or None. None outside a unit, and while require
+# compiles its generated import, means no check; defmacro's generated def
+# is checked, since its parameters and locals are bindings.
 ACTIVE_MACROS = contextvars.ContextVar("lispy_active_macros", default=None)
 
 

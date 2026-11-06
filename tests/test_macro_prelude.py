@@ -241,8 +241,9 @@ def test_nrepl_file_scopes(session, tmp_path):
     assert "NameError: name 'fval' is not defined" in error
 
     # An eval naming the file runs in the file's scope, opt-out included.
-    assert request(session, op="eval", code="(sq fval)", file=path)["value"] == "49"
-    error = request(session, op="eval", code="(inc 1)", file=path)["error"]
+    reply = request(session, op="eval", code="(sq fval)", file=path, line=4)
+    assert reply["value"] == "49"
+    error = request(session, op="eval", code="(inc 1)", file=path, line=4)["error"]
     assert "NameError: name 'inc' is not defined" in error
 
     file_completion = request(session, op="complete", prefix="sq", file=path)
@@ -252,6 +253,52 @@ def test_nrepl_file_scopes(session, tmp_path):
     expansion = request(session, op="macroexpand", code="(sq 3)", file=path)
     assert expansion["expansion"] == "(* 3 3)"
     assert request(session, op="macroexpand", code="(sq 3)")["expansion"] == "(sq 3)"
+
+
+def test_nrepl_region_eval_opts_out_only_at_the_file_start(session, tmp_path):
+    # Editor clients send file, line and column with every region, so a
+    # require on a later line is a later form of the file: it only adds.
+    path = str(tmp_path / "f.lpy")
+    Path(path).write_text("(= a 1)\n(require lispy.macros [->])\n(= b (inc 1))\n")
+    assert request(session, op="load-file", path=path)["error"] is None
+    region = "(require lispy.macros [->])"
+
+    def file_expansion():
+        # macroexpand reads the file scope as it stands, compiling no unit.
+        return request(session, op="macroexpand", code="(inc 1)", file=path)
+
+    reply = request(session, op="eval", code=region, file=path, line=2, column=1)
+    assert reply["error"] is None
+    assert file_expansion()["expansion"] == "(+ 1 1)"
+    reply = request(session, op="eval", code="(inc 1)", file=path, line=3)
+    assert reply["error"] is None
+    # The same text at line 1, column 1 starts the file: it opts out.
+    reply = request(session, op="eval", code=region, file=path, line=1, column=1)
+    assert reply["error"] is None
+    assert file_expansion()["expansion"] == "(inc 1)"
+    error = request(session, op="eval", code="(inc 1)", file=path, line=3)["error"]
+    assert "NameError: name 'inc' is not defined" in error
+
+
+@pytest.mark.parametrize("opted_out_first", [True, False])
+def test_nrepl_reload_after_the_first_form_changes(session, tmp_path, opted_out_first):
+    # A file scope persists across loads; each load starts from the whole
+    # prelude again, so editing the opt-out in or out takes effect.
+    path = tmp_path / "f.lpy"
+    opted_out = "(require lispy.macros [])\n(= x (inc 1))\n"
+    plain = "(= x (inc 1))\n"
+    loads = [opted_out, plain] if opted_out_first else [plain, opted_out]
+    errors = []
+    for src in loads:
+        path.write_text(src)
+        errors.append(request(session, op="load-file", path=str(path))["error"])
+    if opted_out_first:
+        assert "NameError: name 'inc' is not defined" in errors[0]
+        assert errors[1] is None
+        assert request(session, op="eval", code="x", file=str(path))["value"] == "2"
+    else:
+        assert errors[0] is None
+        assert "NameError: name 'inc' is not defined" in errors[1]
 
 
 # --- one home ----------------------------------------------------------------

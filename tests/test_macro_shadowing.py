@@ -7,6 +7,7 @@ refuses it (``check_binding`` in compiler/literal.py).
 """
 
 import ast
+import importlib
 import sys
 import types
 from pathlib import Path
@@ -254,8 +255,6 @@ def test_binding_sites_route_through_binding_name():
 @pytest.fixture
 def lsp_server():
     pytest.importorskip("pygls")
-    import importlib
-
     # lispy.lsp re-exports the server *object* as ``server``; take the module.
     return importlib.import_module("lispy.lsp.server")
 
@@ -271,3 +270,28 @@ def test_diagnostics_report_a_binding_of_a_macro_at_its_symbol(lsp_server):
     assert BUILT_IN in diagnostic.message
     start = diagnostic.range.start
     assert (start.line, start.character) == (1, 5)
+
+
+# --- defmacro: its parameters and locals are bindings -----------------------
+
+DEFMACRO_PARAM = "(= a 1)\n(defmacro my-m [x\n               cond]\n  (return x))\n"
+
+
+def test_a_defmacro_parameter_is_a_binding_in_l2py():
+    # l2py (include_meta off) runs the defmacro only at compile time.
+    with pytest.raises(LispyCompileError) as info:
+        tools.l2py_s(DEFMACRO_PARAM, fresh_scope=True, format=False)
+    assert info.value.msg.startswith("cannot bind 'cond': it is a built-in macro")
+    assert (info.value.lineno, info.value.offset) == (3, 16)
+
+
+def test_a_defmacro_parameter_is_a_binding_on_import(tmp_path, monkeypatch):
+    # The importer (include_meta on) also compiles the defmacro as module code.
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "defmacro_param_mod.lpy").write_text(DEFMACRO_PARAM)
+    monkeypatch.delitem(sys.modules, "defmacro_param_mod", raising=False)
+    with pytest.raises(LispyCompileError) as info:
+        importlib.import_module("defmacro_param_mod")
+    sys.modules.pop("defmacro_param_mod", None)
+    assert info.value.msg.startswith("cannot bind 'cond': it is a built-in macro")
+    assert (info.value.lineno, info.value.offset) == (3, 16)
