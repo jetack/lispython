@@ -8,6 +8,19 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- LSP: the Python backend's (basedpyright's) diagnostics now show in `.lpy`
+  buffers, beside lispython's own. Each lands on the `.lpy` text it is about,
+  and one that falls on code the compiler or a macro generated is dropped. An
+  error inside a macro's output lands on the macro call; messages name things
+  as the buffer spells them (`"undefined-name" is not defined`). A parse or
+  compile error hides them until the buffer compiles again. Rule severities
+  come from the project's own `pyrightconfig.json` (JSONC) or
+  `[tool.basedpyright]`/`[tool.pyright]` in `pyproject.toml`, with
+  `typeCheckingMode` `standard` when it sets none. A trailing
+  `; pyright: ignore[rule, ...]` (or a bare `; pyright: ignore`) silences a
+  line; unlike pyright, an unused one is never reported. The
+  `pythonDiagnostics` initializationOption (default on) turns all of this
+  off.
 - A Pygments lexer for lispython (`lispy.highlight.LispythonLexer`),
   registered through the `pygments.lexers` entry point under the aliases
   `lispython` and `lpy` and the `*.lpy` filename, so Markdown fences, Sphinx
@@ -39,6 +52,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- LSP: opening a `.lpy` file starts the Python backend while diagnostics are
+  on (it used to wait for the first completion, hover or definition), and a
+  buffer change compiles the buffer once, off the event loop, instead of
+  twice.
 - `(->> x f (g 1))` now compiles to `g(1, f(x))`: the steps after a bare-name
   step keep threading last (they used to thread first).
 - `conde` with an even number of operands (no final else) is a compile error
