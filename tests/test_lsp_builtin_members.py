@@ -359,22 +359,28 @@ def test_a_call_inside_a_form_reaches_the_backend(signature_help, backend_reques
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_SIGNATURE_HELP]
 
 
-@pytest.mark.parametrize(
-    "marked",
-    [
-        "(require lispy.macros *)\n(print (when x |))",
-        "(require lispy.macros *)\n(when ((g) |))",
-    ],
-    ids=["head is the macro", "innermost form has no head"],
-)
 def test_a_required_macro_answers_signature_help_before_the_backend(
-    signature_help, backend_requests, marked
+    signature_help, backend_requests
 ):
-    # Defect: the backend is asked first and its answer (print's signature,
-    # or a call of g) wins over the usage of the macro the cursor is in.
+    # Defect: the backend is asked first and its answer (print's signature)
+    # wins over the usage of the macro the cursor is in.
     from lispy.form_docs import BUILTIN_MACROS
 
-    result = signature_help(marked)
+    result = signature_help("(require lispy.macros *)\n(print (when x |))")
     assert result is not None
     assert [s.label for s in result.signatures] == list(BUILTIN_MACROS["when"].usage)
     assert backend_requests.sent == []
+
+
+def test_a_headless_form_falls_back_to_the_enclosing_macro_usage(
+    signature_help, backend_requests
+):
+    # Defect: with no backend answer for the headless innermost form ((g) |),
+    # the enclosing macro's usage is dropped. The backend is asked first here
+    # (the view compiles), so the request must have been sent.
+    from lispy.form_docs import BUILTIN_MACROS
+
+    result = signature_help("(require lispy.macros *)\n(when x ((g) |))")
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_SIGNATURE_HELP]
+    assert result is not None
+    assert [s.label for s in result.signatures] == list(BUILTIN_MACROS["when"].usage)
