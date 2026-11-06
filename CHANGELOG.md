@@ -25,17 +25,34 @@ follows [Semantic Versioning](https://semver.org/).
   `(require lispy.macros)` only the qualified names.
 - nREPL: a file-less `eval` runs in the session's `__main__` scope with every
   built-in; an `eval` with `file`, or `load-file`, runs in that file's own
-  macro scope, where its opt-out applies. `macroexpand`, `complete`, `docs`
-  and `annotate` accept an optional `file` to answer from that file's scope.
+  macro scope. A `load-file`, or an `eval` with `file` at line 1, column 1,
+  starts the file again: it begins from every built-in and its first form's
+  opt-out applies; an `eval` further down only adds. `macroexpand`,
+  `complete`, `docs` and `annotate` accept an optional `file` to answer from
+  that file's scope.
 
 ### Changed
 
+- Built-in macros now load with no `require` (see Added), so a call to a
+  function named like one (`inc`, `dec`, `when`, `fn`, `comment`, `cond`,
+  ...) that the module did not bind itself, such as a name from
+  `(from lib *)` or a Python builtin, now expands the macro instead of
+  calling the function. Fix: make `(require lispy.macros [...])` the
+  module's first form, listing only the macros it uses (`[]` for none).
+- nREPL: an `eval` naming a `file`, and `load-file`, run in that file's own
+  scope instead of the session's, so a file-less `eval` no longer sees the
+  definitions they make. Editor clients should send `file` with `complete`,
+  `docs`, `macroexpand` and `annotate` too, to answer from the same scope.
+- Upgrading: a `.pyc` that 0.6.0 compiled for a module using a built-in
+  macro without a `require` keeps its old code until the source changes;
+  touch the file or delete its `__pycache__`.
 - Binding a name that is an active macro (`def`/`class` names, `=`,
-  augmented assignment, `:=`, parameters, `for`/`with`/`except`/comprehension
-  targets, import names and aliases, match captures, type parameters) is a
-  compile error, compared by Python name, because macro lookup is by head
-  name and `(inc ...)` would still expand the macro. This refuses code that
-  compiled before, for example `(def inc [x] ...)`. Rename the binding, or
+  augmented assignment, `:=`, parameters, `defmacro` parameters and locals,
+  `for`/`with`/`except`/comprehension targets, import names and aliases,
+  match captures, type parameters) is a compile error, compared by Python
+  name, because macro lookup is by head name and `(inc ...)` would still
+  expand the macro. This refuses code that compiled before, for example
+  `(def inc [x] ...)` or `(defmacro m [cond] ...)`. Rename the binding, or
   list only the macros the module uses in
   `(require lispy.macros [...])` as its first form. A `defmacro` of the same
   name stays allowed.
