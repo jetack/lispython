@@ -1,6 +1,8 @@
-"""docs/hooks.py rewrites internal links so llms-full.txt, which joins every
-page into one file, still resolves them. Built from mkdocs' own File, Files,
-Page and config objects, so the site URLs are the ones mkdocs computes."""
+"""docs/hooks.py: internal links are rewritten so the llms files, which join
+pages into one file, still resolve them; llms.txt lists every nav page,
+llms-full.txt holds them all, llms-syntax.txt only the pages in
+extra.llms_syntax_pages. Built from mkdocs' own File, Files, Page and config
+objects, so the site URLs are the ones mkdocs computes."""
 
 import importlib.util
 from pathlib import Path
@@ -21,6 +23,12 @@ def hooks():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def fresh_pages(hooks):
+    # _pages outlives a build on purpose (--dirty), so tests reset it.
+    hooks._pages.clear()
 
 
 @pytest.fixture(scope="module")
@@ -111,7 +119,8 @@ NAV = [
 LISTED = ["macros.md", "syntax/statements.md", "syntax/expressions.md"]
 
 
-def build(hooks, tmp_path, listed, site_url=SITE):
+def build(hooks, tmp_path, listed, site_url=SITE, render=None):
+    """One build cycle; ``render`` limits which pages get on_page_markdown."""
     config = MkDocsConfig()
     config.load_dict(
         {
@@ -127,6 +136,8 @@ def build(hooks, tmp_path, listed, site_url=SITE):
     hooks.on_pre_build(config)
     hooks.on_nav(type("Nav", (), {"pages": pages})(), config, files)
     for page in pages:
+        if render is not None and page.file.src_uri not in render:
+            continue
         hooks.on_page_markdown(f"BODY {page.file.src_uri}", page, config, files)
     hooks.on_post_build(config)
     return {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir()}
@@ -163,6 +174,34 @@ def test_a_listed_path_that_is_no_nav_page_or_repeats_fails_the_build(
 ):
     with pytest.raises(PluginError):
         build(hooks, tmp_path, listed)
+
+
+@pytest.mark.parametrize("extra", [{}, {"llms_syntax_pages": []}])
+def test_an_absent_or_empty_page_list_fails_the_build(hooks, tmp_path, extra):
+    config = MkDocsConfig()
+    config.load_dict({"site_name": "t", "site_dir": str(tmp_path), "extra": extra})
+    hooks.on_pre_build(config)
+    with pytest.raises(PluginError, match="missing or empty"):
+        hooks.on_post_build(config)
+
+
+def test_a_listed_page_not_rendered_in_a_later_build_keeps_its_last_render(
+    hooks, tmp_path
+):
+    # mkdocs build --dirty skips on_page_markdown for unchanged pages.
+    build(hooks, tmp_path, LISTED)
+    out = build(hooks, tmp_path, LISTED, render={"macros.md"})
+    assert page_lines(out["llms-syntax.txt"]) == [
+        "Page: Macros",
+        "Page: Statements",
+        "Page: Expressions",
+    ]
+    assert "BODY syntax/statements.md" in out["llms-syntax.txt"]
+
+
+def test_a_nav_page_never_rendered_is_named_as_such(hooks, tmp_path):
+    with pytest.raises(PluginError, match="not rendered"):
+        build(hooks, tmp_path, LISTED, render={"macros.md"})
 
 
 def test_a_versioned_site_url_without_a_trailing_slash_keeps_its_version(

@@ -20,7 +20,7 @@ plugins:
   - search
   - mike
 
-# After the plugins: llms.txt / llms-full.txt from the rendered markdown.
+# After the plugins: llms.txt / llms-full.txt / llms-syntax.txt from the rendered markdown.
 hooks:
   - docs/hooks.py
 

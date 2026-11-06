@@ -27,8 +27,7 @@ SYNTAX_PREAMBLE = (
     "LisPython is Python written as s-expressions: a `.lpy` file compiles to a "
     "Python AST and runs on CPython, so Python's semantics, built-ins and "
     "standard library apply unchanged. This file covers only what differs from "
-    "Python: the lexical syntax, statements and expressions, every form's usage, "
-    "the macro system and the built-in macros."
+    "Python."
 )
 
 # mkdocs loads a hook by file path without putting docs/ on sys.path, so
@@ -40,13 +39,16 @@ _spec = importlib.util.spec_from_file_location(
 docs_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(docs_main)
 
-_pages = {}  # src_uri -> rendered markdown, for the current build
+# src_uri -> rendered markdown. Never cleared: mkdocs serve/build --dirty skips
+# on_page_markdown for unchanged pages, so their last render must survive.
+# Entries are overwritten whenever a page renders, and the output is selected
+# through the current nav, so a page removed from the nav never appears.
+_pages = {}
 _nav = []
 
 
 def on_pre_build(config):
     # mkdocs serve rebuilds in the same process.
-    _pages.clear()
     _nav.clear()
 
 
@@ -131,16 +133,24 @@ def _description(page, markdown):
 
 def on_post_build(config):
     pages = [p for p in _nav if p.file.src_uri in _pages]
-    by_src = {p.file.src_uri: p for p in pages}
+    nav_by_src = {p.file.src_uri: p for p in _nav}
+    listed = config.extra.get("llms_syntax_pages")
+    if not listed:
+        raise PluginError("extra.llms_syntax_pages is missing or empty")
     syntax = []
-    for src in config.extra.get("llms_syntax_pages", []):
-        if src not in by_src:
+    for src in listed:
+        if src not in nav_by_src:
             raise PluginError(
                 f"extra.llms_syntax_pages lists {src!r}, which is not a nav page"
             )
-        if by_src[src] in syntax:
+        if src not in _pages:
+            raise PluginError(
+                f"extra.llms_syntax_pages lists {src!r}, which was not rendered "
+                "in this build"
+            )
+        if nav_by_src[src] in syntax:
             raise PluginError(f"extra.llms_syntax_pages lists {src!r} twice")
-        syntax.append(by_src[src])
+        syntax.append(nav_by_src[src])
     site_dir = Path(config.site_dir)
     header = [
         f"# {config.site_name}",
