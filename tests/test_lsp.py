@@ -675,7 +675,8 @@ def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
 
 def cursor_view_references(path):
     """The nearest enclosing def's name (None at top level) of every symbol
-    spelled exactly cursor-view in the lispython source at path."""
+    in the lispython source at path whose last dotted part is the name
+    cursor-view (by name_key, so cursor_view and server.cursor-view count)."""
     stack = [(form, None) for form in parse(path.read_text())]
     found = []
     while stack:
