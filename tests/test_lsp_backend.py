@@ -69,6 +69,9 @@ FAKE_SERVER = textwrap.dedent(
             if "answer" in config:
                 break
             await asyncio.sleep(0.01)
+        # The column is a delay in tenths of a second before the document is
+        # read, so requests can overlap.
+        await asyncio.sleep(params.position.character / 10)
         doc = ls.workspace.get_text_document(params.text_document.uri)
         text = doc.source
         answer = {"pid": os.getpid(), "text": text, "config": config.get("answer")}
@@ -313,6 +316,12 @@ def test_only_an_open_with_diagnostics_starts_a_backend(
 
     run_bounded(scenario())
     assert len(spawned) == (1 if python_diagnostics else 0)
+    # Nobody reads its diagnostics: the backend checks nothing.
+    client._prepare_view_root()
+    config = json.loads(
+        (pathlib.Path(client.view_root.path) / "pyrightconfig.json").read_text()
+    )
+    assert config["typeCheckingMode"] == ("standard" if python_diagnostics else "off")
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +477,35 @@ def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
             await client.shutdown()
 
     assert run_bounded(scenario()) == [{"pythonPath": client.view_root.python}, {}]
+
+
+def test_overlapping_requests_keep_their_text_until_the_last_answers(
+    project, tmp_path, fake_argv
+):
+    # Defect: the first of two requests over one cursor text (completion and
+    # signature help) to answer syncs the buffer's full view back while the
+    # other still waits, which is then answered over the wrong text; or the
+    # full view is never synced back after both.
+    client = backend.BackendClient(view_root(project, tmp_path), fake_argv)
+    uri = (project / "main.lpy").as_uri()
+    full = pv.compile_view("(= y 5)")
+    client.push_buffer(uri, "(= y 5)", full)
+
+    def hover(delay, text):
+        params = hover_params(client.backend_uri(uri), character=delay)
+        return client.request(lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=text)
+
+    async def scenario():
+        try:
+            assert fake_hover(await hover(0, None))["text"] == full.text
+            fast, slow = await asyncio.gather(hover(1, "cursor"), hover(5, "cursor"))
+            assert fake_hover(fast)["text"] == "cursor"
+            assert fake_hover(slow)["text"] == "cursor"
+            assert fake_hover(await hover(0, None))["text"] == full.text
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
 
 
 def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):

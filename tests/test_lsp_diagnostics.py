@@ -11,6 +11,7 @@ last test runs the session's real basedpyright.
 import asyncio
 import importlib
 import itertools
+import pathlib
 import re
 import sys
 import time
@@ -118,24 +119,33 @@ def test_plumbing_maps_nowhere():
 # ---------------------------------------------------------------------------
 
 
-def test_messages_quote_names_as_the_buffer_spells_them():
+def test_messages_quote_names_as_the_code_they_mark_spells_them():
     # Defects: a message names the Python spelling the user never wrote; a
-    # name the buffer spells two ways is guessed; quoted text that is no
+    # quoted name the marked code does not spell (a TypedDict key, while
+    # my-key is a symbol elsewhere) is rewritten; quoted text that is no
     # name (a type) is rewritten.
-    src = "(= my-x 1)\n(= other-y my-x)\n(= amb-z 1)\n(= amb_z 2)"
-    spellings = server.buffer_name_spellings(src)
-    rename = server.message_to_buffer
+    src = '(print undefined-name)\n(= unused-x 1)\n(= d {"my_key" 1})\n(= my-key 2)'
+    lines = pv.source_lines(src)
+
+    def rename(message, word):
+        return server.message_to_buffer(message, lines, span(src, word))
+
     assert (
-        rename('"undefined_name" is not defined', "undefined-name", spellings)
+        rename('"undefined_name" is not defined', "undefined-name")
         == '"undefined-name" is not defined'
     )
     assert (
-        rename('Variable "other_y" is not accessed', None, spellings)
-        == 'Variable "other-y" is not accessed'
+        rename('Variable "unused_x" is not accessed', "(= unused-x 1)")
+        == 'Variable "unused-x" is not accessed'
     )
-    assert rename('"amb_z" is unbound', None, spellings) == '"amb_z" is unbound'
-    literal = 'Type "Literal[\'s\']" is not assignable to "my_x"'
-    assert rename(literal, None, spellings) == literal.replace("my_x", "my-x")
+    key = '"my_key" is not a defined key in "Point"'
+    assert rename(key, '{"my_key" 1}') == key
+    # A key missing from the marked call is quoted as the TypedDict spells
+    # it, never as the unrelated symbol my-key.
+    missing = '"my_key" is required in "Point"'
+    assert rename(missing, "(print undefined-name)") == missing
+    literal = 'Type "Literal[\'s\']" is not assignable to "unused_x"'
+    assert rename(literal, "(= unused-x 1)") == literal.replace("unused_x", "unused-x")
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +194,38 @@ def test_only_the_full_views_current_version_is_kept(tmp_path):
     assert client.diagnostics_for(uri, full) is None
     assert heard == []
     client._diagnostics_published(process, published(shadow, 4, [diagnostic]))
-    assert client.diagnostics_for(uri, full) == [diagnostic]
+    assert client.diagnostics_for(uri, full) == [(diagnostic, [])]
     assert heard == [uri]
+
+
+def test_related_locations_are_placed_when_published(tmp_path):
+    # Defect: a related location is placed (locate) only when the server
+    # maps the set, after a later sync (a request's cursor view) has
+    # replaced the origin of the text the backend analysed, so it maps
+    # through the wrong view.
+    project = tmp_path / "project"
+    project.mkdir()
+    client = backend.BackendClient(
+        pv.view_root_for(str(project), cache_home=str(tmp_path / "cache")), None
+    )
+    process = object()
+    client._client = process
+    uri = (project / "main.lpy").as_uri()
+    shadow = client.backend_uri(uri)
+    full, full_origin = "x = 1", ("(= x 1)", object())
+    client._full[uri] = (full, full_origin)
+    client._docs[uri] = [shadow, 2, full, full_origin]
+    here = lsp.Range(
+        start=lsp.Position(line=0, character=0), end=lsp.Position(line=0, character=1)
+    )
+    related = lsp.DiagnosticRelatedInformation(
+        location=lsp.Location(uri=shadow, range=here), message="see"
+    )
+    diagnostic = lsp.Diagnostic(range=here, message="m", related_information=[related])
+    client._diagnostics_published(process, published(shadow, 2, [diagnostic]))
+    client._docs[uri][3] = ("(= x 1)", object())  # a later cursor sync
+    [(_, places)] = client.diagnostics_for(uri, full)
+    assert places == [("lpy", uri, full_origin)]
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +261,23 @@ class Editor:
     def change(self, text):
         self.edit(text, server.did_change)
 
+    def params(self):
+        return SimpleNamespace(text_document=SimpleNamespace(uri=self.uri))
+
+    def save(self):
+        server.did_save(self, self.params())
+
+    def close(self):
+        server.did_close(self, self.params())
+
+
+def fresh_server_state(monkeypatch):
+    monkeypatch.setattr(server, "view_cache", pv.ViewCache())
+    monkeypatch.setattr(server, "DIAGNOSTIC_RUNS", {})
+    monkeypatch.setattr(server, "_COMPILING", set())
+    for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
+        monkeypatch.setattr(server, name, {})
+
 
 async def until(predicate, timeout=10):
     deadline = time.monotonic() + timeout
@@ -246,10 +303,7 @@ def fake_served(tmp_path, monkeypatch):
     backends.configure(None)
     backends.on_diagnostics = server.backend_diagnostics_arrived
     monkeypatch.setattr(server, "backends", backends)
-    monkeypatch.setattr(server, "view_cache", pv.ViewCache())
-    monkeypatch.setattr(server, "DIAGNOSTIC_RUNS", {})
-    for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
-        monkeypatch.setattr(server, name, {})
+    fresh_server_state(monkeypatch)
     return Editor((project / "main.lpy").as_uri()), backends
 
 
@@ -332,6 +386,207 @@ def test_a_change_compiles_once(fake_served, monkeypatch):
     assert len(calls) == 1
 
 
+def test_a_change_right_after_the_open_still_starts_the_backend(fake_served):
+    # Defect: the open starts the backend only once its compile is done, and
+    # a change that comes first supersedes the open's run: no backend, no
+    # Python diagnostics until some request starts one.
+    editor, backends = fake_served
+
+    async def scenario():
+        try:
+            editor.open("(print 1)\n")
+            editor.change("(print undefined-name)\n")
+            await until(
+                lambda: editor.published and backend_diagnostics(editor.published[-1])
+            )
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+
+
+def test_a_save_compiles_again(fake_served, monkeypatch):
+    # Defect: a save reuses the version's cached compile, so a macro that
+    # reads the disk (here a flag file) shows its result from before.
+    editor, backends = fake_served
+    project = pathlib.Path(editor.uri[len("file://") :]).parent
+    (project / "flag.txt").write_text("ok")
+    (project / "diag_flag_mac.lpy").write_text(
+        "(import os.path)\n"
+        "(defmacro from-disk []\n"
+        '  (with [(open (os.path.join (os.path.dirname __file__) "flag.txt")) as f]\n'
+        '    (if (== (.strip (.read f)) "bad")\n'
+        '        (raise (ValueError "bad flag"))))\n'
+        "  (return 1))\n"
+    )
+    monkeypatch.delitem(sys.modules, "diag_flag_mac", raising=False)
+    backends.configure({"backend": "off"})
+
+    async def scenario():
+        editor.open("(require diag_flag_mac [from-disk])\n(print (from-disk))\n")
+        await until(lambda: editor.published)
+        assert editor.published[-1] == []
+        (project / "flag.txt").write_text("bad")
+        count = len(editor.published)
+        editor.save()
+        await until(lambda: len(editor.published) > count)
+        [warning] = editor.published[-1]
+        assert "bad flag" in warning.message
+
+    run_bounded(scenario())
+    sys.modules.pop("diag_flag_mac", None)
+
+
+class ScriptedBackends:
+    """A running backend whose published sets the test decides: known maps
+    a view text to its (diagnostic, places) pairs."""
+
+    name = "basedpyright"
+
+    def __init__(self):
+        self.known = {}
+        self.on_diagnostics = None
+
+    def document_opened(self, uri):
+        pass
+
+    def document_changed(self, uri, source, view):
+        return True
+
+    def document_saved(self, uri):
+        pass
+
+    def document_closed(self, uri):
+        pass
+
+    def backend_diagnostics(self, uri, text):
+        return self.known.get(text)
+
+    def publish(self, src, word):
+        """An Error on word in src's view, as the backend publishes it."""
+        text = pv.compile_view(src).text
+        (line, col), (end_line, end_col) = span(text, word)
+        diagnostic = lsp.Diagnostic(
+            range=lsp.Range(
+                start=lsp.Position(line=line - 1, character=col),
+                end=lsp.Position(line=end_line - 1, character=end_col),
+            ),
+            message=f'"{word}" is not defined',
+            code="reportUndefinedVariable",
+        )
+        self.known[text] = [(diagnostic, [])]
+
+
+@pytest.fixture
+def scripted(tmp_path, monkeypatch):
+    """(editor, backends) over ScriptedBackends, the server's state fresh."""
+    backends = ScriptedBackends()
+    monkeypatch.setattr(server, "backends", backends)
+    fresh_server_state(monkeypatch)
+    return Editor((tmp_path / "main.lpy").as_uri()), backends
+
+
+def messages(diagnostics):
+    return [d.message for d in diagnostics]
+
+
+def test_a_late_backend_set_republishes(scripted, monkeypatch):
+    # Defect: the backend's set that comes after the change's publish (past
+    # DIAGNOSTICS_TIMEOUT, or after a start) is never shown.
+    editor, backends = scripted
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0.05)
+    src = "(print undefined-name)\n"
+
+    async def scenario():
+        editor.change(src)
+        await until(lambda: editor.published)
+        assert editor.published == [[]]
+        backends.publish(src, "undefined_name")
+        server.backend_diagnostics_arrived(editor.uri)
+        await until(lambda: len(editor.published) > 1)
+
+    run_bounded(scenario())
+    assert messages(editor.published[-1]) == ['"undefined-name" is not defined']
+
+
+def test_a_newer_change_supersedes_a_waiting_run(scripted, monkeypatch):
+    # Defect: a run waiting for the backend's set of an older text publishes
+    # after a newer change, so the editor shows the older text's state.
+    editor, backends = scripted
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 5)
+    newer = "(print undefined-name 2)\n"
+    backends.publish(newer, "undefined_name")
+
+    async def scenario():
+        editor.change("(print 1)\n")
+        await until(lambda: server.DIAGNOSTIC_RUNS[editor.uri].arrived is not None)
+        editor.change(newer)
+        await until(lambda: editor.published, timeout=2)
+        await asyncio.sleep(0.2)  # a superseded run would publish by now
+
+    run_bounded(scenario())
+    assert [messages(p) for p in editor.published] == [
+        ['"undefined-name" is not defined']
+    ]
+
+
+def test_a_close_clears_the_buffer_and_ends_a_waiting_run(scripted, monkeypatch):
+    # Defects: forwarded diagnostics linger in the editor after the buffer
+    # closes; a run waiting for the backend publishes after the close.
+    editor, backends = scripted
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 5)
+
+    async def scenario():
+        editor.change("(print 1)\n")
+        await until(lambda: server.DIAGNOSTIC_RUNS[editor.uri].arrived is not None)
+        waiting = server.DIAGNOSTIC_RUNS[editor.uri]
+        editor.close()
+        backends.publish("(print 1)\n", "print")
+        server.backend_diagnostics_arrived(editor.uri)
+        await until(lambda: waiting.arrived is None, timeout=2)
+        await asyncio.sleep(0.1)
+
+    run_bounded(scenario())
+    assert editor.published == [[]]
+
+
+def test_rapid_changes_compile_at_most_twice(scripted, monkeypatch):
+    # Defect: every keystroke's compile runs, all its macros included, even
+    # once a newer change has made it moot; or the coalesced compile is not
+    # of the latest version.
+    import threading
+
+    editor, backends = scripted
+    gate = threading.Event()
+    compiled = []
+    real = server.compile_document
+
+    def blocking(uri, version, source, **kwargs):
+        compiled.append(source)
+        if len(compiled) == 1:
+            gate.wait(10)
+        return real(uri, version, source, **kwargs)
+
+    monkeypatch.setattr(server, "compile_document", blocking)
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
+
+    async def scenario():
+        editor.change("(= a 1)\n")
+        await until(lambda: compiled)
+        for n in range(2, 7):
+            editor.change(f"(= a {n})\n")
+            await asyncio.sleep(0)
+        editor.change("(= a")  # the latest does not parse
+        gate.set()
+        await until(lambda: editor.published)
+        await asyncio.sleep(0.2)
+
+    run_bounded(scenario())
+    assert compiled == ["(= a 1)\n", "(= a"]
+    [[diagnostic]] = editor.published
+    assert diagnostic.message.startswith("Parse error:")
+
+
 # ---------------------------------------------------------------------------
 # Real basedpyright
 # ---------------------------------------------------------------------------
@@ -351,10 +606,7 @@ def test_real_basedpyright_reports_on_the_lpy_word(
         real_backends, "on_diagnostics", server.backend_diagnostics_arrived
     )
     monkeypatch.setattr(server, "backends", real_backends)
-    monkeypatch.setattr(server, "view_cache", pv.ViewCache())
-    monkeypatch.setattr(server, "DIAGNOSTIC_RUNS", {})
-    for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
-        monkeypatch.setattr(server, name, {})
+    fresh_server_state(monkeypatch)
     editor = Editor((backend_project / "main.lpy").as_uri())
 
     async def scenario():
@@ -412,7 +664,7 @@ class StubBackends:
                     code=code,
                 )
             )
-        return None, found
+        return [(diagnostic, []) for diagnostic in found]
 
 
 def survivors(monkeypatch, published):
@@ -421,7 +673,9 @@ def survivors(monkeypatch, published):
     monkeypatch.setattr(server, "backends", StubBackends(published))
     doc = TextDocument("file:///buffer.lpy", SUPPRESSED, version=1)
     view = pv.compile_view(SUPPRESSED)
-    found = asyncio.run(server.mapped_backend_diagnostics(doc, view))
+    run = server.DiagnosticRun(None, doc)
+    run.view = view
+    found = asyncio.run(server.mapped_backend_diagnostics(run))
     return [(d.code, d.range.start.line + 1) for d in found]
 
 

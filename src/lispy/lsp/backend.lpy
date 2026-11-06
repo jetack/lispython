@@ -284,10 +284,13 @@
    view is synced back.  Its diagnostics are kept only for a full view's
    text (_diagnostics-published, diagnostics-for).  definition-walks-up is
    True for a backend in DEFINITION-WALKS-UP."
-  (def __init__ [self view-root argv :manifest None :definition-walks-up False]
+  (def __init__ [self view-root argv :manifest None :check-types True
+                 :definition-walks-up False]
     (= self.view-root view-root)
     (= self.project-root (osp.realpath view-root.project-root))
     (= self.argv argv)
+    ;; write-pyright-config's: False when no diagnostic is forwarded.
+    (= self.check-types check-types)
     (= self.definition-walks-up definition-walks-up)
     (= self.manifest (ife (is manifest None) (ShadowManifest) manifest))
     (= self.state (ife (is argv None) OFF "idle"))
@@ -313,7 +316,10 @@
     (= self._diagnostics {})
     ;; Called with an lpy uri on the loop when its diagnostics arrive; set by
     ;; Backends.
-    (= self.on-diagnostics None))
+    (= self.on-diagnostics None)
+    ;; lpy uri -> its requests in flight (request), which a full view's
+    ;; sync waits for.
+    (= self._in-flight {}))
 
   (deco property
     (def running [self]
@@ -345,7 +351,8 @@
     (os.makedirs root :exist-ok True)
     (write-shadows self.project-root root :manifest self.manifest)
     (write-pyright-config self.project-root root
-                          :import-roots self.manifest.import-roots))
+                          :import-roots self.manifest.import-roots
+                          :check-types self.check-types))
 
   (def _start-task [self]
     "The task starting the backend: the one in progress, else a new one when
@@ -520,27 +527,40 @@
       (if (not (await (._ensure-started self deadline)))
           (return failed))
       (= client self._client)
-      (if (and (is-not uri None) (is-not text None))
-          (._sync self uri text :origin origin))
-      (= msg-id (str (uuid.uuid4)))
-      (= answer (.send-request-async client.protocol method params :msg-id msg-id))
-      ;; shielded, so a timeout cancels only this wait: the late answer then
-      ;; resolves a future nobody awaits instead of one already cancelled.
-      (.add-done-callback answer _retrieve)
+      (if (is-not uri None)
+          (= (sub self._in-flight uri) (+ (.get self._in-flight uri 0) 1)))
       (try
-        (return (await (asyncio.wait-for (asyncio.shield answer) (_remaining deadline))))
-        (except [TimeoutError]
-          (.debug logger "python backend: %s timed out" method)
-          (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
-          (return failed))
+        (if (and (is-not uri None) (is-not text None))
+            (._sync self uri text :origin origin))
+        (= msg-id (str (uuid.uuid4)))
+        (= answer (.send-request-async client.protocol method params :msg-id msg-id))
+        ;; shielded, so a timeout cancels only this wait: the late answer
+        ;; then resolves a future nobody awaits instead of one cancelled.
+        (.add-done-callback answer _retrieve)
+        (try
+          (return (await (asyncio.wait-for (asyncio.shield answer) (_remaining deadline))))
+          (except [TimeoutError]
+            (.debug logger "python backend: %s timed out" method)
+            (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
+            (return failed)))
         (finally
-          ;; Once answered, the backend analyses the buffer again, not the
-          ;; cursor view, whose diagnostics are never forwarded.
           (if (is-not uri None)
-              (._sync-full self uri))))
+              (._request-done self uri))))
       (except [Exception as e]
         (.debug logger "python backend: %s failed: %s" method e)
         (return failed))))
+
+  (def _request-done [self lpy-uri]
+    "A request on document lpy-uri ended.  Once none is left in flight, the
+     backend analyses the buffer's full view again (a cursor view's
+     diagnostics are never forwarded); never while another still waits for
+     its answer over the text it synced."
+    (= left (- (.get self._in-flight lpy-uri 1) 1))
+    (if (> left 0)
+        (do (= (sub self._in-flight lpy-uri) left)
+            (return)))
+    (.pop self._in-flight lpy-uri None)
+    (._sync-full self lpy-uri))
 
   (def push-buffer [self lpy-uri source view]
     "Make view, the full PythonView of buffer source (the one compile of
@@ -586,7 +606,14 @@
         (if (or (is params.version None) (!= params.version (sub doc 1))
                 (is full None) (!= (sub full 0) (sub doc 2)))
             (return))
-        (= (sub self._diagnostics lpy-uri) (, (sub doc 2) (list params.diagnostics)))
+        ;; Related locations are placed now, as locate requires, through
+        ;; the origin of the text the backend analysed.
+        (= origins {lpy-uri (sub full 1)})
+        (= (sub self._diagnostics lpy-uri)
+           (, (sub doc 2)
+              [(, diagnostic [(.locate self info.location.uri :origins origins)
+                              for info in (or diagnostic.related-information [])])
+               for diagnostic in params.diagnostics]))
         (if (is-not self.on-diagnostics None)
             (self.on-diagnostics lpy-uri))
         (return))
@@ -594,9 +621,10 @@
         (.exception logger "lispython LSP: backend diagnostics failed for %s" params.uri))))
 
   (def diagnostics-for [self lpy-uri text]
-    "The backend's diagnostics (lsprotocol Diagnostics over text, in UTF-16
-     units) for document lpy-uri when they were published for text, the
-     text of its full view, else None."
+    "The backend's diagnostics for document lpy-uri when they were published
+     for text, the text of its full view, else None: a list of (diagnostic,
+     places), an lsprotocol Diagnostic over text in UTF-16 units and the
+     locate answer for each of its related locations."
     (= known (.get self._diagnostics lpy-uri))
     (if (or (is known None) (!= (sub known 0) text))
         (return None))
@@ -848,6 +876,7 @@
                 (.configure self None))
             (= client (BackendClient (view-root-for root :cache-home self.cache-home)
                                      (backend-argv self.name)
+                                     :check-types self.forwards-diagnostics
                                      :definition-walks-up
                                      (in self.name DEFINITION-WALKS-UP)))
             (= client.on-diagnostics self._diagnostics-arrived)
@@ -913,17 +942,15 @@
         (return False))))
 
   (def backend-diagnostics [self lpy-uri text]
-    "(client, diagnostics): the backend's diagnostics published for text, the
-     full view of buffer lpy-uri (BackendClient.diagnostics-for), and the
-     client that placed them; None when they are not forwarded or not
-     known for text."
+    "The backend's diagnostics published for text, the full view of buffer
+     lpy-uri (BackendClient.diagnostics-for: (diagnostic, places) pairs);
+     None when they are not forwarded or not known for text."
     (if (not self.forwards-diagnostics)
         (return None))
     (= client (._existing self lpy-uri))
     (if (is client None)
         (return None))
-    (= found (.diagnostics-for client lpy-uri text))
-    (return (ife (is found None) None (, client found))))
+    (return (.diagnostics-for client lpy-uri text)))
 
   (def document-closed [self lpy-uri]
     (try

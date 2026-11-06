@@ -915,6 +915,44 @@ class TestShadows:
         )
         assert config["typeCheckingMode"] == "standard"
 
+    def test_pyright_config_reads_jsonc_as_pyright_does(self, tmp_path):
+        # Defect: a pyrightconfig.json with comments or trailing commas,
+        # which pyright accepts, is taken as malformed, so the project's
+        # rules silently fall back to the default; or a "//" or "/*" inside
+        # a string is cut as a comment.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyrightconfig.json").write_text(
+            "{\n"
+            "  // the project's level\n"
+            '  "typeCheckingMode": "strict", /* inline */\n'
+            '  "reportGeneralTypeIssues": "warning",\n'
+            '  "pythonPlatform": "a//b /* c */ \\"d\\"",\n'
+            '  "ignore": ["x",],\n'
+            "}\n"
+        )
+        config = json.loads(
+            open(pv.write_pyright_config(str(project), str(root))).read()
+        )
+        assert config["typeCheckingMode"] == "strict"
+        assert config["reportGeneralTypeIssues"] == "warning"
+        assert config["pythonPlatform"] == 'a//b /* c */ "d"'
+
+    def test_pyright_config_checks_nothing_without_diagnostics(self, tmp_path):
+        # Defect: with pythonDiagnostics false the backend still type-checks
+        # every open buffer, at the project's strictness, for nobody.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[tool.basedpyright]\n"
+            'typeCheckingMode = "strict"\n'
+            'reportUnusedVariable = "error"\n'
+        )
+        path = pv.write_pyright_config(str(project), str(root), check_types=False)
+        config = json.loads(open(path).read())
+        assert config["typeCheckingMode"] == "off"
+        assert "reportUnusedVariable" not in config
+
     def test_pyright_config(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
         site = project / ".venv" / "lib" / "python3.99" / "site-packages"

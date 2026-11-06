@@ -14,6 +14,7 @@
 (import builtins)
 (import contextlib)
 (import errno)
+(import functools)
 (import glob)
 (import hashlib)
 (import json)
@@ -235,29 +236,27 @@
     "The innermost entry whose generated span holds (line, col), or None."
     (return (._innermost self (, line col) 0)))
 
-  (def exact-span [self start end]
-    "The narrowest .lpy span of the node entries (never a name entry) whose
-     generated span is exactly start..end, or None."
-    (= best None)
-    (for [gen-start gen-end lpy-start lpy-end name-p] in self.entries
-      (if (and (not name-p) (== gen-start start) (== gen-end end)
-               (or (is best None)
-                   (_narrower-p lpy-start lpy-end False (sub best 0) (sub best 1) False)))
-          (= best (, lpy-start lpy-end))))
-    (return best))
-
-  (def spanning-span [self start end]
-    "The .lpy span of the innermost entry whose generated span holds the
-     whole of start..end (a name wins a tie), or None."
-    (= best None)
+  (def range-spans [self start end]
+    "(exact, spanning) for the generated range start..end, in one pass over
+     the entries: exact, the narrowest .lpy span of the node entries (never
+     a name entry) whose generated span is exactly start..end; spanning, the
+     .lpy span of the innermost entry whose generated span holds the whole
+     range (a name wins a tie).  Either is None when there is none."
+    (= exact None)
+    (= spanning None)
     (for entry in self.entries
-      (= [gen-start gen-end _ _ name-p] entry)
-      (if (and (<= gen-start start) (<= end gen-end)
-               (or (is best None)
-                   (_narrower-p gen-start gen-end name-p
-                                (sub best 0) (sub best 1) (sub best 4))))
-          (= best entry)))
-    (return (ife (is best None) None (, (sub best 2) (sub best 3)))))
+      (= [gen-start gen-end lpy-start lpy-end name-p] entry)
+      (if (or (> gen-start start) (< gen-end end))
+          (continue))
+      (if (and (not name-p) (== gen-start start) (== gen-end end)
+               (or (is exact None)
+                   (_narrower-p lpy-start lpy-end False (sub exact 0) (sub exact 1) False)))
+          (= exact (, lpy-start lpy-end)))
+      (if (or (is spanning None)
+              (_narrower-p gen-start gen-end name-p
+                           (sub spanning 0) (sub spanning 1) (sub spanning 4)))
+          (= spanning entry)))
+    (return (, exact (ife (is spanning None) None (, (sub spanning 2) (sub spanning 3))))))
 
   (def _lookup [self pos from-index to-index]
     (= best (._innermost self pos from-index))
@@ -419,6 +418,7 @@
    compile had registered once expanded: a name there is a lispython form at
    a call's head, which no Python backend knows."
   (def __init__ [self text position-map tree :macros (frozenset)]
+    (= self._lines None)
     (= self.text text)
     (= self.map position-map)
     (= self.tree tree)
@@ -427,11 +427,24 @@
     (= self.partial None)
     (= self.attribute False)
     (= self.in-import False)
-    (= self.fallback False)))
+    (= self.fallback False))
 
-(def _spelled-in [lines start end name]
+  (deco property
+    (def lines [self]
+      "text split into lines, once per text (view-at-cursor edits text)."
+      (if (or (is self._lines None) (is-not (sub self._lines 0) self.text))
+          (= self._lines (, self.text (.split self.text "\n"))))
+      (return (sub self._lines 1)))))
+
+(deco (functools.lru-cache :maxsize 8)
+  (def source-lines [source]
+    "source split into lines, as a tuple: one split per source however many
+     ranges are mapped over it."
+    (return (tuple (.split source "\n")))))
+
+(def spelled-in [lines start end name]
   "The .lpy span of the first name run between start and end in lines
-   whose py-name is name, or None.  A run is a stretch of _name-char-p
+   (source-lines) whose py-name is name, or None.  A run is a stretch of _name-char-p
    characters (a dot splits runs) less its leading _SYMBOL-PREFIXES."
   (for line in (range (sub start 0) (+ (sub end 0) 1))
     (if (> line (len lines))
@@ -476,18 +489,15 @@
                         (+ (sub lpy-start 1) (min (- (sub start 1) (sub gen-start 1)) length)))
                      (, (sub lpy-start 0)
                         (+ (sub lpy-start 1) (min (- (sub end 1) (sub gen-start 1)) length)))))))
-  (= gen-lines (.split view.text "\n"))
-  (if (or (!= (sub start 0) (sub end 0)) (> (sub start 0) (len gen-lines)))
+  (= word (_generated-text view start end))
+  (if (or (is word None) (not (.isidentifier word)))
       (return None))
-  (= word (sub (sub gen-lines (- (sub start 0) 1)) [: (sub start 1) (sub end 1)]))
-  (if (not (.isidentifier word))
-      (return None))
-  (return (_spelled-in (.split source "\n") lpy-start lpy-end word)))
+  (return (spelled-in (source-lines source) lpy-start lpy-end word)))
 
 (def _generated-text [view start end]
   "The text of view between generated start and end when both lie on one
    line of it, else None."
-  (= gen-lines (.split view.text "\n"))
+  (= gen-lines view.lines)
   (if (or (!= (sub start 0) (sub end 0)) (> (sub start 0) (len gen-lines)))
       (return None))
   (return (sub (sub gen-lines (- (sub start 0) 1)) [: (sub start 1) (sub end 1)])))
@@ -517,13 +527,12 @@
   (if (is-not found None)
       (return found))
   (= word (_generated-text view start end))
-  (if (not (and (is-not word None) (.isidentifier word)))
-      (do (= found (.exact-span view.map start end))
-          (if (is-not found None)
-              (return found))))
+  (= [exact spanning] (.range-spans view.map start end))
+  (if (and (is-not exact None) (not (and (is-not word None) (.isidentifier word))))
+      (return exact))
   (if tagged
       (return None))
-  (return (.spanning-span view.map start end)))
+  (return spanning))
 
 ;; Who holds each import root on sys.path: directory -> [users, the entry
 ;; _on-sys-path inserted or None], under _SYS-PATH-LOCK, since threads
@@ -738,14 +747,14 @@
       (return self._generation)))
 
   (def compiled [self uri version source :package "" :name "__main__" :import-root None
-                 :filename None :generation None]
+                 :filename None :generation None :fresh False]
     "The CompiledBuffer of uri's source at version (compile-buffer), compiled
      once per version: the diagnostics of a change and every request on the
-     same version share it."
+     same version share it.  fresh compiles again, replacing the entry."
     (if (is generation None)
         (= generation self._generation))
     (= hit (.get self._views uri))
-    (if (and (is-not hit None) (== (sub hit 0) version))
+    (if (and (not fresh) (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
     (= result (compile-buffer source :package package :name name :import-root import-root
                               :filename filename))
@@ -1272,6 +1281,48 @@
 ;; annotation, which most lispython code has none of; "off" leaves hints only.
 (= DEFAULT-TYPE-CHECKING-MODE "standard")
 
+(def _jsonc-to-json [text]
+  "JSONC text (pyright's config format: // and /* */ comments, trailing
+   commas) as JSON: comments outside strings become a space, and a comma
+   followed by nothing but whitespace and comments before a } or ] goes.
+   A string's escapes are skipped, so a quote or // inside one is text."
+  (= out [])
+  (= n (len text))
+  (= i 0)
+  ;; index in out of a comma that may turn out to trail
+  (= comma None)
+  (while (< i n)
+    (= ch (sub text i))
+    (cond
+      (== ch "\"")
+      (do (= j (+ i 1))
+          (while (and (< j n) (!= (sub text j) "\""))
+            (+= j (ife (== (sub text j) "\\") 2 1)))
+          (.append out (sub text [: i (+ j 1)]))
+          (= comma None)
+          (= i (+ j 1)))
+
+      (.startswith text "//" i)
+      (do (= j (.find text "\n" i))
+          (= i (ife (== j -1) n j)))
+
+      (.startswith text "/*" i)
+      (do (= j (.find text "*/" (+ i 2)))
+          (.append out " ")
+          (= i (ife (== j -1) n (+ j 2))))
+
+      True
+      (do (cond (== ch ",")
+                (= comma (len out))
+                (and (in ch "}]") (is-not comma None))
+                (do (= (sub out comma) "")
+                    (= comma None))
+                (not (.isspace ch))
+                (= comma None))
+          (.append out ch)
+          (+= i 1))))
+  (return (.join "" out)))
+
 (def _project-type-config [project-root]
   "The project's own basedpyright/pyright settings, as a dict: its
    pyrightconfig.json, else [tool.basedpyright], else [tool.pyright] of its
@@ -1281,7 +1332,7 @@
   (try
     (if (osp.isfile path)
         (with [(open path "r" :encoding "utf-8") as f]
-          (= config (json.load f))
+          (= config (json.loads (_jsonc-to-json (.read f))))
           (return (ife (isinstance config dict) config {}))))
     (= path (osp.join project-root "pyproject.toml"))
     (if (not (osp.isfile path))
@@ -1298,22 +1349,26 @@
               :exc-info True)
       (return {}))))
 
-(def _rule-settings [project-root]
+(def _rule-settings [project-root check-types]
   "The rule settings of the view root's config: the project's rule keys
    (_RULE-KEYS, report*), typeCheckingMode DEFAULT-TYPE-CHECKING-MODE when
-   it sets none, and the rules lispython forces."
-  (= rules {"typeCheckingMode" DEFAULT-TYPE-CHECKING-MODE})
-  (for [key value] in (.items (_project-type-config project-root))
-    (if (and (isinstance key str) (or (in key _RULE-KEYS) (.startswith key "report")))
-        (= (sub rules key) value)))
+   it sets none, and the rules lispython forces.  Without check-types (no
+   diagnostic is forwarded) checking is off and the project's rules are
+   left out: the backend would check for nobody."
+  (= rules {"typeCheckingMode" (ife check-types DEFAULT-TYPE-CHECKING-MODE "off")})
+  (if check-types
+      (for [key value] in (.items (_project-type-config project-root))
+        (if (and (isinstance key str) (or (in key _RULE-KEYS) (.startswith key "report")))
+            (= (sub rules key) value))))
   ;; lispython's reader owns string escapes: a generated string literal is
   ;; a repr, so an escape the backend flags there is not one the user wrote.
   (= (sub rules "reportInvalidStringEscapeSequence") "none")
   (return rules))
 
-(def write-pyright-config [project-root view-root :import-roots None]
+(def write-pyright-config [project-root view-root :import-roots None :check-types True]
   "Write view-root's pyrightconfig.json when it changed: the project's
-   rule settings (_rule-settings), the search paths, and
+   rule settings (_rule-settings; check-types false, as when no diagnostic
+   is forwarded, turns checking off), the search paths, and
    the environment of this process's interpreter.  The search paths are,
    in order, the view-root counterpart of every import root strictly inside
    the project (ShadowManifest.import-roots; <view>/src in a src layout;
@@ -1342,7 +1397,9 @@
               [project-root]))
   (.extend extra (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
                                               "site-packages"))))
-  (= config (_rule-settings project-root))
+  ;; Every server of the project shares the view root: two run with
+  ;; different pythonDiagnostics, the last to write decides its checking.
+  (= config (_rule-settings project-root check-types))
   (= (sub config "extraPaths") extra)
   (if (!= sys.prefix sys.base-prefix)
       (do (= (sub config "venvPath") (osp.dirname sys.prefix))
