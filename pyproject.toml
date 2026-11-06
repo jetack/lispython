@@ -29,11 +29,17 @@ lpy = "lispy:run"
 l2py = "lispy:l2py"
 lpy-lsp = "lispy.lsp:main"
 
+# The lispython Pygments lexer, found by its alias (```lispython fences).
+[project.entry-points."pygments.lexers"]
+lispython = "lispy.highlight:LispythonLexer"
+
 [project.optional-dependencies]
 dev = [
     # tests/test_docs_hooks.py builds mkdocs' own File/Page objects.
     "mkdocs>=1.6.1,<2",
     "pre-commit>=3.6.0",
+    # lispy.highlight (tests/test_highlight.py).
+    "pygments>=2.19",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
     "toml>=0.10.2",
@@ -46,6 +52,8 @@ docs = [
     "mkdocs-material>=9.6.14",
     "mkdocs-macros-plugin>=1.3.7",
     "mike>=2.1.3",
+    # lispy.highlight, the lexer of the ```lispython fences.
+    "pygments>=2.19",
 ]
 
 [build-system]
@@ -108,7 +116,8 @@ select = ["E", "F", "I", "UP"]
 "src/lispy/macros/__init__.py" = ["F401", "F403"]
 
 [tool.ruff.format]
-# Generated file (see above); the docs' fenced "python" blocks hold LisPython.
+# Generated file (see above); the docs' python fences keep the layout the page
+# compares with its lispython fence, not ruff's.
 exclude = ["src/lispy/core/meta_functions.py", "docs/**/*.md"]
 
 [tool.ruff.lint.isort]
