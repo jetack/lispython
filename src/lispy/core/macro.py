@@ -1,11 +1,12 @@
 import ast
+import enum
 from collections.abc import Callable
 
 from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import (
     ACTIVE_MACROS,
     constant_compile,
-    hyphenated_name_p,
+    name_key,
     string_node_value,
 )
 from lispy.core.compiler.utils import compile_nesting_errors
@@ -70,7 +71,7 @@ def require_macro(sexp, scope, include_meta=True):
         )
         with compile_nesting_errors(body):
             code = compile(ast.Interactive(body=body), "macro-requiring", "single")
-        eval(code, scope)
+        _eval_require(code, scope)
     except (ModuleNotFoundError, ImportError):
         import sys
 
@@ -81,6 +82,28 @@ def require_macro(sexp, scope, include_meta=True):
             file=sys.stderr,
         )
     return transformed if include_meta else None
+
+
+def _eval_require(code, scope):
+    """Run a require's code in scope. A key the require registers is the
+    require's from then on, even when it registers the very macro a unit
+    start seeded there (SEEDED_KEY), so a later TOP start keeps it: the
+    seeded keys are set aside while it runs, and each it did not register
+    again is put back, still seeded."""
+    seeded = scope.get(SEEDED_KEY)
+    if not seeded:
+        eval(code, scope)
+        return
+    namespace = scope.setdefault("__macro_namespace", {})
+    aside = {key: namespace.pop(key) for key in list(seeded) if key in namespace}
+    try:
+        eval(code, scope)
+    finally:
+        for key, macro in aside.items():
+            if key in namespace:
+                seeded.discard(key)
+            else:
+                namespace[key] = macro
 
 
 def macroexpand(sexp, scope, include_meta=True):
@@ -164,31 +187,31 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
 
 def active_macro_kind(scope):
     """The check_binding lookup (compiler/literal.py) over scope's macros as
-    they stand when a binding compiles: for a binding's Python name and
-    spelling, "built-in" (its macro is the prelude's own), "macro" or None. A
-    dotted key (lispy.macros.inc, from (require mod)) is never a bare name."""
+    they stand when a binding compiles: for a binding's spelling, None or
+    ``(kind, key)`` of the macro that is one name with it, kind "built-in"
+    (its macro is the prelude's own) or "macro". A dotted key
+    (lispy.macros.inc, from (require mod)) is never a bare name."""
 
-    def kind(name, spelling):
+    def kind(spelling):
         namespace = scope.get("__macro_namespace") or {}
         prelude = scope.get(PRELUDE_KEY) or {}
         found = None
-        for key, macro in namespace.items():
+        # A snapshot: in the nREPL another connection's running code (a
+        # compiled defmacro or require) may add to the table meanwhile.
+        for key, macro in list(namespace.items()):
             if "." in key:
                 continue
             # Lookup is by spelling, so a binding hides a macro only when a
-            # call meant for the binding could be spelled as the macro. A
-            # hyphenated name's Python name is a second spelling of it (my-x
-            # and my_x are one name); an operator-spelled key (->, --) mangles
-            # to a name nobody calls it by (_to_, __), so only its own
-            # spelling clashes.
-            if hyphenated_name_p(key):
-                if Symbol(key).name != name:
-                    continue
-            elif key != spelling:
+            # call meant for the binding could be spelled as the macro: the
+            # two are one name (name_key, shared with the LSP). A hyphenated
+            # name's Python name is a second spelling of it (my-x and my_x);
+            # any other key (->, ok?) mangles to a name nobody calls it by
+            # (_to_, ok_p), so only its own spelling clashes.
+            if name_key(key) != name_key(spelling):
                 continue
             if prelude.get(key) is macro:
-                return "built-in"
-            found = "macro"
+                return ("built-in", key)
+            found = ("macro", key)
         return found
 
     return kind
@@ -213,8 +236,12 @@ def macroexpand_then_compile(sexp_list, scope, include_meta=True, check_bindings
 # they emit no code and a module's runtime __macro_namespace holds only its
 # own defmacros and explicit requires. The scope keeps the copy under this
 # key, which marks it seeded (a persistent scope, such as a REPL session, is
-# seeded once) and lets an opt-out remove exactly those entries.
+# seeded once) and is what every later unit start copies from.
 PRELUDE_KEY = "__macro_prelude"
+# The keys of the scope's macro table a unit start (seed_prelude, MODULE,
+# TOP) put there from the prelude and nothing has registered since: the
+# entries a TOP start may take back. A require never adds to it.
+SEEDED_KEY = "__macro_seeded"
 PRELUDE_MODULE = "lispy.macros"
 
 
@@ -230,8 +257,11 @@ def _prelude_source_p(scope):
 
 
 def seed_prelude(scope):
-    """Give scope the prelude macros, once. A name the scope already defines
-    keeps its own macro."""
+    """Record the prelude in scope (under PRELUDE_KEY) and add its macros to
+    scope's macro table, once: a scope already seeded is left as it is, and a
+    name the table already defines keeps its own macro. compile_unit seeds
+    every scope it compiles in; how a unit start then reshapes the table is
+    UnitStart's."""
     if PRELUDE_KEY in scope:
         return
     if _prelude_source_p(scope):
@@ -242,20 +272,56 @@ def seed_prelude(scope):
         prelude = dict(getattr(lispy.macros, "__macro_namespace"))
     scope[PRELUDE_KEY] = prelude
     namespace = scope.setdefault("__macro_namespace", {})
+    seeded = scope.setdefault(SEEDED_KEY, set())
     for name, macro in prelude.items():
-        namespace.setdefault(name, macro)
+        if name not in namespace:
+            namespace[name] = macro
+            seeded.add(name)
 
 
-def _opt_out_form_p(forms):
-    """Whether the unit's first form, after one docstring, is
-    ``(require lispy.macros ...)``: the unit then gets only that require's
-    selection of the built-in macros."""
+class UnitStart(enum.Enum):
+    """How a unit's forms relate to the macro table of the scope they compile
+    in (compile_unit).
+
+    MODULE: the unit is a whole module or file (lpy, the importer, l2py, the
+    LSP, an nREPL load-file). Its table starts as the prelude alone, even in
+    a persistent scope an earlier unit defined macros in or opted out of, so
+    a reload compiles as a fresh module does; a first form (after one
+    docstring) ``(require lispy.macros <selection>)`` keeps only that
+    selection.
+
+    TOP: the unit is a region at the top of a file whose scope persists (an
+    nREPL eval sent at line 1). Only the entries a unit start seeded from
+    the prelude (SEEDED_KEY) are derived again, from the region's first
+    form: each still holding its prelude macro is dropped, then every
+    prelude macro whose name the table lacks is seeded again, unless that
+    form is the opt-out, whose require adds its selection back as it
+    compiles. Every other macro stays: the file's defmacros, and any macro
+    a require registered, a built-in one included, as re-evaluating a
+    Clojure namespace's first form keeps its vars. A region with no form
+    beyond a docstring changes nothing.
+
+    CONTINUE: the unit is a later input of a session (a REPL input, an nREPL
+    eval elsewhere in a file): macros persist and such a require only adds.
+    """
+
+    MODULE = "module"
+    TOP = "top"
+    CONTINUE = "continue"
+
+
+def _first_form(forms):
+    """The unit's first form after one docstring, or None."""
     forms = list(forms[:2])
     if forms and isinstance(forms[0], String):
         forms = forms[1:]
-    if not forms:
-        return False
-    form = forms[0]
+    return forms[0] if forms else None
+
+
+def _opt_out_form_p(form):
+    """Whether form, a unit's first (_first_form), is
+    ``(require lispy.macros ...)``: the unit then gets only that require's
+    selection of the built-in macros."""
     return (
         isinstance(form, Paren)
         and len(form) >= 2
@@ -264,35 +330,41 @@ def _opt_out_form_p(forms):
     )
 
 
-def _start_unit(scope, forms):
-    """Make scope's macros, in place, what a fresh module starts with: the
-    prelude, or none of it when the unit opts out (its require then adds
-    back its selection). A persistent scope (an nREPL file reloaded) keeps
-    no macro an earlier unit defined, required or dropped, so a reload
-    compiles as the file does under lpy."""
+def _start_unit(scope, forms, start):
+    """Reshape scope's macro table, in place, for a unit starting as start
+    says (UnitStart)."""
+    if start is UnitStart.CONTINUE:
+        return
     namespace = scope.setdefault("__macro_namespace", {})
-    namespace.clear()
-    if not _opt_out_form_p(forms):
-        namespace.update(scope.get(PRELUDE_KEY, {}))
+    prelude = scope.get(PRELUDE_KEY, {})
+    first = _first_form(forms)
+    if start is UnitStart.MODULE:
+        namespace.clear()
+    elif first is None:
+        return
+    else:
+        for key in scope.get(SEEDED_KEY, ()):
+            if key in namespace and namespace[key] is prelude.get(key):
+                del namespace[key]
+    seeded = scope[SEEDED_KEY] = set()
+    if not _opt_out_form_p(first):
+        for key, macro in prelude.items():
+            if key not in namespace:
+                namespace[key] = macro
+                seeded.add(key)
 
 
-def compile_unit(forms, scope, *, opt_out=True, include_meta=True):
-    """Compile one unit of source (a module, a REPL input, an editor view)
-    to a list of Python statements, expanding macros in scope.
+def compile_unit(forms, scope, *, start=UnitStart.MODULE, include_meta=True):
+    """Compile one unit of source (a module, a REPL input, an editor view or
+    region) to a list of Python statements, expanding macros in scope.
 
-    The one entry point of compilation: scope gets the prelude macros first.
-    With opt_out (module semantics: the unit starts its module or file), the
-    unit's macros are the prelude alone, even in a persistent scope an
-    earlier unit defined macros in or opted out of (an nREPL file scope
-    reloaded after an edit), so a reload compiles as a fresh module does; a
-    unit whose first form is ``(require lispy.macros <selection>)`` keeps
-    only that selection of them. Elsewhere (a REPL session's later inputs)
-    macros persist and such a require only adds. Only the macro table
-    restarts: a reload keeps the Python names an earlier load of the scope
-    defined, stale ones included, as a Clojure namespace keeps its vars.
+    The one entry point of compilation: scope gets the prelude macros first
+    (seed_prelude), then start (UnitStart) says how the unit's start
+    reshapes its macro table. Only the macro table restarts: a reload keeps
+    the Python names an earlier load of the scope defined, stale ones
+    included, as a Clojure namespace keeps its vars.
     """
     forms = list(forms)
     seed_prelude(scope)
-    if opt_out:
-        _start_unit(scope, forms)
+    _start_unit(scope, forms, start)
     return macroexpand_then_compile(forms, scope, include_meta=include_meta)

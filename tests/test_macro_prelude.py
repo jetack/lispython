@@ -19,7 +19,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy import tools
-from lispy.core.macro import compile_unit
+from lispy.core.macro import UnitStart, compile_unit
 from lispy.core.parser import parse
 
 BIN = Path(sys.executable).parent
@@ -75,9 +75,23 @@ def test_prelude_in_lpy_c_and_l2py_cli(tmp_path):
 
 
 def test_prelude_in_repl_and_nrepl_evals(capsys):
-    tools.eval_and_print("(print (inc 1))", {}, filename="<repl>", opt_out=False)
+    tools.eval_and_print(
+        "(print (inc 1))", {}, filename="<repl>", start=UnitStart.CONTINUE
+    )
     assert capsys.readouterr().out == "2\n"
     assert tools.nrepl_eval("(inc 1)", {})["value"] == "2"
+
+
+def test_a_translation_is_its_own_unit(monkeypatch):
+    # A translation naming no scope is a module of its own: it neither sees
+    # the REPL session's macros nor resets them.
+    session = tools.main_scope()
+    monkeypatch.setattr(tools, "SCOPE", session)
+    defmacro = "(defmacro sq [x] (return `(* ~x ~x)))"
+    compile_unit(parse(defmacro), session, start=UnitStart.CONTINUE)
+    assert tools.src_to_python_org("(sq 2)") == "sq(2)"
+    assert tools.l2py_s("(sq 2)", no_lispy=True, format=False) == "sq(2)"
+    assert "sq" in session["__macro_namespace"]
 
 
 def test_prelude_in_l2py_s_and_l2py_f(tmp_path):
@@ -192,7 +206,7 @@ def test_a_unit_start_forgets_an_earlier_units_macros():
 
 def test_repl_input_require_only_adds():
     scope = {}
-    compile_unit(parse("(require lispy.macros [])"), scope, opt_out=False)
+    compile_unit(parse("(require lispy.macros [])"), scope, start=UnitStart.CONTINUE)
     assert translate("(dec 1)", scope) == "1 - 1"
 
 
@@ -284,6 +298,76 @@ def test_nrepl_region_eval_opts_out_only_at_the_file_start(session, tmp_path):
     assert "NameError: name 'inc' is not defined" in error
 
 
+def expand_in(session, path, code):
+    """code's expansion in path's file scope as it stands (no unit compiles)."""
+    return request(session, op="macroexpand", code=code, file=str(path))["expansion"]
+
+
+def eval_at(session, path, code, line):
+    return request(session, op="eval", code=code, file=str(path), line=line, column=1)
+
+
+def test_nrepl_top_region_keeps_the_files_macros(session, tmp_path):
+    # Re-sending a file's top form (an import, its ns form) is not a reload:
+    # the macros the file defined further down stay, as Clojure keeps a
+    # namespace's vars when its ns form is evaluated again.
+    path = tmp_path / "f.lpy"
+    src = "(import math)\n(defmacro sq [x] (return `(* ~x ~x)))\n(print (sq 3))\n"
+    assert load(session, path, src)["stdout"] == "9\n"
+    assert eval_at(session, path, "(import math)", 1)["error"] is None
+    assert eval_at(session, path, "(sq 4)", 3)["value"] == "16"
+
+
+def test_nrepl_top_region_opt_out_drops_only_the_built_ins(session, tmp_path):
+    path = tmp_path / "f.lpy"
+    load(session, path, "(= a 1)\n(defmacro sq [x] (return `(* ~x ~x)))\n")
+    assert eval_at(session, path, "(require lispy.macros [->])", 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(inc 1)"
+    assert expand_in(session, path, "(-> 1 (f))") == "(f 1)"
+    assert expand_in(session, path, "(sq 3)") == "(* 3 3)"
+    # A region with no form beyond a docstring re-derives nothing.
+    assert eval_at(session, path, '"Doc."', 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(inc 1)"
+    # Editing the opt-out away and re-sending the top restores the built-ins.
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(+ 1 1)"
+    assert expand_in(session, path, "(sq 3)") == "(* 3 3)"
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(require lispy.macros [->])\n(require lispy.macros [cond])\n(= a 1)\n",
+        "(= a 1)\n(require lispy.macros [cond])\n",
+    ],
+)
+def test_nrepl_top_region_keeps_a_built_in_the_file_required(session, tmp_path, src):
+    # A built-in a later require registered is the require's, not the
+    # unit start's: an opt-out at the top drops only what a start seeded.
+    path = tmp_path / "f.lpy"
+    assert load(session, path, src)["error"] is None
+    assert eval_at(session, path, "(require lispy.macros [->])", 1)["error"] is None
+    assert expand_in(session, path, "(cond a 1)") == "(if a 1)"
+    assert expand_in(session, path, "(-> 1 (f))") == "(f 1)"
+    assert expand_in(session, path, "(inc 1)") == "(inc 1)"
+
+
+def test_nrepl_top_region_keeps_the_files_macro_of_a_built_in_name(session, tmp_path):
+    path = tmp_path / "f.lpy"
+    load(session, path, "(= a 1)\n(defmacro inc [x] (return `(+ ~x 1000)))\n")
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(+ 1 1000)"
+
+
+def test_nrepl_scope_lock_is_not_in_the_scope(session, tmp_path):
+    # The lock lives beside the scope, never in the user's globals.
+    path = tmp_path / "f.lpy"
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    reply = request(session, op="complete", prefix="__nr", file=str(path))
+    assert reply["completions"] == []
+    assert tools.nrepl_scope_lock(session) is tools.nrepl_scope_lock(session)
+
+
 @pytest.mark.parametrize("opted_out_first", [True, False])
 def test_nrepl_reload_after_the_first_form_changes(session, tmp_path, opted_out_first):
     # A file scope persists across loads; each load starts from the whole
@@ -353,6 +437,22 @@ def test_nrepl_file_eval_without_a_line_is_not_the_file_start(session, tmp_path)
     assert "NameError: name 'inc' is not defined" in error
     reply = request(session, op="eval", code="(= c (inc 1))", file=str(path), line=3)
     assert "NameError: name 'inc' is not defined" in reply["error"]
+
+
+# --- docs ---------------------------------------------------------------------
+
+
+def test_the_built_in_macros_note_matches_behaviour():
+    # The note feeds llms.txt and the docs: the built-ins need no require,
+    # and every require of lispy.macros it shows, made a module's first
+    # form, narrows them.
+    from lispy.form_docs import BUILTIN_MACROS_NOTE
+
+    assert translate("(inc 1)") == "1 + 1"
+    spans = re.findall(r"`(\(require lispy\.macros[^`]*\))`", BUILTIN_MACROS_NOTE)
+    assert spans
+    for span in spans:
+        assert translate(f"{span}\n(inc 1)").splitlines()[-1] == "inc(1)", span
 
 
 # --- one home ----------------------------------------------------------------

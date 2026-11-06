@@ -16,7 +16,7 @@ import pytest
 
 from lispy import tools
 from lispy.core.errors import LispyCompileError
-from lispy.core.macro import compile_unit
+from lispy.core.macro import UnitStart, compile_unit
 from lispy.core.parser import parse
 
 COMPILER = (
@@ -24,7 +24,8 @@ COMPILER = (
 )
 
 BUILT_IN = (
-    "cannot bind 'inc': it is a built-in macro here, so (inc ...) would expand "
+    "cannot bind 'inc': it is the built-in macro 'inc' here, so (inc ...) would "
+    "expand "
     "the macro instead of using this name; rename it, or make "
     "(require lispy.macros [...]) the module's first form listing only the "
     "macros it uses"
@@ -149,8 +150,8 @@ def test_a_user_macro_has_the_plain_message():
     with pytest.raises(LispyCompileError) as info:
         translate("(defmacro twice [x] (return x))\n(def f [twice] None)")
     assert info.value.msg == (
-        "cannot bind 'twice': it is a macro here, so (twice ...) would expand the "
-        "macro instead of using this name; rename it"
+        "cannot bind 'twice': it is the macro 'twice' here, so (twice ...) would "
+        "expand the macro instead of using this name; rename it"
     )
     assert (info.value.lineno, info.value.offset) == (2, 9)
 
@@ -158,7 +159,7 @@ def test_a_user_macro_has_the_plain_message():
 def test_a_redefined_prelude_name_is_a_user_macro():
     with pytest.raises(LispyCompileError) as info:
         translate("(defmacro inc [x] (return x))\n(= inc 1)")
-    assert info.value.msg.startswith("cannot bind 'inc': it is a macro here,")
+    assert info.value.msg.startswith("cannot bind 'inc': it is the macro 'inc' here,")
 
 
 def test_a_required_macro(monkeypatch):
@@ -167,7 +168,9 @@ def test_a_required_macro(monkeypatch):
     monkeypatch.setitem(sys.modules, "shadow_fake_macros", mod)
     with pytest.raises(LispyCompileError) as info:
         translate("(require shadow-fake-macros [twice])\n(= twice 1)")
-    assert info.value.msg.startswith("cannot bind 'twice': it is a macro here,")
+    assert info.value.msg.startswith(
+        "cannot bind 'twice': it is the macro 'twice' here,"
+    )
     # The module's own require binds nothing a macro named k or v shadows.
     src = "(defmacro k [] (return 1))\n(defmacro v [] (return 1))\n"
     for require in [
@@ -178,10 +181,48 @@ def test_a_required_macro(monkeypatch):
 
 
 def test_compared_by_python_name():
-    # my-x and my_x are one Python name; the message spells the binding.
+    # my-x and my_x are one name; the message spells the binding and the macro
+    # each as written.
     with pytest.raises(LispyCompileError) as info:
         translate("(defmacro my-x [] (return 1))\n(= my_x 1)")
-    assert info.value.msg.startswith("cannot bind 'my_x': it is a macro here, so (my_x")
+    assert info.value.msg.startswith(
+        "cannot bind 'my_x': it is the macro 'my-x' here, so (my-x ...) would"
+    )
+
+
+# (macro key, binding spelling, one name?). A hyphenated name and its Python
+# name are one name both ways; any other spelling is only itself.
+NAME_IDENTITY = [
+    ["inc", "inc", True],
+    ["my-x", "my_x", True],
+    ["my_x", "my-x", True],
+    ["as->", "as->", True],
+    ["ok?", "ok?", True],
+    ["as->", "as_to_", False],
+    ["->", "_to_", False],
+    ["ok?", "ok_p", False],
+    ["ok_p", "ok?", False],
+    ["x-", "x_", False],
+]
+
+
+@pytest.mark.parametrize("key, spelling, same", NAME_IDENTITY)
+def test_the_compiler_and_the_lsp_agree_on_name_identity(key, spelling, same):
+    # Two sides of one rule: the binding clash check and the LSP's name-key
+    # (references, completion, macro heads) must call the same pairs one name.
+    from lispy.lsp import python_view
+
+    src = f"(require lispy.macros [])\n(defmacro {key} [] (return 1))\n(= {spelling} 1)"
+    try:
+        translate(src)
+        refused = False
+    except LispyCompileError as e:
+        assert e.msg.startswith(
+            f"cannot bind '{spelling}': it is the macro '{key}' here, so ({key} ...)"
+        )
+        refused = True
+    lsp_same = python_view.name_key(key) == python_view.name_key(spelling)
+    assert (refused, lsp_same) == (same, same)
 
 
 # A macro spelled other than as a hyphenated name mangles to a name nobody
@@ -211,7 +252,7 @@ def test_an_operator_macro_does_not_clash_by_python_name(src):
 def test_an_operator_macro_clashes_with_its_own_spelling(src, spelling):
     with pytest.raises(LispyCompileError) as info:
         translate(src)
-    assert info.value.msg.startswith(f"cannot bind '{spelling}': it is a")
+    assert info.value.msg.startswith(f"cannot bind '{spelling}': it is the")
 
 
 def test_a_macro_generated_binding_is_at_the_call():
@@ -225,17 +266,19 @@ def test_a_macro_generated_binding_is_at_the_call():
 def test_position_on_a_later_line():
     with pytest.raises(LispyCompileError) as info:
         translate("(= a 1)\n(def f [x\n       when]\n  None)")
-    assert info.value.msg.startswith("cannot bind 'when': it is a built-in macro")
+    assert info.value.msg.startswith("cannot bind 'when': it is the built-in macro")
     assert (info.value.lineno, info.value.offset) == (3, 8)
 
 
 def test_repl_and_nrepl_scopes():
     scope = {}
-    tools.eval_and_print("(= a 1)", scope, filename="<repl>", opt_out=False)
+    tools.eval_and_print("(= a 1)", scope, filename="<repl>", start=UnitStart.CONTINUE)
     with pytest.raises(LispyCompileError, match="cannot bind 'inc'"):
-        tools.eval_and_print("(= inc 1)", scope, filename="<repl>", opt_out=False)
+        tools.eval_and_print(
+            "(= inc 1)", scope, filename="<repl>", start=UnitStart.CONTINUE
+        )
     error = tools.nrepl_eval("(def dec [x] x)", {})["error"]
-    assert "cannot bind 'dec': it is a built-in macro here" in error
+    assert "cannot bind 'dec': it is the built-in macro 'dec' here" in error
 
 
 def test_no_check_outside_a_unit():
@@ -311,7 +354,7 @@ def test_a_defmacro_parameter_is_a_binding_in_l2py():
     # l2py (include_meta off) runs the defmacro only at compile time.
     with pytest.raises(LispyCompileError) as info:
         tools.l2py_s(DEFMACRO_PARAM, fresh_scope=True, format=False)
-    assert info.value.msg.startswith("cannot bind 'cond': it is a built-in macro")
+    assert info.value.msg.startswith("cannot bind 'cond': it is the built-in macro")
     assert (info.value.lineno, info.value.offset) == (3, 16)
 
 
@@ -323,5 +366,5 @@ def test_a_defmacro_parameter_is_a_binding_on_import(tmp_path, monkeypatch):
     with pytest.raises(LispyCompileError) as info:
         importlib.import_module("defmacro_param_mod")
     sys.modules.pop("defmacro_param_mod", None)
-    assert info.value.msg.startswith("cannot bind 'cond': it is a built-in macro")
+    assert info.value.msg.startswith("cannot bind 'cond': it is the built-in macro")
     assert (info.value.lineno, info.value.offset) == (3, 16)

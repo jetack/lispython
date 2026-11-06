@@ -29,7 +29,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
-(from lispy.core.macro [compile-unit macroexpand seed-prelude])
+(from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
 (from lispy.core.compiler.utils [compile-nesting-errors python-interpolations])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
@@ -51,10 +51,19 @@
       (sys.path.insert 0 current))
   (return (.join "." parts)))
 
-(= SCOPE {"__builtins__" __builtins__
-          "__name__" "__main__"
-          "__package__" (detect-package-name)
-          "__macro_namespace" {}})
+(= MAIN-PACKAGE (detect-package-name))
+
+(def main-scope []
+  "A new __main__ scope in the working directory's package.  SCOPE, the one
+   the REPL and nREPL sessions share, is one; a translation that names no
+   scope compiles in a new one, since every module unit compiles in its own
+   scope and must not reset the session's macros."
+  (return {"__builtins__" __builtins__
+           "__name__" "__main__"
+           "__package__" MAIN-PACKAGE
+           "__macro_namespace" {}}))
+
+(= SCOPE (main-scope))
 
 (def ast-to-python [st]
   ;; ast.unparse recurses and gives up on a shallower AST than compile()
@@ -67,8 +76,10 @@
              from None))))
 
 (def src-to-python-org [src :include-meta False :scope None]
+  "src's Python, compiled as a module unit in scope (default a new
+   main-scope)."
   (if (is scope None)
-      (= scope SCOPE))
+      (= scope (main-scope)))
   (return (.join "\n" (map ast-to-python
                            (compile-unit
                              (parse src)
@@ -76,8 +87,6 @@
                              :include-meta include-meta)))))
 
 (def src-to-python [src :include-meta False :scope None :format True]
-  (if (is scope None)
-      (= scope SCOPE))
   (= raw-pysrc (src-to-python-org src :include-meta include-meta :scope scope))
   (if format
       (return (format-python-source raw-pysrc))
@@ -121,7 +130,7 @@
                     "__macro_namespace" {}})
           (if (is-not name None)
               (= (sub scope "__name__") name)))
-      (= scope SCOPE))
+      (= scope (main-scope)))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope :format format))
   (if no_lispy
       (return pysrc))
@@ -359,14 +368,15 @@
                          :multiline True
                          :prompt-continuation "...   ")))
 
-(def eval-and-print [src :scope SCOPE :translate False :filename "<string>" :opt-out True]
+(def eval-and-print [src :scope SCOPE :translate False :filename "<string>" :start UnitStart.MODULE]
   ;; Compile every statement before running any, so compile-errors covers
   ;; compiling only; compile-nesting-errors wraps compile() alone, one
   ;; statement at a time, so a too-deep error is at the first statement
-  ;; compile() fails on, not the deepest of all.  opt-out: src is a whole
-  ;; unit (lpy -c), not one input of a REPL session (compile-unit).
+  ;; compile() fails on, not the deepest of all.  start: src is a whole
+  ;; unit (lpy -c) by default, CONTINUE for one input of a REPL session
+  ;; (UnitStart).
   (with [(compile-errors filename src)]
-    (= stl (compile-unit (parse src) scope :opt-out opt-out))
+    (= stl (compile-unit (parse src) scope :start start))
     (= codes [])
     (for st stl
       (with [(compile-nesting-errors [st])]
@@ -392,12 +402,12 @@
 
   (= session (make-repl-session))
   (= scope SCOPE)
-  (eval-and-print "(from pprint [pprint])" scope :opt-out False)
+  (eval-and-print "(from pprint [pprint])" scope :start UnitStart.CONTINUE)
   (while True
     (try
       (do
         (= src (session.prompt "repl> "))
-        (eval-and-print src scope translate :filename "<repl>" :opt-out False))
+        (eval-and-print src scope translate :filename "<repl>" :start UnitStart.CONTINUE))
       (except [SystemExit]
         (print "SystemExit caught. Exiting REPL.")
         (break))
@@ -505,18 +515,22 @@
   the source gets a fresh <nrepl-N> name.  The source is padded to that
   position before parsing, so compile errors, tracebacks and linecache all
   use buffer lines and columns.  whole-file marks src as the entire file
-  (load-file), so it starts at line 1, column 1.  A load-file, or source
-  naming a file at a line given as 1 (column 1 or not given), starts the
-  file's unit: its macros are the built-in ones alone again, and its first
-  form may narrow them (compile-unit).  Any other eval only adds, since
-  editor clients send file, line and column with every region.
+  (load-file), so it starts at line 1, column 1.  A load-file starts the
+  file's unit again (UnitStart.MODULE): its macros are the built-in ones
+  alone, and its first form may narrow them.  Source naming a file at a
+  line given as 1 (column 1 or not given) is the file's top region
+  (UnitStart.TOP): its first form re-derives only the built-in macros, so
+  the file's own macros stay.  Any other eval only adds, since editor
+  clients send file, line and column with every region.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
-  ;; Only a line the request sent as 1 is the file's start: a file eval with
-  ;; no line has no known position, and restarting the unit there would
-  ;; undo the file's opt-out mid-file.
-  (= file-start (and (is-not filename None)
-                     (or whole-file (and (== line 1) (in column (, None 1))))))
+  ;; Only a line the request sent as 1 is the file's top: a file eval with
+  ;; no line has no known position, and re-deriving the built-ins there
+  ;; would undo the file's opt-out mid-file.
+  (= start (conde whole-file UnitStart.MODULE
+                  (and (is-not filename None) (== line 1) (in column (, None 1)))
+                  UnitStart.TOP
+                  UnitStart.CONTINUE))
   (if (is line None)
       (= line 1))
   (if (is column None)
@@ -540,8 +554,10 @@
     (= padded (+ (* "\n" (- line 1)) (* " " (- column 1)) src))
     (_nrepl-register-source filename src line column whole-file)
     ;; Compile every statement before running any (see eval-and-print).
-    (with [(compile-errors filename padded)]
-      (= stl (compile-unit (parse padded) scope :opt-out file-start))
+    ;; Compiling reshapes the scope's macro table; running the code holds
+    ;; no lock, so a long eval never blocks another connection.
+    (with [(nrepl-scope-lock scope) (compile-errors filename padded)]
+      (= stl (compile-unit (parse padded) scope :start start))
       (= codes [])
       (for st stl
         (with [(compile-nesting-errors [st])]
@@ -607,6 +623,28 @@
             (= (sub _NREPL-FILE-SCOPES key) scope))))
   (return scope))
 
+;; id(scope) -> (scope, lock), under _NREPL-FILE-SCOPES-LOCK.  A side table,
+;; never a key in the scope, which is the user's globals (completion would
+;; offer it, pickling fails, and code that clears its globals would swap
+;; it).  The entry keeps the scope alive, so its id is never reused.
+(= _NREPL-SCOPE-LOCKS {})
+
+(def nrepl-scope-lock [scope]
+  "The lock of scope's macro table, created on first use.  Connections are
+   served on threads and share the session scope and file scopes.
+   Compiling (an eval's compile phase, a macroexpand) holds it, so two
+   compiles never reshape one table at once and completion, which takes
+   its snapshot under it, never sees a table half reset by a unit start.
+   Running code holds no lock and may still add to the table (a compiled
+   defmacro or require), so every iteration over the table or scope is
+   over a snapshot (list/dict), never the live dict."
+  (with [_NREPL-FILE-SCOPES-LOCK]
+    (= entry (.get _NREPL-SCOPE-LOCKS (id scope)))
+    (if (is entry None)
+        (do (= entry (, scope (threading.RLock)))
+            (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
+  (return (sub entry 1)))
+
 (def _nrepl-request-scope [msg field scope]
   "The scope a request runs in: the file's when its field names a file (a
    string), else the session scope."
@@ -618,8 +656,10 @@
   (try
     (= parsed (parse src))
     (= expanded [])
-    (for sexp in parsed
-      (expanded.append (str (macroexpand sexp scope))))
+    ;; A defmacro in src defines a macro as it expands.
+    (with [(nrepl-scope-lock scope)]
+      (for sexp in parsed
+        (expanded.append (str (macroexpand sexp scope)))))
     (return {"op" "macroexpand-result"
              "expansion" (.join "\n" expanded)
              "error" None})
@@ -739,9 +779,12 @@
                  "kinds" kinds}))
       (do
         ;; Prefix completion from scope, builtins, macros, keywords
+        (with [(nrepl-scope-lock scope)]
+          (= names (list scope))
+          (= macros (dict (.get scope "__macro_namespace" {}))))
         (= matches [])
         (= py-prefix (_mangle prefix))
-        (for k in scope
+        (for k in names
           (if (or (.startswith k prefix) (.startswith k py-prefix))
               (matches.append (_unmangle k))))
         (= builtins (ife (isinstance __builtins__ dict)
@@ -750,7 +793,6 @@
         (for k in builtins
           (if (or (.startswith k prefix) (.startswith k py-prefix))
               (matches.append k)))
-        (= macros (.get scope "__macro_namespace" {}))
         (for k in macros
           (if (.startswith k prefix)
               (matches.append k)))

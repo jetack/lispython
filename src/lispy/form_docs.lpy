@@ -29,9 +29,11 @@ this module only reads them."""
 ;; re-exports lispy.macros.sugar's namespace.
 (= BUILTIN-MACRO-MODULES (frozenset ["lispy.macros" "lispy.macros.sugar"]))
 
-;; How a file gets the built-in macros, for the docs site and llms.txt.
+;; How a module gets the built-in macros, for the docs site and llms.txt.
+;; Every (require lispy.macros ...) span in it must narrow them (a test runs
+;; each one).
 (= BUILTIN-MACROS-NOTE
-   "A `.lpy` file needs `(require lispy.macros *)` before it can use the built-in macros (`cond`, `->`, `fn`, ...); the REPL and nREPL load them already.")
+   "The built-in macros (`cond`, `->`, `fn`, ...) load in every module with no `require`: `.lpy` files, `lpy -c`, the REPL, nREPL, `l2py` and the LSP. Making `(require lispy.macros [-> cond])` a module's first form (after an optional docstring) keeps only those, and `(require lispy.macros [])` none. Binding a name that is an active macro is a compile error.")
 
 (class FormDoc [NamedTuple]
   "One form's documentation: its reference section, its usage lines (none for
