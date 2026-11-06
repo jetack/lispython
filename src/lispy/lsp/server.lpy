@@ -508,7 +508,8 @@
    flight per document, and none for a change superseded before its
    compile began, since every compile runs the buffer's macros.  Each
    compiled run that is still the latest goes on in a task of its own
-   (finish-run)."
+   (finish-run).  A compile that raises is logged and its run dropped, and
+   the loop goes on, so a change recorded meanwhile is still compiled."
   (try
     (while True
       (= run (.get DIAGNOSTIC-RUNS uri))
@@ -516,9 +517,14 @@
           (break))
       (= run.compiled True)
       (= doc run.doc)
-      (= compiled (await (asyncio.to-thread compile-document doc.uri doc.version doc.source
-                                            :generation view-cache.generation
-                                            :fresh run.recompile)))
+      (try
+        (= compiled (await (asyncio.to-thread compile-document doc.uri doc.version
+                                              doc.source
+                                              :generation view-cache.generation
+                                              :fresh run.recompile)))
+        (except [Exception]
+          (.exception logger "lispython LSP: cannot compile %s" uri)
+          (continue)))
       (if (_current-p run)
           (_schedule-run (finish-run run compiled))))
     (finally
@@ -528,8 +534,12 @@
   "Turn run's compile into lispython's diagnostics, push its view to the
    backend, and publish them with the backend's for that view: waited for
    up to DIAGNOSTICS-TIMEOUT when the view reached a running backend,
-   published at once otherwise.  Nothing is published once a newer change
-   superseded run."
+   published at once otherwise.  Nothing is pushed or published once a
+   newer change or a close superseded run, which may come between the
+   compile and this task: a push then would reopen a closed document in
+   the backend, or send it a stale view."
+  (if (not (_current-p run))
+      (return))
   (= doc run.doc)
   (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled))
   (= run.view compiled.view)

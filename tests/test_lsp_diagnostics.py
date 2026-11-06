@@ -587,6 +587,67 @@ def test_rapid_changes_compile_at_most_twice(scripted, monkeypatch):
     assert diagnostic.message.startswith("Parse error:")
 
 
+def test_a_close_before_the_run_goes_on_pushes_nothing(fake_served, monkeypatch):
+    # Defect: a close that lands between a change's compile and the rest of
+    # its run lets that run push its view: the closed document is opened
+    # again in the backend (and on every restart, through _full).
+    editor, backends = fake_served
+    client = backends.client_for(editor.uri)
+    real_schedule = server._schedule_run
+
+    def close_first(coroutine):
+        if getattr(coroutine, "__name__", "") == "finish_run":
+            editor.close()
+        real_schedule(coroutine)
+
+    async def scenario():
+        try:
+            editor.open("(print undefined-name)\n")
+            await until(
+                lambda: editor.published and backend_diagnostics(editor.published[-1])
+            )
+            monkeypatch.setattr(server, "_schedule_run", close_first)
+            editor.change("(print 1)\n")
+            await until(lambda: editor.published[-1] == [])  # the close's
+            await until(lambda: not server._DIAGNOSTIC_TASKS)
+            return editor.uri in client._docs, editor.uri in client._full
+        finally:
+            await backends.shutdown_all()
+
+    assert run_bounded(scenario()) == (False, False)
+
+
+def test_a_compile_that_raises_never_stops_the_next(scripted, monkeypatch):
+    # Defect: a compile that raises ends the document's compile loop, so the
+    # change recorded during it is never compiled or published.
+    import threading
+
+    editor, backends = scripted
+    gate = threading.Event()
+    calls = []
+    real = server.compile_document
+
+    def failing_first(uri, version, source, **kwargs):
+        calls.append(source)
+        if len(calls) == 1:
+            gate.wait(10)
+            raise RuntimeError("compile failed")
+        return real(uri, version, source, **kwargs)
+
+    monkeypatch.setattr(server, "compile_document", failing_first)
+
+    async def scenario():
+        editor.change("(= a 1)\n")
+        await until(lambda: calls)
+        editor.change("(= a")
+        gate.set()
+        await until(lambda: editor.published)
+
+    run_bounded(scenario())
+    [[diagnostic]] = editor.published
+    assert diagnostic.message.startswith("Parse error:")
+
+
 # ---------------------------------------------------------------------------
 # Real basedpyright
 # ---------------------------------------------------------------------------

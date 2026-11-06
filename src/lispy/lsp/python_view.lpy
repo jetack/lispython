@@ -1353,13 +1353,17 @@
   "The rule settings of the view root's config: the project's rule keys
    (_RULE-KEYS, report*), typeCheckingMode DEFAULT-TYPE-CHECKING-MODE when
    it sets none, and the rules lispython forces.  Without check-types (no
-   diagnostic is forwarded) checking is off and the project's rules are
-   left out: the backend would check for nobody."
-  (= rules {"typeCheckingMode" (ife check-types DEFAULT-TYPE-CHECKING-MODE "off")})
-  (if check-types
-      (for [key value] in (.items (_project-type-config project-root))
-        (if (and (isinstance key str) (or (in key _RULE-KEYS) (.startswith key "report")))
-            (= (sub rules key) value))))
+   diagnostic is forwarded) checking is off and the project's report*
+   rules are left out, since the backend would check for nobody; its other
+   settings (pythonVersion, pythonPlatform, ...) stay, since hover and
+   completion follow them."
+  (= rules {"typeCheckingMode" DEFAULT-TYPE-CHECKING-MODE})
+  (for [key value] in (.items (_project-type-config project-root))
+    (if (and (isinstance key str)
+             (or (in key _RULE-KEYS) (and check-types (.startswith key "report"))))
+        (= (sub rules key) value)))
+  (if (not check-types)
+      (= (sub rules "typeCheckingMode") "off"))
   ;; lispython's reader owns string escapes: a generated string literal is
   ;; a repr, so an escape the backend flags there is not one the user wrote.
   (= (sub rules "reportInvalidStringEscapeSequence") "none")

@@ -565,12 +565,17 @@
   (def push-buffer [self lpy-uri source view]
     "Make view, the full PythonView of buffer source (the one compile of
      the change, never a second), the buffer's text in the backend: sent at
-     once to a running one, else at its start.  True when it was sent.  The
-     caller pushes only a view that compiled, so the backend keeps the last
-     good text.  Call on the loop."
+     once to a running one, else at its start; while requests on the
+     document are in flight, when the last ends (_request-done), never
+     under a request still waiting for its answer over the text it synced.
+     True when the running backend has it or will.  The caller pushes only
+     a view that compiled, so the backend keeps the last good text.  Call
+     on the loop."
     (= (sub self._full lpy-uri) (, view.text (, source view)))
     (if (not self.running)
         (return False))
+    (if (> (.get self._in-flight lpy-uri 0) 0)
+        (return True))
     (return (._sync-full self lpy-uri)))
 
   (def _sync-full [self lpy-uri]

@@ -947,11 +947,14 @@ class TestShadows:
             "[tool.basedpyright]\n"
             'typeCheckingMode = "strict"\n'
             'reportUnusedVariable = "error"\n'
+            'pythonVersion = "3.12"\n'
         )
         path = pv.write_pyright_config(str(project), str(root), check_types=False)
         config = json.loads(open(path).read())
         assert config["typeCheckingMode"] == "off"
         assert "reportUnusedVariable" not in config
+        # Hover and completion still follow the project's Python.
+        assert config["pythonVersion"] == "3.12"
 
     def test_pyright_config(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
