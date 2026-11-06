@@ -389,14 +389,16 @@
   "The PositionMap from a structural walk of the compiled tree and its
    re-parse in step.  A pair whose types differ (a round trip that changed
    shape) and a list field whose lengths differ are skipped with everything
-   under them, never the whole map."
+   under them, never the whole map; except a Constant the unparse spells as an
+   operation (-1, 1+2j, a nan), which still maps as one node."
   (= lines (.split source "\n"))
   (= columns (_GeneratedColumns text))
   (= entries [])
   (= stack [(, compiled generated)])
   (while stack
     (= [a b] (.pop stack))
-    (if (is-not (type a) (type b))
+    (= leaf (and (isinstance a ast.Constant) (isinstance b (, ast.UnaryOp ast.BinOp))))
+    (if (and (is-not (type a) (type b)) (not leaf))
         (continue))
     (= lpy (_lpy-span a))
     (= gen (ife (is lpy None) None (_gen-span b columns)))
@@ -409,6 +411,8 @@
                         (.append entries
                           (, (sub (sub named 0) 0) (sub (sub named 0) 1)
                              (sub lpy-name 0) (sub lpy-name 1) True)))))))
+    (if leaf
+        (continue))
     (= children [])
     (for [field va] in (ast.iter-fields a)
       (= vb (getattr b field None))
