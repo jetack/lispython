@@ -161,11 +161,24 @@ def wait_running(client, seconds=30):
     return client.running
 
 
-def test_a_non_attribute_completion_never_waits_for_the_backend(complete, idle):
+def test_a_non_attribute_completion_never_waits_for_the_backend(
+    complete, idle, monkeypatch
+):
     # Defect: a keystroke off an attribute waits for the backend's start
-    # (about a second) for kinds that only refine the local list.
+    # (about a second) for kinds that only refine the local list. The wait
+    # is a backend_answer call (bounded by MERGE-TIMEOUT, shorter than the
+    # start), so timing alone cannot tell it from the start-soon branch.
+    answers = []
+    real_answer = server.backend_answer
+
+    async def spy(*args, **kwargs):
+        answers.append(args)
+        return await real_answer(*args, **kwargs)
+
+    monkeypatch.setattr(server, "backend_answer", spy)
     backends, client = idle
     items = complete(IMPORTED_CLASS, backends)[2]
+    assert answers == []  # no request, so no wait on the start
     assert not client.running  # answered before the backend was up
     assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Variable]
 
