@@ -40,15 +40,24 @@ _spec = importlib.util.spec_from_file_location(
 docs_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(docs_main)
 
-# src_uri -> rendered markdown. Never cleared, so a rebuild in the same process
-# (mkdocs serve --dirty skips on_page_markdown for unchanged pages) keeps their
-# last render. A cold ``build --dirty`` starts with it empty: on_post_build then
-# leaves the llms files as the last full build wrote them. Entries are
+# src_uri -> rendered markdown. Never cleared, so a dirty rebuild in the same
+# process (mkdocs serve --dirty skips on_page_markdown for unchanged pages)
+# keeps their last render. A cold ``build --dirty`` starts with it empty:
+# on_post_build then leaves the llms files as the last full build wrote them.
+# A non-dirty build renders every included page, so a nav page without a render
+# there is a draft or excluded page in the nav, and fails the build. Entries are
 # overwritten whenever a page renders, and the output is selected through the
 # current nav, so a page removed from the nav never appears.
 _pages = {}
 _log = logging.getLogger("mkdocs.hooks.llms")
 _nav = []
+# Whether this process builds with --dirty; set once by on_startup.
+_dirty = False
+
+
+def on_startup(*, command, dirty):
+    global _dirty
+    _dirty = dirty
 
 
 def on_pre_build(config):
@@ -149,10 +158,18 @@ def on_post_build(config):
         if nav_by_src[src] in syntax:
             raise PluginError(f"extra.llms_syntax_pages lists {src!r} twice")
         syntax.append(nav_by_src[src])
-    # The files are derived from every nav page's rendered markdown: a build
-    # that has not rendered them all (a cold --dirty build skips unchanged
-    # pages) cannot produce them, so it leaves the previous ones alone.
+    # The files are derived from every nav page's rendered markdown. A dirty
+    # build that has not rendered them all (a cold --dirty build skips
+    # unchanged pages) cannot produce them, so it leaves the previous ones
+    # alone; any other build renders every included page, so a missing one is
+    # an error.
     missing = [p for p in _nav if p.file.src_uri not in _pages]
+    if missing and not _dirty:
+        names = ", ".join(p.file.src_uri for p in missing)
+        raise PluginError(
+            f"nav pages were not rendered: {names} (a draft or excluded page "
+            "in the nav?)"
+        )
     if missing:
         _log.info(
             "llms*.txt left as the last full build wrote them: %d of %d pages "

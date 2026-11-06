@@ -29,6 +29,7 @@ def hooks():
 def fresh_pages(hooks):
     # _pages outlives a build on purpose (--dirty), so tests reset it.
     hooks._pages.clear()
+    hooks._dirty = False
 
 
 @pytest.fixture(scope="module")
@@ -119,8 +120,11 @@ NAV = [
 LISTED = ["macros.md", "syntax/statements.md", "syntax/expressions.md"]
 
 
-def build(hooks, tmp_path, listed, site_url=SITE, render=None):
-    """One build cycle; ``render`` limits which pages get on_page_markdown."""
+def build(
+    hooks, tmp_path, listed, site_url=SITE, render=None, dirty=False, body="BODY"
+):
+    """One build cycle; ``render`` limits which pages get on_page_markdown,
+    ``dirty`` is the --dirty flag mkdocs hands on_startup."""
     config = MkDocsConfig()
     config.load_dict(
         {
@@ -133,12 +137,13 @@ def build(hooks, tmp_path, listed, site_url=SITE, render=None):
     )
     files = Files([File(src, "/src", "/out", True) for src, _ in NAV])
     pages = [Page(title, files.get_file_from_path(src), config) for src, title in NAV]
+    hooks.on_startup(command="build", dirty=dirty)
     hooks.on_pre_build(config)
     hooks.on_nav(type("Nav", (), {"pages": pages})(), config, files)
     for page in pages:
         if render is not None and page.file.src_uri not in render:
             continue
-        hooks.on_page_markdown(f"BODY {page.file.src_uri}", page, config, files)
+        hooks.on_page_markdown(f"{body} {page.file.src_uri}", page, config, files)
     hooks.on_post_build(config)
     return {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir()}
 
@@ -188,26 +193,52 @@ def test_an_absent_or_empty_page_list_fails_the_build(hooks, tmp_path, extra):
 def test_a_listed_page_not_rendered_in_a_later_build_keeps_its_last_render(
     hooks, tmp_path
 ):
-    # mkdocs build --dirty skips on_page_markdown for unchanged pages.
+    # mkdocs serve --dirty skips on_page_markdown for unchanged pages.
     build(hooks, tmp_path, LISTED)
-    out = build(hooks, tmp_path, LISTED, render={"macros.md"})
+    out = build(hooks, tmp_path, LISTED, render={"macros.md"}, dirty=True, body="NEW")
+    for name in ("llms-syntax.txt", "llms-full.txt"):
+        assert "NEW macros.md" in out[name] and "BODY macros.md" not in out[name]
+        assert "BODY syntax/statements.md" in out[name]
     assert page_lines(out["llms-syntax.txt"]) == [
         "Page: Macros",
         "Page: Statements",
         "Page: Expressions",
     ]
-    assert "BODY syntax/statements.md" in out["llms-syntax.txt"]
 
 
-def test_a_build_that_did_not_render_every_page_leaves_the_llms_files_alone(
+def test_a_dirty_build_that_did_not_render_every_page_leaves_the_llms_files_alone(
     hooks, tmp_path
 ):
     # A cold mkdocs build --dirty: unchanged pages never reach on_page_markdown.
     names = ("llms.txt", "llms-full.txt", "llms-syntax.txt")
     for name in names:
         (tmp_path / name).write_text(f"LAST {name}\n", encoding="utf-8")
-    out = build(hooks, tmp_path, LISTED, render={"macros.md"})
+    out = build(hooks, tmp_path, LISTED, render={"macros.md"}, dirty=True)
     assert out == {name: f"LAST {name}\n" for name in names}
+
+
+def test_a_clean_build_with_an_unrendered_nav_page_fails(hooks, tmp_path):
+    # mkdocs does not render a draft or excluded page that the nav points at.
+    with pytest.raises(PluginError, match=r"usage/cli\.md"):
+        build(hooks, tmp_path, LISTED, render={s for s, _ in NAV} - {"usage/cli.md"})
+
+
+@pytest.mark.parametrize(
+    "listed", [None, [], ["macros.md", "gone.md"], ["macros.md"] * 2]
+)
+def test_the_page_list_is_validated_before_a_dirty_build_is_skipped(
+    hooks, tmp_path, listed
+):
+    config = MkDocsConfig()
+    extra = {} if listed is None else {"llms_syntax_pages": listed}
+    config.load_dict({"site_name": "t", "site_dir": str(tmp_path), "extra": extra})
+    files = Files([File(src, "/src", "/out", True) for src, _ in NAV])
+    pages = [Page(title, files.get_file_from_path(src), config) for src, title in NAV]
+    hooks.on_startup(command="build", dirty=True)
+    hooks.on_pre_build(config)
+    hooks.on_nav(type("Nav", (), {"pages": pages})(), config, files)
+    with pytest.raises(PluginError):
+        hooks.on_post_build(config)
 
 
 def test_a_versioned_site_url_without_a_trailing_slash_keeps_its_version(
