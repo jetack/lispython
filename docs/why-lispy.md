@@ -11,7 +11,7 @@ You can use any Python libraries and modules in LisPy.
 You can also use LisPy modules in Python.
 ### Interop example
 #### Import numpy in LisPy
-```python
+```lispython
 (import numpy as np)
 ```
 #### Import LisPy Code in Python
@@ -29,7 +29,7 @@ LisPy has a Lisp-like macro system. This can be achieved by its s-expression-lik
 I recommend reading Paul Graham’s article [Beating the Average](https://paulgraham.com/avg.html), which illustrates why macro systems are valuable.
 ### Macro example
 `do-while` macro
-```python
+```lispython
 ; do-while macro example
 (defmacro do-while [pred *body]
   (return `(do

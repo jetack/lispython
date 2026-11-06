@@ -242,7 +242,7 @@ def macro_doc_markdown(name):
     """A built-in macro's usage block and description, from the docstring the
     LSP hover and the reference table read (lispy.form_docs.BUILTIN_MACROS)."""
     doc = form_docs.BUILTIN_MACROS[name]
-    return "\n".join(["```python", *doc.usage, "```", "", doc.prose])
+    return "\n".join(["```lispython", *doc.usage, "```", "", doc.prose])
 
 
 def define_env(env):

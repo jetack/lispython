@@ -1,7 +1,7 @@
 # Statements
 ## Function Definitions
 LisPy version
-```python
+```lispython
 (deco [decorator1
        decorator2]
   (def function-name [arg1 arg2 *args :kwarg1 value1 :kwarg2 value2 **kwargs]
@@ -27,7 +27,7 @@ Use `async-def` instead of `def`.
 Decorates the definition (`def`, `async-def` or `class`) it wraps: `(deco decorator definition)` for one decorator, `(deco [d1 d2] definition)` for several, listed top to bottom and applied bottom-up as in Python: the last one wraps the definition first, so `(deco [d1 d2] ...)` is `d1(d2(f))`. A decorator is any expression, a call included.
 
 LisPy version
-```python
+```lispython
 (deco my-decorator
   (def f [x] (return x)))
 
@@ -60,7 +60,7 @@ class A:
 `(return)` returns `None`; `(return value)` returns the value. It takes at most one value: return several as a tuple with `(, a b)`.
 
 LisPy version
-```python
+```lispython
 (def f [x]
   (return x))
 (def g []
@@ -84,7 +84,7 @@ def h(x, y):
 
 ## Class Definition
 LisPy version
-```python
+```lispython
 (deco [decorator1
        decorator2]
   (class class-name [base-class1 base-class2]
@@ -114,7 +114,7 @@ A glued name is only valid as the name of `def`, `async-def`, `class` and
 `type`; to subscript, use `(sub xs ...)`.
 
 LisPy version
-```python
+```lispython
 (def first[T] [xs ^(sub list T)] ^T
   (return (sub xs 0)))
 
@@ -147,7 +147,7 @@ plain name. Every other shape is a call to the builtin `type`, so
 version it needs.
 
 LisPy version
-```python
+```lispython
 (type Number (| int float))
 (type Vec[T] (sub list T))
 ```
@@ -159,7 +159,7 @@ type Vec[T] = list[T]
 
 ## `del`
 LisPy version
-```python
+```lispython
 (del x y z ...)
 ```
 Python version
@@ -169,7 +169,7 @@ del x, y, z, ...
 
 ## Assignment
 LisPy version
-```python
+```lispython
 (= x value)
 (= [x y *args] [value1 value2 value3 value4, ...]) ; destructuring assignment
 ```
@@ -182,7 +182,7 @@ x = value
 
 ## Augmented Assignment
 LisPy version
-```python
+```lispython
 (+= x value)
 (-= x value)
 (*= x value)
@@ -201,7 +201,7 @@ x /= value
 ## Type Annotations
 ### Simple Type Annotations
 LisPy version
-```python
+```lispython
 (= x ^type)
 ```
 Python version
@@ -210,7 +210,7 @@ x: type
 ```
 ### Assignment with Type Annotations
 LisPy version
-```python
+```lispython
 (= a ^int 1)
 ```
 Python version
@@ -219,7 +219,7 @@ a: int = 1
 ```
 ### Function Definition with Type Annotations
 LisPy version
-```python
+```lispython
 (def a [b ^int c] ^float
   (return (+ b c)))
 ```
@@ -230,7 +230,7 @@ def a(b: int, c) -> float:
 ```
 ### Pydantic Example
 LisPy version
-```python
+```lispython
 (class User [BaseModel]
   (= id ^int)
   (= name ^str "John Doe")
@@ -248,7 +248,7 @@ class User(BaseModel):
 
 ## `for`
 LisPy version
-```python
+```lispython
 (for x in xs
   body1
   body2)
@@ -265,7 +265,7 @@ Use `async-for` instead of `for`.
 
 ## `while`
 LisPy version
-```python
+```lispython
 (while condition
   body1
   body2)
@@ -279,7 +279,7 @@ while condition:
 
 ## `if`
 LisPy version
-```python
+```lispython
 (if test
     then
     else)
@@ -294,7 +294,7 @@ else:
 ## `do` block
 If you want to use multiple statements in `then-body` or `else-body`, you can use `do` block.
 LisPy version
-```python
+```lispython
 (if test
     (do then1 then2)
     (do else1 else2))
@@ -312,7 +312,7 @@ else:
 ## `with`
 ### Simple `with`
 LisPy version
-```python
+```lispython
 (with [expression]
   body)
 ```
@@ -323,7 +323,7 @@ with expression:
 ```
 ### `with` with alias
 LisPy version
-```python
+```lispython
 (with [expression as target]
   body)
 ```
@@ -337,7 +337,7 @@ Use `async-with` instead of `with`.
 
 ## `match`
 LisPy version
-```python
+```lispython
 (match x
   (case "Relevant"
         ...)
@@ -397,7 +397,7 @@ A negative number or a complex literal is a value pattern. A leading `+` needs
 Python 3.15+; on an older Python it is a compile error naming the version.
 
 LisPy version
-```python
+```lispython
 (match x
   (case -1
     ...)
@@ -423,7 +423,7 @@ match x:
 
 ## `raise`
 LisPy version
-```python
+```lispython
 (raise)
 (raise Exception)
 (raise Exception from ValueError)
@@ -437,7 +437,7 @@ raise Exception from ValueError
 
 ## `try`
 LisPy version
-```python
+```lispython
 (try
   body1
   body2
@@ -475,7 +475,7 @@ finally:
 
 ### `except*` clause
 LisPy version
-```python
+```lispython
 (try
   (raise BlockingIOError)
   (except* [BlockingIOError as e]
@@ -491,7 +491,7 @@ except* BlockingIOError as e:
 
 ## `assert`
 LisPy version
-```python
+```lispython
 (assert condition)
 (assert condition "message")
 ```
@@ -504,7 +504,7 @@ assert condition, "message"
 ## `import`
 ### Simple `import`
 LisPy version
-```python
+```lispython
 (import module)
 (import module as alias)
 ```
@@ -516,7 +516,7 @@ import module as alias
 ### `from` import
 #### without alias
 LisPy version
-```python
+```lispython
 (from module [name1 name2 name3])
 ```
 Python version
@@ -525,7 +525,7 @@ from module import name1, name2, name3
 ```
 #### with alias
 LisPy version
-```python
+```lispython
 (from module [name1
               name2 as alias
               name3])
@@ -545,7 +545,7 @@ loaded when a name is first used. As in Python, `lazy-from` refuses `*` and
 version they need.
 
 LisPy version
-```python
+```lispython
 (lazy-import json)
 (lazy-import numpy as np)
 (lazy-from json [dumps loads as load-json])
@@ -559,7 +559,7 @@ lazy from json import dumps, loads as load_json
 
 ## `global`
 LisPy version
-```python
+```lispython
 (global x y z ...)
 ```
 Python version
@@ -568,7 +568,7 @@ global x, y, z, ...
 ```
 ## `nonlocal`
 LisPy version
-```python
+```lispython
 (nonlocal x y z ...)
 ```
 Python version
@@ -577,7 +577,7 @@ nonlocal x, y, z, ...
 ```
 ## `pass`
 LisPy version
-```python
+```lispython
 (pass)
 ```
 Python version
@@ -586,7 +586,7 @@ pass
 ```
 ## `break`
 LisPy version
-```python
+```lispython
 (break)
 ```
 Python version
@@ -595,7 +595,7 @@ break
 ```
 ## `continue`
 LisPy version
-```python
+```lispython
 (continue)
 ```
 Python version

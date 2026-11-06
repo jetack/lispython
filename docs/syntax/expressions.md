@@ -2,7 +2,7 @@
 ## Operators
 ### Boolean Operators
 LisPy version
-```python
+```lispython
 (and expr1 expr2 ...)
 ```
 Python version
@@ -11,7 +11,7 @@ expr1 and expr2 and ...
 ```
 ### Binary Operators
 LisPy version
-```python
+```lispython
 (+ n1 n2 ...)
 ```
 Python version
@@ -20,7 +20,7 @@ n1 + n2 + ...
 ```
 ### Unary Operators
 LisPy version
-```python
+```lispython
 (- n)
 ```
 Python version
@@ -29,7 +29,7 @@ Python version
 ```
 #### `not`
 LisPy version
-```python
+```lispython
 (not expr)
 ```
 Python version
@@ -38,7 +38,7 @@ not expr
 ```
 #### `~`
 LisPy version
-```python
+```lispython
 (~ n)
 ```
 Python version
@@ -48,7 +48,7 @@ Python version
 ### Comparison Operators
 #### `==`
 LisPy version
-```python
+```lispython
 (== expr1 expr2 expr3 ...)
 ```
 Python version
@@ -57,7 +57,7 @@ expr1 == expr2 == expr3 == ...
 ```
 #### `>`
 LisPy version
-```python
+```lispython
 (> expr1 expr2 expr3 ...)
 ```
 Python version
@@ -66,7 +66,7 @@ expr1 > expr2 > expr3 > ...
 ```
 #### `!=`
 LisPy version
-```python
+```lispython
 (!= expr1 expr2 expr3 ...)
 ```
 Python version
@@ -75,7 +75,7 @@ expr1 != expr2 != expr3 != ...
 ```
 #### `<`
 LisPy version
-```python
+```lispython
 (< expr1 expr2 expr3 ...)
 ```
 Python version
@@ -84,7 +84,7 @@ expr1 < expr2 < expr3 < ...
 ```
 #### `<=`
 LisPy version
-```python
+```lispython
 (<= expr1 expr2 expr3 ...)
 ```
 Python version
@@ -93,7 +93,7 @@ expr1 <= expr2 <= expr3 <= ...
 ```
 #### `>=`
 LisPy version
-```python
+```lispython
 (>= expr1 expr2 expr3 ...)
 ```
 Python version
@@ -102,7 +102,7 @@ expr1 >= expr2 >= expr3 >= ...
 ```
 #### `is`
 LisPy version
-```python
+```lispython
 (is expr1 expr2 expr3 ...)
 ```
 Python version
@@ -111,7 +111,7 @@ expr1 is expr2 is expr3 is ...
 ```
 #### `is-not`
 LisPy version
-```python
+```lispython
 (is-not expr1 expr2 expr3 ...)
 ```
 Python version
@@ -120,7 +120,7 @@ expr1 is not expr2 is not expr3 is not ...
 ```
 #### `in`
 LisPy version
-```python
+```lispython
 (in expr1 expr2 expr3 ...)
 ```
 Python version
@@ -129,7 +129,7 @@ expr1 in expr2 in expr3 in ...
 ```
 #### `not-in`
 LisPy version
-```python
+```lispython
 (not-in expr1 expr2 expr3 ...)
 ```
 Python version
@@ -139,7 +139,7 @@ expr1 not in expr2 not in expr3 not in ...
 
 ## `:=`
 LisPy version
-```python
+```lispython
 (:= name value)
 ```
 Python version
@@ -152,7 +152,7 @@ Statement forms (`do`, `=`, `+=`, `if`, `return`, `def`, ...) cannot appear insi
 
 ## `lambda`
 LisPy version
-```python
+```lispython
 (lambda [arg1 arg2 ...] body)
 ; or the built-in macro fn (needs (require lispy.macros *))
 (fn [arg1 arg2 ...] body)
@@ -163,7 +163,7 @@ lambda arg1, arg2, ...: body
 ```
 ## `if` expression
 LisPy version
-```python
+```lispython
 (ife test then other)
 ```
 Python version
@@ -173,7 +173,7 @@ then if test else other
 ## Collection Literals
 ### List
 LisPy version
-```python
+```lispython
 [item1 item2 ...]
 ```
 Python version
@@ -182,7 +182,7 @@ Python version
 ```
 ### Dictionary
 LisPy version
-```python
+```lispython
 {key1 value1 key2 value2 ...}
 ```
 Python version
@@ -191,7 +191,7 @@ Python version
 ```
 ### Set
 LisPy version
-```python
+```lispython
 {, item1 item2 ...}
 ```
 Python version
@@ -200,7 +200,7 @@ Python version
 ```
 ### Tuple
 LisPy version
-```python
+```lispython
 (, item1 item2 ...)
 ```
 Python version
@@ -210,7 +210,7 @@ Python version
 ## Comprehensions
 ### List Comprehension
 LisPy version
-```python
+```lispython
 [(* 2 x) for x in (range 10) if (== (% x 2) 0)]
 ```
 Python version
@@ -219,7 +219,7 @@ Python version
 ```
 ### Dictionary Comprehension
 LisPy version
-```python
+```lispython
 {(* 2 x) (* 3 x) for x in (range 10) if (== (% x 2) 0)}
 ```
 Python version
@@ -228,7 +228,7 @@ Python version
 ```
 ### Set Comprehension
 LisPy version
-```python
+```lispython
 {, (* 2 x) for x in (range 10) if (== (% x 2) 0)}
 ```
 Python version
@@ -237,7 +237,7 @@ Python version
 ```
 ### Generator Expression
 LisPy version
-```python
+```lispython
 ((* 2 x) for x in (range 10) if (== (% x 2) 0))
 ```
 Python version
@@ -249,7 +249,7 @@ Python 3.15+ ([PEP 798](https://peps.python.org/pep-0798/)). On an older Python
 these forms are a compile error naming the version they need.
 
 LisPy version
-```python
+```lispython
 [*L for L in lists]
 (*L for L in lists)
 {, *s for s in sets}
@@ -267,7 +267,7 @@ Python version
 
 ## `await`
 LisPy version
-```python
+```lispython
 (await expr)
 ```
 Python version
@@ -276,7 +276,7 @@ await expr
 ```
 ## `yield`
 LisPy version
-```python
+```lispython
 (yield expr)
 ```
 Python version
@@ -285,7 +285,7 @@ yield expr
 ```
 ## `yield from`
 LisPy version
-```python
+```lispython
 (yield-from expr)
 ```
 Python version
@@ -294,7 +294,7 @@ yield from expr
 ```
 ## Function Call
 LisPy version
-```python
+```lispython
 (func-name arg1 arg2 *args :kwarg1 value1 :kwarg2 value2 **kwargs)
 ```
 Python version
@@ -303,7 +303,7 @@ func_name(arg1, arg2, *args, kwarg1=value1, kwarg2=value2, **kwargs)
 ```
 ## Formatted String Literals
 LisPy version
-```python
+```lispython
 (= name "World")
 f"Hello, {(* 2 name)}!"
 ```
@@ -321,7 +321,7 @@ with a `SyntaxWarning` (shown by default, as for an invalid escape sequence
 in Python 3.12+), and a string opened with `\"` must be closed by
 `\"`.
 LisPy version
-```python
+```lispython
 f"{{literal}} {x!r:>{width}} {x=}"
 ```
 Python version
@@ -337,7 +337,7 @@ text inside the braces. On an older Python a t-string is a compile error naming
 the version it needs.
 
 LisPy version
-```python
+```lispython
 (= name "World")
 t"Hello, {(* 2 name)!r:>12}!"
 ```
@@ -356,7 +356,7 @@ anywhere a name does: as a value, a call head, an assignment or `del` target,
 and in `import`.
 
 LisPy version
-```python
+```lispython
 a.b.c
 (obj.method arg :kwarg value)
 (= obj.attr 1)
@@ -385,7 +385,7 @@ attribute access (`(f).x` and `"s".upper` are errors). `(. obj attr)` takes
 the attribute names after the object, so more than one chains them.
 
 LisPy version
-```python
+```lispython
 (. obj attr)
 (. obj a b)
 (. (f) attr)
@@ -405,7 +405,7 @@ call a method on an expression use the method-call form below.
 
 ## Method Call
 LisPy version
-```python
+```lispython
 (.method-name obj arg1 arg2 *args :kwarg1 value1 :kwarg2 value2 **kwargs)
 ```
 Python version
@@ -415,7 +415,7 @@ obj.method_name(arg1, arg2, *args, kwarg1=value1, kwarg2=value2, **kwargs)
 ## Subscription
 ### Simple Subscription
 LisPy version
-```python
+```lispython
 (sub obj i1 i2)
 ```
 Python version
@@ -424,7 +424,7 @@ obj[i1][i2]
 ```
 ### Tuple Subscription
 LisPy version
-```python
+```lispython
 (sub obj (, i1 i2 ...))
 ```
 Python version
@@ -434,7 +434,7 @@ obj[i1, i2, ...]
 ## Slice
 ### Slice Subscription
 LisPy version
-```python
+```lispython
 (sub obj [: start stop step])
 ```
 Python version
@@ -443,7 +443,7 @@ obj[start:stop:step]
 ```
 ### Slice with Emptiness
 LisPy version
-```python
+```lispython
 (sub obj [: stop])
 (sub obj [: start _])
 (sub obj [: start _ step])

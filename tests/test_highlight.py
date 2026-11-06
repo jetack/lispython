@@ -1,12 +1,17 @@
 """The lispython Pygments lexer (lispy.highlight), as the docs' ```lispython
 fences and any Pygments user reach it: through the entry point, by alias."""
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 from pygments.lexers import get_lexer_by_name, get_lexer_for_filename
-from pygments.token import Comment, Keyword, Name, Number, Operator, String
+from pygments.token import Comment, Error, Keyword, Name, Number, Operator, String
 
 import lispy  # noqa: F401  (the .lpy import hook, for lispy.form_docs)
 from lispy import form_docs
+
+DOCS = Path(__file__).resolve().parent.parent / "docs"
 
 
 @pytest.fixture(scope="module")
@@ -146,3 +151,32 @@ def test_derived_form_names(lexer):
     for name in form_docs.SPECIAL_FORMS:
         if any(c.isalpha() for c in name):
             assert kind_of(lexer, f"({name} x)", name) is Keyword, name
+
+
+def lispython_fences(docs_main):
+    """The text of every ```lispython fence on the docs pages, and the usage
+    block docs/main.py generates for every built-in macro."""
+    pages = [path.read_text() for path in sorted(DOCS.rglob("*.md"))]
+    pages += [docs_main.macro_doc_markdown(name) for name in form_docs.BUILTIN_MACROS]
+    for text in pages:
+        block = None
+        for line, in_code in docs_main.markdown_lines(text):
+            if block is None and in_code and line.strip() == "```lispython":
+                block = []
+            elif block is not None and in_code and line.strip().startswith("```"):
+                yield "\n".join(block)
+                block = None
+            elif block is not None:
+                block.append(line)
+
+
+def test_no_error_token_in_the_docs(lexer):
+    spec = importlib.util.spec_from_file_location("docs_main", DOCS / "main.py")
+    docs_main = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(docs_main)
+    fences = list(lispython_fences(docs_main))
+    assert len(fences) > 100
+    errors = [
+        [src, v] for src in fences for t, v in lexer.get_tokens(src) if t in Error
+    ]
+    assert errors == []

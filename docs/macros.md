@@ -14,29 +14,29 @@ You can check out how to manipulate these nodes in
 - the definitions of built-in macros in `src/lispy/macros/sugar.lpy`.
 
 ## quote
-```python
+```lispython
 'expr
 ```
 ## syntax-quote
-```python
+```lispython
 `expr
 ```
 ## unquote
-```python
+```lispython
 ~expr
 ```
 ## unquote-splicing
-```python
+```lispython
 ~@expr
 ```
 ## Macro Definition
 Just change `def` in function definition to `defmacro`. And macros usually return a quoted expression.
-```python
+```lispython
 (defmacro name [args*]
   body*)
 ```
 ### Macro Example
-```python
+```lispython
 (defmacro unless [test *body]
   (return `(if (not ~test)
              (do ~@body))))
@@ -55,7 +55,7 @@ The built-in macros ([below](#built-in-macros)) are written the same way; their 
 Loads the macros of a module so the file can use them. Macros are compile-time only: `require` leaves no runtime import behind.
 
 LisPy version
-```python
+```lispython
 (require mod)          ; every macro, as mod.name
 (require mod *)        ; every macro, unqualified
 (require mod [a b])    ; only a and b, unqualified
@@ -77,7 +77,7 @@ Every example below has `(require lispy.macros *)` at the top of the file; the P
 {{ macro_doc("cond") }}
 
 LisPy version
-```python
+```lispython
 (cond (< x 0) (print "neg")
       (== x 0) (print "zero")
       (print "pos"))
@@ -96,7 +96,7 @@ else:
 {{ macro_doc("conde") }}
 
 LisPy version
-```python
+```lispython
 (= label (conde (< x 0) "neg"
                 (== x 0) "zero"
                 "pos"))
@@ -110,7 +110,7 @@ label = "neg" if x < 0 else "zero" if x == 0 else "pos"
 {{ macro_doc("->") }}
 
 LisPy version
-```python
+```lispython
 (-> x (f 1) (g 2))
 ```
 Python version
@@ -122,7 +122,7 @@ g(f(x, 1), 2)
 {{ macro_doc("->>") }}
 
 LisPy version
-```python
+```lispython
 (->> x (f 1) (g 2))
 ```
 Python version
@@ -134,7 +134,7 @@ g(2, f(1, x))
 {{ macro_doc("as->") }}
 
 Unlike `->` (thread first) and `->>` (thread last), `as->` lets you name the threaded value and place it anywhere in each form:
-```python
+```lispython
 (as-> 0 x
   (+ x 10)     ;; x = 10
   (* 2 x)      ;; x = 20
@@ -156,7 +156,7 @@ Useful when the threaded value doesn't always go in the first or last position.
 {{ macro_doc("fn") }}
 
 LisPy version
-```python
+```lispython
 (= double (fn [x] (* 2 x)))
 ```
 Python version
@@ -168,7 +168,7 @@ double = lambda x: 2 * x
 {{ macro_doc("comment") }}
 
 LisPy version
-```python
+```lispython
 (comment (print "never runs") (undefined-name))
 (print "done")
 ```
@@ -182,7 +182,7 @@ print("done")
 {{ macro_doc("when") }}
 
 LisPy version
-```python
+```lispython
 (when (> x 0)
   (print "positive")
   (= y x))
@@ -198,7 +198,7 @@ if x > 0:
 {{ macro_doc("inc") }}
 
 LisPy version
-```python
+```lispython
 (= y (inc x))
 ```
 Python version
@@ -210,7 +210,7 @@ y = x + 1
 {{ macro_doc("dec") }}
 
 LisPy version
-```python
+```lispython
 (= z (dec x))
 ```
 Python version
@@ -222,7 +222,7 @@ z = x - 1
 {{ macro_doc("++") }}
 
 LisPy version
-```python
+```lispython
 (++ n)
 ```
 Python version
@@ -234,7 +234,7 @@ n += 1
 {{ macro_doc("--") }}
 
 LisPy version
-```python
+```lispython
 (-- n)
 ```
 Python version
@@ -245,7 +245,7 @@ n -= 1
 ## gensym
 `gensym` generates unique symbols to avoid variable name collisions in macros. It is automatically available inside `defmacro` bodies.
 
-```python
+```lispython
 (gensym)          ;; => Symbol("__gensym_0")
 (gensym "tmp")    ;; => Symbol("__tmp_1")
 (gensym 'tmp)     ;; => Symbol("__tmp_2")  (also accepts a quoted Symbol)
@@ -255,7 +255,7 @@ The prefix can be a string or a symbol. Each call increments a global counter, s
 
 ### Why gensym?
 Without `gensym`, a macro that introduces a local variable can accidentally shadow a variable in the caller's scope:
-```python
+```lispython
 ;; BAD: if the caller has a variable named `tmp`, this breaks
 (defmacro broken-swap [a b]
   (return `(do (= tmp ~a)
@@ -264,7 +264,7 @@ Without `gensym`, a macro that introduces a local variable can accidentally shad
 ```
 
 Using `gensym` prevents this:
-```python
+```lispython
 (defmacro swap [a b]
   (= tmp (gensym "tmp"))
   (return `(do (= ~tmp ~a)
