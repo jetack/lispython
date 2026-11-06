@@ -35,7 +35,7 @@
 (from lispy.core.nodes [Symbol])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.macro [compile-unit])
-(from lispy.core.compiler.literal [identifier-p])
+(from lispy.core.compiler.literal [identifier-p name-key])
 (from lispy.core.compiler.utils [python-interpolations])
 (from lispy.core.importer [package-root])
 
@@ -58,14 +58,11 @@
    holds a letter or digit, so an operator such as - (py-name _) is none."
   (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
 
-(def name-key [text]
-  "The name text stands for, as the LSP compares names (references,
-   completion, macro heads): each .-separated part its Python name when it
-   spells one (name-spelling-p), else as written, so self.my-v is
-   self.my_v while an operator such as - (py-name _) or -> (py-name _to_)
-   is never the Python name its mangling happens to give."
-  (return (.join "." [(ife (name-spelling-p part) (py-name part) part)
-                      for part in (.split text ".")])))
+;; name-key (from compiler/literal.py) is how the LSP compares identifiers
+;; (references, completion, macro heads): the compiler's own name identity,
+;; so the LSP and the macro clash check agree on which spellings are one name
+;; (my-x and my_x are; -> and _to_, ok? and ok_p are not).  Re-exported here
+;; for the server.
 
 (def source-prefix [source line col]
   "The text of source before the 1-based line and code-point column."

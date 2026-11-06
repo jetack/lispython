@@ -420,6 +420,19 @@ def hyphenated_name_p(text):
     )
 
 
+def name_key(text):
+    """The name ``text`` stands for when two spellings are compared: each
+    ``.``-separated part its Python name when it is a hyphenated name
+    (hyphenated_name_p: ``my-x`` and ``my_x`` are one name), else the part as
+    written (``->``, ``ok?``, ``x-`` are only themselves). The one home of
+    name identity: the compiler's macro clash check (core/macro.py) and the
+    LSP (python_view's name-key) both compare through it."""
+    return ".".join(
+        Symbol(part).name if hyphenated_name_p(part) else part
+        for part in text.split(".")
+    )
+
+
 def plain_name_p(sexp):
     """Whether ``sexp`` is shaped as a name: a symbol whose mangled text
     passes identifier_p (so no dot). A shape test for sites with their own

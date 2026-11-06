@@ -6,7 +6,7 @@ from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import (
     ACTIVE_MACROS,
     constant_compile,
-    hyphenated_name_p,
+    name_key,
     string_node_value,
 )
 from lispy.core.compiler.utils import compile_nesting_errors
@@ -177,15 +177,12 @@ def active_macro_kind(scope):
             if "." in key:
                 continue
             # Lookup is by spelling, so a binding hides a macro only when a
-            # call meant for the binding could be spelled as the macro. A
-            # hyphenated name's Python name is a second spelling of it (my-x
-            # and my_x are one name); an operator-spelled key (->, --) mangles
-            # to a name nobody calls it by (_to_, __), so only its own
-            # spelling clashes.
-            if hyphenated_name_p(key):
-                if Symbol(key).name != name:
-                    continue
-            elif key != spelling:
+            # call meant for the binding could be spelled as the macro: the
+            # two are one name (name_key, shared with the LSP). A hyphenated
+            # name's Python name is a second spelling of it (my-x and my_x);
+            # any other key (->, ok?) mangles to a name nobody calls it by
+            # (_to_, ok_p), so only its own spelling clashes.
+            if name_key(key) != name_key(spelling):
                 continue
             if prelude.get(key) is macro:
                 return "built-in"

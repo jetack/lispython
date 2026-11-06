@@ -184,6 +184,39 @@ def test_compared_by_python_name():
     assert info.value.msg.startswith("cannot bind 'my_x': it is a macro here, so (my_x")
 
 
+# (macro key, binding spelling, one name?). A hyphenated name and its Python
+# name are one name both ways; any other spelling is only itself.
+NAME_IDENTITY = [
+    ["inc", "inc", True],
+    ["my-x", "my_x", True],
+    ["my_x", "my-x", True],
+    ["as->", "as->", True],
+    ["ok?", "ok?", True],
+    ["as->", "as_to_", False],
+    ["->", "_to_", False],
+    ["ok?", "ok_p", False],
+    ["ok_p", "ok?", False],
+    ["x-", "x_", False],
+]
+
+
+@pytest.mark.parametrize("key, spelling, same", NAME_IDENTITY)
+def test_the_compiler_and_the_lsp_agree_on_name_identity(key, spelling, same):
+    # Two sides of one rule: the binding clash check and the LSP's name-key
+    # (references, completion, macro heads) must call the same pairs one name.
+    from lispy.lsp import python_view
+
+    src = f"(require lispy.macros [])\n(defmacro {key} [] (return 1))\n(= {spelling} 1)"
+    try:
+        translate(src)
+        refused = False
+    except LispyCompileError as e:
+        assert e.msg.startswith(f"cannot bind '{spelling}': ")
+        refused = True
+    lsp_same = python_view.name_key(key) == python_view.name_key(spelling)
+    assert (refused, lsp_same) == (same, same)
+
+
 # A macro spelled other than as a hyphenated name mangles to a name nobody
 # calls it by (-> is _to_), so binding that name hides no macro call.
 @pytest.mark.parametrize(
