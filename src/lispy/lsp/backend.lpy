@@ -104,6 +104,13 @@
 (= BACKENDS {"basedpyright" _basedpyright-argv
              "pyrefly" _pyrefly-argv})
 
+;; Backends whose definition answer for a name with no declarations walks up
+;; the parse tree to the enclosing call or operator and answers for it
+;; (basedpyright's DefinitionProviderBase.getDefinitionsForNode), so an
+;; undefined name in (print nosuch) gets print's definition.  The server
+;; checks such an answer (BackendClient.definition-walks-up).
+(= DEFINITION-WALKS-UP (frozenset ["basedpyright"]))
+
 (def backend-argv [name]
   "The argv that starts backend name, or None for off, an unknown name or a
    backend that is not installed."
@@ -249,11 +256,13 @@
    leaves the backend off.  state is idle (not started), running, dead
    (waiting for its restart), off or closed (after shutdown); process is
    the running process.  Documents are synced by full text, keyed by their
-   .lpy uri, as the view-path shadow's uri."
-  (def __init__ [self view-root argv :manifest None]
+   .lpy uri, as the view-path shadow's uri.  definition-walks-up is True
+   for a backend in DEFINITION-WALKS-UP."
+  (def __init__ [self view-root argv :manifest None :definition-walks-up False]
     (= self.view-root view-root)
     (= self.project-root (osp.realpath view-root.project-root))
     (= self.argv argv)
+    (= self.definition-walks-up definition-walks-up)
     (= self.manifest (ife (is manifest None) (ShadowManifest) manifest))
     (= self.state (ife (is argv None) OFF "idle"))
     (= self.spawns 0)
@@ -460,10 +469,11 @@
     (return True))
 
   (async-def request [self method params :uri None :text None :timeout None
-                      :origin None]
+                      :origin None :failed None]
     "Send request method with params (its lsprotocol params type) to the
-     backend and return its result, or None: the backend is off, failed to
-     start, died, or took REQUEST-TIMEOUT.  The first request spawns the
+     backend and return its result, or failed (default None, which is also
+     a null result): the backend is off, failed to start, died, or took
+     REQUEST-TIMEOUT.  The first request spawns the
      backend.  With uri (the .lpy document's) and text, the backend's copy
      of that document is made text first: any text, a cursor view's as
      well as the buffer's; origin is where that text comes from (_docs),
@@ -474,7 +484,7 @@
                    (ife (is timeout None) REQUEST-TIMEOUT timeout)))
     (try
       (if (not (await (._ensure-started self deadline)))
-          (return None))
+          (return failed))
       (= client self._client)
       (if (and (is-not uri None) (is-not text None))
           (._sync self uri text :origin origin))
@@ -488,10 +498,10 @@
         (except [TimeoutError]
           (.debug logger "python backend: %s timed out" method)
           (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
-          (return None)))
+          (return failed)))
       (except [Exception as e]
         (.debug logger "python backend: %s failed: %s" method e)
-        (return None))))
+        (return failed))))
 
   (async-def push-buffer [self lpy-uri source]
     "Send the view of buffer source to a running backend (nothing when it is
@@ -731,7 +741,9 @@
         (do (if (is self.name None)
                 (.configure self None))
             (= client (BackendClient (view-root-for root :cache-home self.cache-home)
-                                     (backend-argv self.name)))
+                                     (backend-argv self.name)
+                                     :definition-walks-up
+                                     (in self.name DEFINITION-WALKS-UP)))
             (= (sub self.clients root) client)))
     (if (is (.backend-uri client lpy-uri) None)
         (return None))
