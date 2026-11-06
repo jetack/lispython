@@ -1251,7 +1251,8 @@
   "The forms open at the cursor, outermost first, and the leaf touching it.
    tree is the parse of the prefix with its closers right after the cursor,
    so a form is open iff it ends past the cursor.  The leaf is the innermost
-   open form's last element when it ends exactly at the cursor, else None."
+   open form's last element that starts before the cursor (inside an f/t-string
+   field or format spec too) when it ends exactly at the cursor, else None."
   (= cursor (, line col))
   (= path [])
   (= node (ife tree (sub tree -1) None))

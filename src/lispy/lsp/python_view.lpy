@@ -76,6 +76,13 @@
   (.append before (sub (sub lines (- line 1)) [: None col]))
   (return (.join "\n" before)))
 
+(def _pop-through [stack kind]
+  "Pop stack down to and including its last entry of kind, if it has one."
+  (for index in (range (- (len stack) 1) -1 -1)
+    (if (== (sub (sub stack index) 0) kind)
+        (do (del (sub stack [: index None]))
+            (return)))))
+
 (def open-form-closers [prefix :literals False]
   "The closers of the forms still open at the end of prefix, innermost
    first, or None when the lexer cannot read it or it ends inside an
@@ -88,6 +95,10 @@
     (= tokens (list (tokenize prefix)))
     (except [Exception]
       (return None)))
+  ;; Entries are (kind, closer): "b" a bracket, "f" a field's }, "q" a
+  ;; literal's quote.  A stray closer pops only a bracket; a field or literal
+  ;; end pops back to its own entry, if any, so a typo never misaligns
+  ;; the closers or empties the stack.
   (= stack [])
   (= open-literals 0)
   (for [text tktype _ _] in tokens
@@ -97,30 +108,30 @@
 
       (== tktype "interpolated-start")
       (do (+= open-literals 1)
-          (.append stack (.lstrip text "fFtTrR")))
+          (.append stack (, "q" (.lstrip text "fFtTrR"))))
 
       (== tktype "interpolated-end")
       (do (-= open-literals 1)
-          (.pop stack))
+          (_pop-through stack "q"))
 
       (== tktype "field-start")
-      (.append stack "}")
+      (.append stack (, "f" "}"))
 
       (== tktype "field-end")
-      (.pop stack)
+      (_pop-through stack "f")
 
       (or (== tktype "opening")
           (and (== tktype "bad-prefix") (in (sub text -1) "([{")))
       (do (= closer (.get _CLOSERS (sub text -1)))
           (if (is closer None)
               (return None))
-          (.append stack closer))
+          (.append stack (, "b" closer)))
 
-      (and (== tktype "closing") stack)
+      (and (== tktype "closing") stack (== (sub (sub stack -1) 0) "b"))
       (.pop stack)))
   (if (and open-literals (not literals))
       (return None))
-  (return (.join "" (reversed stack))))
+  (return (.join "" (reversed [closer for [_ closer] in stack]))))
 
 ;; A pyright suppression in a comment's text, spaced as pyright takes one
 ;; after its comment marker (a ; here, # there): ;pyright:ignore,

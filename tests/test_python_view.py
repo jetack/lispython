@@ -1442,3 +1442,13 @@ def test_the_attribute_gate_rejects_a_field_outside_an_attribute():
     src = '(print f"{(len |)}")'
     line, col = locate(src, "|")
     assert not server.attribute_context_p(src.replace("|", ""), line, col)
+
+
+@pytest.mark.parametrize(
+    "src", ['(= x [1])\nf"{x)}"\n(. x so|)', '(= x [1])\nf"{x]}" (. x |']
+)
+def test_a_stray_closer_in_a_field_never_breaks_the_cursor_view_or_gate(src):
+    line, col = locate(src, "|")
+    source = src.replace("|", "")
+    pv.view_at_cursor(source, line, col)
+    server.attribute_context_p(source, line, col)  # must not raise
