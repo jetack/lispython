@@ -1054,11 +1054,6 @@ or an extra usage line names no usage key."
         (return name)))
   (return None))
 
-(def find-enclosing-function [source line col]
-  "Name of the innermost call open at the cursor whose head is a symbol, or
-   None (open-form-heads)."
-  (return (innermost-named (open-form-heads source line col))))
-
 (def cursor-of [doc pos]
   "The LSP position pos as tokenize() coordinates: (1-based line, code-point column).
    LSP counts character in the negotiated encoding (UTF-16 by default), which
