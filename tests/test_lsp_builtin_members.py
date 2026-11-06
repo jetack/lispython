@@ -357,3 +357,24 @@ def test_a_call_inside_a_form_reaches_the_backend(signature_help, backend_reques
     # a macro's body is a call (the counterpart of the cases above).
     signature_help("(require lispy.macros *)\n(when x (.sort [1] |))")
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_SIGNATURE_HELP]
+
+
+@pytest.mark.parametrize(
+    "marked",
+    [
+        "(require lispy.macros *)\n(print (when x |))",
+        "(require lispy.macros *)\n(when ((g) |))",
+    ],
+    ids=["head is the macro", "innermost form has no head"],
+)
+def test_a_required_macro_answers_signature_help_before_the_backend(
+    signature_help, backend_requests, marked
+):
+    # Defect: the backend is asked first and its answer (print's signature,
+    # or a call of g) wins over the usage of the macro the cursor is in.
+    from lispy.form_docs import BUILTIN_MACROS
+
+    result = signature_help(marked)
+    assert result is not None
+    assert [s.label for s in result.signatures] == list(BUILTIN_MACROS["when"].usage)
+    assert backend_requests.sent == []
