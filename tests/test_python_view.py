@@ -442,21 +442,31 @@ class TestShadows:
     def test_src_layout_modules_outside_the_view_resolve(self, tmp_path):
         # Only pkg is in the view: a pure-.py package, a top-level .py and a
         # stub-only module beside it resolve from the real src, while pkg.m2,
-        # which exists only as .lpy, resolves from the view's shadow.
+        # which exists only as .lpy, resolves from the view's shadow, and so
+        # does pkg.both, whose stale .py beside it in the real src lacks new.
         project, root = tmp_path / "project", tmp_path / "view"
         src = project / "src"
-        imports = "(import other)\n(import single)\n(import stubbed)\n(import pkg.m2)"
+        imports = (
+            "(import other)\n(import single)\n(import stubbed)\n(import pkg.m2)\n"
+            "(from pkg.both [new])"
+        )
         for name, text in [
             ("pkg/__init__.py", ""),
             ("pkg/m.lpy", imports),
             ("pkg/m2.lpy", "(= z 1)"),
+            ("pkg/both.lpy", "(= new 1)"),
+            ("pkg/both.py", "old = 1"),
             ("other/__init__.py", ""),
             ("single.py", "s = 1"),
             ("stubbed.pyi", "t: int"),
         ]:
             self.write(src / name, text)
         messages = self.basedpyright_messages(
-            tmp_path, project, root, reportMissingModuleSource="none"
+            tmp_path,
+            project,
+            root,
+            reportMissingModuleSource="none",
+            reportAttributeAccessIssue="error",
         )
         assert messages == []
 
