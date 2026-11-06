@@ -287,6 +287,30 @@ def test_a_document_belongs_to_its_innermost_folder(tmp_path):
     assert inside is not None and inside.project_root == os.path.realpath(project)
 
 
+@pytest.mark.parametrize(
+    "name, written, absent",
+    [
+        ("pyrefly", "pyrefly.toml", "pyrightconfig.json"),
+        ("basedpyright", "pyrightconfig.json", "pyrefly.toml"),
+    ],
+)
+def test_the_view_root_gets_the_chosen_backends_config(
+    name, written, absent, project, tmp_path, monkeypatch
+):
+    # Defect: the view root gets another backend's config file than the
+    # one the user chose: pyrefly then migrates a pyrightconfig.json, with
+    # neither this LSP's interpreter nor the project's pyrefly settings.
+    monkeypatch.setitem(backend.BACKENDS, name, lambda: ["unused"])
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    backends.configure({"backend": name})
+    client = backends.client_for((project / "main.lpy").as_uri())
+    client._prepare_view_root()
+    root = pathlib.Path(client.view_root.path)
+    assert (root / written).is_file()
+    assert not (root / absent).exists()
+
+
 @pytest.mark.parametrize("python_diagnostics", [True, False])
 def test_only_an_open_with_diagnostics_starts_a_backend(
     python_diagnostics, project, tmp_path, fake_default, spawned
