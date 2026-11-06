@@ -1,0 +1,224 @@
+"""The documentation of every lispython form: one entry per form (its usage
+lines and a description) that the LSP (hover, signature help, completion)
+and the docs site (docs/main.py's form reference, llms.txt) both read, so the
+two are shapes of one source.
+
+It lives outside lispy.lsp because importing that package starts the
+language server (lispy.lsp imports lispy.lsp.server, which builds the server
+object and its builtin index), and the docs build must import this without
+one. Built-in macros are documented by their own docstrings (macros/sugar.lpy);
+this module only reads them."""
+
+(import inspect)
+(from typing [NamedTuple])
+
+(import lispy.macros)
+(from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS STATEMENT-HEADS])
+(from lispy.core.utils [augassignop-dict])
+
+;; Sections of the form reference; hover labels a BUILTIN-MACRO entry.
+(= STATEMENT "statement")
+(= EXPRESSION "expression")
+(= MACRO-SYSTEM "macro system")
+(= BUILTIN-MACRO "built-in macro")
+
+;; FORM-USAGE keys that are clauses of a statement, not heads of their own.
+(= CLAUSES (frozenset ["except" "except*" "else" "finally" "case"]))
+
+;; The modules whose (require ...) brings in the built-in macros: lispy.macros
+;; re-exports lispy.macros.sugar's namespace.
+(= BUILTIN-MACRO-MODULES (frozenset ["lispy.macros" "lispy.macros.sugar"]))
+
+(class FormDoc [NamedTuple]
+  "One form's documentation: its reference section, its usage lines (none for
+   an operator whose call is the usual one) and a description."
+  (= section ^str)
+  (= usage ^tuple)
+  (= prose ^str))
+
+;; Statement and expression forms: the usage line is FORM-USAGE (the
+;; compiler's own error-message table), so docs and compile errors cannot
+;; drift apart. Only the explanatory sentence is written here, keyed by
+;; FORM-USAGE key.
+(= FORM-PROSE
+  {"def"       "Define a function. Arguments are given in a bracket list. An optional docstring can follow the argument list."
+   "async-def" "Define an async function (coroutine)."
+   "class"     "Define a class. Bases are given in a bracket list."
+   "if"        "Conditional statement. Compiles to Python `if/else`."
+   "while"     "While loop."
+   "for"       "For loop. `target` is bound to each element of `iterable`."
+   "async-for" "Async for loop — use inside `async-def`."
+   "match"     "Structural pattern matching (Python 3.10+)."
+   "case"      "One arm of a `match`: a pattern, an optional `as` name and `if` guard, then the body."
+   "try"       "Try/except/finally statement."
+   "except"    "Exception handler clause of a `try`."
+   "except*"   "Exception-group handler clause of a `try` (Python 3.11+)."
+   "else"      "Clause of a `try` that runs when no exception was raised."
+   "finally"   "Clause of a `try` that always runs on exit."
+   "with"      "Context manager statement."
+   "async-with" "Async context manager — use inside `async-def`."
+   "="         "Assignment statement."
+   "raise"     "Raise an exception."
+   "assert"    "Assert that a condition is true."
+   "del"       "Delete a name or item."
+   "global"    "Declare names as global variables."
+   "nonlocal"  "Declare names as nonlocal variables."
+   "deco"      "Apply a decorator to the following function/class definition."
+   "|"         "Bitwise OR as an operator; inside a `case`, an or-pattern matching any alternative."
+   ":="        "Walrus operator (assignment expression)."
+   "."         "Attribute access (`obj.attr`); `(. obj a b)` is `obj.a.b`."
+   "ife"       "Ternary conditional expression (`then if test else else`)."
+   "sub"       "Subscript access (`obj[index]`); more indexes subscript again."
+   "lambda"    "Anonymous function (lambda expression)."
+   "await"     "Await a coroutine."
+   "yield"     "Yield a value from a generator."
+   "yield-from" "Yield all values from a sub-generator."
+   "and"       "Logical AND (short-circuit)."
+   "or"        "Logical OR (short-circuit)."
+   "=="        "Equality test."
+   "!="        "Inequality test."
+   "<"         "Less than."
+   "<="        "Less than or equal."
+   ">"         "Greater than."
+   ">="        "Greater than or equal."
+   "is"        "Identity test (`x is y`)."
+   "is-not"    "Negated identity test (`x is not y`)."
+   "in"        "Membership test (`x in y`)."
+   "not-in"    "Negated membership test (`x not in y`)."})
+
+(for op in augassignop-dict
+  (= (sub FORM-PROSE op) f"Augmented assignment (`target {op} value`)."))
+
+;; Extra usage lines shown above the FORM_USAGE line, for a key that is also
+;; an ordinary call: `|` is the n-ary bitwise-OR operator as well as the
+;; or-pattern. Signature help uses the whole code block as its label.
+(= EXTRA-USAGE {"|" "(| a b ...)"})
+
+(def form-docs [usage prose extras]
+  "FormDoc entries for the FORM-USAGE forms; raises if usage and prose
+   disagree or an extra usage line names no usage key."
+  (= usage-keys (set usage))
+  (for kind in HEADLESS-FORMS
+    (.discard usage-keys kind))
+  (= missing (- usage-keys (set prose)))
+  (= extra (- (set prose) usage-keys))
+  (if (or missing extra)
+      (raise (RuntimeError f"FORM-PROSE out of sync with FORM_USAGE: no prose for {(sorted missing)}, no usage for {(sorted extra)}")))
+  (= orphans (- (set extras) (set usage)))
+  (if orphans
+      (raise (RuntimeError f"EXTRA-USAGE names keys with no FORM_USAGE entry: {(sorted orphans)}")))
+  (= docs {})
+  (for key in prose
+    (= lines (+ (ife (in key extras) [(sub extras key)] []) [(sub usage key)]))
+    (= section (ife (or (in key STATEMENT-HEADS) (in key CLAUSES)) STATEMENT EXPRESSION))
+    (= (sub docs key) (FormDoc section (tuple lines) (sub prose key))))
+  (return docs))
+
+(= HAND-WRITTEN-DOCS
+  {;; Forms outside FORM-USAGE
+   "do"        (FormDoc STATEMENT (, "(do body...)") "A statement block grouping several statements where one statement is expected (e.g. an `if` branch); not an expression.")
+   "import"    (FormDoc STATEMENT (, "(import module)" "(import module as alias)") "Import a module.")
+   "from"      (FormDoc STATEMENT (, "(from module [names...])" "(from module [name as alias ...])") "Import specific names from a module.")
+   "lazy-import" (FormDoc STATEMENT (, "(lazy-import module)" "(lazy-import module as alias)") "Import a module lazily: it is loaded on first use (Python 3.15+).")
+   "lazy-from" (FormDoc STATEMENT (, "(lazy-from module [names...])" "(lazy-from module [name as alias ...])") "Import names from a module lazily: it is loaded on first use (Python 3.15+).")
+   "return"    (FormDoc STATEMENT (, "(return value)") "Return a value from a function.")
+   "pass"      (FormDoc STATEMENT (, "(pass)") "No-op placeholder statement.")
+   "break"     (FormDoc STATEMENT (, "(break)") "Break out of a loop.")
+   "continue"  (FormDoc STATEMENT (, "(continue)") "Continue to the next loop iteration.")
+   ;; Expression forms
+   ","         (FormDoc EXPRESSION (, "(, a b c)") "Tuple literal.")
+   "f-string"  (FormDoc EXPRESSION (, "f\"text {expr} more\"") "Formatted string literal (f-string).")
+   ;; Operators
+   "+"  (FormDoc EXPRESSION (tuple) "Arithmetic addition / unary positive.")
+   "-"  (FormDoc EXPRESSION (tuple) "Arithmetic subtraction / unary negative.")
+   "*"  (FormDoc EXPRESSION (tuple) "Arithmetic multiplication / iterable unpacking.")
+   "/"  (FormDoc EXPRESSION (tuple) "True division.")
+   "//" (FormDoc EXPRESSION (tuple) "Floor (integer) division.")
+   "%"  (FormDoc EXPRESSION (tuple) "Modulo (remainder).")
+   "**" (FormDoc EXPRESSION (tuple) "Exponentiation.")
+   "@"  (FormDoc EXPRESSION (tuple) "Matrix multiplication.")
+   "<<" (FormDoc EXPRESSION (tuple) "Bitwise left shift.")
+   ">>" (FormDoc EXPRESSION (tuple) "Bitwise right shift.")
+   "^"  (FormDoc EXPRESSION (tuple) "Bitwise XOR.")
+   "&"  (FormDoc EXPRESSION (tuple) "Bitwise AND.")
+   "~"  (FormDoc EXPRESSION (tuple) "Bitwise NOT / unquote (inside quasiquote).")
+   "not" (FormDoc EXPRESSION (tuple) "Logical NOT.")
+   ;; The macro system
+   "defmacro"  (FormDoc MACRO-SYSTEM (, "(defmacro name [args] body...)") "Define a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression.")
+   "require"   (FormDoc MACRO-SYSTEM (, "(require module)" "(require module *)" "(require module [names...])") "Import macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none.")
+   "'"  (FormDoc MACRO-SYSTEM (tuple) "Quote — prevent evaluation; return the form as data.")
+   "`"  (FormDoc MACRO-SYSTEM (tuple) "Quasiquote — like quote but allows unquote (`~`) splicing.")
+   "~@" (FormDoc MACRO-SYSTEM (tuple) "Unquote-splice — splice a list into a quasiquote.")})
+
+;; A hand-written entry sharing a key with FORM-USAGE would silently override
+;; the derived one in the merge below, so it is refused here.
+(def refuse-shadowing [hand-written usage]
+  "Raises if a hand-written entry shares a key with usage."
+  (= shadowed (& (set hand-written) (set usage)))
+  (if shadowed
+      (raise (RuntimeError f"HAND-WRITTEN-DOCS shadows FORM_USAGE entries: {(sorted shadowed)}"))))
+
+(refuse-shadowing HAND-WRITTEN-DOCS FORM-USAGE)
+
+;; Every form the compiler dispatches as a statement has an entry.
+(def refuse-undocumented [heads docs]
+  "Raises if a statement head has no entry in docs."
+  (= missing (- (set heads) (set docs)))
+  (if missing
+      (raise (RuntimeError f"statement heads with no form docs: {(sorted missing)}"))))
+
+;; The forms hover, signature help and completion offer everywhere.
+(= SPECIAL-FORMS {**(form-docs FORM-USAGE FORM-PROSE EXTRA-USAGE) **HAND-WRITTEN-DOCS})
+
+(refuse-undocumented STATEMENT-HEADS SPECIAL-FORMS)
+
+;; Not in SPECIAL-FORMS: `type` is also the builtin, so the LSP shows this only
+;; where type-alias-p (the compiler's own test) accepts the form.
+(= TYPE-ALIAS
+   (FormDoc STATEMENT (, "(type Name value)" "(type Name[T] value)") "Define a type alias (Python 3.12+)."))
+
+(def macro-form-doc [macro]
+  "The FormDoc of a built-in macro, from its docstring: the usage lines up to
+   the first blank line, then the description. None without a docstring."
+  (= doc (inspect.getdoc macro))
+  (if (not doc)
+      (return None))
+  (= [usage _ prose] (.partition doc "\n\n"))
+  (return (FormDoc BUILTIN-MACRO (tuple (.splitlines usage)) (.strip prose))))
+
+(def builtin-macro-docs [namespace]
+  "{name: FormDoc} for each documented macro in a macro namespace."
+  (= docs {})
+  (for [name macro] in (.items namespace)
+    (= doc (macro-form-doc macro))
+    (if (is-not doc None)
+        (= (sub docs name) doc)))
+  (return docs))
+
+(= BUILTIN-MACRO-NAMESPACE (getattr lispy.macros "__macro_namespace"))
+(= BUILTIN-MACROS (builtin-macro-docs BUILTIN-MACRO-NAMESPACE))
+
+(def all-form-docs [special type-alias macros]
+  "Every documented form, for the docs site: special forms, `type`, then the
+   built-in macros. Raises if a macro shares a name with a special form, since
+   one would hide the other in hover and in the reference."
+  (= clash (& (set macros) (| (set special) {, "type"})))
+  (if clash
+      (raise (RuntimeError f"built-in macros named like special forms: {(sorted clash)}")))
+  (return {**special "type" type-alias **macros}))
+
+(= ALL-FORMS (all-form-docs SPECIAL-FORMS TYPE-ALIAS BUILTIN-MACROS))
+
+(def hover-markdown [doc]
+  "The hover (and signature help) markdown of a FormDoc: the usage lines as a
+   code block, a label for a built-in macro, then the description."
+  (= parts [])
+  (if doc.usage
+      (parts.append f"```\n{(.join "\n" doc.usage)}\n```"))
+  (if (== doc.section BUILTIN-MACRO)
+      (parts.append "*(built-in macro)*"))
+  (parts.append doc.prose)
+  (return (.join "\n\n" parts)))
+
+(= SPECIAL-FORM-DOCS {name (hover-markdown doc) for [name doc] in (.items SPECIAL-FORMS)})
+(= TYPE-ALIAS-DOC (hover-markdown TYPE-ALIAS))
