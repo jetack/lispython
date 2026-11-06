@@ -124,6 +124,49 @@ class TestMacros:
             assert view.map.to_lpy(*locate(view.text, name)) == locate(src, name)
 
 
+def gen_range(text, word, nth=0):
+    start = locate(text, word, nth)
+    return start, plus(start, len(word))
+
+
+class TestLpyRange:
+    """lpy_range: a backend's range in the generated text, back to .lpy."""
+
+    def test_a_name_maps_character_for_character(self):
+        # Defect: the range keeps generated columns or the Python spelling's
+        # width (dd_ee_p is one longer than dd-ee?, so its end overshoots).
+        src = "(= dd-ee? 1)\n(print dd-ee? obj.dd-ee?)"
+        view = view_of(src)
+        for nth in range(3):
+            got = pv.lpy_range(view, src, *gen_range(view.text, "dd_ee_p", nth))
+            assert got == gen_range(src, "dd-ee?", nth)
+
+    @pytest.mark.parametrize("head", ["def", "class"])
+    def test_a_definition_name_is_its_lpy_word(self, head):
+        # A FunctionDef or ClassDef name has no entry of its own: the
+        # defect is the start of the whole form, or None.
+        src = f"(= x 1)\n({head} my-fn [] (pass))"
+        view = view_of(src)
+        got = pv.lpy_range(view, src, *gen_range(view.text, "my_fn"))
+        assert got == gen_range(src, "my-fn")
+
+    def test_generated_code_maps_nowhere(self):
+        # Defect: a defmacro's temporary def, which the user never wrote,
+        # lands on whatever .lpy text its entry or line number names.
+        src = "(defmacro swap [a b] `(= [~a ~b] [~b ~a]))\n(= x 1)"
+        view = view_of(src)
+        assert (
+            pv.lpy_range(view, src, *gen_range(view.text, "___defmacro_temp___swap"))
+            is None
+        )
+
+    def test_the_module_location_stays_at_its_start(self):
+        # A module's own location (the definition of an imported module) is
+        # the empty range at its first character, whatever entry is there.
+        src = "(= x 1)"
+        assert pv.lpy_range(view_of(src), src, (1, 0), (1, 0)) == ((1, 0), (1, 0))
+
+
 class TestFailures:
     @pytest.mark.parametrize(
         "src",

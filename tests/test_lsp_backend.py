@@ -12,6 +12,7 @@ import contextlib
 import importlib
 import json
 import os
+import pathlib
 import signal
 import sys
 import textwrap
@@ -709,3 +710,50 @@ def test_real_backend_resolves_a_sibling_lpy_module(loop, real):
     # import of another .lpy module of the project does not resolve.
     text = real_hover(loop, real, "(from helper [greet])\n(greet 1)", "greet", 1)
     assert "Say hello to name." in text
+
+
+def test_locate_places_each_backend_location(project, tmp_path):
+    # Defects: a shadow or temporary file of the cache reaches the editor,
+    # a linked real file is named by its link in the cache, an open
+    # document maps through its disk shadow, or a file outside the view
+    # root is touched.  No backend process: locate reads the filesystem and
+    # the synced documents only.
+    (project / "other.lpy").write_text("(= z 1)\n")
+    (project / "real.py").write_text("x = 1\n")
+    client = backend.BackendClient(view_root(project, tmp_path), None)
+    root = pathlib.Path(client.view_root.path)
+    root.mkdir(parents=True)
+    for name in ["main.py", "other.py", "orphan.py", "w.py.tmp"]:
+        (root / name).write_text("z = 1\n")
+    (root / "real.py").symlink_to(project / "real.py")
+    main_uri = (project / "main.lpy").as_uri()
+    origin = ("(= y 1)\n", object())
+    client._docs[main_uri] = [(root / "main.py").as_uri(), 1, "y = 1\n", origin]
+    real_project = project.resolve()
+
+    def place(path):
+        return client.locate(path.as_uri())
+
+    assert place(root / "main.py") == ("lpy", main_uri, origin)
+    assert place(root / "other.py") == (
+        "lpy",
+        (real_project / "other.lpy").as_uri(),
+        None,
+    )
+    assert place(root / "real.py") == ("file", (real_project / "real.py").as_uri())
+    assert place(root / "orphan.py") is None
+    assert place(root / "w.py.tmp") is None
+    outside = tmp_path / "elsewhere.py"
+    assert client.locate(outside.as_uri()) == ("file", outside.as_uri())
+    # The requesting document's origin, given by the caller, wins over a
+    # later sync's in _docs.
+    asked = ("(= y 1)\n", object())
+    assert client.locate((root / "main.py").as_uri(), origins={main_uri: asked}) == (
+        "lpy",
+        main_uri,
+        asked,
+    )
+    # A synced document whose text has no known origin is dropped, never
+    # mapped through its shadow on disk (not what the backend read).
+    client._docs[main_uri][3] = None
+    assert place(root / "main.py") is None

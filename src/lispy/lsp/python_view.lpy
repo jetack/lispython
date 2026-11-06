@@ -172,7 +172,9 @@
   (def __init__ [self entries]
     (= self.entries entries))
 
-  (def _lookup [self pos from-index to-index]
+  (def _innermost [self pos from-index]
+    "The innermost entry whose span on side from-index (0 generated, 2
+     .lpy) holds pos (end inclusive), or None; a name wins a tie."
     (= best None)
     (for entry in self.entries
       (= start (sub entry from-index))
@@ -184,6 +186,14 @@
                                 (sub best (+ from-index 1))
                                 (sub best 4))))
           (= best entry)))
+    (return best))
+
+  (def entry-at [self line col]
+    "The innermost entry whose generated span holds (line, col), or None."
+    (return (._innermost self (, line col) 0)))
+
+  (def _lookup [self pos from-index to-index]
+    (= best (._innermost self pos from-index))
     (if (is best None)
         (return None))
     (= target (sub best to-index))
@@ -348,6 +358,61 @@
     (= self.partial None)
     (= self.attribute False)
     (= self.fallback False)))
+
+(def _spelled-in [lines start end name]
+  "The .lpy span of the first name run between start and end in lines
+   whose py-name is name, or None.  A run is a stretch of _name-char-p
+   characters (a dot splits runs) less its leading _SYMBOL-PREFIXES."
+  (for line in (range (sub start 0) (+ (sub end 0) 1))
+    (if (> line (len lines))
+        (break))
+    (= text (sub lines (- line 1)))
+    (= col (ife (== line (sub start 0)) (sub start 1) 0))
+    (= stop (ife (== line (sub end 0)) (min (sub end 1) (len text)) (len text)))
+    (while (< col stop)
+      (if (not (_name-char-p (sub text col)))
+          (do (+= col 1)
+              (continue)))
+      (= run-end (min (_name-end text col) stop))
+      (= run-start col)
+      (while (and (< run-start run-end) (in (sub text run-start) _SYMBOL-PREFIXES))
+        (+= run-start 1))
+      (if (and (< run-start run-end) (== (py-name (sub text [: run-start run-end])) name))
+          (return (, (, line run-start) (, line run-end))))
+      (= col run-end)))
+  (return None))
+
+(def lpy-range [view source start end]
+  "The .lpy ((line col) (line col)) range in source, the text view was
+   compiled from, of the generated range start..end of view.text, or None
+   when it maps nowhere (code the compiler made up).  Positions are (1-based
+   line, code-point column) on both sides.  An empty range at (1, 0) is the
+   module itself and stays there.  Inside one name entry the range maps
+   character for character, clamped to the .lpy spelling.  Otherwise a range
+   that is one identifier is looked up by py-name among the words of the
+   innermost entry's .lpy span: a FunctionDef or ClassDef name has no node,
+   so no entry, of its own (its entry is the whole (def my-fn ...) form),
+   and a name the source never spells (a defmacro's temporary def, a
+   gensym) is found nowhere and dropped.  Anything else maps nowhere."
+  (if (and (== start (, 1 0)) (== end (, 1 0)))
+      (return (, (, 1 0) (, 1 0))))
+  (= entry (.entry-at view.map (sub start 0) (sub start 1)))
+  (if (is entry None)
+      (return None))
+  (= [gen-start gen-end lpy-start lpy-end name-p] entry)
+  (if (and name-p (_contains gen-start gen-end end))
+      (do (= length (- (sub lpy-end 1) (sub lpy-start 1)))
+          (return (, (, (sub lpy-start 0)
+                        (+ (sub lpy-start 1) (min (- (sub start 1) (sub gen-start 1)) length)))
+                     (, (sub lpy-start 0)
+                        (+ (sub lpy-start 1) (min (- (sub end 1) (sub gen-start 1)) length)))))))
+  (= gen-lines (.split view.text "\n"))
+  (if (or (!= (sub start 0) (sub end 0)) (> (sub start 0) (len gen-lines)))
+      (return None))
+  (= word (sub (sub gen-lines (- (sub start 0) 1)) [: (sub start 1) (sub end 1)]))
+  (if (not (.isidentifier word))
+      (return None))
+  (return (_spelled-in (.split source "\n") lpy-start lpy-end word)))
 
 ;; Who holds each import root on sys.path: directory -> [users, the entry
 ;; _on-sys-path inserted or None], under _SYS-PATH-LOCK, since threads
