@@ -593,3 +593,33 @@ class TestMemberCompletion:
     def test_a_closure_sees_the_methods_receiver(self):
         source = "(class A []\n  (def f [self]\n    (def g [] self.|)))"
         assert self.labels(source) == {"f"}
+
+
+def test_an_operator_never_spells_a_name():
+    # Defect: (- a b) records - as the spelling of _ (py-name of -), so a
+    # backend member _ is relabelled "-"; ? (py-name _p) likewise.
+    spellings = server.buffer_spellings("(- a b)\n(? c)\n(= x._ x._p)")
+    assert (spellings.get("_", "_"), spellings["_p"]) == ("_", "_p")
+
+
+def test_an_auto_import_item_gives_no_kind():
+    # Defect: a symbol the buffer never binds (offered with an import edit)
+    # sets the kind of the buffer's own name.
+    from lsprotocol import types as lsp
+
+    local = lsp.CompletionList(
+        is_incomplete=False,
+        items=[lsp.CompletionItem(label="foo", kind=lsp.CompletionItemKind.Variable)],
+    )
+    edit = lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=0, character=0),
+            end=lsp.Position(line=0, character=0),
+        ),
+        new_text="from m import foo\n",
+    )
+    imported = lsp.CompletionItem(
+        label="foo", kind=lsp.CompletionItemKind.Class, additional_text_edits=[edit]
+    )
+    [item] = server.with_backend_kinds(local, [imported]).items
+    assert item.kind == lsp.CompletionItemKind.Variable

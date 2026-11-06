@@ -277,6 +277,26 @@ class TestCache:
         cache.view_at_cursor("u", 1, "(print a.b)", 1, 9)
         assert len(calls) == 5
 
+    @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
+    def test_a_close_during_a_view_leaves_no_entry(self, monkeypatch, method):
+        # Defect: the document closes while its view is compiled in a
+        # thread, and the view stores its entry after forget dropped it.
+        cache = pv.ViewCache()
+        calls = []
+        real = pv.compile_view
+
+        def closing(source, **kw):
+            calls.append(source)
+            if len(calls) == 1:
+                cache.forget("u")
+            return real(source, **kw)
+
+        monkeypatch.setattr(pv, "compile_view", closing)
+        args = ("u", 1, "(print a.b)") + ((1, 10) if method == "view_at_cursor" else ())
+        getattr(cache, method)(*args)
+        getattr(cache, method)(*args)
+        assert len(calls) == 2  # nothing was cached for the closed document
+
 
 class TestShadows:
     def write(self, path, text):

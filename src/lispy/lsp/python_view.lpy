@@ -497,34 +497,50 @@
 (class ViewCache []
   "The latest view of each document, by version (and cursor for
    view-at-cursor): one entry per uri, so the cache never outgrows the open
-   documents.  A None result is cached like any other."
+   documents.  A None result is cached like any other.  Views are made in
+   worker threads while forget runs on the LSP's loop, so a view stores
+   its result only when no forget came since it began (generation, one
+   counter for every uri: a close elsewhere only costs a cache miss),
+   checked and stored under lock with forget, so a closed document's
+   entry is never stored after it was dropped."
   (def __init__ [self]
     (= self._views {})
-    (= self._cursor-views {}))
+    (= self._cursor-views {})
+    (= self._lock (threading.Lock))
+    (= self._generation 0))
+
+  (def _store [self table uri key result generation]
+    (with [self._lock]
+      (if (== generation self._generation)
+          (= (sub table uri) (, key result)))))
 
   (def view [self uri version source :package "" :name "__main__" :import-root None]
+    (= generation self._generation)
     (= hit (.get self._views uri))
     (if (and (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
     (= result (compile-view source :package package :name name :import-root import-root))
-    (= (sub self._views uri) (, version result))
+    (._store self self._views uri version result generation)
     (return result))
 
   (def view-at-cursor [self uri version source line col
                        :package "" :name "__main__" :import-root None]
+    (= generation self._generation)
     (= key (, version line col))
     (= hit (.get self._cursor-views uri))
     (if (and (is-not hit None) (== (sub hit 0) key))
         (return (sub hit 1)))
     (= result (view-at-cursor source line col :package package :name name
                               :import-root import-root))
-    (= (sub self._cursor-views uri) (, key result))
+    (._store self self._cursor-views uri key result generation)
     (return result))
 
   (def forget [self uri]
     "Drop uri's entries (its document closed)."
-    (.pop self._views uri None)
-    (.pop self._cursor-views uri None)))
+    (with [self._lock]
+      (+= self._generation 1)
+      (.pop self._views uri None)
+      (.pop self._cursor-views uri None))))
 
 ;; ---------------------------------------------------------------------------
 ;; View root: shadows of the workspace and the backend's config

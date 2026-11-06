@@ -145,15 +145,37 @@
   (async-def server-exit [self server]
     (._backend-exited self.owner self server)))
 
+;; Settings a backend takes from its client, not from the view root's
+;; config file, as one nested object (the didChangeConfiguration shape); a
+;; workspace/configuration section is a dotted path into it, and a server
+;; ignores the keys that are not its own.  Auto-import completions are off:
+;; their edits land on generated lines, and a symbol the buffer never
+;; imports would give a buffer name its kind.  pyright's settings default
+;; wins over pyrightconfig.json there, so the config file cannot turn them
+;; off.  basedpyright reads its whole analysis object from here once one
+;; is given, so autoSearchPaths keeps its default (true) explicitly.
+(def backend-settings [view-root]
+  (return {"python" {"pythonPath" view-root.python}
+           "basedpyright" {"analysis" {"autoImportCompletions" False
+                                       "autoSearchPaths" True}}}))
+
+(def settings-section [settings section]
+  "The value at dotted section of settings, {} when there is none."
+  (= node settings)
+  (for key in (.split (or section "") ".")
+    (= node (ife (isinstance node dict) (.get node key) None))
+    (if (is node None)
+        (return {})))
+  (return node))
+
 (def _register-handlers [client view-root]
   "The backend's requests and notifications to the client."
   (deco (client.feature lsp.WORKSPACE_CONFIGURATION)
     (def configuration [params]
       ;; pyright asks python, python.analysis, basedpyright and
-      ;; basedpyright.analysis; only the interpreter is ours to give, the
-      ;; rest is pyrightconfig.json's.
-      (return [(ife (== item.section "python") {"pythonPath" view-root.python} {})
-               for item in params.items])))
+      ;; basedpyright.analysis; the rest is pyrightconfig.json's.
+      (= settings (backend-settings view-root))
+      (return [(settings-section settings item.section) for item in params.items])))
   (for method in [lsp.CLIENT_REGISTER_CAPABILITY
                   lsp.CLIENT_UNREGISTER_CAPABILITY
                   lsp.WINDOW_WORK_DONE_PROGRESS_CREATE
@@ -366,7 +388,7 @@
     (.initialized client (lsp.InitializedParams))
     (.workspace-did-change-configuration client
       (lsp.DidChangeConfigurationParams
-        :settings {"python" {"pythonPath" self.view-root.python}})))
+        :settings (backend-settings self.view-root))))
 
   (def _backend-exited [self client process]
     "A backend process exited: unless shutdown stopped it, its backend is
@@ -423,16 +445,18 @@
                 :content-changes [(lsp.TextDocumentContentChangeWholeDocument :text text)]))))
     (return True))
 
-  (async-def request [self method params :uri None :text None]
+  (async-def request [self method params :uri None :text None :timeout None]
     "Send request method with params (its lsprotocol params type) to the
      backend and return its result, or None: the backend is off, failed to
      start, died, or took REQUEST-TIMEOUT.  The first request spawns the
      backend.  With uri (the .lpy document's) and text, the backend's copy
      of that document is made text first: any text, a cursor view's as
-     well as the buffer's.  REQUEST-TIMEOUT bounds the whole call, the
+     well as the buffer's.  timeout (default REQUEST-TIMEOUT) bounds the
+     whole call, the
      backend's start included; a start that takes longer goes on, for the
      next request.  Never raises but for cancellation."
-    (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
+    (= deadline (+ (.time (asyncio.get-running-loop))
+                   (ife (is timeout None) REQUEST-TIMEOUT timeout)))
     (try
       (if (not (await (._ensure-started self deadline)))
           (return None))
@@ -629,14 +653,24 @@
         (return None))
     (return client))
 
-  (async-def request [self lpy-uri method params :text None]
-    "BackendClient.request for document lpy-uri's backend, or None when it
-     has none."
+  (def available-client [self lpy-uri]
+    "Document lpy-uri's BackendClient when a request to it can be answered
+     (BackendClient.available), else None: the one lookup every feature
+     makes, so a caller prepares nothing for a document with no backend.
+     Never raises."
     (try
       (= client (.client-for self lpy-uri))
       (except [Exception]
         (.exception logger "lispython LSP: no Python backend for %s" lpy-uri)
         (return None)))
+    (if (or (is client None) (not client.available))
+        (return None))
+    (return client))
+
+  (async-def request [self lpy-uri method params :text None]
+    "BackendClient.request for document lpy-uri's backend, or None when it
+     has none."
+    (= client (.available-client self lpy-uri))
     (if (is client None)
         (return None))
     (return (await (.request client method params :uri lpy-uri :text text))))

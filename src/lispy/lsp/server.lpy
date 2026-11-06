@@ -13,12 +13,13 @@
 (from lsprotocol [types as lsp])
 (from pygls.lsp.server [LanguageServer])
 (from pygls.uris [to-fs-path])
-(from pygls.workspace [PositionCodec])
+(from pygls.workspace [PositionCodec TextDocument])
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
+(from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
@@ -1641,9 +1642,15 @@ or an extra usage line names no usage key."
         True
         (return (list answer))))
 
+(def name-spelling-p [part]
+  "Whether part spells a Python name: its py-name is an identifier and it
+   holds a letter or digit, so an operator such as - (py-name _) is none."
+  (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
+
 (def buffer-spellings [source]
   "Python name -> the buffer's first spelling of it in source order: every
-   Symbol counts, a dotted one (a.my-b) by each of its parts."
+   Symbol counts, a dotted one (a.my-b) by each of its parts, each only
+   when it spells a name (name-spelling-p)."
   (try
     (= tree (parse source :partial True))
     (except [Exception]
@@ -1654,7 +1661,7 @@ or an extra usage line names no usage key."
     (= node (.pop stack))
     (cond (isinstance node Symbol)
           (for part in (.split node.value ".")
-            (if part
+            (if (name-spelling-p part)
                 (.setdefault spellings (py-name part) part)))
           (isinstance node Expression)
           (.extend stack (reversed node.list))
@@ -1697,10 +1704,12 @@ or an extra usage line names no usage key."
 (def with-backend-kinds [result items]
   "result's items, each whose label is one of the backend items' Python
    names taking that item's kind (a special form or keyword keeps its own):
-   the backend knows that an imported defaultdict is a class."
+   the backend knows that an imported defaultdict is a class.  An item with
+   additional_text_edits (an auto-import of a symbol the buffer never
+   binds) names some other object, so it gives no kind."
   (= kinds {})
   (for item in items
-    (if (is-not item.kind None)
+    (if (and (is-not item.kind None) (not item.additional-text-edits))
         (.setdefault kinds item.label item.kind)))
   (for item in result.items
     (if (!= item.kind lsp.CompletionItemKind.Keyword)
@@ -1709,33 +1718,73 @@ or an extra usage line names no usage key."
                 (= item.kind kind)))))
   (return result))
 
+;; Seconds the local list waits for the backend's kinds off an attribute:
+;; they only refine it, so a slow backend never holds up typing.
+(= KINDS-TIMEOUT 0.5)
+
+(def attribute-context-p [source line col]
+  "Whether the cursor may be on an attribute name: a dot right before the
+   word (x.a|, (.me| x)) or an operand past the receiver of an open
+   (. recv ...).  A cheap gate only, read before any view is compiled:
+   the Python view's attribute decides."
+  (= lines (.split source "\n"))
+  (= text (ife (<= 1 line (len lines)) (sub lines (- line 1)) ""))
+  (= col (min col (len text)))
+  (= start (sub (partial-span text col) 0))
+  (if (and (> start 0) (== (sub text (- start 1)) "."))
+      (return True))
+  (= prefix (source-prefix source line col))
+  (= closers (open-form-closers prefix))
+  (if (is closers None)
+      (return False))
+  (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))
+  (if (or (not path) (!= (head-of (sub path -1)) "."))
+      (return False))
+  (= form (sub path -1))
+  (return (or (> (len form) 2) (and (== (len form) 2) (is leaf None)))))
+
+(async-def backend-answer [client doc line col timeout]
+  "(view, items): the cursor view of doc and the backend's completion
+   items there, [] when either is missing.  timeout (None: the request's
+   default, start included) bounds the view and the request together."
+  (= loop (asyncio.get-running-loop))
+  (= deadline (ife (is timeout None) None (+ (.time loop) timeout)))
+  (= path (to-fs-path doc.uri))
+  (if (is path None)
+      (return (, None [])))
+  (= [name package import-root] (module-names path))
+  (= making (asyncio.to-thread cursor-view doc.uri doc.version doc.source line col
+                               name package import-root))
+  (try
+    (= view (await (ife (is deadline None) making (asyncio.wait-for making timeout))))
+    (except [TimeoutError]
+      (return (, None []))))
+  (if (is view None)
+      (return (, None [])))
+  (= params (lsp.CompletionParams
+              :text-document (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
+              :position (generated-position view)))
+  (= answer (await (.request client lsp.TEXT_DOCUMENT_COMPLETION params
+                             :uri doc.uri :text view.text
+                             :timeout (ife (is deadline None) None
+                                           (max 0 (- deadline (.time loop)))))))
+  (return (, view (completion-items answer))))
+
 (async-def backend-completion [doc line col insert-replace]
   "The completion answer with the Python backend's help, or None when it
    gives none (no backend, a buffer with no Python view, no items), and
-   local-completion is the answer.  On an attribute the backend's items
-   alone answer; elsewhere the local list does, with the backend's kinds."
-  (= uri doc.uri)
-  (try
-    (= client (.client-for backends uri))
-    (except [Exception]
-      (.exception logger "lispython LSP: no Python backend for %s" uri)
-      (return None)))
-  (if (or (is client None) (not client.available))
+   local-completion is the answer.  doc is a snapshot (document-snapshot).
+   On an attribute the backend's items alone answer, and the request may
+   start the backend; elsewhere the local list does, with the kinds of an
+   already running backend within KINDS-TIMEOUT."
+  (= client (.available-client backends doc.uri))
+  (if (is client None)
       (return None))
-  (= path (to-fs-path uri))
-  (if (is path None)
+  (= attribute (attribute-context-p doc.source line col))
+  (if (and (not attribute) (not client.running))
       (return None))
-  (= [name package import-root] (module-names path))
-  (= view (await (asyncio.to-thread cursor-view uri (getattr doc "version" None)
-                                    doc.source line col name package import-root)))
-  (if (is view None)
-      (return None))
-  (= params (lsp.CompletionParams
-              :text-document (lsp.TextDocumentIdentifier :uri (.backend-uri client uri))
-              :position (generated-position view)))
-  (= items (completion-items
-             (await (.request client lsp.TEXT_DOCUMENT_COMPLETION params
-                              :uri uri :text view.text))))
+  (= [view items] (await (backend-answer client doc line col
+                                         (ife attribute None KINDS-TIMEOUT))))
   (if (not items)
       (return None))
   (if view.attribute
@@ -1746,11 +1795,19 @@ or an extra usage line names no usage key."
             (local-completion doc line col :insert-replace insert-replace)
             items)))
 
+(def document-snapshot [doc]
+  "doc's text, version and position codec as they are now.  A handler that
+   awaits reads the buffer from the snapshot, never from the live document,
+   which an edit during the await changes under the cursor it computed."
+  (return (TextDocument doc.uri doc.source
+                        :version (getattr doc "version" None)
+                        :position-codec (getattr doc "position_codec" None))))
+
 (deco (server.feature
         lsp.TEXT_DOCUMENT_COMPLETION
         (lsp.CompletionOptions :trigger-characters ["." "-"]))
 (async-def completion [ls params]
-  (= doc (.get-text-document ls.workspace params.text_document.uri))
+  (= doc (document-snapshot (.get-text-document ls.workspace params.text_document.uri)))
   (try
     (= [line col] (cursor-of doc params.position))
     (except [Exception]

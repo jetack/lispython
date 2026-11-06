@@ -196,24 +196,97 @@ def test_module_attributes_after_an_alias(complete, access):
     assert "print" not in labels
 
 
+IMPORTED_CLASS = "(from collections [defaultdict])\n(defau|"
+
+
+def kinds_of(items, label):
+    return [item.kind for item in items if item.label == label]
+
+
 def test_an_imported_class_is_one_class_item(complete):
     # Regression TASK-1014: an imported defaultdict was a Variable, shown
-    # beside the nREPL's class item as a second defaultdict.
-    items = complete("(from collections [defaultdict])\n(defau|")[2]
-    matches = [item for item in items if item.label == "defaultdict"]
-    assert [item.kind for item in matches] == [lsp.CompletionItemKind.Class]
+    # beside the nREPL's class item as a second defaultdict. Kinds come
+    # only from a running backend, so a dot completion starts it first.
+    complete("(import os)\nos.pa|")
+    items = complete(IMPORTED_CLASS)[2]
+    assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Class]
+
+
+def test_a_non_attribute_completion_never_starts_the_backend(
+    complete, loop, project, tmp_path
+):
+    # Defect: every keystroke off an attribute waits for a backend start
+    # (about a second) for kinds that only refine the local list.
+    idle = make_backends(project, tmp_path / "idle-cache", "basedpyright")
+    try:
+        items = complete(IMPORTED_CLASS, idle)[2]
+        client = idle.available_client((project / "main.lpy").as_uri())
+        assert (client.state, client.process) == ("idle", None)
+        assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Variable]
+    finally:
+        on_loop(loop, idle.shutdown_all())
+
+
+def test_auto_import_completions_are_off(complete, loop, project, real_backends):
+    # Defect: the backend offers symbols the buffer never imports, with an
+    # import edit on a generated line (and their kinds).
+    complete("(import os)\nos.pa|")
+    client = real_backends.available_client((project / "main.lpy").as_uri())
+    document = server.TextDocument(
+        (project / "main.lpy").as_uri(), "(= default-x 1)\n(defau)", version=None
+    )
+    _, items = on_loop(loop, server.backend_answer(client, document, 2, 6, None))
+    assert "default_x" in {item.label for item in items}  # it did answer
+    assert "defaultdict" not in {item.label for item in items}
 
 
 LOCAL_MEMBERS = {"__init__", "my-x", "f"}
 
 
-def test_backend_off_gives_the_local_members(complete, off_backends):
-    labels = set(by_label(complete(CLASS.format("self.|"), off_backends)[2]))
+@pytest.fixture
+def requests(project, real_backends, monkeypatch):
+    """The completion requests sent to the shared backend, and a way to set
+    its answer."""
+    client = real_backends.available_client((project / "main.lpy").as_uri())
+    sent = []
+    real_request = client.request
+    answer = {}
+
+    async def request(method, params, **kwargs):
+        sent.append(method)
+        if "value" in answer:
+            return answer["value"]
+        return await real_request(method, params, **kwargs)
+
+    monkeypatch.setattr(client, "request", request)
+    return SimpleNamespace(sent=sent, answer=answer)
+
+
+@pytest.mark.parametrize(
+    "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
+)
+def test_a_backend_with_no_items_gives_the_local_members(complete, requests, empty):
+    # Defect: an empty backend answer is returned as is: no completion.
+    requests.answer["value"] = empty
+    labels = set(by_label(complete(CLASS.format("self.|"))[2]))
+    assert requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
     assert labels == LOCAL_MEMBERS
 
 
-def test_a_buffer_that_does_not_compile_gives_the_local_members(complete):
+def test_backend_off_gives_the_local_members(complete, off_backends, monkeypatch):
+    # Defect: an off backend still has a view compiled (the buffer's macros
+    # run) for a request that cannot be answered.
+    views = []
+    monkeypatch.setattr(server, "cursor_view", lambda *a: views.append(a))
+    labels = set(by_label(complete(CLASS.format("self.|"), off_backends)[2]))
+    assert (labels, views) == (LOCAL_MEMBERS, [])
+
+
+def test_a_buffer_that_does_not_compile_gives_the_local_members(complete, requests):
     # An earlier refused form: neither the buffer nor its prefix compiles,
     # so there is no view to ask the backend about.
     labels = set(by_label(complete("(def)\n" + CLASS.format("self.|"))[2]))
-    assert labels == LOCAL_MEMBERS
+    assert (labels, requests.sent) == (LOCAL_MEMBERS, [])
+    # The backend does answer the same buffer once it compiles.
+    labels = set(by_label(complete(CLASS.format("self.|"))[2]))
+    assert "__class__" in labels and requests.sent
