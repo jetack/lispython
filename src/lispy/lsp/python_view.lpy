@@ -42,6 +42,7 @@
 (from lispy.core.compiler.literal [identifier-p name-key])
 (from lispy.core.compiler.utils [python-interpolations])
 (from lispy.core.importer [package-root])
+(from lispy.lsp.macro-modules [epoch fresh-modules])
 
 (= logger (logging.getLogger __name__))
 
@@ -592,9 +593,10 @@
    strict and runs in compile-errors for filename (the document's path), so
    a parse warning names that file.  Macros run with import-root
    (module-names' third item) on sys.path, so a relative require imports
-   its package; the generated module is never compiled or executed.
-   Warnings go where the process's filters send them (stderr, never the
-   LSP's stdout); a filter that makes one an error fails the stage it was
+   its package, and under fresh-modules, so a module a require imported is
+   imported anew once its file changed (macro_modules.lpy); the generated
+   module is never compiled or executed.  Warnings go where the process's
+   filters send them (stderr, never the LSP's stdout); a filter that makes one an error fails the stage it was
    issued in.  The filters are never swapped here: a swap is process wide,
    so it would need a lock held across the user's macros, which every other
    compile on the loop would then wait for."
@@ -608,7 +610,7 @@
     (except [Exception as e]
       (return (CompiledBuffer None :stage PARSE-STAGE :error e))))
   (try
-    (with [(_on-sys-path import-root)]
+    (with [(fresh-modules import-root) (_on-sys-path import-root)]
       (= body (list (compile-unit forms scope))))
     (except [Exception as e]
       (return (CompiledBuffer None :stage COMPILE-STAGE :error e))))
@@ -720,9 +722,11 @@
   (return view))
 
 (class ViewCache []
-  "The latest view of each document, by version (and cursor for
-   view-at-cursor): one entry per uri, so the cache never outgrows the open
-   documents.  A None result is cached like any other.  Views are made in
+  "The latest view of each document, by version and macro environment
+   (macro_modules.epoch, read before the compile, so a hit needs the modules
+   its requires imported unchanged), and cursor for view-at-cursor: one
+   entry per uri, so the cache never outgrows the open documents.  A None
+   result is cached like any other.  Views are made in
    worker threads while forget runs on the LSP's loop, so a view stores
    its result only when no forget came since it began (generation, one
    counter for every uri: a close elsewhere only costs a cache miss),
@@ -753,12 +757,13 @@
      same version share it.  fresh compiles again, replacing the entry."
     (if (is generation None)
         (= generation self._generation))
+    (= key (, version (epoch)))
     (= hit (.get self._views uri))
-    (if (and (not fresh) (is-not hit None) (== (sub hit 0) version))
+    (if (and (not fresh) (is-not hit None) (== (sub hit 0) key))
         (return (sub hit 1)))
     (= result (compile-buffer source :package package :name name :import-root import-root
                               :filename filename))
-    (._store self self._views uri version result generation)
+    (._store self self._views uri key result generation)
     (return result))
 
   (def view [self uri version source :package "" :name "__main__" :import-root None
@@ -772,7 +777,7 @@
                        :generation None]
     (if (is generation None)
         (= generation self._generation))
-    (= key (, version line col))
+    (= key (, version (epoch) line col))
     (= hit (.get self._cursor-views uri))
     (if (and (is-not hit None) (== (sub hit 0) key))
         (return (sub hit 1)))
@@ -1034,9 +1039,10 @@
 
 (class ShadowManifest []
   "What write-shadows last saw of each source: path -> ((mtime_ns, size),
-   module-names, whether its shadow is written), so an unchanged file is not
-   compiled again; and import-roots, the sorted import roots of the written
-   shadows' sources (write-pyright-config)."
+   module-names, whether its shadow is written, the macro environment it
+   compiled in (macro_modules.epoch)), so a file unchanged since, under the
+   same macro environment, is not compiled again; and import-roots, the
+   sorted import roots of the written shadows' sources (write-pyright-config)."
   (def __init__ [self]
     (= self.sources {})
     (= self.import-roots [])))
@@ -1196,6 +1202,7 @@
   "write-shadows' sweep, under the view root's lock."
   (= sources (project-sources project-root))
   (= current (set sources))
+  (= macro-epoch (epoch))
   (for path in (list manifest.sources)
     (if (not (in path current))
         (del (sub manifest.sources path))))
@@ -1216,6 +1223,7 @@
       (= stamp (, st.st_mtime_ns st.st_size))
       (= known (.get manifest.sources lpy-path))
       (if (and (is-not known None) (== (sub known 0) stamp) (== (sub known 1) names)
+               (== (sub known 3) macro-epoch)
                (or (not (sub known 2)) (_regular-file-p shadow)))
           (do (if (sub known 2)
                   (= (sub shadows shadow) lpy-path))
@@ -1240,7 +1248,7 @@
       (if (is-not view None)
           (do (_write-if-changed root shadow view.text)
               (= (sub shadows shadow) lpy-path)))
-      (= (sub manifest.sources lpy-path) (, stamp names (is-not view None)))
+      (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) macro-epoch))
       (except [OSError as e]
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
   (= import-roots (set))
