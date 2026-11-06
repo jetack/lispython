@@ -253,22 +253,16 @@ def _opt_out_form_p(forms):
     )
 
 
-def _drop_prelude(scope):
-    """Remove the prelude's entries from scope's macros, by identity: a macro
-    the unit defined under a prelude name stays."""
+def _start_unit(scope, forms):
+    """Make scope's macros, in place, what a fresh module starts with: the
+    prelude, or none of it when the unit opts out (its require then adds
+    back its selection). A persistent scope (an nREPL file reloaded) keeps
+    no macro an earlier unit defined, required or dropped, so a reload
+    compiles as the file does under lpy."""
     namespace = scope.setdefault("__macro_namespace", {})
-    for name, macro in scope.get(PRELUDE_KEY, {}).items():
-        if namespace.get(name) is macro:
-            del namespace[name]
-
-
-def _restore_prelude(scope):
-    """Re-add every prelude entry scope's macros lack (an earlier unit's
-    opt-out dropped it); a macro the scope defined under a prelude name
-    stays."""
-    namespace = scope.setdefault("__macro_namespace", {})
-    for name, macro in scope.get(PRELUDE_KEY, {}).items():
-        namespace.setdefault(name, macro)
+    namespace.clear()
+    if not _opt_out_form_p(forms):
+        namespace.update(scope.get(PRELUDE_KEY, {}))
 
 
 def compile_unit(forms, scope, *, opt_out=True, include_meta=True):
@@ -277,18 +271,17 @@ def compile_unit(forms, scope, *, opt_out=True, include_meta=True):
 
     The one entry point of compilation: scope gets the prelude macros first.
     With opt_out (module semantics: the unit starts its module or file), the
-    unit starts from the whole prelude again, even in a persistent scope an
-    earlier unit opted out of (an nREPL file scope reloaded after its first
-    form changed), and a unit whose first form is
-    ``(require lispy.macros <selection>)`` keeps only that selection of them;
-    elsewhere (a REPL session's later inputs) such a require only adds.
-    A reload keeps the macros and names an earlier load of the scope
+    unit's macros are the prelude alone, even in a persistent scope an
+    earlier unit defined macros in or opted out of (an nREPL file scope
+    reloaded after an edit), so a reload compiles as a fresh module does; a
+    unit whose first form is ``(require lispy.macros <selection>)`` keeps
+    only that selection of them. Elsewhere (a REPL session's later inputs)
+    macros persist and such a require only adds. Only the macro table
+    restarts: a reload keeps the Python names an earlier load of the scope
     defined, stale ones included, as a Clojure namespace keeps its vars.
     """
     forms = list(forms)
     seed_prelude(scope)
     if opt_out:
-        _restore_prelude(scope)
-        if _opt_out_form_p(forms):
-            _drop_prelude(scope)
+        _start_unit(scope, forms)
     return macroexpand_then_compile(forms, scope, include_meta=include_meta)

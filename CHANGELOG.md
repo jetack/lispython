@@ -25,9 +25,11 @@ follows [Semantic Versioning](https://semver.org/).
   `(require lispy.macros)` only the qualified names.
 - nREPL: a file-less `eval` runs in the session's `__main__` scope with every
   built-in; an `eval` with `file`, or `load-file`, runs in that file's own
-  macro scope. A `load-file`, or an `eval` with `file` at line 1, column 1,
-  starts the file again: it begins from every built-in and its first form's
-  opt-out applies; an `eval` further down only adds. `macroexpand`,
+  macro scope. A `load-file`, or an `eval` with `file` that sends `line` 1
+  (and `column` 1 or none), starts the file again: its macros are every
+  built-in and nothing an earlier load defined, its first form's opt-out
+  applies, and so it compiles as under `lpy`; any other `eval` with `file`,
+  one without `line` included, only adds. `macroexpand`,
   `complete`, `docs` and `annotate` accept an optional `file` to answer from
   that file's scope.
 

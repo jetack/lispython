@@ -180,10 +180,14 @@ def test_opt_out(src, expected):
     assert translate(src) == expected
 
 
-def test_opt_out_keeps_a_user_macro_of_a_prelude_name():
+def test_a_unit_start_forgets_an_earlier_units_macros():
+    # A persistent scope compiling a new module or file unit starts from the
+    # prelude alone, as a fresh module does: an earlier unit's macro of a
+    # prelude name neither survives an opt-out nor shadows the built-in.
     scope = {}
-    translate("(defmacro inc [x] (return `(+ ~x 1000)))", scope)
-    assert translate("(require lispy.macros [])\n(inc 1)", scope) == "1 + 1000"
+    translate("(defmacro inc [x] (return `(+ ~x 1000)))\n(inc 1)", scope)
+    assert translate("(require lispy.macros [])\n(inc 1)", scope) == "inc(1)"
+    assert translate("(inc 1)", scope) == "1 + 1"
 
 
 def test_repl_input_require_only_adds():
@@ -299,6 +303,56 @@ def test_nrepl_reload_after_the_first_form_changes(session, tmp_path, opted_out_
     else:
         assert errors[0] is None
         assert "NameError: name 'inc' is not defined" in errors[1]
+
+
+def load(session, path, src):
+    path.write_text(src)
+    return request(session, op="load-file", path=str(path))
+
+
+@pytest.mark.parametrize(
+    ["before", "after"],
+    [
+        # A file turns its macro into a function.
+        [
+            "(defmacro helper [x] (return `(+ ~x 1000)))\n(print (helper 1))\n",
+            "(def helper [x] (return (+ x 1)))\n(print (helper 1))\n",
+        ],
+        # A file's own macro of a prelude name, replaced after an opt-out.
+        [
+            "(defmacro inc [x] (return `(+ ~x 1000)))\n(print (inc 1))\n",
+            "(require lispy.macros [])\n"
+            "(def inc [x] (return (+ x 1)))\n(print (inc 1))\n",
+        ],
+    ],
+)
+def test_nrepl_reload_compiles_as_a_fresh_module(session, tmp_path, before, after):
+    # A reload starts from the prelude alone, so a macro only the previous
+    # load defined is not a macro to bind over, as under lpy.
+    path = tmp_path / "f.lpy"
+    first = load(session, path, before)
+    assert (first["error"], first["stdout"]) == (None, "1001\n")
+    second = load(session, path, after)
+    assert (second["error"], second["stdout"]) == (None, "2\n")
+
+
+def test_nrepl_reload_keeps_the_files_macros_and_the_prelude(session, tmp_path):
+    path = tmp_path / "f.lpy"
+    src = "(defmacro helper [x] (return `(inc ~x)))\n(print (helper 1))\n"
+    for _ in range(2):
+        reply = load(session, path, src)
+        assert (reply["error"], reply["stdout"]) == (None, "2\n")
+
+
+def test_nrepl_file_eval_without_a_line_is_not_the_file_start(session, tmp_path):
+    # Only a line sent as 1 starts the file's unit: one with no line would
+    # bring the prelude back mid-file, undoing the opt-out.
+    path = tmp_path / "f.lpy"
+    assert load(session, path, "(require lispy.macros [])\n(= a 1)\n")["error"] is None
+    error = request(session, op="eval", code="(= b (inc 1))", file=str(path))["error"]
+    assert "NameError: name 'inc' is not defined" in error
+    reply = request(session, op="eval", code="(= c (inc 1))", file=str(path), line=3)
+    assert "NameError: name 'inc' is not defined" in reply["error"]
 
 
 # --- one home ----------------------------------------------------------------

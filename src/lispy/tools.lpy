@@ -496,26 +496,35 @@
     (= tb tb.tb_next))
   (return (.rstrip (.join "" (traceback.format-exception (type e) e tb)))))
 
-(def nrepl-eval [src scope :filename None :line 1 :column 1 :whole-file False]
+(def nrepl-eval [src scope :filename None :line None :column None :whole-file False]
   "Evaluate LisPython source, capturing stdout/stderr and return value.
 
   filename, line and column say where src sits in the editor's buffer (the
   1-based position of its first character, nREPL's file/line/column eval
-  fields); without a filename the source gets a fresh <nrepl-N> name.  The
-  source is padded to that position before parsing, so compile errors,
-  tracebacks and linecache all use buffer lines and columns.  whole-file
-  marks src as the entire file (load-file), so it starts at line 1, column
-  1.  Source naming a file at its line 1, column 1 (a load-file, or a
-  region at the file's start) starts the file's unit, whose first form may
-  narrow its built-in macros (compile-unit); any other eval only adds,
-  since editor clients send file, line and column with every region.
+  fields; None, a field the request left out, is 1); without a filename
+  the source gets a fresh <nrepl-N> name.  The source is padded to that
+  position before parsing, so compile errors, tracebacks and linecache all
+  use buffer lines and columns.  whole-file marks src as the entire file
+  (load-file), so it starts at line 1, column 1.  A load-file, or source
+  naming a file at a line given as 1 (column 1 or not given), starts the
+  file's unit: its macros are the built-in ones alone again, and its first
+  form may narrow them (compile-unit).  Any other eval only adds, since
+  editor clients send file, line and column with every region.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
+  ;; Only a line the request sent as 1 is the file's start: a file eval with
+  ;; no line has no known position, and restarting the unit there would
+  ;; undo the file's opt-out mid-file.
+  (= file-start (and (is-not filename None)
+                     (or whole-file (and (== line 1) (in column (, None 1))))))
+  (if (is line None)
+      (= line 1))
+  (if (is column None)
+      (= column 1))
   (_nrepl-buffer-position line "line" NREPL-MAX-POSITION-LINE)
   (_nrepl-buffer-position column "column" NREPL-MAX-POSITION-COLUMN)
   (if (and whole-file (!= (, line column) (, 1 1)))
       (raise (ValueError "a whole file starts at line 1, column 1")))
-  (= file-start (and (is-not filename None) (== (, line column) (, 1 1))))
   (if (is filename None)
       (= filename (+ "<nrepl-" (str (next _NREPL-EVAL-IDS)) ">")))
   (if (not (isinstance filename str))
@@ -871,15 +880,13 @@
   (= op (.get msg "op" "eval"))
   (cond (== op "eval")
         ;; file/line/column: where code sits in the client's buffer; a missing
-        ;; or null field takes nrepl-eval's default.
-        (do (= line (.get msg "line"))
-            (= column (.get msg "column"))
-            (= file (.get msg "file"))
-            (= result (nrepl-eval (sub msg "code")
+        ;; or null field goes to nrepl-eval as None, which tells it apart
+        ;; from a sent 1 (a file eval with no line is not the file's start).
+        (do (= result (nrepl-eval (sub msg "code")
                                   (_nrepl-request-scope msg "file" scope)
-                                  :filename file
-                                  :line (ife (is line None) 1 line)
-                                  :column (ife (is column None) 1 column)))
+                                  :filename (.get msg "file")
+                                  :line (.get msg "line")
+                                  :column (.get msg "column")))
             (= (sub result "op") "eval-result")
             (return result))
 
