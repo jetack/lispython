@@ -253,16 +253,25 @@ class TestRequireSelection:
     @pytest.mark.parametrize(
         "form",
         [
-            "(require m foo)",
-            "(require m [a] b)",
-            '(require m "ab")',
-            "(require m :as x)",
+            "(require lispy.macros foo)",
+            "(require lispy.macros [a] b)",
+            '(require lispy.macros "ab")',
+            "(require lispy.macros :as x)",
+            "(require lispy.macros)",
             "(require)",
         ],
     )
     def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
-        assert self._find(form + "\n(print 1)", "print") is None
-        assert server.builtin_macro_doc(parse(form + "\n(cond)"), "cond") is None
+        # The module is a built-in macro module, so only the malformed
+        # selection stands between the buffer and a hover on `cond`.
+        tree = parse(form + "\n(cond)")
+        assert server.find_import_for_name(tree, "print") is None
+        assert server.builtin_macro_doc(tree, "cond") is None
+
+    def test_bare_require_of_the_built_in_macros_is_qualified_only(self):
+        tree = parse("(require lispy.macros)\n(cond)")
+        assert server.builtin_macro_doc(tree, "cond") is None
+        assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
 
 
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,
