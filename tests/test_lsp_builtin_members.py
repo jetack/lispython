@@ -50,15 +50,31 @@ def hover_text(marked):
     return None if result is None else result.contents.value
 
 
-def signature_label(marked):
+def signature_labels(marked):
+    """Every signature offered: overload order differs between stub versions."""
     result = server.signature_help(*request(marked))
-    return None if result is None else result.signatures[0].label
+    return [] if result is None else [sig.label for sig in result.signatures]
+
+
+def shows_any(labels, cls, member):
+    errors = []
+    for label in labels:
+        try:
+            assert_shows(label, cls, member)
+            return
+        except (AssertionError, ValueError) as err:
+            errors.append(f"{label!r}: {err!r}")
+    raise AssertionError(f"no signature shows {cls.__name__}.{member}: {errors}")
 
 
 def assert_shows(text, cls, member):
     assert text is not None
     for name in bound_parameters(cls, member):
         assert name in text
+    # The sorted builtin also takes key and reverse (after an iterable): a
+    # server resolving .sort to it must not pass.
+    assert "iterable" not in text
+    assert "sorted" not in text
     # list.sort's parameters are keyword-only; a positional rendering would
     # be the wrong signature.
     if (cls, member) == (list, "sort"):
@@ -101,9 +117,9 @@ def test_hover_on_a_list_method_shows_its_parameters(marked):
 
 @pytest.mark.parametrize("marked", SIGNATURES)
 def test_signature_help_in_a_list_method_call_shows_its_parameters(marked):
-    assert_shows(signature_label(marked), list, "sort")
+    shows_any(signature_labels(marked), list, "sort")
 
 
 def test_another_type_and_method():
     marked = '(= d {"a" 1})\n(.get d |)'
-    assert_shows(signature_label(marked), dict, "get")
+    shows_any(signature_labels(marked), dict, "get")
