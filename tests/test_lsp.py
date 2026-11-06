@@ -18,7 +18,7 @@ import pytest
 import lispy.macros
 from lispy import form_docs
 from lispy.core import nodes
-from lispy.core.compiler import features
+from lispy.core.compiler import features, literal
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
 from lispy.core.parser import parse
 
@@ -625,10 +625,11 @@ def test_abandoned_keystrokes_queue_no_cursor_view_compiles(slow_views, tmp_path
         live = asyncio.ensure_future(view_of(tmp_path, 1, col=9))
         await asyncio.sleep(0)
         slow_views.release.set()
-        return await asyncio.wait_for(live, 10)
+        result = await asyncio.wait_for(live, 10)
+        await until(lambda: not server.CURSOR_COMPILES)
+        return result
 
     view, answer = asyncio.run(scenario())
-    assert not server.CURSOR_COMPILES
     assert (view.version, view.col) == (1, 9)
     assert slow_views.calls == [(1, 1), (1, 9)]
     assert slow_views.most == 1
@@ -646,10 +647,11 @@ def test_a_newer_version_supersedes_pending_cursor_views(slow_views, tmp_path):
         latest = [asyncio.ensure_future(view_of(tmp_path, 3)) for _ in range(2)]
         await asyncio.sleep(0)
         slow_views.release.set()
-        return await asyncio.wait_for(asyncio.gather(stale, *latest), 10)
+        result = await asyncio.wait_for(asyncio.gather(stale, *latest), 10)
+        await until(lambda: not server.CURSOR_COMPILES)
+        return result
 
     stale, *latest = asyncio.run(scenario())
-    assert not server.CURSOR_COMPILES
     assert stale == (None, None)
     assert [view.version for view, _ in latest] == [3, 3]
     assert slow_views.calls == [(1, 1), (3, 1)]
@@ -662,9 +664,13 @@ def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
         raise RuntimeError("compile failed")
 
     monkeypatch.setattr(server, "cursor_view", cursor_view)
-    with pytest.raises(RuntimeError, match="compile failed"):
-        asyncio.run(asyncio.wait_for(view_of(tmp_path, 1), 10))
-    assert not server.CURSOR_COMPILES
+
+    async def scenario():
+        with pytest.raises(RuntimeError, match="compile failed"):
+            await asyncio.wait_for(view_of(tmp_path, 1), 10)
+        await until(lambda: not server.CURSOR_COMPILES)
+
+    asyncio.run(scenario())
 
 
 def cursor_view_references(path):
@@ -678,7 +684,10 @@ def cursor_view_references(path):
             if nodes.atom_text(node[0]) in ("def", "async-def"):
                 def_name = nodes.atom_text(node[1])
         if isinstance(node, nodes.Symbol):
-            if nodes.atom_text(node) == "cursor-view":
+            # any spelling of the name: cursor_view, server.cursor-view, ...
+            if literal.name_key(
+                nodes.atom_text(node).rsplit(".", 1)[-1]
+            ) == literal.name_key("cursor-view"):
                 found.append(def_name)
         elif isinstance(node, nodes.Expression):
             stack.extend((child, def_name) for child in node)
