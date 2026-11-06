@@ -1145,7 +1145,8 @@ def test_real_pyrefly_exits_when_the_lsp_is_killed(tmp_path, project):
     # Every pyrefly below the LSP, however it was started, not just the
     # LSP's own child.
     session = LspSession(tmp_path, "unused", project, launcher=REAL_LAUNCHER)
-    binary = os.path.realpath(backend.backend_argv("pyrefly")[0])
+    # The pyrefly executable itself, whatever argv starts it with.
+    binary = os.path.realpath(backend._scripts_binary("pyrefly"))
 
     async def scenario():
         pyreflies = []
