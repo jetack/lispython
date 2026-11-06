@@ -433,6 +433,24 @@ class TestImportBindings:
         assert server.find_import_for_name(tree, "sep") is not None
 
 
+def test_local_references_compare_python_names():
+    # Defect: references compare spellings, so my_x misses the my-x it
+    # stands for (one Python name).
+    from lsprotocol import types as lsp
+
+    ls = ls_with("(= my-x 1)\n(print my_x)\n(print my-y)")
+    params = lsp.ReferenceParams(
+        text_document=lsp.TextDocumentIdentifier(uri=URI),
+        position=lsp.Position(line=1, character=8),
+        context=lsp.ReferenceContext(include_declaration=True),
+    )
+    found = asyncio.run(server.references(ls, params))
+    assert [(loc.range.start.line, loc.range.start.character) for loc in found] == [
+        (0, 3),
+        (1, 7),
+    ]
+
+
 def test_an_operator_never_spells_a_name():
     # Defect: (- a b) records - as the spelling of _ (py-name of -), so a
     # backend member _ is relabelled "-"; ? (py-name _p) likewise.

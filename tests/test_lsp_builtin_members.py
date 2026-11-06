@@ -284,14 +284,21 @@ def test_the_hover_range_is_the_lpy_word(hover):
     assert (start.line, start.character, end.line, end.character) == (1, 10, 1, 14)
 
 
-PRINT_HOVER = server.builtin_info("print")[0]
+def assert_local_print(hover_result, signature_result):
+    """The answers are lispython's own builtin documentation of print (its
+    signature as inspect reads it differs between Python versions)."""
+    text = hover_text(hover_result)
+    assert text.startswith("```python\nprint") and "*(Python builtin)*" in text
+    [label] = signature_labels(signature_result)
+    assert label.startswith("print") and label in text
 
 
 def test_backend_off_gives_the_local_answer(hover, signature_help, off_backends):
     # Defect: no backend answer leaves hover or signature help empty
     # instead of lispython's builtin documentation.
-    assert PRINT_HOVER in hover_text(hover("(pri|nt 1)", off_backends))
-    assert signature_labels(signature_help("(print |)", off_backends)) == [PRINT_HOVER]
+    assert_local_print(
+        hover("(pri|nt 1)", off_backends), signature_help("(print |)", off_backends)
+    )
 
 
 def test_a_buffer_that_does_not_compile_gives_the_local_answer(
@@ -299,8 +306,7 @@ def test_a_buffer_that_does_not_compile_gives_the_local_answer(
 ):
     # An earlier refused form: neither the buffer nor its prefix compiles,
     # so there is no view and no request; the builtin answer stands.
-    assert PRINT_HOVER in hover_text(hover("(def)\n(pri|nt 1)"))
-    assert signature_labels(signature_help("(def)\n(print |)")) == [PRINT_HOVER]
+    assert_local_print(hover("(def)\n(pri|nt 1)"), signature_help("(def)\n(print |)"))
     assert backend_requests.sent == []
 
 

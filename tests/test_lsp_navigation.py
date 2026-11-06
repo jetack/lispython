@@ -229,3 +229,32 @@ def test_references_never_come_from_a_view_of_the_prefix(navigate, backend_reque
     )
     assert [span[1] for span in spans(found)] == [0, 1, 2]
     assert backend_requests.sent == []
+
+
+SHADOWED = "(= my-x 1)\n(def f []\n  (= my-x 2))\n(print my-|x)"
+
+
+@pytest.mark.parametrize("handler", [server.definition, server.references])
+def test_an_empty_backend_answer_is_final(navigate, backend_requests, handler):
+    # Defect: the backend found nothing, and the local lookup, which
+    # matches by name alone, answers anyway with every my-x in the buffer,
+    # the function's local among them.
+    backend_requests.answer["value"] = []
+    assert navigate(handler, SHADOWED) == []
+    assert backend_requests.sent == [
+        lsp.TEXT_DOCUMENT_DEFINITION
+        if handler is server.definition
+        else lsp.TEXT_DOCUMENT_REFERENCES
+    ]
+
+
+def test_a_macro_gets_the_local_answers(navigate, backend_requests):
+    # Defect: the backend, never asked about a macro, counts as having
+    # answered nothing, and the macro's own definition and uses are lost.
+    marked = "(defmacro twice [x] (return x))\n(twi|ce 1)"
+    assert spans(navigate(server.definition, marked)) == [("main.lpy", 0, 10, 0, 15)]
+    assert spans(navigate(server.references, marked)) == [
+        ("main.lpy", 0, 10, 0, 15),
+        ("main.lpy", 1, 1, 1, 6),
+    ]
+    assert backend_requests.sent == []

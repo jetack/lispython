@@ -257,3 +257,86 @@ def test_an_edit_during_the_request_never_moves_the_answer(complete, backend_req
     item = by_label(items)["my-x"]
     assert item.filter_text == "my-x"
     assert item.text_edit.insert.start.character == character - 3
+
+
+@pytest.fixture
+def merged(complete, real_backends, backend_project, monkeypatch):
+    """complete, off an attribute, with the session's backend running (only
+    a running backend's items are merged) and the time to answer on a
+    loaded box."""
+    monkeypatch.setattr(server, "MERGE_TIMEOUT", 30)
+    client = real_backends.available_client((backend_project / "main.lpy").as_uri())
+    if not client.running:
+        complete("(= x 1)\n(pri|)")
+        assert wait_running(client)
+    return complete
+
+
+def test_merged_completion_offers_the_backends_names_as_the_buffer_spells_them(
+    merged,
+):
+    # Defects: off an attribute the backend's items are not merged (the
+    # parameter, which only the backend's scopes know, is missing), or a
+    # name keeps the backend's Python spelling (my_arg).
+    items = by_label(merged("(def f [my-arg]\n  (return my-a|))")[2])
+    assert "my-arg" in items and "my_arg" not in items
+    assert items["my-arg"].filter_text == "my-arg"
+    assert "ife" in items  # lispython's own forms stay
+
+
+@pytest.mark.parametrize(
+    "source, label",
+    [
+        ("(def when [] 1)\n(print whe|)", "when"),
+        ("(= is_not 1)\n(print is_n|)", "is-not"),
+    ],
+    ids=["same spelling", "same python name"],
+)
+def test_a_lispython_form_wins_over_the_backends_name(merged, source, label):
+    # Defect: the backend's item for a name lispython has a form for (when;
+    # is_not, the Python name of is-not) is offered beside lispython's
+    # item, or in its place.
+    name = server.py_name(label)
+    same = [item for item in merged(source)[2] if server.py_name(item.label) == name]
+    assert [(item.label, item.kind) for item in same] == [
+        (label, lsp.CompletionItemKind.Keyword)
+    ]
+
+
+def test_python_keywords_are_dropped_but_the_constants_stay(merged):
+    # Defects: Python syntax the backend offers (elif) is offered as if
+    # lispython had it; or True, a Keyword item too, goes with it.
+    items = by_label(merged("(= x 1)\nel|")[2])
+    assert items["eval"].text_edit is not None  # the backend did answer
+    assert "elif" not in items
+    assert "True" in by_label(merged("(= x 1)\n(print Tr|)")[2])
+
+
+@pytest.mark.parametrize(
+    "marked", ["(= my-x 1)\n(print my-|)", "(= my-x [])\nmy-x.co|"]
+)
+def test_an_incomplete_backend_list_stays_incomplete(
+    merged, backend_requests, run_on_loop, lsp_buffer, marked
+):
+    # Defect: the backend's partial list is answered as complete, so the
+    # client filters it on the next keystrokes instead of asking again.
+    backend_requests.answer["value"] = lsp.CompletionList(
+        is_incomplete=True,
+        items=[lsp.CompletionItem(label="my_x", kind=lsp.CompletionItemKind.Variable)],
+    )
+    ls, uri, position = lsp_buffer(marked)
+    params = lsp.CompletionParams(
+        text_document=lsp.TextDocumentIdentifier(uri=uri), position=position
+    )
+    assert run_on_loop(server.completion(ls, params)).is_incomplete is True
+
+
+def test_a_backend_member_edit_counts_in_utf16_units(complete):
+    # Defect: the edit range counts code points: after the emoji (one code
+    # point, two UTF-16 units) it starts one column short.
+    line, character, items = complete('(= ab [1])\n(print "\U0001f600" ab.so|)')
+    edit = by_label(items)["sort"].text_edit
+    assert (edit.insert.start.line, edit.insert.start.character) == (
+        line,
+        character - 2,
+    )
