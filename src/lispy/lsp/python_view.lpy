@@ -13,6 +13,7 @@
 (import ast)
 (import builtins)
 (import contextlib)
+(import errno)
 (import glob)
 (import hashlib)
 (import json)
@@ -22,6 +23,7 @@
 (import shutil)
 (import sys)
 (import tempfile)
+(import threading)
 (import time)
 (import warnings)
 
@@ -336,17 +338,54 @@
     (= self.partial None)
     (= self.fallback False)))
 
-(def compile-view [source :package "" :name "__main__"]
+;; Who holds each import root on sys.path: directory -> [users, the entry
+;; _on-sys-path inserted or None], under _SYS-PATH-LOCK, since threads
+;; compiling at once share one sys.path.
+(= _SYS-PATH-LOCK (threading.Lock))
+(= _SYS-PATH-USERS {})
+
+(deco contextlib.contextmanager
+  (def _on-sys-path [directory]
+    "Keep directory on sys.path for the body (nothing for None): inserted
+     first by the first user when absent, and that entry removed when the
+     last user leaves, so sys.path ends as it was."
+    (if (is directory None)
+        (do (yield)
+            (return)))
+    (with [_SYS-PATH-LOCK]
+      (= users (.get _SYS-PATH-USERS directory))
+      (if (is users None)
+          (do (= users [0 None])
+              (if (not (in directory sys.path))
+                  (do (.insert sys.path 0 directory)
+                      (= (sub users 1) directory)))
+              (= (sub _SYS-PATH-USERS directory) users)))
+      (+= (sub users 0) 1))
+    (try
+      (yield)
+      (finally
+        (with [_SYS-PATH-LOCK]
+          (-= (sub users 0) 1)
+          (if (== (sub users 0) 0)
+              (do (del (sub _SYS-PATH-USERS directory))
+                  (for [i entry] in (enumerate sys.path)
+                    (if (is entry (sub users 1))
+                        (do (del (sub sys.path i))
+                            (break)))))))))))
+
+(def compile-view [source :package "" :name "__main__" :import-root None]
   "The PythonView of source, or None when it does not become Python: a parse
    or compile error, a failing macro, a nesting too deep to unparse.  The
    parse is strict, as diagnostics' is.  Macros run as compute-diagnostics
-   already runs them; the generated module is never compiled or executed."
+   already runs them, with import-root (module-names' third item) on
+   sys.path, so a relative require imports its package; the generated
+   module is never compiled or executed."
   (= scope {"__builtins__" builtins
             "__name__" name
             "__package__" package
             "__macro_namespace" {}})
   (try
-    (with [(warnings.catch-warnings)]
+    (with [(warnings.catch-warnings) (_on-sys-path import-root)]
       (warnings.simplefilter "ignore")
       (= module (ast.Module :body (list (macroexpand-then-compile (parse source) scope))
                             :type-ignores (list)))
@@ -381,7 +420,7 @@
                 (+= found (.count (.split v ".") word)))))))
   (return found))
 
-(def view-at-cursor [source line col :package "" :name "__main__"]
+(def view-at-cursor [source line col :package "" :name "__main__" :import-root None]
   "The PythonView of source for a request at 1-based line, code-point col,
    or None.  The partial word before the cursor (name characters back to a
    dot, space, bracket, quote, comma or ;, less a leading prefix such as :
@@ -390,7 +429,8 @@
    before the cursor with its open forms closed is compiled instead.  The
    sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
-   partial's Python name and the map follows that edit."
+   partial's Python name and the map follows that edit.  import-root is
+   compile-view's."
   (= lines (.split source "\n"))
   (if (not (<= 1 line (len lines)))
       (return None))
@@ -403,13 +443,14 @@
   (= marked (.join "\n" lines))
   (= sentinel-end (+ start (len CURSOR-SENTINEL)))
   (= fallback False)
-  (= view (compile-view marked :package package :name name))
+  (= view (compile-view marked :package package :name name :import-root import-root))
   (if (is view None)
       (do (= prefix (source-prefix marked line sentinel-end))
           (= closers (open-form-closers prefix))
           (if (is closers None)
               (return None))
-          (= view (compile-view (+ prefix closers) :package package :name name))
+          (= view (compile-view (+ prefix closers) :package package :name name
+                                :import-root import-root))
           (= fallback True)))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
@@ -445,20 +486,22 @@
     (= self._views {})
     (= self._cursor-views {}))
 
-  (def view [self uri version source :package "" :name "__main__"]
+  (def view [self uri version source :package "" :name "__main__" :import-root None]
     (= hit (.get self._views uri))
     (if (and (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
-    (= result (compile-view source :package package :name name))
+    (= result (compile-view source :package package :name name :import-root import-root))
     (= (sub self._views uri) (, version result))
     (return result))
 
-  (def view-at-cursor [self uri version source line col :package "" :name "__main__"]
+  (def view-at-cursor [self uri version source line col
+                       :package "" :name "__main__" :import-root None]
     (= key (, version line col))
     (= hit (.get self._cursor-views uri))
     (if (and (is-not hit None) (== (sub hit 0) key))
         (return (sub hit 1)))
-    (= result (view-at-cursor source line col :package package :name name))
+    (= result (view-at-cursor source line col :package package :name name
+                              :import-root import-root))
     (= (sub self._cursor-views uri) (, key result))
     (return result))
 
@@ -510,13 +553,15 @@
   "Take an exclusive lock on the open file fd, waiting for it."
   (if (is-not fcntl None)
       (return (fcntl.flock fd fcntl.LOCK_EX)))
-  ;; msvcrt.locking gives up after ten one-second tries; a sweep may be longer.
+  ;; msvcrt.locking gives up after ten one-second tries (EDEADLOCK, or
+  ;; EACCES); a sweep may be longer, so contention is retried, nothing else.
   (while True
     (try
       (msvcrt.locking fd msvcrt.LK_LOCK 1)
       (return)
-      (except [OSError]
-        (pass)))))
+      (except [OSError as e]
+        (if (not (in e.errno (, errno.EDEADLOCK errno.EACCES)))
+            (raise))))))
 
 (def _unlock-fd [fd]
   (if (is-not fcntl None)
@@ -554,9 +599,13 @@
 
 (def _refuse-overlap [project-root view-root]
   "Raise ValueError when view-root is project-root or either holds the
-   other: the shadow sweep deletes every .py and link under the view root."
+   other: the shadow sweep deletes every .py and link under the view root.
+   Paths on two drives never overlap (commonpath refuses them)."
   (= project (osp.realpath project-root))
   (= root (osp.realpath (os.fspath view-root)))
+  (if (!= (osp.normcase (sub (osp.splitdrive project) 0))
+          (osp.normcase (sub (osp.splitdrive root) 0)))
+      (return None))
   (if (in (osp.commonpath [project root]) (, project root))
       (raise (ValueError
                f"view root {root} overlaps the project {project}: it must be a cache outside it"))))
@@ -865,22 +914,6 @@
   (with [(_view-root-lock root)]
     (return (_write-shadows project-root root manifest))))
 
-(deco contextlib.contextmanager
-  (def _on-sys-path [directory]
-    "Put directory first on sys.path, unless it is there, for the body; the
-     entry put there is removed after it."
-    (if (in directory sys.path)
-        (do (yield)
-            (return)))
-    (.insert sys.path 0 directory)
-    (try
-      (yield)
-      (finally
-        (for [i entry] in (enumerate sys.path)
-          (if (is entry directory)
-              (do (del (sub sys.path i))
-                  (break))))))))
-
 (def _write-shadows [project-root root manifest]
   "write-shadows' sweep, under the view root's lock."
   (= sources (project-sources project-root))
@@ -924,8 +957,8 @@
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e)
         (continue)))
     (try
-      (with [(_on-sys-path (sub names 2))]
-        (= view (compile-view source :name (sub names 0) :package (sub names 1))))
+      (= view (compile-view source :name (sub names 0) :package (sub names 1)
+                            :import-root (sub names 2)))
       (if (is-not view None)
           (do (_write-if-changed root shadow view.text)
               (= (sub shadows shadow) lpy-path)))
@@ -958,8 +991,9 @@
   "Write view-root's pyrightconfig.json when it changed: type checking off
    (only completion and navigation are asked for), the search paths, and
    the environment of this process's interpreter.  The search paths are,
-   in order, the view-root counterpart of every import root other than the
-   project root (ShadowManifest.import-roots; <view>/src in a src layout),
+   in order, the view-root counterpart of every import root strictly inside
+   the project (ShadowManifest.import-roots; <view>/src in a src layout;
+   one above the project, which lies inside a package, is left out),
    so import pkg finds the shadows before any real directory of uncompiled
    .lpy; then those import roots themselves, so what the view lacks of one
    (a pure-.py package, a top-level .py or .pyi, an extension module beside
@@ -975,17 +1009,13 @@
   (= root (osp.abspath (os.fspath view-root)))
   (= roots [])
   (for import-root in (or import-roots [])
-    (if (!= (osp.abspath import-root) project-root)
-        (.append roots (osp.abspath import-root))))
-  (= extra [])
-  (for import-root in roots
-    (= view-dir (_view-dir project-root root import-root))
-    (if (and (is-not view-dir None) (not (in view-dir extra)))
-        (.append extra view-dir)))
-  (for import-root in roots
-    (if (not (in import-root extra))
-        (.append extra import-root)))
-  (.append extra project-root)
+    (= import-root (osp.abspath import-root))
+    (if (and (!= import-root project-root) (not (in import-root roots))
+             (is-not (_view-dir project-root root import-root) None))
+        (.append roots import-root)))
+  (= extra (+ [(_view-dir project-root root import-root) for import-root in roots]
+              roots
+              [project-root]))
   (.extend extra (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
                                               "site-packages"))))
   (= config {"typeCheckingMode" "off" "extraPaths" extra})

@@ -7,6 +7,7 @@ Expected positions are read off the source and generated text with
 import hashlib
 import importlib
 import json
+import ntpath
 import os
 import shutil
 import subprocess
@@ -289,6 +290,48 @@ class TestShadows:
             ("pkg.a.m", "pkg.a", str(src)),
         ]
 
+    def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):
+        # An open buffer compiles as its shadow does: its import root on
+        # sys.path while its macros load, and sys.path as it was after.
+        pkg = tmp_path / "src" / "pvcurpkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        names = ["pvcurpkg", "pvcurpkg.mac"]
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        src = "(require .mac *)\n(= yy (twice 2))"
+        path = list(sys.path)
+        try:
+            view = pv.ViewCache().view_at_cursor(
+                "u",
+                1,
+                src,
+                *plus(locate(src, "yy"), 2),
+                package="pvcurpkg",
+                name="pvcurpkg.mod",
+                import_root=str(tmp_path / "src"),
+            )
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        assert view is not None and view.text.endswith("\nyy = 2 + 2")
+        assert sys.path == path
+
+    def test_import_root_stays_on_sys_path_while_any_user_holds_it(self):
+        # Two compiles overlapping on one import root, the first ending first:
+        # the root stays for the second and goes with it.
+        root = "/nonexistent/pv-overlap-root"
+        path = list(sys.path)
+        first, second = pv._on_sys_path(root), pv._on_sys_path(root)
+        first.__enter__()
+        second.__enter__()
+        try:
+            first.__exit__(None, None, None)
+            assert sys.path[0] == root
+        finally:
+            second.__exit__(None, None, None)
+        assert sys.path == path
+
     def test_relative_require_in_a_src_layout(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pvsrcpkg"
@@ -501,7 +544,9 @@ class TestShadows:
     ):
         # "fresh" sees pkg/util/y.lpy and writes view/pkg/util/y.py; "stale"
         # does not, so it links view/pkg/util into the project.  "stale"
-        # starts while "fresh" pauses with view/pkg/util a real directory.
+        # starts while "fresh" pauses with view/pkg/util a real directory:
+        # under the lock it waits, so "fresh" writes its shadow (the link
+        # guard alone keeps the project intact but loses the shadow).
         real_sources, real_dir = pv.project_sources, pv._real_view_dir
         paused = threading.Event()
 
@@ -526,12 +571,13 @@ class TestShadows:
             self.util_layout(project)
             before = self.snapshot(project)
             paused.clear()
-            errors = []
+            errors, shadows = [], {}
 
             def run(wait, project=project, root=root):
                 try:
                     assert not wait or paused.wait(5)
-                    pv.write_shadows(str(project), str(root))
+                    name = threading.current_thread().name
+                    shadows[name] = pv.write_shadows(str(project), str(root))
                 except BaseException as e:
                     errors.append(e)
 
@@ -545,6 +591,7 @@ class TestShadows:
                 thread.join(10)
             assert not any(thread.is_alive() for thread in threads)
             assert errors == []
+            assert str(root / "pkg" / "util" / "y.py") in shadows["fresh"]
             assert self.snapshot(project) == before
 
     def test_no_write_or_removal_through_a_foreign_link(self, tmp_path, monkeypatch):
@@ -704,6 +751,21 @@ class TestShadows:
         assert os.fspath(pv.view_root_for(str(project))).startswith(
             str(tmp_path / "x" / "lispython")
         )
+
+    def test_pyright_config_leaves_out_import_roots_above_the_project(self, tmp_path):
+        # A project inside a package: its modules' import root lies above it.
+        project, root = tmp_path / "pkg" / "project", tmp_path / "view"
+        project.mkdir(parents=True)
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=[str(tmp_path)]
+        )
+        assert json.loads(open(path).read())["extraPaths"] == [str(project)]
+
+    def test_overlap_check_takes_two_drives_as_apart(self, monkeypatch):
+        monkeypatch.setattr(pv, "osp", ntpath)
+        pv._refuse_overlap("C:\\work\\project", "D:\\cache\\view")
+        with pytest.raises(ValueError, match="overlaps"):
+            pv._refuse_overlap("C:\\work\\project", "c:\\work\\project\\.cache")
 
     def test_pyright_config(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
