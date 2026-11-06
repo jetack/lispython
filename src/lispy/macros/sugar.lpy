@@ -31,7 +31,8 @@
 
   Thread-first: insert `value` as the first argument of the first form, that
   result as the first argument of the next, and so on. A form that is not a
-  parenthesised call, such as a bare name, is called with the value."
+  parenthesised call, such as a bare name, is called with the value:
+  `(-> x f (g 2))` is `g(f(x), 2)`."
   (if (== 0 (len fs))
       (return x))
   (= [f *rest] fs)
@@ -45,7 +46,9 @@
 
   Thread-last: insert `value` as the last argument of the first form, that
   result as the last argument of the next, and so on. A form that is not a
-  parenthesised call, such as a bare name, is called with the value."
+  parenthesised call, such as a bare name, is called with the value, but the
+  steps after it then thread first instead of last: write every step as a
+  parenthesised call."
   (if (== 0 (len fs))
       (return x))
   (= [f *rest] fs)

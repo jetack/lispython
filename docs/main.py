@@ -1,7 +1,8 @@
 """mkdocs-macros module (``module_name: docs/main`` in mkdocs.yml).
 
 Besides the ``version`` variable it generates the form reference
-(``{{ form_index() }}`` on syntax/reference.md) from ``lispy.form_docs``, the
+(``{{ form_index() }}`` on syntax/reference.md, ``{{ macro_doc("cond") }}`` on
+macros.md) from ``lispy.form_docs``, the
 documentation the LSP hover shows too, and owns the rule that finds a form's
 section on the hand-written pages (``form_section``), which both the reference
 links and tests/test_docs.py use. Nothing here needs mkdocs, so the test
@@ -34,8 +35,6 @@ REFERENCE_PAGE = "syntax/reference.md"
 GROUP_SECTIONS = {
     **{op: ("syntax/expressions.md", "Binary Operators") for op in binop_dict},
     **{op: ("syntax/statements.md", "Augmented Assignment") for op in augassignop_dict},
-    "not": ("syntax/expressions.md", "Unary Operators"),
-    "~": ("syntax/expressions.md", "Unary Operators"),
     "and": ("syntax/expressions.md", "Boolean Operators"),
     "or": ("syntax/expressions.md", "Boolean Operators"),
     "ife": ("syntax/expressions.md", "`if` expression"),
@@ -81,12 +80,23 @@ _ATX = re.compile(r"^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 _CODE_SPAN = re.compile(r"(`+)(.+?)\1")
 
 
-@functools.cache
+def _stamp(page, docs_dir):
+    """A page's file and its mtime: the cache key, so an edit under
+    ``mkdocs serve`` is read again (the process outlives the build)."""
+    path = Path(docs_dir) / page
+    return path, path.stat().st_mtime_ns
+
+
 def page_headings(page, docs_dir=DOCS_DIR):
     """The ATX headings of a docs page, outside fenced code blocks."""
+    return _headings(*_stamp(page, docs_dir))
+
+
+@functools.cache
+def _headings(path, _mtime_ns):
     headings = []
     fence = None
-    lines = (Path(docs_dir) / page).read_text(encoding="utf-8").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     for number, line in enumerate(lines):
         opener = _FENCE.match(line)
         if opener:
@@ -140,10 +150,14 @@ def missing_sections(docs_dir=DOCS_DIR):
     return sorted(f for f in canonical_forms() if form_section(f, docs_dir) is None)
 
 
-@functools.cache
 def page_anchors(page, docs_dir=DOCS_DIR):
     """{heading line: id} as Python-Markdown's toc extension assigns them:
     its own slugify and de-duplication over the heading text as rendered."""
+    return _anchors(*_stamp(page, docs_dir), page, docs_dir)
+
+
+@functools.cache
+def _anchors(_path, _mtime_ns, page, docs_dir):
     from markdown.extensions.toc import slugify, unique
 
     used = set()
@@ -213,6 +227,13 @@ def form_index_markdown(page=REFERENCE_PAGE, docs_dir=DOCS_DIR):
     return "\n".join(out)
 
 
+def macro_doc_markdown(name):
+    """A built-in macro's usage block and description, from the docstring the
+    LSP hover and the reference table read (lispy.form_docs.BUILTIN_MACROS)."""
+    doc = form_docs.BUILTIN_MACROS[name]
+    return "\n".join(["```python", *doc.usage, "```", "", doc.prose])
+
+
 def define_env(env):
     try:
         with open("pyproject.toml", "rb") as f:
@@ -222,6 +243,10 @@ def define_env(env):
         version = "dev"
 
     env.variables["version"] = version
+
+    @env.macro
+    def macro_doc(name):
+        return macro_doc_markdown(name)
 
     @env.macro
     def form_index():

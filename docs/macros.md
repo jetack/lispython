@@ -1,3 +1,7 @@
+---
+render_macros: true
+---
+
 # Macros
 LisPy's macro system is highly inspired by Clojure's macro system.
 You can check out the [Chapter 7](https://www.braveclojure.com/read-and-eval/) and [Chapter 8](https://www.braveclojure.com/writing-macros/) of "Brave Clojure" for more information about Clojure's macro system.
@@ -70,7 +74,7 @@ In a `.lpy` file the built-in macros need `(require lispy.macros *)` (or a selec
 Every example below has `(require lispy.macros *)` at the top of the file; the Python version is what `l2py` prints.
 
 ### `cond`
-Nested `if` statements: each test/then pair is one branch (`elif` after the first) and a trailing odd operand is the final `else`. It is a statement and yields no value: use `conde` for a value.
+{{ macro_doc("cond") }}
 
 LisPy version
 ```python
@@ -87,10 +91,9 @@ elif x == 0:
 else:
     print("pos")
 ```
-Note: a branch of several forms needs `(do ...)`.
 
 ### `conde`
-The expression form of `cond`: a chain of `ife` whose trailing operand is the final else.
+{{ macro_doc("conde") }}
 
 LisPy version
 ```python
@@ -102,10 +105,9 @@ Python version
 ```python
 label = "neg" if x < 0 else "zero" if x == 0 else "pos"
 ```
-Note: always give the final else. With an even number of operands the last test is never evaluated and its then becomes the else.
 
 ### `->`
-Thread-first: the value becomes the first argument of the first form, that result the first argument of the next, and so on.
+{{ macro_doc("->") }}
 
 LisPy version
 ```python
@@ -115,10 +117,9 @@ Python version
 ```python
 g(f(x, 1), 2)
 ```
-Note: a step that is not a parenthesised call, such as a bare name, is called with the value: `(-> x f (g 2))` is `g(f(x), 2)`.
 
 ### `->>`
-Thread-last: the value becomes the last argument of the first form, that result the last argument of the next, and so on.
+{{ macro_doc("->>") }}
 
 LisPy version
 ```python
@@ -128,9 +129,10 @@ Python version
 ```python
 g(2, f(1, x))
 ```
-Note: a step that is not a parenthesised call, such as a bare name, is called with the value. After such a bare-name step the remaining steps thread first instead of last, so write every `->>` step as a parenthesised call.
 
 ### `as->`
+{{ macro_doc("as->") }}
+
 Unlike `->` (thread first) and `->>` (thread last), `as->` lets you name the threaded value and place it anywhere in each form:
 ```python
 (as-> 0 x
@@ -151,7 +153,7 @@ The name is replaced only where it is read as a variable, not in keyword-argumen
 Useful when the threaded value doesn't always go in the first or last position.
 
 ### `fn`
-Alias of `lambda`: an anonymous function whose body is one expression.
+{{ macro_doc("fn") }}
 
 LisPy version
 ```python
@@ -163,7 +165,7 @@ double = lambda x: 2 * x
 ```
 
 ### `comment`
-Ignores its body: nothing in it is compiled or evaluated, and the form expands to `None`.
+{{ macro_doc("comment") }}
 
 LisPy version
 ```python
@@ -177,7 +179,7 @@ print("done")
 ```
 
 ### `when`
-An `if` statement with no else, whose branch runs every body form in order. A statement: it yields no value.
+{{ macro_doc("when") }}
 
 LisPy version
 ```python
@@ -193,7 +195,7 @@ if x > 0:
 ```
 
 ### `inc`
-The expression `value + 1`; `value` itself is left unchanged.
+{{ macro_doc("inc") }}
 
 LisPy version
 ```python
@@ -205,7 +207,7 @@ y = x + 1
 ```
 
 ### `dec`
-The expression `value - 1`; `value` itself is left unchanged.
+{{ macro_doc("dec") }}
 
 LisPy version
 ```python
@@ -217,7 +219,7 @@ z = x - 1
 ```
 
 ### `++`
-The statement `target += 1`.
+{{ macro_doc("++") }}
 
 LisPy version
 ```python
@@ -229,7 +231,7 @@ n += 1
 ```
 
 ### `--`
-The statement `target -= 1`.
+{{ macro_doc("--") }}
 
 LisPy version
 ```python

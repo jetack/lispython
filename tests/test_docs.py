@@ -8,6 +8,7 @@ links with (``form_section``).
 
 import importlib.util
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,33 @@ def test_form_section_skips_headings_in_code_and_reads_code_spans(docs_main, tmp
     assert docs_main.form_section("zap", tmp_path) is None
     found = docs_main.form_section("zop", tmp_path)
     assert (found.page, found.heading.text) == ("macros.md", "Using `zop` here")
+
+
+def test_macros_page_takes_each_macro_description_from_its_docstring(docs_main):
+    page = (DOCS / "macros.md").read_text(encoding="utf-8")
+    assert "render_macros: true" in page.split("---")[1]
+    missing = [
+        name
+        for name in docs_main.form_docs.BUILTIN_MACROS
+        if f'{{{{ macro_doc("{name}") }}}}' not in page
+    ]
+    assert not missing, f"macros.md sections without macro_doc: {missing}"
+
+
+def test_macro_doc_renders_usage_then_the_docstring_description(docs_main):
+    text = docs_main.macro_doc_markdown("->>")
+    assert text.startswith("```python\n(->> value form ...)\n```\n\n")
+    assert "write every step as a parenthesised call" in " ".join(text.split())
+
+
+def test_page_headings_are_read_again_after_the_file_changes(docs_main, tmp_path):
+    page = tmp_path / "p.md"
+    page.write_text("# One\n")
+    assert [h.text for h in docs_main.page_headings("p.md", tmp_path)] == ["One"]
+    page.write_text("# Two\n## Extra\n")
+    os.utime(page, ns=(1, 1))  # a rewrite within the same mtime tick is no edit
+    assert [h.text for h in docs_main.page_headings("p.md", tmp_path)] == [
+        "Two",
+        "Extra",
+    ]
+    assert list(docs_main.page_anchors("p.md", tmp_path).values()) == ["two", "extra"]
