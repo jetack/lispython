@@ -165,11 +165,12 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
 
 def active_macro_kind(scope):
     """The check_binding lookup (compiler/literal.py) over scope's macros as
-    they stand when a binding compiles: for a binding's Python name and
-    spelling, "built-in" (its macro is the prelude's own), "macro" or None. A
-    dotted key (lispy.macros.inc, from (require mod)) is never a bare name."""
+    they stand when a binding compiles: for a binding's spelling, None or
+    ``(kind, key)`` of the macro that is one name with it, kind "built-in"
+    (its macro is the prelude's own) or "macro". A dotted key
+    (lispy.macros.inc, from (require mod)) is never a bare name."""
 
-    def kind(name, spelling):
+    def kind(spelling):
         namespace = scope.get("__macro_namespace") or {}
         prelude = scope.get(PRELUDE_KEY) or {}
         found = None
@@ -185,8 +186,8 @@ def active_macro_kind(scope):
             if name_key(key) != name_key(spelling):
                 continue
             if prelude.get(key) is macro:
-                return "built-in"
-            found = "macro"
+                return ("built-in", key)
+            found = ("macro", key)
         return found
 
     return kind

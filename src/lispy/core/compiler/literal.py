@@ -343,36 +343,39 @@ def symbol_name(sexp):
 # name_compile for a stored undotted name, binding_name for every other name
 # slot (parameters, def/class names, imports, except, patterns, type
 # parameters). core/macro.py sets the value around compiling a unit's
-# forms: a callable from a binding's Python name and spelling to
-# "built-in" (a prelude macro), "macro" (any other) or None. None outside a
+# forms: a callable from a binding's spelling to None, or to the kind of the
+# active macro that is one name with it (name_key) and that macro's key:
+# ("built-in", key) for a prelude macro, ("macro", key) for any other. None outside a
 # unit, and while require compiles its generated import, means no check;
 # defmacro's generated def is checked, since its parameters and locals are
 # bindings.
 ACTIVE_MACROS = contextvars.ContextVar("lispy_active_macros", default=None)
 
 
-def check_binding(name, node, spelling=None):
-    """Refuse, at ``node``, binding the Python name ``name`` where a macro of
-    that Python name is active; ``spelling`` (default: the symbol's text) is
-    how the bound name is written."""
+def check_binding(node, spelling=None):
+    """Refuse, at ``node``, binding the name spelled ``spelling`` (default:
+    the symbol's text) where an active macro is one name with it
+    (name_key). The message names the macro as its key spells it, which
+    may differ from the binding (``my_x`` against the macro ``my-x``)."""
     active = ACTIVE_MACROS.get()
     if active is None:
         return
     spelling = atom_text(node) if spelling is None else spelling
-    kind = active(name, spelling)
-    if kind is None:
+    found = active(spelling)
+    if found is None:
         return
+    [kind, key] = found
     if kind == "built-in":
         raise LispyCompileError(
-            f"cannot bind '{spelling}': it is a built-in macro here, so "
-            f"({spelling} ...) would expand the macro instead of using this name; "
+            f"cannot bind '{spelling}': it is the built-in macro '{key}' here, so "
+            f"({key} ...) would expand the macro instead of using this name; "
             "rename it, or make (require lispy.macros [...]) the module's first "
             "form listing only the macros it uses",
             node,
         )
     raise LispyCompileError(
-        f"cannot bind '{spelling}': it is a macro here, so ({spelling} ...) would "
-        "expand the macro instead of using this name; rename it",
+        f"cannot bind '{spelling}': it is the macro '{key}' here, so ({key} ...) "
+        "would expand the macro instead of using this name; rename it",
         node,
     )
 
@@ -381,7 +384,7 @@ def binding_name(sexp):
     """symbol_name for a symbol the construct binds, refused where it shadows
     an active macro (check_binding)."""
     name = symbol_name(sexp)
-    check_binding(name, sexp)
+    check_binding(sexp)
     return name
 
 
@@ -468,7 +471,7 @@ def name_compile(symbol, ctx):
         python_name(attr, symbol)
     if ctx is ast.Store and not attrs:
         # A stored undotted name is a binding; a dotted one an attribute.
-        check_binding(name, symbol)
+        check_binding(symbol)
     position_info = {**symbol.position_info}
     # Positions are .lpy columns: measure the spelling's components (``a.x->y``),
     # never the mangled Python names, which differ in length.

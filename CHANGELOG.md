@@ -54,9 +54,11 @@ follows [Semantic Versioning](https://semver.org/).
 - Binding a name that is an active macro (`def`/`class` names, `=`,
   augmented assignment, `:=`, parameters, `defmacro` parameters and locals,
   `for`/`with`/`except`/comprehension targets, import names and aliases,
-  match captures, type parameters) is a compile error, compared by Python
-  name, because macro lookup is by head name and `(inc ...)` would still
-  expand the macro. This refuses code that compiled before, for example
+  match captures, type parameters) is a compile error, because macro lookup
+  is by head name and `(inc ...)` would still expand the macro. A hyphenated
+  name such as `my-x` is one name with `my_x`; any other spelling, such as
+  `->` or `ok?`, clashes only with itself. The error names the macro as it
+  is spelled. This refuses code that compiled before, for example
   `(def inc [x] ...)` or `(defmacro m [cond] ...)`. Rename the binding, or
   list only the macros the module uses in
   `(require lispy.macros [...])` as its first form. A `defmacro` of the same

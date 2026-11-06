@@ -161,7 +161,7 @@ def import_aliases(names, form, from_p=False):
         else:
             # Unaliased, the import binds the name, or a module path's first
             # part (import_bindings).
-            check_binding(name.split(".")[0], n, atom_text(n).split(".")[0])
+            check_binding(n, atom_text(n).split(".")[0])
         rst.append((alias, n, asname))
     return rst
 
