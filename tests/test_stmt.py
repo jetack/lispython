@@ -925,6 +925,9 @@ class TestBodyEmptiedByDo:
     def test_def_with_only_empty_do_is_pass_like_an_empty_def(self):
         assert stmt_to_dump("(def f [] (do))") == stmt_to_dump("(def f [])")
 
+    def test_class_with_only_empty_do_is_pass_like_an_empty_class(self):
+        assert stmt_to_dump("(class A [] (do))") == stmt_to_dump("(class A [])")
+
     def test_nonempty_do_body_still_compiles(self):
         assert stmt_to_dump("(if x (do (f) (do (g))))") == ast.dump(
             ast.parse("if x:\n    f()\n    g()")
