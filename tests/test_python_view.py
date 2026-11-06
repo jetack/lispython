@@ -297,6 +297,28 @@ class TestCache:
         getattr(cache, method)(*args)
         assert len(calls) == 2  # nothing was cached for the closed document
 
+    @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
+    def test_a_close_before_the_worker_starts_leaves_no_entry(
+        self, monkeypatch, method
+    ):
+        # Defect: the generation is read when the worker starts, after a
+        # forget that came between the hand-off and the start.
+        cache = pv.ViewCache()
+        calls = []
+        real = pv.compile_view
+
+        def counting(source, **kw):
+            calls.append(source)
+            return real(source, **kw)
+
+        monkeypatch.setattr(pv, "compile_view", counting)
+        args = ("u", 1, "(print a.b)") + ((1, 10) if method == "view_at_cursor" else ())
+        generation = cache.generation  # read before the hand-off
+        cache.forget("u")
+        getattr(cache, method)(*args, generation=generation)
+        getattr(cache, method)(*args)
+        assert len(calls) == 2
+
 
 class TestShadows:
     def write(self, path, text):

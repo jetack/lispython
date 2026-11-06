@@ -1616,14 +1616,16 @@ or an extra usage line names no usage key."
 ;; The cursor views of the open documents, by version (python_view.ViewCache).
 (= view-cache (ViewCache))
 
-(def cursor-view [uri version source line col name package import-root]
+(def cursor-view [uri version source line col name package import-root generation]
   "view-at-cursor of source, through view-cache when the document has a
-   version.  It runs the buffer's macros, so callers run it in a thread."
+   version.  It runs the buffer's macros, so callers run it in a thread,
+   reading view-cache's generation before the hand-off."
   (if (is version None)
       (return (view-at-cursor source line col :package package :name name
                               :import-root import-root)))
   (return (.view-at-cursor view-cache uri version source line col
-                           :package package :name name :import-root import-root)))
+                           :package package :name name :import-root import-root
+                           :generation generation)))
 
 (def generated-position [view]
   "view.cursor as an LSP Position over view.text, in UTF-16 units: the
@@ -1754,7 +1756,7 @@ or an extra usage line names no usage key."
       (return (, None [])))
   (= [name package import-root] (module-names path))
   (= making (asyncio.to-thread cursor-view doc.uri doc.version doc.source line col
-                               name package import-root))
+                               name package import-root view-cache.generation))
   (try
     (= view (await (ife (is deadline None) making (asyncio.wait-for making timeout))))
     (except [TimeoutError]
@@ -1776,13 +1778,17 @@ or an extra usage line names no usage key."
    local-completion is the answer.  doc is a snapshot (document-snapshot).
    On an attribute the backend's items alone answer, and the request may
    start the backend; elsewhere the local list does, with the kinds of an
-   already running backend within KINDS-TIMEOUT."
+   already running backend within KINDS-TIMEOUT, and a backend not yet
+   running is started without waiting for it (start-soon)."
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
   (= attribute (attribute-context-p doc.source line col))
   (if (and (not attribute) (not client.running))
-      (return None))
+      ;; Kinds come from a running backend only: start one for the next
+      ;; keystroke, and answer this one now.
+      (do (.start-soon client)
+          (return None)))
   (= [view items] (await (backend-answer client doc line col
                                          (ife attribute None KINDS-TIMEOUT))))
   (if (not items)

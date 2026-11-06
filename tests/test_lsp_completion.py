@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import itertools
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -204,28 +205,43 @@ def kinds_of(items, label):
     return [item.kind for item in items if item.label == label]
 
 
-def test_an_imported_class_is_one_class_item(complete):
-    # Regression TASK-1014: an imported defaultdict was a Variable, shown
-    # beside the nREPL's class item as a second defaultdict. Kinds come
-    # only from a running backend, so a dot completion starts it first.
-    complete("(import os)\nos.pa|")
-    items = complete(IMPORTED_CLASS)[2]
-    assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Class]
+@pytest.fixture
+def idle(loop, project, tmp_path):
+    """A Backends of its own whose basedpyright has not started."""
+    backends = make_backends(project, tmp_path / "idle-cache", "basedpyright")
+    yield backends, backends.available_client((project / "main.lpy").as_uri())
+    on_loop(loop, backends.shutdown_all())
 
 
-def test_a_non_attribute_completion_never_starts_the_backend(
-    complete, loop, project, tmp_path
-):
-    # Defect: every keystroke off an attribute waits for a backend start
+def wait_running(client, seconds=30):
+    """Poll (bounded) until client's backend runs; True when it does."""
+    deadline = time.monotonic() + seconds
+    while not client.running and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return client.running
+
+
+def test_a_non_attribute_completion_never_waits_for_the_backend(complete, idle):
+    # Defect: a keystroke off an attribute waits for the backend's start
     # (about a second) for kinds that only refine the local list.
-    idle = make_backends(project, tmp_path / "idle-cache", "basedpyright")
-    try:
-        items = complete(IMPORTED_CLASS, idle)[2]
-        client = idle.available_client((project / "main.lpy").as_uri())
-        assert (client.state, client.process) == ("idle", None)
-        assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Variable]
-    finally:
-        on_loop(loop, idle.shutdown_all())
+    backends, client = idle
+    items = complete(IMPORTED_CLASS, backends)[2]
+    assert not client.running  # answered before the backend was up
+    assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Variable]
+
+
+def test_an_imported_class_is_one_class_item(complete, idle, monkeypatch):
+    # Regression TASK-1014: an imported defaultdict was a Variable, shown
+    # beside the nREPL's class item as a second defaultdict. The first
+    # completion starts the backend without waiting; once it runs, the
+    # next one has its kinds. A loaded box may answer past KINDS-TIMEOUT,
+    # which this test does not pin.
+    monkeypatch.setattr(server, "KINDS_TIMEOUT", 30)
+    backends, client = idle
+    complete(IMPORTED_CLASS, backends)
+    assert wait_running(client)
+    items = complete(IMPORTED_CLASS, backends)[2]
+    assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Class]
 
 
 def test_auto_import_completions_are_off(complete, loop, project, real_backends):

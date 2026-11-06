@@ -502,7 +502,9 @@
    its result only when no forget came since it began (generation, one
    counter for every uri: a close elsewhere only costs a cache miss),
    checked and stored under lock with forget, so a closed document's
-   entry is never stored after it was dropped."
+   entry is never stored after it was dropped.  A caller that hands the
+   view to a thread reads generation on its own thread first and passes
+   it, since a forget can come before the worker starts."
   (def __init__ [self]
     (= self._views {})
     (= self._cursor-views {})
@@ -514,8 +516,15 @@
       (if (== generation self._generation)
           (= (sub table uri) (, key result)))))
 
-  (def view [self uri version source :package "" :name "__main__" :import-root None]
-    (= generation self._generation)
+  (deco property
+    (def generation [self]
+      "The forget count a view made from now on stores under."
+      (return self._generation)))
+
+  (def view [self uri version source :package "" :name "__main__" :import-root None
+             :generation None]
+    (if (is generation None)
+        (= generation self._generation))
     (= hit (.get self._views uri))
     (if (and (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
@@ -524,8 +533,10 @@
     (return result))
 
   (def view-at-cursor [self uri version source line col
-                       :package "" :name "__main__" :import-root None]
-    (= generation self._generation)
+                       :package "" :name "__main__" :import-root None
+                       :generation None]
+    (if (is generation None)
+        (= generation self._generation))
     (= key (, version line col))
     (= hit (.get self._cursor-views uri))
     (if (and (is-not hit None) (== (sub hit 0) key))

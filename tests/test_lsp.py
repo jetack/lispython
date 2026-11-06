@@ -623,3 +623,40 @@ def test_an_auto_import_item_gives_no_kind():
     )
     [item] = server.with_backend_kinds(local, [imported]).items
     assert item.kind == lsp.CompletionItemKind.Variable
+
+
+def test_completion_reads_the_view_generation_before_the_hand_off(
+    monkeypatch, tmp_path
+):
+    # Defect: the cursor view's thread reads the cache generation itself,
+    # so a document closed after the hand-off but before the thread starts
+    # still gets its view stored.
+    from pygls.workspace import TextDocument
+
+    pv = importlib.import_module("lispy.lsp.python_view")
+    uri = (tmp_path / "main.lpy").as_uri()
+    monkeypatch.setattr(server, "view_cache", pv.ViewCache())
+    compiled = []
+    real_view_at_cursor = pv.view_at_cursor
+
+    def counting(*args, **kwargs):
+        compiled.append(args)
+        return real_view_at_cursor(*args, **kwargs)
+
+    monkeypatch.setattr(pv, "view_at_cursor", counting)
+    real_to_thread = asyncio.to_thread
+
+    async def close_first(fn, *args, **kwargs):
+        server.view_cache.forget(uri)  # the close lands before the worker
+        return await real_to_thread(fn, *args, **kwargs)
+
+    async def no_items(*args, **kwargs):
+        return []
+
+    client = SimpleNamespace(backend_uri=lambda u: u, request=no_items)
+    document = TextDocument(uri, "(import os)\nos.pa", version=1)
+    monkeypatch.setattr(asyncio, "to_thread", close_first)
+    asyncio.run(server.backend_answer(client, document, 2, 5, None))
+    monkeypatch.setattr(asyncio, "to_thread", real_to_thread)
+    asyncio.run(server.backend_answer(client, document, 2, 5, None))
+    assert len(compiled) == 2  # the closed document's view was not kept

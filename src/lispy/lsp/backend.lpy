@@ -544,6 +544,20 @@
     ;; a cleanup a cancelled start left running (each bounded by _reap)
     (await (asyncio.gather *self._cleanups :return-exceptions True)))
 
+  (def start-soon [self]
+    "Begin starting the backend without waiting for it, so a later request
+     finds it running: the one start task every request shares
+     (_start-task), so never a second process, and none when it runs, is
+     off or closed, or has no start left.  Call on the loop.  Never
+     raises."
+    (if self.running
+        (return))
+    (try
+      (._start-task self)
+      (except [Exception]
+        (.exception logger "lispython LSP: cannot start the Python backend for %s"
+                    self.project-root))))
+
   (def kill [self]
     "Kill the process now, without the protocol (the LSP is exiting)."
     (= self.state "closed")
