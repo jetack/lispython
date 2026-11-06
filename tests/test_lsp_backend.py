@@ -354,8 +354,10 @@ def test_a_slow_start_is_bounded_and_goes_on(
             started = time.monotonic()
             assert await hover() is None
             assert time.monotonic() - started < 0.9
+            # A request that answers None at once (a backend gone off)
+            # never yields to the loop: sleep, so the timeout can fire.
             while (answer := await hover()) is None:
-                pass
+                await asyncio.sleep(0.01)
             assert answer["pid"] == client.process.pid
         finally:
             await client.shutdown()
