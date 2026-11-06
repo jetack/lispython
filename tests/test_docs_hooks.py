@@ -237,7 +237,7 @@ def test_the_page_list_is_validated_before_a_dirty_build_is_skipped(
     hooks.on_startup(command="build", dirty=True)
     hooks.on_pre_build(config)
     hooks.on_nav(type("Nav", (), {"pages": pages})(), config, files)
-    with pytest.raises(PluginError):
+    with pytest.raises(PluginError, match="llms_syntax_pages"):
         hooks.on_post_build(config)
 
 

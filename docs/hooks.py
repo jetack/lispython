@@ -42,8 +42,9 @@ _spec.loader.exec_module(docs_main)
 
 # src_uri -> rendered markdown. Never cleared, so a dirty rebuild in the same
 # process (mkdocs serve --dirty skips on_page_markdown for unchanged pages)
-# keeps their last render. A cold ``build --dirty`` starts with it empty:
-# on_post_build then leaves the llms files as the last full build wrote them.
+# keeps their last render. A cold ``build --dirty`` starts with it empty: when
+# it skips some nav page, on_post_build leaves the llms files as the last full
+# build wrote them; when it renders every page, it writes them.
 # A non-dirty build renders every included page, so a nav page without a render
 # there is a draft or excluded page in the nav, and fails the build. Entries are
 # overwritten whenever a page renders, and the output is selected through the
