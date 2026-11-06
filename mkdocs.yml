@@ -1,4 +1,5 @@
 site_name: LisPython
+site_url: https://jetack.github.io/lispython/
 site_description: >-
   LisPython is a Lisp-flavored syntax for Python: .lpy source compiles to
   Python AST and runs on CPython, with Clojure-style macros.
@@ -77,6 +78,14 @@ markdown_extensions:
       permalink: true
 
 extra:
+  # The pages of llms-syntax.txt, in this order: what an agent needs to write
+  # lispython (docs/hooks.py). Each must be a nav page.
+  llms_syntax_pages:
+    - syntax/overview.md
+    - syntax/statements.md
+    - syntax/expressions.md
+    - syntax/reference.md
+    - macros.md
   version:
     provider: mike
   analytics:

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from mkdocs.config.defaults import MkDocsConfig
+from mkdocs.exceptions import PluginError
 from mkdocs.structure.files import File, Files
 from mkdocs.structure.pages import Page
 
@@ -97,3 +98,78 @@ def test_a_backtick_run_closes_a_span_only_against_a_run_of_equal_length(
     assert rewrite(hooks, site, text) == (
         f"{opener}a [l]({SITE}syntax/statements/) {closer}"
     )
+
+
+# The real hook sequence, as mkdocs drives it, writing into tmp_path.
+NAV = [
+    ("index.md", "Home"),
+    ("syntax/statements.md", "Statements"),
+    ("syntax/expressions.md", "Expressions"),
+    ("usage/cli.md", "CLI"),
+    ("macros.md", "Macros"),
+]
+LISTED = ["macros.md", "syntax/statements.md", "syntax/expressions.md"]
+
+
+def build(hooks, tmp_path, listed, site_url=SITE):
+    config = MkDocsConfig()
+    config.load_dict(
+        {
+            "site_name": "t",
+            "site_url": site_url,
+            "site_description": "d",
+            "site_dir": str(tmp_path),
+            "extra": {"llms_syntax_pages": listed},
+        }
+    )
+    files = Files([File(src, "/src", "/out", True) for src, _ in NAV])
+    pages = [Page(title, files.get_file_from_path(src), config) for src, title in NAV]
+    hooks.on_pre_build(config)
+    hooks.on_nav(type("Nav", (), {"pages": pages})(), config, files)
+    for page in pages:
+        hooks.on_page_markdown(f"BODY {page.file.src_uri}", page, config, files)
+    hooks.on_post_build(config)
+    return {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir()}
+
+
+def page_lines(text):
+    return [line for line in text.splitlines() if line.startswith("Page: ")]
+
+
+def test_syntax_file_holds_the_listed_pages_in_list_order(hooks, tmp_path):
+    out = build(hooks, tmp_path, LISTED)
+    syntax = out["llms-syntax.txt"]
+    assert page_lines(syntax) == [
+        "Page: Macros",
+        "Page: Statements",
+        "Page: Expressions",
+    ]
+    assert syntax.index("BODY macros.md") < syntax.index("BODY syntax/statements.md")
+    assert "BODY index.md" not in syntax and "BODY usage/cli.md" not in syntax
+    # llms-full.txt keeps meaning every page, in nav order.
+    assert page_lines(out["llms-full.txt"]) == [f"Page: {t}" for _, t in NAV]
+
+
+def test_index_links_the_syntax_file_before_the_full_file(hooks, tmp_path):
+    index = build(hooks, tmp_path, LISTED)["llms.txt"]
+    syntax_link = f"[llms-syntax.txt]({SITE}llms-syntax.txt)"
+    full_link = f"[llms-full.txt]({SITE}llms-full.txt)"
+    assert 0 <= index.index(syntax_link) < index.index(full_link)
+
+
+@pytest.mark.parametrize("listed", [["macros.md", "gone.md"], ["macros.md"] * 2])
+def test_a_listed_path_that_is_no_nav_page_or_repeats_fails_the_build(
+    hooks, tmp_path, listed
+):
+    with pytest.raises(PluginError):
+        build(hooks, tmp_path, listed)
+
+
+def test_a_versioned_site_url_without_a_trailing_slash_keeps_its_version(
+    hooks, tmp_path
+):
+    # mike sets site_url to <site_url><version>, no trailing slash.
+    out = build(hooks, tmp_path, LISTED, site_url="https://example.org/docs/0.4.6")
+    base = "https://example.org/docs/0.4.6/"
+    assert f"URL: {base}macros/" in out["llms-syntax.txt"]
+    assert f"({base}llms-syntax.txt)" in out["llms.txt"]
