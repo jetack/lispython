@@ -1061,9 +1061,9 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert cache.view("u", 1, src, **kwargs).text.endswith("yy = 2 * 2 * 2")
 
-    def test_diagnostics_see_an_edited_macro_module(self, package, monkeypatch):
-        # Diagnostics put no import root on sys.path; the server's does.
-        monkeypatch.syspath_prepend(str(package.root))
+    def test_diagnostics_see_an_edited_macro_module(self, package):
+        # The document's own import root (module-names) puts its package on
+        # sys.path for the compile, as compile-buffer does for every view.
         uri = (package.pkg / "mod.lpy").as_uri()
         src = "(require .mac *)\n(= yy (twice 2))"
         assert server.compute_diagnostics(src, uri) == []
