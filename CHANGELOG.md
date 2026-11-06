@@ -62,6 +62,12 @@ follows [Semantic Versioning](https://semver.org/).
   step keep threading last (they used to thread first).
 - `conde` with an even number of operands (no final else) is a compile error
   at the call; it used to drop its last test.
+- **Breaking:** `def`, `async-def`, `class` and `defmacro` with no body
+  (`(def f [])`, `(class A [])`, a body of only `(do)`, or a `def` holding only
+  a return annotation) are a compile error at the form (`(<form> ...) needs a
+  body`; a defmacro's names its generated `def`), as the equivalent Python is a
+  SyntaxError. They used to compile to `pass`. Write the `pass` (or a
+  docstring) explicitly.
 - Built-in macros now load with no `require` (see Added), so a call to a
   function named like one (`inc`, `dec`, `when`, `fn`, `comment`, `cond`,
   ...) that the module did not bind itself, such as a name from
@@ -169,8 +175,7 @@ follows [Semantic Versioning](https://semver.org/).
 - A body that compiles to no statement, such as `(when test)` or
   `(if x (do))`, is a compile error at the form (`(if ...) needs a body`)
   for `if`, `while`, `for`, `with`, `try`, `except`, `else`, `finally` and
-  `case`, where it printed `if x:` with nothing under it. `def` with such a
-  body compiles to `pass`, as an empty `def` already did.
+  `case`, where it printed `if x:` with nothing under it.
 - An invalid escape in a string (`"\d"`) warns at the .lpy file and line of
   the string, where it named `<unknown>` line 1.
 - A malformed number glued to a keyword (`(= a 1if)`, `0x1for`, `1jor`) is

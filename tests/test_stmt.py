@@ -863,7 +863,7 @@ class TestClassBases:
         [
             ("(class A [B :metaclass M **kw] 1)", "class A(B, metaclass=M, **kw): 1"),
             ("(class A [*bs] 1)", "class A(*bs): 1"),
-            ("(class A [**kw])", "class A(**kw): pass"),
+            ("(class A [**kw] 1)", "class A(**kw): 1"),
         ],
     )
     def test_bases_compile_as_python(self, lispy, python):
@@ -915,18 +915,18 @@ class TestBodyEmptiedByDo:
             ("(try 1 (finally (do)))", "(finally ...) needs a body"),
             ("(try 1 (except E 2) (else (do)))", "(else ...) needs a body"),
             ("(match x (case 1 (do)))", "(case ...) needs a body"),
+            ("(def f [] (do))", "(def ...) needs a body"),
+            ("(def f [])", "(def ...) needs a body"),
+            ("(async-def f [] (do))", "(async-def ...) needs a body"),
+            ("(def f [] ^int)", "(def ...) needs a body"),
+            ("(class A [] (do))", "(class ...) needs a body"),
+            ("(class A [])", "(class ...) needs a body"),
         ],
     )
     def test_refused(self, src, msg):
         with pytest.raises(LispyCompileError) as info:
             src_to_python_org(src)
         assert info.value.msg.startswith(msg + ": ")
-
-    def test_def_with_only_empty_do_is_pass_like_an_empty_def(self):
-        assert stmt_to_dump("(def f [] (do))") == stmt_to_dump("(def f [])")
-
-    def test_class_with_only_empty_do_is_pass_like_an_empty_class(self):
-        assert stmt_to_dump("(class A [] (do))") == stmt_to_dump("(class A [])")
 
     def test_nonempty_do_body_still_compiles(self):
         assert stmt_to_dump("(if x (do (f) (do (g))))") == ast.dump(

@@ -914,7 +914,7 @@ def functiondef_p(sexp):
 
 def definition_parts(sexp, header):
     """``[name, bracket, body]`` of a def/async-def/class: the bracket (args
-    or bases) is required, an empty body compiles to pass."""
+    or bases) and a body are required."""
     [[name, bracket], body] = form_parts(sexp, ("name", header))
     if not isinstance(bracket, Bracket):
         raise form_error(
@@ -934,7 +934,7 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
         name=name,
         **type_params,
         args=(yield def_args_parse(args)),
-        body=((yield stmt_list_steps(body)) or [ast.Pass(**sexp.position_info)]),
+        body=(yield required_body_steps(sexp, body)),
         decorator_list=(
             (yield expr_list_steps(decorator_list)) if decorator_list else []
         ),
@@ -990,7 +990,7 @@ def classdef_compile(sexp, decorator_list):
         **type_params,
         bases=bases,
         keywords=keywords,
-        body=((yield stmt_list_steps(body)) or [ast.Pass(**sexp.position_info)]),
+        body=(yield required_body_steps(sexp, body)),
         decorator_list=(
             (yield expr_list_steps(decorator_list)) if decorator_list else []
         ),
