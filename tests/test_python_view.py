@@ -1417,3 +1417,38 @@ def test_catch_warnings_has_one_home():
             if re.search(r"warnings\.catch[_-]warnings|import catch", text):
                 offenders.append(path)
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        '(= x [1])\n(print f"{(. x |)}")',
+        '(= x [1])\n(print f"{(. x so|)}")',
+        '(= x [1])\n(print f"""a{(. x so|)}b""")',
+        '(= x [1])\n(print f"{x!r:>{(. x so|)}}")',
+        '(= x [1])\n(print f"{(. x |)} {x}")',
+    ],
+)
+def test_the_attribute_gate_agrees_with_the_view_inside_a_literal(src):
+    """The cheap gate read before a cursor view must say attribute wherever
+    the view does, f/t-string fields included."""
+    line, col = locate(src, "|")
+    source = src.replace("|", "")
+    assert pv.view_at_cursor(source, line, col).attribute
+    assert server.attribute_context_p(source, line, col)
+
+
+def test_the_attribute_gate_rejects_a_field_outside_an_attribute():
+    src = '(print f"{(len |)}")'
+    line, col = locate(src, "|")
+    assert not server.attribute_context_p(src.replace("|", ""), line, col)
+
+
+@pytest.mark.parametrize(
+    "src", ['(= x [1])\nf"{x)}"\n(. x so|)', '(= x [1])\nf"{x]}" (. x |']
+)
+def test_a_stray_closer_in_a_field_never_breaks_the_cursor_view_or_gate(src):
+    line, col = locate(src, "|")
+    source = src.replace("|", "")
+    pv.view_at_cursor(source, line, col)
+    server.attribute_context_p(source, line, col)  # must not raise
