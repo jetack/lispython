@@ -8,9 +8,9 @@ import pytest
 
 from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError, compile_errors
+from lispy.core.macro import compile_unit
 from lispy.core.nodes import FStrExpr, Paren, Symbol, atom_text
 from lispy.core.parser import parse, tokenize
-from lispy.tools import macroexpand_then_compile
 from tests.utils import stmt_to_dump
 
 T_STRINGS = (
@@ -573,12 +573,12 @@ class TestFieldsLexedInPlace:
             )
 
     def test_an_echo_is_the_field_source_text(self):
-        [stmt] = macroexpand_then_compile(parse(r'f"{(g "say \"hi\"")=}"'))
+        [stmt] = compile_unit(parse(r'f"{(g "say \"hi\"")=}"'), {})
         assert stmt.value.values[0].value == r'(g "say \"hi\"")='
 
     def test_an_echo_shows_an_escaped_quote_as_written(self):
         with pytest.warns(SyntaxWarning, match=ESCAPED_QUOTE_DEPRECATED):
-            [stmt] = macroexpand_then_compile(parse(r'f"{(.get d \"k\")=}"'))
+            [stmt] = compile_unit(parse(r'f"{(.get d \"k\")=}"'), {})
         assert stmt.value.values[0].value == r"(.get d \"k\")="
 
     @pytest.mark.parametrize(
@@ -623,7 +623,7 @@ class TestFieldsLexedInPlace:
         with pytest.warns(
             SyntaxWarning, match="^t-string: " + ESCAPED_QUOTE_DEPRECATED + "$"
         ):
-            [stmt] = macroexpand_then_compile(parse(r't"{(g \"a\")}"'))
+            [stmt] = compile_unit(parse(r't"{(g \"a\")}"'), {})
         [interpolation] = stmt.value.values
         assert ast.dump(interpolation.value) == ast.dump(
             ast.parse("g('a')", mode="eval").body
@@ -1203,7 +1203,7 @@ class TestConversion:
 
     @pytest.mark.parametrize("src", ['f"{x!r}"', 'f"{x!r }"', 'f"{x!r :>3}"'])
     def test_blanks_may_follow_the_name(self, src):
-        [field] = macroexpand_then_compile(parse(src))[0].value.values
+        [field] = compile_unit(parse(src), {})[0].value.values
         assert field.conversion == ord("r")
 
 
@@ -1334,7 +1334,7 @@ class TestQuoteOrLineBreakInFormatSpec:
 
 def _field_value(src, **names):
     """What the f-string ``src`` evaluates to, with ``names`` bound."""
-    [stmt] = macroexpand_then_compile(parse(src))
+    [stmt] = compile_unit(parse(src), {})
     expr = ast.fix_missing_locations(ast.Expression(stmt.value))
     return eval(compile(expr, "<test>", "eval"), names)
 
@@ -1377,7 +1377,7 @@ class TestBackslashContinuationInAField:
 
 
 def _read_and_compile(src):
-    return macroexpand_then_compile(parse(src))
+    return compile_unit(parse(src), {})
 
 
 def _spec_parts(field):

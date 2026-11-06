@@ -29,7 +29,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
-(from lispy.core.macro [macroexpand macroexpand-then-compile])
+(from lispy.core.macro [compile-unit macroexpand seed-prelude])
 (from lispy.core.compiler.utils [compile-nesting-errors python-interpolations])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
@@ -70,7 +70,7 @@
   (if (is scope None)
       (= scope SCOPE))
   (return (.join "\n" (map ast-to-python
-                           (macroexpand-then-compile
+                           (compile-unit
                              (parse src)
                              scope
                              :include-meta include-meta)))))
@@ -112,12 +112,15 @@
                         :dest "no_lispy"
                         :action "store_true")
 
-(def l2py-s [src :include-meta False :fresh-scope False :package "" :no-lispy False :format True]
-  "Translate lispy source string to Python source string"
+(def l2py-s [src :include-meta False :fresh-scope False :package "" :name None :no-lispy False :format True]
+  "Translate lispy source string to Python source string.  A fresh scope is
+   the module name's (when given) in package."
   (if fresh-scope
-      (= scope {"__builtins__" __builtins__
-                "__package__" package
-                "__macro_namespace" {}})
+      (do (= scope {"__builtins__" __builtins__
+                    "__package__" package
+                    "__macro_namespace" {}})
+          (if (is-not name None)
+              (= (sub scope "__name__") name)))
       (= scope SCOPE))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope :format format))
   (if no_lispy
@@ -147,8 +150,14 @@
 
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
+  ;; The module's dotted name, as the importer names it: a module of
+  ;; lispy.macros compiles without the prelude it is the source of.
+  (= stem (sub (osp.splitext (osp.basename file-path)) 0))
+  (= module-name (conde (== stem "__init__") pkg
+                        pkg (+ pkg "." stem)
+                        stem))
   (with [(compile-errors file-path src)]
-    (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :no-lispy no_lispy :format format) "\n"))))
+    (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :name module-name :no-lispy no_lispy :format format) "\n"))))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
@@ -350,13 +359,14 @@
                          :multiline True
                          :prompt-continuation "...   ")))
 
-(def eval-and-print [src :scope SCOPE :translate False :filename "<string>"]
+(def eval-and-print [src :scope SCOPE :translate False :filename "<string>" :opt-out True]
   ;; Compile every statement before running any, so compile-errors covers
   ;; compiling only; compile-nesting-errors wraps compile() alone, one
   ;; statement at a time, so a too-deep error is at the first statement
-  ;; compile() fails on, not the deepest of all.
+  ;; compile() fails on, not the deepest of all.  opt-out: src is a whole
+  ;; unit (lpy -c), not one input of a REPL session (compile-unit).
   (with [(compile-errors filename src)]
-    (= stl (macroexpand-then-compile (parse src) scope))
+    (= stl (compile-unit (parse src) scope :opt-out opt-out))
     (= codes [])
     (for st stl
       (with [(compile-nesting-errors [st])]
@@ -382,13 +392,12 @@
 
   (= session (make-repl-session))
   (= scope SCOPE)
-  (eval-and-print "(require lispy.macros *)
-(from pprint [pprint])" scope)
+  (eval-and-print "(from pprint [pprint])" scope :opt-out False)
   (while True
     (try
       (do
         (= src (session.prompt "repl> "))
-        (eval-and-print src scope translate :filename "<repl>"))
+        (eval-and-print src scope translate :filename "<repl>" :opt-out False))
       (except [SystemExit]
         (print "SystemExit caught. Exiting REPL.")
         (break))
@@ -487,17 +496,31 @@
     (= tb tb.tb_next))
   (return (.rstrip (.join "" (traceback.format-exception (type e) e tb)))))
 
-(def nrepl-eval [src scope :filename None :line 1 :column 1 :whole-file False]
+(def nrepl-eval [src scope :filename None :line None :column None :whole-file False]
   "Evaluate LisPython source, capturing stdout/stderr and return value.
 
   filename, line and column say where src sits in the editor's buffer (the
   1-based position of its first character, nREPL's file/line/column eval
-  fields); without a filename the source gets a fresh <nrepl-N> name.  The
-  source is padded to that position before parsing, so compile errors,
-  tracebacks and linecache all use buffer lines and columns.  whole-file
-  marks src as the entire file (load-file), so it starts at line 1, column
-  1.  Raises ValueError for an invalid filename, line or column; every other
+  fields; None, a field the request left out, is 1); without a filename
+  the source gets a fresh <nrepl-N> name.  The source is padded to that
+  position before parsing, so compile errors, tracebacks and linecache all
+  use buffer lines and columns.  whole-file marks src as the entire file
+  (load-file), so it starts at line 1, column 1.  A load-file, or source
+  naming a file at a line given as 1 (column 1 or not given), starts the
+  file's unit: its macros are the built-in ones alone again, and its first
+  form may narrow them (compile-unit).  Any other eval only adds, since
+  editor clients send file, line and column with every region.
+  Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
+  ;; Only a line the request sent as 1 is the file's start: a file eval with
+  ;; no line has no known position, and restarting the unit there would
+  ;; undo the file's opt-out mid-file.
+  (= file-start (and (is-not filename None)
+                     (or whole-file (and (== line 1) (in column (, None 1))))))
+  (if (is line None)
+      (= line 1))
+  (if (is column None)
+      (= column 1))
   (_nrepl-buffer-position line "line" NREPL-MAX-POSITION-LINE)
   (_nrepl-buffer-position column "column" NREPL-MAX-POSITION-COLUMN)
   (if (and whole-file (!= (, line column) (, 1 1)))
@@ -518,7 +541,7 @@
     (_nrepl-register-source filename src line column whole-file)
     ;; Compile every statement before running any (see eval-and-print).
     (with [(compile-errors filename padded)]
-      (= stl (macroexpand-then-compile (parse padded) scope))
+      (= stl (compile-unit (parse padded) scope :opt-out file-start))
       (= codes [])
       (for st stl
         (with [(compile-nesting-errors [st])]
@@ -558,6 +581,37 @@
   (with [(open file-path "rb") as f]
     (= src (.decode (f.read) "utf-8")))
   (return (nrepl-eval src scope :filename file-path :whole-file True)))
+
+;; A file's own scope (Clojure's namespace of a file): evals naming a file and
+;; load-files run in it, never in the session scope, so a file's definitions
+;; and macro choices stay its own.  Created on first use and kept for the
+;; server's lifetime; clients are served on threads, hence the lock.
+(= _NREPL-FILE-SCOPES {})  ; normalised absolute path -> scope
+(= _NREPL-FILE-SCOPES-LOCK (threading.Lock))
+
+(def nrepl-file-scope [path]
+  "The scope of the file at path, created (with the built-in macros) on first
+   use.  Its __name__ is __main__, so a load-file runs the main guard."
+  (= path (osp.abspath path))
+  (= key (osp.normcase path))
+  (with [_NREPL-FILE-SCOPES-LOCK]
+    (= scope (.get _NREPL-FILE-SCOPES key))
+    (if (is scope None)
+        (do (= [_ parts] (package-root (osp.dirname path)))
+            (= scope {"__builtins__" __builtins__
+                      "__name__" "__main__"
+                      "__package__" (.join "." parts)
+                      "__file__" path
+                      "__macro_namespace" {}})
+            (seed-prelude scope)
+            (= (sub _NREPL-FILE-SCOPES key) scope))))
+  (return scope))
+
+(def _nrepl-request-scope [msg field scope]
+  "The scope a request runs in: the file's when its field names a file (a
+   string), else the session scope."
+  (= path (.get msg field))
+  (return (ife (isinstance path str) (nrepl-file-scope path) scope)))
 
 (def nrepl-macroexpand [src scope]
   "Macroexpand LisPython source and return the expanded s-expression."
@@ -826,32 +880,37 @@
   (= op (.get msg "op" "eval"))
   (cond (== op "eval")
         ;; file/line/column: where code sits in the client's buffer; a missing
-        ;; or null field takes nrepl-eval's default.
-        (do (= line (.get msg "line"))
-            (= column (.get msg "column"))
-            (= result (nrepl-eval (sub msg "code") scope
+        ;; or null field goes to nrepl-eval as None, which tells it apart
+        ;; from a sent 1 (a file eval with no line is not the file's start).
+        (do (= result (nrepl-eval (sub msg "code")
+                                  (_nrepl-request-scope msg "file" scope)
                                   :filename (.get msg "file")
-                                  :line (ife (is line None) 1 line)
-                                  :column (ife (is column None) 1 column)))
+                                  :line (.get msg "line")
+                                  :column (.get msg "column")))
             (= (sub result "op") "eval-result")
             (return result))
 
         (== op "load-file")
-        (do (= result (nrepl-load-file (sub msg "path") scope))
+        (do (= result (nrepl-load-file (sub msg "path")
+                                       (_nrepl-request-scope msg "path" scope)))
             (= (sub result "op") "load-file-result")
             (return result))
 
         (== op "macroexpand")
-        (return (nrepl-macroexpand (sub msg "code") scope))
+        (return (nrepl-macroexpand (sub msg "code")
+                                   (_nrepl-request-scope msg "file" scope)))
 
         (== op "complete")
-        (return (nrepl-complete (sub msg "prefix") scope))
+        (return (nrepl-complete (sub msg "prefix")
+                                (_nrepl-request-scope msg "file" scope)))
 
         (== op "docs")
-        (return (nrepl-docs (sub msg "symbol") scope))
+        (return (nrepl-docs (sub msg "symbol")
+                            (_nrepl-request-scope msg "file" scope)))
 
         (== op "annotate")
-        (return (nrepl-annotate (sub msg "symbol") scope))
+        (return (nrepl-annotate (sub msg "symbol")
+                                (_nrepl-request-scope msg "file" scope)))
 
         (== op "ping")
         (return {"op" "pong"}))
@@ -952,7 +1011,7 @@
   (if (not (in cwd sys.path))
       (sys.path.insert 0 cwd))
   (= scope SCOPE)
-  (nrepl-eval "(require lispy.macros *)\n(from pprint [pprint])" scope)
+  (nrepl-eval "(from pprint [pprint])" scope)
 
   (= srv (socket.socket socket.AF-INET socket.SOCK-STREAM))
   (srv.setsockopt socket.SOL-SOCKET socket.SO-REUSEADDR 1)

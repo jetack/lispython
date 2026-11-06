@@ -1,4 +1,5 @@
 import ast
+import contextvars
 import io
 import keyword
 import re
@@ -335,6 +336,55 @@ def symbol_name(sexp):
     return python_name(sexp.name, sexp)
 
 
+# Bindings that shadow a macro. Macro lookup is by a call's head name with no
+# lexical scope (core/macro.py), so a name bound while a macro of that Python
+# name is active stays a macro call: (def inc [x] ...) then (inc 1) silently
+# expands the built-in inc. Every site that binds a name refuses that here:
+# name_compile for a stored undotted name, binding_name for every other name
+# slot (parameters, def/class names, imports, except, patterns, type
+# parameters). core/macro.py sets the value around compiling a unit's
+# forms: a callable from a binding's Python name and spelling to
+# "built-in" (a prelude macro), "macro" (any other) or None. None outside a
+# unit, and while require compiles its generated import, means no check;
+# defmacro's generated def is checked, since its parameters and locals are
+# bindings.
+ACTIVE_MACROS = contextvars.ContextVar("lispy_active_macros", default=None)
+
+
+def check_binding(name, node, spelling=None):
+    """Refuse, at ``node``, binding the Python name ``name`` where a macro of
+    that Python name is active; ``spelling`` (default: the symbol's text) is
+    how the bound name is written."""
+    active = ACTIVE_MACROS.get()
+    if active is None:
+        return
+    spelling = atom_text(node) if spelling is None else spelling
+    kind = active(name, spelling)
+    if kind is None:
+        return
+    if kind == "built-in":
+        raise LispyCompileError(
+            f"cannot bind '{spelling}': it is a built-in macro here, so "
+            f"({spelling} ...) would expand the macro instead of using this name; "
+            "rename it, or make (require lispy.macros [...]) the module's first "
+            "form listing only the macros it uses",
+            node,
+        )
+    raise LispyCompileError(
+        f"cannot bind '{spelling}': it is a macro here, so ({spelling} ...) would "
+        "expand the macro instead of using this name; rename it",
+        node,
+    )
+
+
+def binding_name(sexp):
+    """symbol_name for a symbol the construct binds, refused where it shadows
+    an active macro (check_binding)."""
+    name = symbol_name(sexp)
+    check_binding(name, sexp)
+    return name
+
+
 def method_name(method):
     """The attribute of a ``(.method obj ...)`` head: the text after its dot,
     mangled as a symbol and passed through python_name at the head."""
@@ -355,6 +405,19 @@ def module_path(sexp, relative=False):
     for part in rest:
         python_name(part, sexp)
     return [path, level]
+
+
+def hyphenated_name_p(text):
+    """Whether ``text`` is a name written with hyphens as word separators
+    (``my-x``, ``inc``): its Python name is ``text`` with each ``-`` as ``_``
+    and no hyphen leads, trails or doubles. Anything else (``->``, ``--``,
+    ``ok?``) is mangled into its Python name rather than spelled as it."""
+    name = Symbol(text).name
+    return (
+        identifier_p(name)
+        and name == text.replace("-", "_")
+        and "" not in text.split("-")
+    )
 
 
 def plain_name_p(sexp):
@@ -390,6 +453,9 @@ def name_compile(symbol, ctx):
     python_name(name, symbol)
     for attr in attrs:
         python_name(attr, symbol)
+    if ctx is ast.Store and not attrs:
+        # A stored undotted name is a binding; a dotted one an attribute.
+        check_binding(name, symbol)
     position_info = {**symbol.position_info}
     # Positions are .lpy columns: measure the spelling's components (``a.x->y``),
     # never the mangled Python names, which differ in length.

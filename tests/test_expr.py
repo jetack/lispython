@@ -3,7 +3,8 @@ import ast
 import pytest
 
 from lispy.core.errors import LispyCompileError
-from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
+from lispy.core.macro import compile_unit
+from lispy.tools import parse, src_to_python_org
 from tests.utils import stmt_to_dump
 
 
@@ -338,7 +339,7 @@ class TestNotCallableHead:
         ],
     )
     def test_compiles_and_fails_as_python_does(self, src, python, kind):
-        body = macroexpand_then_compile(parse(src))
+        body = compile_unit(parse(src), {})
         assert stmt_to_dump(src) == ast.dump(ast.parse(python))
         message = f"'{kind}' object is not callable"
         with pytest.warns(SyntaxWarning, match=message):
@@ -371,7 +372,7 @@ class TestDottedSymbolPositions:
 
     @pytest.mark.parametrize("src", ["my-x.cc.dd-ee?", "a.x->y", "a-b.c?.d->e"])
     def test_ends_follow_spelling(self, src):
-        module = macroexpand_then_compile(parse(src))
+        module = compile_unit(parse(src), {})
         node = module[0].value
         parts = src.split(".")
         end = len(src)

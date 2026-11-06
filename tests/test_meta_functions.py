@@ -2,7 +2,8 @@ import os.path as osp
 import sys
 import types
 
-from lispy.tools import l2py_s, macroexpand_then_compile, parse
+from lispy.core.macro import macroexpand_then_compile
+from lispy.tools import l2py_s, parse
 
 
 class TestMetaFunctionsSync:

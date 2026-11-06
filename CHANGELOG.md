@@ -15,9 +15,49 @@ follows [Semantic Versioning](https://semver.org/).
   `:keyword` arguments, lispython's forms and built-in macros, Python's
   keywords and builtins, and f/t-string fields. It needs Pygments installed;
   lispython itself does not depend on it. The docs' code blocks use it.
+- Built-in macros (`cond`, `conde`, `->`, `->>`, `as->`, `fn`, `comment`,
+  `when`, `inc`, `dec`, `++`, `--`) are loaded in every module with no
+  `require`: files, `lpy -m`, `lpy -c`, the REPL, nREPL, `l2py` and the LSP.
+  The prelude emits no runtime code, so `(require mod *)` never re-exports
+  them. A module opts out (or narrows) by making
+  `(require lispy.macros <selection>)` its first form, after an optional
+  docstring: `[-> ->>]` keeps only those, `[]` none, `*` all, and a bare
+  `(require lispy.macros)` only the qualified names.
+- nREPL: a file-less `eval` runs in the session's `__main__` scope with every
+  built-in; an `eval` with `file`, or `load-file`, runs in that file's own
+  macro scope. A `load-file`, or an `eval` with `file` that sends `line` 1
+  (and `column` 1 or none), starts the file again: its macros are every
+  built-in and nothing an earlier load defined, its first form's opt-out
+  applies, and so it compiles as under `lpy`; any other `eval` with `file`,
+  one without `line` included, only adds. `macroexpand`,
+  `complete`, `docs` and `annotate` accept an optional `file` to answer from
+  that file's scope.
 
 ### Changed
 
+- Built-in macros now load with no `require` (see Added), so a call to a
+  function named like one (`inc`, `dec`, `when`, `fn`, `comment`, `cond`,
+  ...) that the module did not bind itself, such as a name from
+  `(from lib *)` or a Python builtin, now expands the macro instead of
+  calling the function. Fix: make `(require lispy.macros [...])` the
+  module's first form, listing only the macros it uses (`[]` for none).
+- nREPL: an `eval` naming a `file`, and `load-file`, run in that file's own
+  scope instead of the session's, so a file-less `eval` no longer sees the
+  definitions they make. Editor clients should send `file` with `complete`,
+  `docs`, `macroexpand` and `annotate` too, to answer from the same scope.
+- Upgrading: a `.pyc` that 0.6.0 compiled for a module using a built-in
+  macro without a `require` keeps its old code until the source changes;
+  touch the file or delete its `__pycache__`.
+- Binding a name that is an active macro (`def`/`class` names, `=`,
+  augmented assignment, `:=`, parameters, `defmacro` parameters and locals,
+  `for`/`with`/`except`/comprehension targets, import names and aliases,
+  match captures, type parameters) is a compile error, compared by Python
+  name, because macro lookup is by head name and `(inc ...)` would still
+  expand the macro. This refuses code that compiled before, for example
+  `(def inc [x] ...)` or `(defmacro m [cond] ...)`. Rename the binding, or
+  list only the macros the module uses in
+  `(require lispy.macros [...])` as its first form. A `defmacro` of the same
+  name stays allowed.
 - A number-shaped digit-led symbol in a match pattern (value pattern,
   mapping-pattern key, class-pattern class name or `:attr` keyword:
   `(case 1.5if ...)`, `1.else`, `(1.5if)`, `(a.b :1.5if k)`) and a
@@ -102,6 +142,10 @@ follows [Semantic Versioning](https://semver.org/).
   same where it said "is not a valid Python name". A number token Python
   reads as two (`406E-9.8J`) is "invalid number literal" at the token, where
   it said "invalid syntax".
+- Modules shared one process-wide macro namespace, so whether `inc` worked
+  without a `require` depended on the bytecode cache and one module's
+  `defmacro`s could leak into another. Each module now has its own macro
+  scope, and `defmacro` and `require` bodies expand in their own module.
 
 ## [0.6.0] - 2026-11-02
 

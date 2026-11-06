@@ -1,4 +1,5 @@
 import ast
+import builtins
 import importlib.machinery
 import io
 import os
@@ -8,7 +9,7 @@ import sys
 
 from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import compile_errors
-from lispy.core.macro import macroexpand_then_compile
+from lispy.core.macro import compile_unit
 from lispy.core.parser import parse
 
 
@@ -41,7 +42,7 @@ def package_root(dir_path):
     return current, parts
 
 
-def _lpy_code(source, path, compile_module):
+def _lpy_code(source, path, compile_module, scope):
     """Compile .lpy source to code through ``compile_module(ast.Module)``.
 
     Every error names this file and line as a LispyCompileError: the forms
@@ -54,9 +55,12 @@ def _lpy_code(source, path, compile_module):
     first that fails alone is where compile() stopped (or, if an earlier
     statement raises its own error alone, which compiling the whole module
     never reached, that error).
+
+    scope is the module's own compile-time scope (module_scope): macros a
+    module defines or requires never reach another module.
     """
     with compile_errors(os.fsdecode(path), source):
-        tree = ast.Module(macroexpand_then_compile(parse(source)), type_ignores=[])
+        tree = ast.Module(compile_unit(parse(source), scope), type_ignores=[])
         try:
             return compile_module(tree)
         except RecursionError:
@@ -66,6 +70,11 @@ def _lpy_code(source, path, compile_module):
             # Each fits alone: report the deepest path of the module.
             with compile_nesting_errors(tree.body):
                 raise
+
+
+def module_scope(name, package):
+    """A fresh compile-time scope for the module name in package."""
+    return {"__builtins__": builtins, "__name__": name, "__package__": package}
 
 
 # # importlib.machinery.SourceFileLoader.source_to_code injection
@@ -78,10 +87,13 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
     # CPython releases (3.15 added a positional ``fullname``), and only the
     # original implementation knows what each release accepts.
     if _is_lpy_file(path):
+        name = self.name
+        package = name if self.is_package(name) else name.rpartition(".")[0]
         return _lpy_code(
             data.decode("utf-8"),
             path,
             lambda tree: _org_source_to_code(self, tree, path, *args, **kwargs),
+            module_scope(name, package),
         )
     return _org_source_to_code(self, data, path, *args, **kwargs)
 
@@ -112,7 +124,12 @@ def _lpy_get_code_from_file(*args):
         if _is_lpy_file(fname):
             with open(decoded_path, "rb") as f:
                 src = f.read().decode("utf-8")
-            code = _lpy_code(src, fname, lambda tree: compile(tree, fname, "exec"))
+            code = _lpy_code(
+                src,
+                fname,
+                lambda tree: compile(tree, fname, "exec"),
+                module_scope("__main__", ""),
+            )
         else:
             code = _org_get_code_from_file(*args)
             if not _PY312_PLUS:

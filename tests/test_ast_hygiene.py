@@ -17,7 +17,8 @@ import pathlib
 import pytest
 
 from lispy.core.importer import _lpy_source_to_code, _org_source_to_code
-from lispy.tools import macroexpand_then_compile, parse
+from lispy.core.macro import compile_unit
+from lispy.tools import parse
 
 SRC_DIR = pathlib.Path(__file__).resolve().parent.parent / "src" / "lispy"
 LPY_FILES = sorted(SRC_DIR.rglob("*.lpy"))
@@ -50,7 +51,7 @@ def _stray_keywords(module):
 
 
 def _compile_module(src):
-    return ast.Module(macroexpand_then_compile(parse(src)), type_ignores=[])
+    return ast.Module(compile_unit(parse(src), {}), type_ignores=[])
 
 
 def test_snippet_nodes_have_no_stray_keywords():

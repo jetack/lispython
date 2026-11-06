@@ -407,8 +407,18 @@
   ;; macro expansion depends on the runtime environment (imports must
   ;; actually resolve). Import errors here are often not real problems.
   (try
-    (do (from lispy.core.macro [macroexpand-then-compile])
-        (macroexpand-then-compile tree))
+    (do (from lispy.core.macro [compile-unit])
+        ;; A fresh module scope per run, named as Python imports the file
+        ;; (as compile-view's), so the prelude, its opt-out and the macros
+        ;; the buffer defines apply as when the module compiles.
+        (= path (to-fs-path uri))
+        (= [name package _] (ife (is path None)
+                                 (, "__main__" "" None)
+                                 (module-names path)))
+        (compile-unit tree {"__builtins__" builtins
+                            "__name__" name
+                            "__package__" package
+                            "__macro_namespace" {}}))
     (except [ModuleNotFoundError]
       ;; Silently ignore — the file may be using modules the LSP can't resolve
       (pass))

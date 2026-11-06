@@ -154,7 +154,7 @@ Statement forms (`do`, `=`, `+=`, `if`, `return`, `def`, ...) cannot appear insi
 LisPy version
 ```lispython
 (lambda [arg1 arg2 ...] body)
-; or the built-in macro fn (needs (require lispy.macros *))
+; or the built-in macro fn
 (fn [arg1 arg2 ...] body)
 ```
 Python version
