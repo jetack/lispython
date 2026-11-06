@@ -125,16 +125,45 @@ def test_a_location_in_generated_code_is_dropped(
     # number lands on; the location on my_x still maps to my-x.
     uri = (backend_project / "main.lpy").as_uri()
     shadow = real_backends.available_client(uri).backend_uri(uri)
-    text = python_view.compile_view(MACRO_BUFFER.replace("|", "")).text
-    backend_requests.answer["replace"] = [
-        lsp.Location(
-            uri=shadow, range=generated_range(text, "___defmacro_temp___swap")
-        ),
-        lsp.Location(uri=shadow, range=generated_range(text, "my_x", 1)),
-    ]
+
+    def answer(request):
+        # Ranges over the text actually synced for the request.
+        text = request["text"]
+        return [
+            lsp.Location(
+                uri=shadow, range=generated_range(text, "___defmacro_temp___swap")
+            ),
+            lsp.Location(uri=shadow, range=generated_range(text, "my_x", 1)),
+        ]
+
+    backend_requests.answer["replace"] = answer
     found = navigate(server.references, MACRO_BUFFER)
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_REFERENCES]
     assert spans(found) == [("main.lpy", 2, 7, 2, 11)]
+
+
+def test_the_buffer_maps_by_the_view_it_was_asked_over(
+    navigate, backend_requests, real_backends, backend_project
+):
+    # Defect: the buffer's locations map through whatever origin the client
+    # holds when the answer arrives; a sync while the request was in flight
+    # (here: the same text from a source two lines lower) moves them.
+    uri = (backend_project / "main.lpy").as_uri()
+    client = real_backends.available_client(uri)
+    shadow = client.backend_uri(uri)
+    moved = "\n\n(= my-x 1)\n(print my-x)"
+    moved_view = python_view.compile_view(moved)
+
+    def answer(request):
+        assert moved_view.text == request["text"]
+        client._sync(uri, request["text"], origin=(moved, moved_view))
+        return [
+            lsp.Location(uri=shadow, range=generated_range(request["text"], "my_x", 1))
+        ]
+
+    backend_requests.answer["replace"] = answer
+    found = navigate(server.references, "(= my-x 1)\n(print my-|x)")
+    assert spans(found) == [("main.lpy", 1, 7, 1, 11)]
 
 
 def test_backend_off_gives_the_local_answers(navigate, off_backends):
@@ -161,12 +190,16 @@ def test_a_buffer_that_does_not_compile_gives_the_local_answers(
     assert backend_requests.sent == []
 
 
-def test_a_buffer_binding_is_defined_locally(navigate, backend_requests):
-    # Defect: the buffer's own binding waits for the backend, which only
-    # finds the same place again through the view.
-    found = navigate(server.definition, "(= my-x 1)\n(print my-|x)")
-    assert spans(found) == [("main.lpy", 0, 3, 0, 7)]
-    assert backend_requests.sent == []
+def test_definition_follows_python_scopes(navigate):
+    # Defect: a function's local of the same name answers for the global
+    # (a scope-blind lookup of the buffer's bindings): the outer sep is the
+    # one (from os [sep]) binds, which the backend follows into os.
+    found = navigate(
+        server.definition, '(from os [sep])\n(def f [] (= sep "/"))\n(print se|p)'
+    )
+    assert found
+    assert not [span for span in spans(found) if span[:2] == ("main.lpy", 1)]
+    assert any(loc.uri.endswith(".pyi") for loc in found)
 
 
 @pytest.mark.parametrize("handler", [server.definition, server.references])

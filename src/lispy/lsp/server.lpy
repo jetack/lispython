@@ -28,7 +28,7 @@
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [ViewCache lpy-range module-names open-form-closers
                              partial-span py-name source-prefix view-at-cursor])
-(from lispy.lsp.backend [Backends])
+(from lispy.lsp.backend [Backends REQUEST-TIMEOUT])
 
 (= logger (logging.getLogger __name__))
 
@@ -604,8 +604,7 @@
   (if (is-not symbols None)
       (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
 
-(def collect-definitions [nodes uri :defs None :symbols None :in-function False
-                          :imports True]
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
   "Walk AST and collect all definition locations keyed by symbol name.
 
    defs feeds go-to-definition and completion, so it also holds the names
@@ -615,8 +614,7 @@
    with the kind definition-kind gives it.  Imports and loop variables bind
    names but declare nothing, so they get no symbol, and an = inside a def
    body (in-function) is a local, so it gets none either; module and
-   class-body assignments do.  With imports False the names import forms
-   bind are left out (the buffer's own bindings only)."
+   class-body assignments do."
   (if (is defs None)
       (= defs {}))
 
@@ -639,7 +637,7 @@
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
                                            :defs defs :symbols symbols
-                                           :in-function True :imports imports)))))
+                                           :in-function True)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -651,8 +649,7 @@
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs :symbols symbols
-                                       :imports imports))))
+                  (collect-definitions body uri :defs defs :symbols symbols))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
@@ -676,19 +673,17 @@
                   (.append (.setdefault defs name []) loc)))
           (collect-definitions (sub node.list [: 1 None]) uri
                                :defs defs :symbols symbols
-                               :in-function in-function :imports imports))
+                               :in-function in-function))
 
       (in form IMPORT-HEADS)
-      (if imports
-          (for [name name-node] in (buffer-import-bindings node)
-            (= loc (lsp.Location :uri uri :range (node-range name-node)))
-            (.append (.setdefault defs name []) loc)))
+      (for [name name-node] in (buffer-import-bindings node)
+        (= loc (lsp.Location :uri uri :range (node-range name-node)))
+        (.append (.setdefault defs name []) loc))
 
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs :symbols symbols :in-function in-function
-            :imports imports))))
+            uri :defs defs :symbols symbols :in-function in-function))))
 
   (return defs))
 
@@ -850,11 +845,9 @@
   (= name target.value)
   (if (in name SPECIAL-FORM-DOCS)
       (return None))
-  ;; The buffer's own bindings answer here; what an import binds is the
-  ;; backend's to follow into its module.
-  (= own (.get (collect-definitions tree doc.uri :imports False) name))
-  (if own
-      (return own))
+  ;; Every Python name goes to the backend, the buffer's own bindings too:
+  ;; it knows scopes (a function's local never answers for a global of the
+  ;; same name), and maps a buffer binding back to the same .lpy place.
   (try
     (= result (await (backend-locations doc line col target lsp.TEXT_DOCUMENT_DEFINITION
                                         (fn [document position]
@@ -2059,7 +2052,8 @@
    view must be exactly the text of shadow-path, the shadow the backend
    read, since the backend's positions lie in that text.  It runs the
    file's macros, so callers run it in a thread, reading disk-views'
-   generation before the hand-off."
+   generation before the hand-off.  A file that cannot be read loses its
+   disk-views entry, so a deleted file's view does not stay resident."
   (= lpy-path (to-fs-path lpy-uri))
   (if (or (is lpy-path None) (is shadow-path None))
       (return None))
@@ -2069,6 +2063,7 @@
     (with [(open shadow-path "r" :encoding "utf-8") as f]
       (= shadow (.read f)))
     (except [(, OSError ValueError)]
+      (.forget disk-views lpy-uri)
       (return None)))
   (= [name package import-root] (module-names lpy-path))
   (= view (.view disk-views lpy-uri source source :name name :package package
@@ -2096,23 +2091,77 @@
   (return (lsp.Range :start (client-position doc start-line start-col :lines lines)
                      :end (client-position doc end-line end-col :lines lines))))
 
-(async-def editor-location [client doc uri rng origins]
-  "The backend's location uri, rng as the editor's Location, or None when it
-   lies nowhere the editor has (BackendClient.locate).  origins caches, for
-   one answer, the disk origin (disk-origin) of each .lpy uri."
-  (= place (.locate client uri))
+(def utf16-client-p [doc]
+  "Whether doc's editor counts positions in UTF-16 units, as the backend
+   does (a document without a codec counts code points)."
+  (= codec (getattr doc "position_codec" None))
+  (return (and (is-not codec None)
+               (== (getattr codec "encoding" None) lsp.PositionEncodingKind.Utf16))))
+
+(def file-range [doc uri rng]
+  "rng, a backend range in UTF-16 units over the real file at uri, in doc's
+   client units: unchanged for an editor that counts UTF-16, else
+   converted over the lines it touches, the only ones kept as the file is
+   read; unchanged too when the file cannot be read or is shorter."
+  (if (utf16-client-p doc)
+      (return rng))
+  (= path (to-fs-path uri))
+  (= first-line (min rng.start.line rng.end.line))
+  (= last-line (max rng.start.line rng.end.line))
+  (= lines [])
+  (try
+    (with [(open path "r" :encoding "utf-8") as f]
+      (for line in f
+        (.append lines (ife (< (len lines) first-line) "" line))
+        (if (> (len lines) last-line)
+            (break))))
+    (except [(, OSError ValueError TypeError)]
+      (return rng)))
+  (if (<= (len lines) last-line)
+      (return rng))
+  (= utf16 (PositionCodec))
+  (= start (.position-from-client-units utf16 lines rng.start))
+  (= end (.position-from-client-units utf16 lines rng.end))
+  (return (lsp.Range :start (client-position doc (+ start.line 1) start.character
+                                             :lines lines)
+                     :end (client-position doc (+ end.line 1) end.character
+                                           :lines lines))))
+
+(async-def within [deadline awaitable default]
+  "awaitable's result, or default when the loop's clock passes deadline
+   first."
+  (try
+    (return (await (asyncio.wait-for awaitable
+                                     (max 0 (- deadline (.time (asyncio.get-running-loop)))))))
+    (except [TimeoutError]
+      (return default))))
+
+(async-def editor-location [doc place uri rng origins deadline]
+  "The backend's location uri, rng, placed by BackendClient.locate (place),
+   as the editor's Location, or None when it lies nowhere the editor has,
+   or its .lpy did not map by deadline (the loop's clock).  origins caches,
+   for one answer, the disk origin (disk-origin) of each .lpy uri, so each
+   file compiles at most once."
   (if (is place None)
       (return None))
   (if (== (sub place 0) "file")
-      ;; A real .py or stub: the backend's range, in UTF-16 units over that
-      ;; file, passes unchanged.
-      (return (lsp.Location :uri (sub place 1) :range rng)))
+      ;; A real .py or stub: the backend's range is in UTF-16 units over
+      ;; that file, converted only for an editor counting otherwise.
+      (return (lsp.Location
+                :uri (sub place 1)
+                :range (ife (utf16-client-p doc)
+                            rng
+                            (await (within deadline
+                                           (asyncio.to-thread file-range doc (sub place 1) rng)
+                                           rng))))))
   (= [_ lpy-uri origin] place)
   (if (is origin None)
       (do (if (not-in lpy-uri origins)
               (= (sub origins lpy-uri)
-                 (await (asyncio.to-thread disk-origin lpy-uri (to-fs-path uri)
-                                           disk-views.generation))))
+                 (await (within deadline
+                                (asyncio.to-thread disk-origin lpy-uri (to-fs-path uri)
+                                                   disk-views.generation)
+                                None))))
           (= origin (sub origins lpy-uri))))
   (if (is origin None)
       (return None))
@@ -2140,7 +2189,9 @@
    is made with the cursor at the word's end and the request asks at its
    generated start, as backend-hover does.  A location in a compiled view
    maps back to its .lpy (lpy-range), one in a real file passes, one that
-   maps nowhere is dropped (editor-location)."
+   maps nowhere is dropped (editor-location).  REQUEST-TIMEOUT bounds the
+   request and the mapping together: a location whose file has not mapped
+   by then is dropped."
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
@@ -2148,17 +2199,24 @@
   (= [start end] (partial-span text (min col (len text))))
   (if (== start end)
       (return None))
+  (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
   (= offset (- (len (py-name (sub text [: start end])))))
-  (= [view answer] (await (backend-request client doc line end None method
+  (= [view answer] (await (backend-request client doc line end REQUEST-TIMEOUT method
                                            (location-request (py-name target.value)
                                                              offset make))))
   (if (is answer None)
       (return None))
+  ;; Every location is placed now, before any await: a sync meanwhile (a
+  ;; push-buffer, another request) replaces an origin in the client.  The
+  ;; buffer's own maps by the view this answer was computed over.
+  (= own {doc.uri (, doc.source view)})
+  (= placed [(, (.locate client uri :origins own) uri rng)
+             for [uri rng] in (answer-locations answer)])
   (= origins {})
   (= seen (set))
   (= result [])
-  (for [uri rng] in (answer-locations answer)
-    (= location (await (editor-location client doc uri rng origins)))
+  (for [place uri rng] in placed
+    (= location (await (editor-location doc place uri rng origins deadline)))
     (if (is location None)
         (continue))
     (= key (, location.uri location.range.start.line location.range.start.character

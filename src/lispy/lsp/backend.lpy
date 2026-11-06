@@ -511,7 +511,7 @@
     (if (and (is-not view None) self.running (== (.get self._pushes lpy-uri) number))
         (._sync self lpy-uri view.text :origin (, source view))))
 
-  (def locate [self uri]
+  (def locate [self uri :origins None]
     "Where a location the backend answered with, at uri, lives for the
      editor, or None when it lives nowhere the editor has (drop it):
      (lpy, lpy-uri, origin) for a compiled view of a .lpy, to be mapped
@@ -525,13 +525,21 @@
      inverse); a path that leaves the view root through a link (a mirrored
      .py or .pyi, a linked directory) is the real file it reaches; anything
      else under the view root (a temporary file, a shadow whose .lpy is
-     gone) is dropped; a path outside it is a real file.  Call on the loop
-     (it reads _docs).  Never raises."
+     gone) is dropped; a path outside it is a real file.  origins (lpy uri
+     -> origin) names the origin of a document the caller knows better than
+     _docs: the requesting document's, the text its answer was computed
+     over, which a sync since the request may have replaced in _docs.
+     Call on the loop (it reads _docs), right after the answer arrives, so
+     no later sync moves another document's origin.  Never raises."
     (try
       (= path (to-fs-path uri))
       (if (is path None)
           (return None))
       (= path (osp.normpath path))
+      (for [lpy-uri origin] in (.items (or origins {}))
+        (= own (.backend-uri self lpy-uri))
+        (if (and own (== (osp.normpath (to-fs-path own)) path))
+            (return (, "lpy" lpy-uri origin))))
       (for [lpy-uri doc] in (.items self._docs)
         (= synced (to-fs-path (sub doc 0)))
         (if (or (== (sub doc 0) uri) (and synced (== (osp.normpath synced) path)))

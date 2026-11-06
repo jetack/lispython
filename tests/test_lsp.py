@@ -732,3 +732,25 @@ def test_completion_reads_the_view_generation_before_the_hand_off(
     monkeypatch.setattr(asyncio, "to_thread", real_to_thread)
     asyncio.run(server.backend_answer(client, document, 2, 5, None))
     assert len(compiled) == 2  # the closed document's view was not kept
+
+
+@pytest.mark.parametrize(
+    ["encoding", "start", "end"],
+    [("utf-16", 10, 16), ("utf-32", 9, 15), ("utf-8", 13, 19)],
+)
+def test_a_real_file_range_counts_in_the_editors_units(tmp_path, encoding, start, end):
+    # Defect: the backend's UTF-16 columns over a real .py go unchanged to
+    # an editor that negotiated another encoding, off by one per character
+    # outside the BMP (and more in UTF-8).  "target" follows a two-unit
+    # character on the file's second line.
+    from lsprotocol import types as lsp
+    from pygls.workspace import PositionCodec, TextDocument
+
+    path = tmp_path / "real.py"
+    path.write_text('x = 1\nπ = "𝒳"; target = 1\n', encoding="utf-8")
+    doc = TextDocument(URI, "", position_codec=PositionCodec(encoding=encoding))
+    utf16 = lsp.Range(
+        start=lsp.Position(line=1, character=10), end=lsp.Position(line=1, character=16)
+    )
+    got = server.file_range(doc, path.as_uri(), utf16)
+    assert (got.start.line, got.start.character, got.end.character) == (1, start, end)

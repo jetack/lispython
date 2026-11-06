@@ -152,7 +152,8 @@ def lsp_buffer(backend_project, real_backends, monkeypatch):
 def backend_requests(backend_project, real_backends, monkeypatch):
     """The methods of the requests sent to the session's backend (sent), and
     a way to set its answer (answer["value"], never asking the backend),
-    replace the answer it gives (answer["replace"]: the request is sent, so
+    replace the answer it gives (answer["replace"], a function of the
+    request's keyword arguments, text among them: the request is sent, so
     the document is synced, and its answer dropped) or act while it is
     asked (answer["during"])."""
     client = real_backends.available_client((backend_project / "main.lpy").as_uri())
@@ -167,7 +168,9 @@ def backend_requests(backend_project, real_backends, monkeypatch):
         if "value" in answer:
             return answer["value"]
         result = await real_request(method, params, **kwargs)
-        return answer.get("replace", result)
+        if "replace" in answer:
+            return answer["replace"](kwargs)
+        return result
 
     monkeypatch.setattr(client, "request", request)
     return SimpleNamespace(sent=sent, answer=answer)
