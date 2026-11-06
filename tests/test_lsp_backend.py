@@ -3,8 +3,9 @@
 The real-backend tests share one basedpyright process on one event loop in a
 background thread (a basedpyright start costs about a second and 400 MB). The
 others run a fake backend, a tiny pygls server whose hover answers with its
-pid, its copy of the document and the configuration the client gave it, each
-on its own loop; none needs basedpyright installed.
+pid, its copy of the document and the configuration the client gave it, and
+which publishes an Error on each undefined_name of a synced text, each on its
+own loop; none needs basedpyright installed.
 """
 
 import asyncio
@@ -68,10 +69,50 @@ FAKE_SERVER = textwrap.dedent(
             if "answer" in config:
                 break
             await asyncio.sleep(0.01)
+        # The column is a delay in tenths of a second before the document is
+        # read, so requests can overlap.
+        await asyncio.sleep(params.position.character / 10)
         doc = ls.workspace.get_text_document(params.text_document.uri)
         text = doc.source
         answer = {"pid": os.getpid(), "text": text, "config": config.get("answer")}
         return types.Hover(contents=json.dumps(answer))
+
+
+    def publish(ls, document):
+        # As pyright: an Error on each undefined_name, at the synced version.
+        text = ls.workspace.get_text_document(document.uri).source
+        found = []
+        for row, line in enumerate(text.split("\\n")):
+            col = line.find("undefined_name")
+            while col != -1:
+                start = types.Position(line=row, character=col)
+                end = types.Position(line=row, character=col + len("undefined_name"))
+                found.append(
+                    types.Diagnostic(
+                        range=types.Range(start=start, end=end),
+                        message='"undefined_name" is not defined',
+                        severity=types.DiagnosticSeverity.Error,
+                        code="reportUndefinedVariable",
+                        source="fake",
+                        data={"generated": True},
+                    )
+                )
+                col = line.find("undefined_name", col + 1)
+        ls.text_document_publish_diagnostics(
+            types.PublishDiagnosticsParams(
+                uri=document.uri, version=document.version, diagnostics=found
+            )
+        )
+
+
+    @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
+    def did_open(ls, params):
+        publish(ls, params.text_document)
+
+
+    @server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
+    def did_change(ls, params):
+        publish(ls, params.text_document)
 
 
     @server.feature(types.EXIT)
@@ -244,29 +285,43 @@ def test_a_document_belongs_to_its_innermost_folder(tmp_path):
     assert inside is not None and inside.project_root == os.path.realpath(project)
 
 
-def test_buffer_hooks_never_start_a_backend(project, tmp_path, fake_default, spawned):
-    # Defect: opening, editing or saving a buffer spawns the backend (a
-    # process per project on a plain edit) or compiles a view for nobody.
+@pytest.mark.parametrize("python_diagnostics", [True, False])
+def test_only_an_open_with_diagnostics_starts_a_backend(
+    python_diagnostics, project, tmp_path, fake_default, spawned
+):
+    # Defects: editing, saving or closing a buffer spawns the backend (a
+    # process per project on a plain edit); opening one with
+    # pythonDiagnostics false spawns it all the same; or opening one with
+    # them on never starts it, so no diagnostics come until some request.
     folder = SimpleNamespace(uri=project.as_uri())
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    backends.configure({"pythonDiagnostics": python_diagnostics})
     uri = (project / "main.lpy").as_uri()
-    assert backends.client_for(uri).state == "idle"
-    read = []
-
-    def source():
-        read.append(True)
-        return "(= y 2)\n"
+    client = backends.client_for(uri)
+    view = pv.compile_view("(= y 2)\n")
 
     async def scenario():
-        backends.document_changed(uri, source)
-        backends.document_saved(uri)
-        backends.document_closed(uri)
-        others = asyncio.all_tasks() - {asyncio.current_task()}
-        await asyncio.gather(*others)
+        try:
+            backends.document_changed(uri, "(= y 2)\n", view)
+            backends.document_saved(uri)
+            backends.document_closed(uri)
+            others = asyncio.all_tasks() - {asyncio.current_task()}
+            await asyncio.gather(*others)
+            assert spawned == []
+            backends.document_opened(uri)
+            if client._starting is not None:
+                assert await client._starting
+        finally:
+            await backends.shutdown_all()
 
     run_bounded(scenario())
-    assert spawned == []
-    assert read == []
+    assert len(spawned) == (1 if python_diagnostics else 0)
+    # Nobody reads its diagnostics: the backend checks nothing.
+    client._prepare_view_root()
+    config = json.loads(
+        (pathlib.Path(client.view_root.path) / "pyrightconfig.json").read_text()
+    )
+    assert config["typeCheckingMode"] == ("standard" if python_diagnostics else "off")
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +479,101 @@ def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
     assert run_bounded(scenario()) == [{"pythonPath": client.view_root.python}, {}]
 
 
+def test_a_push_waits_for_the_requests_in_flight(project, tmp_path, fake_argv):
+    # Defect: a change pushed while a request waits for its answer flips the
+    # backend's text under it, so it is answered over the full view; or the
+    # pushed view is never synced afterwards, so its diagnostics never come.
+    client = backend.BackendClient(view_root(project, tmp_path), fake_argv)
+    uri = (project / "main.lpy").as_uri()
+    client.push_buffer(uri, "(= y 5)", pv.compile_view("(= y 5)"))
+    changed = pv.compile_view("(print undefined-name)")
+
+    def hover(delay, text):
+        params = hover_params(client.backend_uri(uri), character=delay)
+        return client.request(lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=text)
+
+    async def scenario():
+        try:
+            assert await hover(0, None) is not None
+            slow = asyncio.create_task(hover(5, "cursor"))
+            while client._docs[uri][2] != "cursor":
+                await asyncio.sleep(0.01)
+            assert client.push_buffer(uri, "(print undefined-name)", changed)
+            assert fake_hover(await slow)["text"] == "cursor"
+            while client.diagnostics_for(uri, changed.text) is None:
+                await asyncio.sleep(0.01)
+            [(diagnostic, _)] = client.diagnostics_for(uri, changed.text)
+            assert diagnostic.code == "reportUndefinedVariable"
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
+
+
+def test_a_timed_out_or_cancelled_request_ends_its_flight(project, tmp_path, fake_argv):
+    # Defect: a request that times out or is cancelled stays counted in
+    # flight, so the buffer's full view is never synced back and its
+    # diagnostics never come again.
+    client = backend.BackendClient(view_root(project, tmp_path), fake_argv)
+    uri = (project / "main.lpy").as_uri()
+    full = pv.compile_view("(= y 5)")
+    client.push_buffer(uri, "(= y 5)", full)
+
+    def hover(delay, text, timeout=None):
+        params = hover_params(client.backend_uri(uri), character=delay)
+        return client.request(
+            lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=text, timeout=timeout
+        )
+
+    async def scenario():
+        try:
+            assert await hover(0, None) is not None
+            assert await hover(5, "cursor", timeout=0.1) is None
+            assert uri not in client._in_flight
+            assert client._docs[uri][2] == full.text
+            cancelled = asyncio.create_task(hover(5, "cursor"))
+            while client._docs[uri][2] != "cursor":
+                await asyncio.sleep(0.01)
+            cancelled.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancelled
+            assert uri not in client._in_flight
+            assert client._docs[uri][2] == full.text
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
+
+
+def test_overlapping_requests_keep_their_text_until_the_last_answers(
+    project, tmp_path, fake_argv
+):
+    # Defect: the first of two requests over one cursor text (completion and
+    # signature help) to answer syncs the buffer's full view back while the
+    # other still waits, which is then answered over the wrong text; or the
+    # full view is never synced back after both.
+    client = backend.BackendClient(view_root(project, tmp_path), fake_argv)
+    uri = (project / "main.lpy").as_uri()
+    full = pv.compile_view("(= y 5)")
+    client.push_buffer(uri, "(= y 5)", full)
+
+    def hover(delay, text):
+        params = hover_params(client.backend_uri(uri), character=delay)
+        return client.request(lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=text)
+
+    async def scenario():
+        try:
+            assert fake_hover(await hover(0, None))["text"] == full.text
+            fast, slow = await asyncio.gather(hover(1, "cursor"), hover(5, "cursor"))
+            assert fake_hover(fast)["text"] == "cursor"
+            assert fake_hover(slow)["text"] == "cursor"
+            assert fake_hover(await hover(0, None))["text"] == full.text
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
+
+
 def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):
     # Defect: edits to a buffer never reach a running backend, so it answers
     # for the text of the last request; or a closed buffer stays open in it.
@@ -439,7 +589,7 @@ def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):
     async def scenario():
         try:
             await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params, text="old")
-            backends.document_changed(uri, lambda: "(= my-y 2)")
+            backends.document_changed(uri, "(= my-y 2)", pv.compile_view("(= my-y 2)"))
             while (text := await backend_text()) == "old":
                 await asyncio.sleep(0.01)
             assert text == "my_y = 2"

@@ -151,7 +151,7 @@ def ws_root(tmp_path, monkeypatch):
     folder = SimpleNamespace(uri=root.as_uri())
     monkeypatch.setattr(server, "workspace_folders", lambda: [folder], raising=False)
     # didOpen/didSave also publish diagnostics, which needs a client.
-    monkeypatch.setattr(server, "publish_diagnostics", lambda ls, uri: None)
+    monkeypatch.setattr(server, "publish_diagnostics", lambda ls, uri, **kw: None)
     for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
         monkeypatch.setattr(server, name, {}, raising=False)
     return root

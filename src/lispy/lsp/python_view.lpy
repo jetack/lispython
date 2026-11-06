@@ -14,17 +14,20 @@
 (import builtins)
 (import contextlib)
 (import errno)
+(import functools)
 (import glob)
 (import hashlib)
 (import json)
 (import logging)
 (import os)
 (import os.path as osp)
+(import re)
 (import shutil)
 (import sys)
 (import tempfile)
 (import threading)
 (import time)
+(import tomllib)
 
 (try
   (import fcntl)
@@ -32,6 +35,7 @@
     (= fcntl None)
     (import msvcrt)))
 
+(from lispy.core.errors [compile-errors])
 (from lispy.core.nodes [Symbol])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.macro [compile-unit])
@@ -105,6 +109,35 @@
   (if literals
       (return None))
   (return (.join "" (reversed stack))))
+
+;; A pyright suppression in a comment's text, spaced as pyright takes one
+;; after its comment marker (a ; here, # there): ;pyright:ignore,
+;; ;; pyright: ignore[ruleA, ruleB]; group 1 is the rule list.
+(= _PYRIGHT-IGNORE (re.compile "(?:^|;)\\s*pyright:\\s*ignore(?:\\s*\\[([\\s\\w\\-,]*)\\]|\\s|$)"))
+
+(def pyright-ignores [source]
+  "Line (1-based) -> what a pyright suppression comment on it ignores in
+   source: the frozenset of the rules ; pyright: ignore[ruleA, ruleB]
+   names, or None for a bare ; pyright: ignore, every rule.  Comments are
+   the reader's own (tokenize's comment tokens), so a ; in a string is
+   none; a source the lexer cannot read keeps those before the failure."
+  (try
+    (= tokens (tokenize source :comments True))
+    (except [Exception]
+      (return {})))
+  (= found {})
+  (for [text tktype position _] in tokens
+    (if (!= tktype "comment")
+        (continue))
+    (= m (.search _PYRIGHT-IGNORE text))
+    (if (is m None)
+        (continue))
+    (= rules (.group m 1))
+    (= (sub found (sub position "lineno"))
+       (ife (is rules None)
+            None
+            (frozenset (filter None (map str.strip (.split rules ",")))))))
+  (return found))
 
 ;; Characters that end a symbol token where a name is read back from the
 ;; source: whitespace, the attribute dot, brackets, quotes, `,` and `;`.
@@ -202,6 +235,28 @@
   (def entry-at [self line col]
     "The innermost entry whose generated span holds (line, col), or None."
     (return (._innermost self (, line col) 0)))
+
+  (def range-spans [self start end]
+    "(exact, spanning) for the generated range start..end, in one pass over
+     the entries: exact, the narrowest .lpy span of the node entries (never
+     a name entry) whose generated span is exactly start..end; spanning, the
+     .lpy span of the innermost entry whose generated span holds the whole
+     range (a name wins a tie).  Either is None when there is none."
+    (= exact None)
+    (= spanning None)
+    (for entry in self.entries
+      (= [gen-start gen-end lpy-start lpy-end name-p] entry)
+      (if (or (> gen-start start) (< gen-end end))
+          (continue))
+      (if (and (not name-p) (== gen-start start) (== gen-end end)
+               (or (is exact None)
+                   (_narrower-p lpy-start lpy-end False (sub exact 0) (sub exact 1) False)))
+          (= exact (, lpy-start lpy-end)))
+      (if (or (is spanning None)
+              (_narrower-p gen-start gen-end name-p
+                           (sub spanning 0) (sub spanning 1) (sub spanning 4)))
+          (= spanning entry)))
+    (return (, exact (ife (is spanning None) None (, (sub spanning 2) (sub spanning 3))))))
 
   (def _lookup [self pos from-index to-index]
     (= best (._innermost self pos from-index))
@@ -363,6 +418,7 @@
    compile had registered once expanded: a name there is a lispython form at
    a call's head, which no Python backend knows."
   (def __init__ [self text position-map tree :macros (frozenset)]
+    (= self._lines None)
     (= self.text text)
     (= self.map position-map)
     (= self.tree tree)
@@ -371,11 +427,24 @@
     (= self.partial None)
     (= self.attribute False)
     (= self.in-import False)
-    (= self.fallback False)))
+    (= self.fallback False))
 
-(def _spelled-in [lines start end name]
+  (deco property
+    (def lines [self]
+      "text split into lines, once per text (view-at-cursor edits text)."
+      (if (or (is self._lines None) (is-not (sub self._lines 0) self.text))
+          (= self._lines (, self.text (.split self.text "\n"))))
+      (return (sub self._lines 1)))))
+
+(deco (functools.lru-cache :maxsize 8)
+  (def source-lines [source]
+    "source split into lines, as a tuple: one split per source however many
+     ranges are mapped over it."
+    (return (tuple (.split source "\n")))))
+
+(def spelled-in [lines start end name]
   "The .lpy span of the first name run between start and end in lines
-   whose py-name is name, or None.  A run is a stretch of _name-char-p
+   (source-lines) whose py-name is name, or None.  A run is a stretch of _name-char-p
    characters (a dot splits runs) less its leading _SYMBOL-PREFIXES."
   (for line in (range (sub start 0) (+ (sub end 0) 1))
     (if (> line (len lines))
@@ -420,13 +489,50 @@
                         (+ (sub lpy-start 1) (min (- (sub start 1) (sub gen-start 1)) length)))
                      (, (sub lpy-start 0)
                         (+ (sub lpy-start 1) (min (- (sub end 1) (sub gen-start 1)) length)))))))
-  (= gen-lines (.split view.text "\n"))
+  (= word (_generated-text view start end))
+  (if (or (is word None) (not (.isidentifier word)))
+      (return None))
+  (return (spelled-in (source-lines source) lpy-start lpy-end word)))
+
+(def _generated-text [view start end]
+  "The text of view between generated start and end when both lie on one
+   line of it, else None."
+  (= gen-lines view.lines)
   (if (or (!= (sub start 0) (sub end 0)) (> (sub start 0) (len gen-lines)))
       (return None))
-  (= word (sub (sub gen-lines (- (sub start 0) 1)) [: (sub start 1) (sub end 1)]))
-  (if (not (.isidentifier word))
+  (return (sub (sub gen-lines (- (sub start 0) 1)) [: (sub start 1) (sub end 1)])))
+
+(def lpy-diagnostic-range [view source start end tagged]
+  "The .lpy range in source of a backend diagnostic at the generated range
+   start..end of view, or None to drop it; positions as in lpy-range.
+   tagged: the diagnostic is a hint the editor greys or strikes out
+   (DiagnosticTag Unnecessary or Deprecated).  In order:
+   a. lpy-range (a name entry, or one identifier the innermost entry's .lpy
+      span spells);
+   b. a range that is not one identifier and is exactly the generated span
+      of node entries (an extra call argument, an unreachable statement):
+      the narrowest of their .lpy spans;
+   c. untagged only, the innermost entry holding the whole range: an error
+      inside a macro's output lands on the macro call, whose position its
+      positionless nodes took;
+   d. None, as Volar and Svelte drop what does not map.
+   A hint needs a or b, since greying the whole enclosing form would mark
+   code that is used; and an identifier that a misses (a gensym, a
+   defmacro's temporary def) is never b's, since its node took the macro
+   call's span.  lpy-range's module rule (an empty range at (1, 0)) does
+   not apply: a dropped diagnostic never moves to the module's start."
+  (if (and (== start (, 1 0)) (== end (, 1 0)))
       (return None))
-  (return (_spelled-in (.split source "\n") lpy-start lpy-end word)))
+  (= found (lpy-range view source start end))
+  (if (is-not found None)
+      (return found))
+  (= word (_generated-text view start end))
+  (= [exact spanning] (.range-spans view.map start end))
+  (if (and (is-not exact None) (not (and (is-not word None) (.isidentifier word))))
+      (return exact))
+  (if tagged
+      (return None))
+  (return spanning))
 
 ;; Who holds each import root on sys.path: directory -> [users, the entry
 ;; _on-sys-path inserted or None], under _SYS-PATH-LOCK, since threads
@@ -463,35 +569,66 @@
                         (do (del (sub sys.path i))
                             (break)))))))))))
 
-(def compile-view [source :package "" :name "__main__" :import-root None]
-  "The PythonView of source, or None when it does not become Python: a parse
-   or compile error, a failing macro, a nesting too deep to unparse.  The
-   parse is strict, as diagnostics' is.  Macros run as compute-diagnostics
-   already runs them, with import-root (module-names' third item) on
-   sys.path, so a relative require imports its package; the generated
-   module is never compiled or executed.  Warnings go where the process's
-   filters send them, as diagnostics' do (stderr, never the LSP's stdout); a
-   filter that makes one an error makes the view None, as it makes the
-   compile an error.  The filters are never swapped here: a swap is process
-   wide, so it would need a lock held across the user's macros, which every
-   other compile on the loop would then wait for."
+;; compile-buffer's stages: where a buffer that made no view failed.
+(= PARSE-STAGE "parse")
+(= COMPILE-STAGE "compile")
+(= VIEW-STAGE "view")
+
+(class CompiledBuffer []
+  "What compile-buffer made of a buffer: view, its PythonView, or None; and
+   when that is None, stage, where it failed, and error, the exception.
+   PARSE-STAGE is the reader, COMPILE-STAGE macro expansion and the
+   compiler (what diagnostics report); VIEW-STAGE is the unparse or the
+   re-parse of the generated module, which no diagnostic names."
+  (def __init__ [self view :stage None :error None]
+    (= self.view view)
+    (= self.stage stage)
+    (= self.error error)))
+
+(def compile-buffer [source :package "" :name "__main__" :import-root None
+                     :filename None]
+  "The CompiledBuffer of source: the one compile of a buffer, whose view
+   the backend gets and whose failure diagnostics report.  The parse is
+   strict and runs in compile-errors for filename (the document's path), so
+   a parse warning names that file.  Macros run with import-root
+   (module-names' third item) on sys.path, so a relative require imports
+   its package; the generated module is never compiled or executed.
+   Warnings go where the process's filters send them (stderr, never the
+   LSP's stdout); a filter that makes one an error fails the stage it was
+   issued in.  The filters are never swapped here: a swap is process wide,
+   so it would need a lock held across the user's macros, which every other
+   compile on the loop would then wait for."
   (= scope {"__builtins__" builtins
             "__name__" name
             "__package__" package
             "__macro_namespace" {}})
   (try
+    (with [(compile-errors filename source)]
+      (= forms (parse source)))
+    (except [Exception as e]
+      (return (CompiledBuffer None :stage PARSE-STAGE :error e))))
+  (try
     (with [(_on-sys-path import-root)]
-      (= module (ast.Module :body (list (compile-unit (parse source) scope))
-                            :type-ignores (list)))
-      (= module (python-interpolations module))
-      (= text (ast.unparse module))
-      (= tree (ast.parse text))
-      (= position-map (build-position-map module tree source text))
-      ;; Keys are the spellings a defmacro or require registered.
-      (= macros (frozenset (map name-key (.get scope "__macro_namespace" {})))))
-    (except [Exception]
-      (return None)))
-  (return (PythonView text position-map tree :macros macros)))
+      (= body (list (compile-unit forms scope))))
+    (except [Exception as e]
+      (return (CompiledBuffer None :stage COMPILE-STAGE :error e))))
+  (try
+    (= module (python-interpolations (ast.Module :body body :type-ignores (list))))
+    (= text (ast.unparse module))
+    (= tree (ast.parse text))
+    (= position-map (build-position-map module tree source text))
+    ;; Keys are the spellings a defmacro or require registered.
+    (= macros (frozenset (map name-key (.get scope "__macro_namespace" {}))))
+    (except [Exception as e]
+      (return (CompiledBuffer None :stage VIEW-STAGE :error e))))
+  (return (CompiledBuffer (PythonView text position-map tree :macros macros))))
+
+(def compile-view [source :package "" :name "__main__" :import-root None]
+  "The PythonView of source (compile-buffer), or None when it does not
+   become Python: a parse or compile error, a failing macro, a nesting too
+   deep to unparse."
+  (return (. (compile-buffer source :package package :name name :import-root import-root)
+             view)))
 
 ;; Stands in for the word at the cursor: a plain name, unchanged by mangling,
 ;; that compiles wherever a symbol does.
@@ -609,16 +746,26 @@
       "The forget count a view made from now on stores under."
       (return self._generation)))
 
-  (def view [self uri version source :package "" :name "__main__" :import-root None
-             :generation None]
+  (def compiled [self uri version source :package "" :name "__main__" :import-root None
+                 :filename None :generation None :fresh False]
+    "The CompiledBuffer of uri's source at version (compile-buffer), compiled
+     once per version: the diagnostics of a change and every request on the
+     same version share it.  fresh compiles again, replacing the entry."
     (if (is generation None)
         (= generation self._generation))
     (= hit (.get self._views uri))
-    (if (and (is-not hit None) (== (sub hit 0) version))
+    (if (and (not fresh) (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
-    (= result (compile-view source :package package :name name :import-root import-root))
+    (= result (compile-buffer source :package package :name name :import-root import-root
+                              :filename filename))
     (._store self self._views uri version result generation)
     (return result))
+
+  (def view [self uri version source :package "" :name "__main__" :import-root None
+             :generation None]
+    (return (. (.compiled self uri version source :package package :name name
+                          :import-root import-root :generation generation)
+               view)))
 
   (def view-at-cursor [self uri version source line col
                        :package "" :name "__main__" :import-root None
@@ -1118,9 +1265,114 @@
 
 (= PYRIGHT-CONFIG "pyrightconfig.json")
 
-(def write-pyright-config [project-root view-root :import-roots None]
-  "Write view-root's pyrightconfig.json when it changed: type checking off
-   (only completion and navigation are asked for), the search paths, and
+;; The project's rule settings the view root's config takes over: these,
+;; typeCheckingMode and every report* rule.  Never a path setting (include,
+;; exclude, extraPaths, venv, stubPath, executionEnvironments, ...): the
+;; view root owns every path, and the project's would name directories the
+;; backend reads instead of the shadows.
+(= _RULE-KEYS (frozenset ["typeCheckingMode" "strictListInference" "strictDictionaryInference"
+                          "strictSetInference" "strictParameterNoneValue"
+                          "analyzeUnannotatedFunctions" "deprecateTypingAliases"
+                          "enableTypeIgnoreComments" "enableExperimentalFeatures"
+                          "enableReachabilityAnalysis" "disableBytesTypePromotions"
+                          "pythonVersion" "pythonPlatform"]))
+
+;; basedpyright's own default, "recommended", reports every missing
+;; annotation, which most lispython code has none of; "off" leaves hints only.
+(= DEFAULT-TYPE-CHECKING-MODE "standard")
+
+(def _jsonc-to-json [text]
+  "JSONC text (pyright's config format: // and /* */ comments, trailing
+   commas) as JSON: comments outside strings become a space, and a comma
+   followed by nothing but whitespace and comments before a } or ] goes.
+   A string's escapes are skipped, so a quote or // inside one is text."
+  (= out [])
+  (= n (len text))
+  (= i 0)
+  ;; index in out of a comma that may turn out to trail
+  (= comma None)
+  (while (< i n)
+    (= ch (sub text i))
+    (cond
+      (== ch "\"")
+      (do (= j (+ i 1))
+          (while (and (< j n) (!= (sub text j) "\""))
+            (+= j (ife (== (sub text j) "\\") 2 1)))
+          (.append out (sub text [: i (+ j 1)]))
+          (= comma None)
+          (= i (+ j 1)))
+
+      (.startswith text "//" i)
+      (do (= j (.find text "\n" i))
+          (= i (ife (== j -1) n j)))
+
+      (.startswith text "/*" i)
+      (do (= j (.find text "*/" (+ i 2)))
+          (.append out " ")
+          (= i (ife (== j -1) n (+ j 2))))
+
+      True
+      (do (cond (== ch ",")
+                (= comma (len out))
+                (and (in ch "}]") (is-not comma None))
+                (do (= (sub out comma) "")
+                    (= comma None))
+                (not (.isspace ch))
+                (= comma None))
+          (.append out ch)
+          (+= i 1))))
+  (return (.join "" out)))
+
+(def _project-type-config [project-root]
+  "The project's own basedpyright/pyright settings, as a dict: its
+   pyrightconfig.json, else [tool.basedpyright], else [tool.pyright] of its
+   pyproject.toml; {} when it has none or the file that holds them is
+   malformed."
+  (= path (osp.join project-root PYRIGHT-CONFIG))
+  (try
+    (if (osp.isfile path)
+        (with [(open path "r" :encoding "utf-8") as f]
+          (= config (json.loads (_jsonc-to-json (.read f))))
+          (return (ife (isinstance config dict) config {}))))
+    (= path (osp.join project-root "pyproject.toml"))
+    (if (not (osp.isfile path))
+        (return {}))
+    (with [(open path "rb") as f]
+      (= tool (.get (tomllib.load f) "tool" {})))
+    (for key in ["basedpyright" "pyright"]
+      (= config (.get tool key))
+      (if (isinstance config dict)
+          (return config)))
+    (return {})
+    (except [(, OSError ValueError)]
+      (.debug logger "lispython view: no type checking settings read from %s" path
+              :exc-info True)
+      (return {}))))
+
+(def _rule-settings [project-root check-types]
+  "The rule settings of the view root's config: the project's rule keys
+   (_RULE-KEYS, report*), typeCheckingMode DEFAULT-TYPE-CHECKING-MODE when
+   it sets none, and the rules lispython forces.  Without check-types (no
+   diagnostic is forwarded) checking is off and the project's report*
+   rules are left out, since the backend would check for nobody; its other
+   settings (pythonVersion, pythonPlatform, ...) stay, since hover and
+   completion follow them."
+  (= rules {"typeCheckingMode" DEFAULT-TYPE-CHECKING-MODE})
+  (for [key value] in (.items (_project-type-config project-root))
+    (if (and (isinstance key str)
+             (or (in key _RULE-KEYS) (and check-types (.startswith key "report"))))
+        (= (sub rules key) value)))
+  (if (not check-types)
+      (= (sub rules "typeCheckingMode") "off"))
+  ;; lispython's reader owns string escapes: a generated string literal is
+  ;; a repr, so an escape the backend flags there is not one the user wrote.
+  (= (sub rules "reportInvalidStringEscapeSequence") "none")
+  (return rules))
+
+(def write-pyright-config [project-root view-root :import-roots None :check-types True]
+  "Write view-root's pyrightconfig.json when it changed: the project's
+   rule settings (_rule-settings; check-types false, as when no diagnostic
+   is forwarded, turns checking off), the search paths, and
    the environment of this process's interpreter.  The search paths are,
    in order, the view-root counterpart of every import root strictly inside
    the project (ShadowManifest.import-roots; <view>/src in a src layout;
@@ -1149,7 +1401,10 @@
               [project-root]))
   (.extend extra (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
                                               "site-packages"))))
-  (= config {"typeCheckingMode" "off" "extraPaths" extra})
+  ;; Every server of the project shares the view root: two run with
+  ;; different pythonDiagnostics, the last to write decides its checking.
+  (= config (_rule-settings project-root check-types))
+  (= (sub config "extraPaths") extra)
   (if (!= sys.prefix sys.base-prefix)
       (do (= (sub config "venvPath") (osp.dirname sys.prefix))
           (= (sub config "venv") (osp.basename sys.prefix))))

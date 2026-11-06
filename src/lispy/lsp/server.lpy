@@ -25,8 +25,10 @@
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
-(from lispy.lsp.python-view [ViewCache lpy-range module-names name-key name-spelling-p
-                             open-form-closers partial-span py-name source-prefix
+(from lispy.lsp.python-view [COMPILE-STAGE PARSE-STAGE ViewCache compile-buffer
+                             lpy-diagnostic-range lpy-range module-names name-key
+                             name-spelling-p open-form-closers partial-span py-name
+                             pyright-ignores source-lines source-prefix spelled-in
                              view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT])
 
@@ -125,8 +127,8 @@
       (return (list)))))
 
 ;; The Python backend of each workspace project (lispy.lsp.backend).  Its
-;; document hooks never raise and never start a backend, so the handlers
-;; below behave as they did whether or not one is installed.
+;; document hooks never raise; only an open starts a backend, and only when
+;; its diagnostics are forwarded.
 (= backends (Backends workspace-folders))
 
 (def index-required-modules [tree]
@@ -385,60 +387,216 @@
 ;; Diagnostics
 ;; ---------------------------------------------------------------------------
 
-(def compute-diagnostics [source uri]
-  (= diagnostics [])
-  ;; 1. Parse, in compile-errors so a warning the parse issues names the
-  ;; document's file.
-  (try
-    (with [(compile-errors (uri-to-path uri) source)]
-      (= tree (parse source)))
-    (except [Exception as exc]
-      (= pos (extract-error-position exc source))
-      (if (is pos None)
-          (= pos (, 0 0 0 0)))
-      (.append diagnostics
-        (lsp.Diagnostic
-          :range (make-range *pos)
-          :severity lsp.DiagnosticSeverity.Error
-          :source "lpy-lsp"
-          :message f"Parse error: {exc}"))
-      (return diagnostics)))
-  ;; 2. Compile (best-effort) — reported as warnings, since compile-time
-  ;; macro expansion depends on the runtime environment (imports must
-  ;; actually resolve). Import errors here are often not real problems.
-  (try
-    (do (from lispy.core.macro [compile-unit])
-        ;; A fresh module scope per run, named as Python imports the file
-        ;; (as compile-view's), so the prelude, its opt-out and the macros
-        ;; the buffer defines apply as when the module compiles.
-        (= path (to-fs-path uri))
-        (= [name package _] (ife (is path None)
-                                 (, "__main__" "" None)
-                                 (module-names path)))
-        (compile-unit tree {"__builtins__" builtins
-                            "__name__" name
-                            "__package__" package
-                            "__macro_namespace" {}}))
-    (except [ModuleNotFoundError]
-      ;; Silently ignore — the file may be using modules the LSP can't resolve
-      (pass))
-    (except [Exception as exc]
-      (= pos (extract-error-position exc source))
-      (if (is pos None)
-          (= pos (, 0 0 0 0)))
-      (.append diagnostics
-        (lsp.Diagnostic
-          :range (make-range *pos)
-          :severity lsp.DiagnosticSeverity.Warning
-          :source "lpy-lsp"
-          :message f"Compile warning: {exc}"))))
-  (return diagnostics))
+(def compile-document [uri version source :generation None :fresh False]
+  "The CompiledBuffer of document uri's source (python_view.compile-buffer),
+   named as Python imports its file (module-names) so the prelude, its
+   opt-out and the macros it defines apply as when the module compiles,
+   with its import root on sys.path, and its parse warnings naming the
+   file.  One compile per version (view-cache): a change's diagnostics,
+   its backend push and every request on that version share it; fresh
+   compiles again all the same and caches the result.  It runs
+   the buffer's macros, so callers on the loop run it in a thread, reading
+   view-cache's generation before the hand-off."
+  (= path (to-fs-path uri))
+  (= [name package import-root] (ife (is path None)
+                                     (, "__main__" "" None)
+                                     (module-names path)))
+  (if (is version None)
+      (return (compile-buffer source :package package :name name :import-root import-root
+                              :filename (uri-to-path uri))))
+  (return (.compiled view-cache uri version source :package package :name name
+                     :import-root import-root :filename (uri-to-path uri)
+                     :generation generation :fresh fresh)))
 
-(def publish-diagnostics [ls uri]
-  (= doc (.get-text-document ls.workspace uri))
-  (= diagnostics (compute-diagnostics doc.source uri))
+(def error-diagnostic [exc source severity message]
+  (= pos (extract-error-position exc source))
+  (if (is pos None)
+      (= pos (, 0 0 0 0)))
+  (return (lsp.Diagnostic :range (make-range *pos) :severity severity :source "lpy-lsp"
+                          :message message)))
+
+(def compute-diagnostics [source uri :compiled None]
+  "lispython's own diagnostics of source, document uri's text: its parse
+   error, an Error, or its compile error, a Warning, since macro expansion
+   depends on the runtime environment (imports must resolve); a module the
+   compile cannot import is none.  compiled is source's CompiledBuffer
+   (compile-document), compiled here when None."
+  (if (is compiled None)
+      (= compiled (compile-document uri None source)))
+  (= exc compiled.error)
+  (cond (== compiled.stage PARSE-STAGE)
+        (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Error
+                                   f"Parse error: {exc}")])
+        (and (== compiled.stage COMPILE-STAGE) (not (isinstance exc ModuleNotFoundError)))
+        (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Warning
+                                   f"Compile warning: {exc}")]))
+  (return (list)))
+
+;; Seconds a change's diagnostics wait for the backend's, once its view
+;; reached a running backend: past it lispython's own are published alone,
+;; and the backend's republish the set when they come.
+(= DIAGNOSTICS-TIMEOUT 2)
+
+(class DiagnosticRun []
+  "The diagnostics of one change of a document: ls, the server to publish
+   through; doc, a snapshot of the document (document-snapshot); recompile,
+   whether its compile bypasses the view cache (a save); then, once
+   compiled (compiled), lispy, lispython's own diagnostics, and view, the
+   buffer's full PythonView or None.  arrived is set while the run waits
+   for the backend's diagnostics; published counts its publishes, so an
+   older one finishing last never replaces a newer; ignores memoises the
+   buffer's pyright-ignores for every publish of the run."
+  (def __init__ [self ls doc :recompile False]
+    (= self.ls ls)
+    (= self.doc doc)
+    (= self.recompile recompile)
+    (= self.compiled False)
+    (= self.lispy None)
+    (= self.view None)
+    (= self.arrived None)
+    (= self.published 0)
+    (= self.ignores None)))
+
+;; uri -> the DiagnosticRun of the document's latest change, the only one
+;; that may publish.
+(= DIAGNOSTIC-RUNS {})
+;; The uris whose compile-latest is running: at most one per document.
+(= _COMPILING (set))
+;; The runs' tasks, referenced while they run (the loop holds tasks only
+;; weakly).
+(= _DIAGNOSTIC-TASKS (set))
+
+(def _wake [run]
+  (if (and (is-not run None) (is-not run.arrived None))
+      (.set run.arrived)))
+
+(def _current-p [run]
+  (return (is (.get DIAGNOSTIC-RUNS run.doc.uri) run)))
+
+(def _schedule-run [coroutine]
+  (= task (asyncio.ensure-future coroutine))
+  (.add _DIAGNOSTIC-TASKS task)
+  (.add-done-callback task _DIAGNOSTIC-TASKS.discard)
+  (.add-done-callback task _diagnostics-done))
+
+(def _diagnostics-done [task]
+  (if (and (not (.cancelled task)) (is-not (.exception task) None))
+      (.error logger "lispython LSP: diagnostics failed" :exc-info (.exception task))))
+
+(def publish-diagnostics [ls uri :opened False :recompile False]
+  "Publish document uri's diagnostics as it is now, from tasks of the loop
+   (the handlers that call this are synchronous): the change becomes the
+   document's latest run, which compile-latest compiles unless a newer
+   change supersedes it first.  opened: the document was just opened,
+   which starts its backend now (Backends.document-opened, never waiting),
+   so a change before the open's compile cannot skip the start.
+   recompile: compile again even at a cached version (a save: the macros
+   may read what changed on disk)."
+  (= doc (document-snapshot (.get-text-document ls.workspace uri)))
+  (= run (DiagnosticRun ls doc :recompile recompile))
+  (_wake (.get DIAGNOSTIC-RUNS uri))
+  (= (sub DIAGNOSTIC-RUNS uri) run)
+  (if opened
+      (.document-opened backends uri))
+  (if (not-in uri _COMPILING)
+      (do (.add _COMPILING uri)
+          (_schedule-run (compile-latest uri)))))
+
+(async-def compile-latest [uri]
+  "Compile document uri's latest run (compile-document, in a thread), and
+   again while a newer change came during that compile: one compile in
+   flight per document, and none for a change superseded before its
+   compile began, since every compile runs the buffer's macros.  Each
+   compiled run that is still the latest goes on in a task of its own
+   (finish-run).  A compile that raises is logged and its run dropped, and
+   the loop goes on, so a change recorded meanwhile is still compiled."
+  (try
+    (while True
+      (= run (.get DIAGNOSTIC-RUNS uri))
+      (if (or (is run None) run.compiled)
+          (break))
+      (= run.compiled True)
+      (= doc run.doc)
+      (try
+        (= compiled (await (asyncio.to-thread compile-document doc.uri doc.version
+                                              doc.source
+                                              :generation view-cache.generation
+                                              :fresh run.recompile)))
+        (except [Exception]
+          (.exception logger "lispython LSP: cannot compile %s" uri)
+          (continue)))
+      (if (_current-p run)
+          (_schedule-run (finish-run run compiled))))
+    (finally
+      (.discard _COMPILING uri))))
+
+(async-def finish-run [run compiled]
+  "Turn run's compile into lispython's diagnostics, push its view to the
+   backend, and publish them with the backend's for that view: waited for
+   up to DIAGNOSTICS-TIMEOUT when the view reached a running backend,
+   published at once otherwise.  Nothing is pushed or published once a
+   newer change or a close superseded run, which may come between the
+   compile and this task: a push then would reopen a closed document in
+   the backend, or send it a stale view."
+  (if (not (_current-p run))
+      (return))
+  (= doc run.doc)
+  (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled))
+  (= run.view compiled.view)
+  (if (and (is-not run.view None)
+           (.document-changed backends doc.uri doc.source run.view))
+      (await (wait-backend-diagnostics run)))
+  (await (publish-run run)))
+
+(async-def wait-backend-diagnostics [run]
+  "Wait until the backend's diagnostics for run's view are known, at most
+   DIAGNOSTICS-TIMEOUT, and no longer once a newer change superseded run."
+  (= deadline (+ (.time (asyncio.get-running-loop)) DIAGNOSTICS-TIMEOUT))
+  (= run.arrived (asyncio.Event))
+  (try
+    (while (and (_current-p run)
+                (is (.backend-diagnostics backends run.doc.uri run.view.text) None))
+      (.clear run.arrived)
+      (if (not (await (within deadline (.wait run.arrived) False)))
+          (break)))
+    (finally
+      (= run.arrived None))))
+
+(def backend-diagnostics-arrived [uri]
+  "The backend published diagnostics for document uri (Backends'
+   on-diagnostics): the latest run waiting for them takes them, else one
+   already published publishes again, so a set that came late, or after a
+   start or a change elsewhere in the project, reaches the editor."
+  (= run (.get DIAGNOSTIC-RUNS uri))
+  (cond (is run None)
+        (return)
+        (is-not run.arrived None)
+        (.set run.arrived)
+        (> run.published 0)
+        (_schedule-run (publish-run run))))
+
+(= backends.on-diagnostics backend-diagnostics-arrived)
+
+(async-def publish-run [run]
+  "Publish run's diagnostics if it is still its document's latest: lispython's
+   own, and the backend's only when the buffer made a view (a parse or
+   compile error wins: the backend's last set is for another text) and they
+   were published for that view's text (mapped-backend-diagnostics)."
+  (+= run.published 1)
+  (= number run.published)
+  (= diagnostics (list run.lispy))
+  (if (is-not run.view None)
+      (.extend diagnostics (await (mapped-backend-diagnostics run))))
+  (if (and (_current-p run) (== run.published number))
+      (.text-document-publish-diagnostics run.ls
+        (lsp.PublishDiagnosticsParams :uri run.doc.uri :diagnostics diagnostics))))
+
+(def forget-diagnostics [ls uri]
+  "Document uri closed: no run of it publishes any more, and its
+   diagnostics are cleared, so the backend's do not linger in the editor."
+  (_wake (.pop DIAGNOSTIC-RUNS uri None))
   (.text-document-publish-diagnostics ls
-    (lsp.PublishDiagnosticsParams :uri uri :diagnostics diagnostics)))
+    (lsp.PublishDiagnosticsParams :uri uri :diagnostics (list))))
 
 ;; ---------------------------------------------------------------------------
 ;; Document symbols
@@ -740,31 +898,26 @@
   (if folders
       (index-workspace folders))))
 
-(def buffer-source-getter [ls uri]
-  (return (fn [] (. (.get-text-document ls.workspace uri) source))))
-
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
   (= uri params.text_document.uri)
   (index-file uri)
-  (publish-diagnostics ls uri)
-  (.document-changed backends uri (buffer-source-getter ls uri))))
+  (publish-diagnostics ls uri :opened True)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_CHANGE)
 (def did-change [ls params]
-  (= uri params.text_document.uri)
-  (publish-diagnostics ls uri)
-  (.document-changed backends uri (buffer-source-getter ls uri))))
+  (publish-diagnostics ls params.text_document.uri)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
 (def did-save [ls params]
   (= uri params.text_document.uri)
   (index-file uri)
-  (publish-diagnostics ls uri)
+  (publish-diagnostics ls uri :recompile True)
   (.document-saved backends uri)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_CLOSE)
 (def did-close [ls params]
+  (forget-diagnostics ls params.text_document.uri)
   (.forget view-cache params.text_document.uri)
   (.document-closed backends params.text_document.uri)))
 
@@ -1796,24 +1949,34 @@
       (return None))
   (return (, source view)))
 
-(def origin-range [doc origin rng]
+(def origin-span [origin rng :map-range lpy-range]
   "rng, a backend range over the text of origin's view in UTF-16 units (the
    protocol's default, which the backend client keeps: generated-position),
-   as the range of origin's .lpy source in doc's client units, or None when
-   it maps nowhere (lpy-range)."
+   as the ((line col) (line col)) span of origin's .lpy source in code
+   points that map-range (lpy-range's arguments and answer) gives, or None
+   when it maps nowhere."
   (= [source view] origin)
   (= codec (PositionCodec))
-  (= gen-lines (.split view.text "\n"))
+  (= gen-lines view.lines)
   (= start (.position-from-client-units codec gen-lines rng.start))
   (= end (.position-from-client-units codec gen-lines rng.end))
-  (= mapped (lpy-range view source (, (+ start.line 1) start.character)
-                       (, (+ end.line 1) end.character)))
-  (if (is mapped None)
-      (return None))
-  (= lines (.split source "\n"))
-  (= [[start-line start-col] [end-line end-col]] mapped)
+  (return (map-range view source (, (+ start.line 1) start.character)
+                     (, (+ end.line 1) end.character))))
+
+(def span-range [doc span lines]
+  "The code-point span ((line col) (line col)) over lines as an LSP Range
+   in doc's client units."
+  (= [[start-line start-col] [end-line end-col]] span)
   (return (lsp.Range :start (client-position doc start-line start-col :lines lines)
                      :end (client-position doc end-line end-col :lines lines))))
+
+(def origin-range [doc origin rng]
+  "rng (origin-span's) as the range of origin's .lpy source in doc's
+   client units, or None when it maps nowhere (lpy-range)."
+  (= span (origin-span origin rng))
+  (if (is span None)
+      (return None))
+  (return (span-range doc span (.split (sub origin 0) "\n"))))
 
 (def utf16-client-p [doc]
   "Whether doc's editor counts positions in UTF-16 units, as the backend
@@ -1893,6 +2056,106 @@
   (if (is mapped None)
       (return None))
   (return (lsp.Location :uri lpy-uri :range mapped)))
+
+;; ---------------------------------------------------------------------------
+;; Diagnostics from the Python backend
+;; ---------------------------------------------------------------------------
+
+;; The tags of a hint the editor greys or strikes out, which maps only onto
+;; code that is the very thing it marks (lpy-diagnostic-range).
+(= HINT-TAGS (frozenset [lsp.DiagnosticTag.Unnecessary lsp.DiagnosticTag.Deprecated]))
+
+;; A double-quoted Python identifier in a backend's message, as pyright
+;; quotes a name: "my_x" is not defined.
+(= _QUOTED-NAME (re.compile "\"([^\\W\\d]\\w*)\""))
+
+(def message-to-buffer [message lines span]
+  "A backend's message with each quoted Python name that a symbol inside
+   span (the .lpy code the diagnostic maps onto, over lines, source-lines')
+   spells in the buffer's spelling (spelled-in, by py-name): my_x as the
+   my-x written there.  Anything else quoted stays as it is: a name spelled
+   only elsewhere may be no symbol at all (a TypedDict key, a string)."
+  (= [start end] span)
+  (def spelled [m]
+    (= found (spelled-in lines start end (.group m 1)))
+    (if (or (is found None) (!= (sub (sub found 0) 0) (sub (sub found 1) 0)))
+        (return (.group m 0)))
+    (= [[line col] [_ end-col]] found)
+    (return f"\"{(sub (sub lines (- line 1)) [: col end-col])}\""))
+  (return (.sub _QUOTED-NAME spelled message)))
+
+(async-def editor-diagnostic [doc origin lines diagnostic places origins deadline]
+  "The backend's diagnostic over origin's view as the editor's on the .lpy
+   document doc (a snapshot of origin's source, split as lines), or None
+   to drop it: its range by lpy-diagnostic-range, its message in the
+   buffer's spelling (message-to-buffer), each related location from its
+   place (located when the backend published, BackendClient.locate) as a
+   definition's is (editor-location; one that maps nowhere is dropped), its
+   source the backend's name.  Severity, code, its description and tags are
+   kept; data is never passed on, since it describes generated code."
+  (= tagged (bool (& (set (or diagnostic.tags (list))) HINT-TAGS)))
+  (= span (origin-span origin diagnostic.range
+                       :map-range (fn [view source start end]
+                                    (lpy-diagnostic-range view source start end tagged))))
+  (if (is span None)
+      (return None))
+  (= related None)
+  (if diagnostic.related-information
+      (do (= related [])
+          (for [info place] in (zip diagnostic.related-information places)
+            (= location (await (editor-location doc place info.location.uri
+                                                info.location.range origins deadline)))
+            (if (is-not location None)
+                (.append related
+                  (lsp.DiagnosticRelatedInformation :location location
+                                                    :message info.message))))))
+  (return (lsp.Diagnostic
+            :range (span-range doc span lines)
+            :severity diagnostic.severity
+            :code diagnostic.code
+            :code-description diagnostic.code-description
+            :source backends.name
+            :message (message-to-buffer diagnostic.message lines span)
+            :tags diagnostic.tags
+            :related-information (or related None))))
+
+(def suppressed-p [diagnostic ignores]
+  "Whether the editor's diagnostic is suppressed by a pyright comment on
+   the .lpy line its range starts on (ignores, pyright-ignores'): a bare
+   one suppresses every rule, a listed one the rules it names."
+  (= line (+ diagnostic.range.start.line 1))
+  (if (not-in line ignores)
+      (return False))
+  (= rules (sub ignores line))
+  (return (or (is rules None) (in diagnostic.code rules))))
+
+(async-def mapped-backend-diagnostics [run]
+  "The backend's diagnostics published for run's view, the full view of its
+   document's source, as the editor's (editor-diagnostic), in the backend's
+   order, less those a ; pyright: ignore comment suppresses (suppressed-p,
+   the comments read once per run); [] when it has published none for that
+   text.  DIAGNOSTICS-TIMEOUT bounds the mapping of related locations."
+  (= doc run.doc)
+  (= published (.backend-diagnostics backends doc.uri run.view.text))
+  (if (is published None)
+      (return (list)))
+  (if (is run.ignores None)
+      (= run.ignores (pyright-ignores doc.source)))
+  (= origin (, doc.source run.view))
+  (= lines (source-lines doc.source))
+  (= deadline (+ (.time (asyncio.get-running-loop)) DIAGNOSTICS-TIMEOUT))
+  (= origins {})
+  (= result [])
+  (for [diagnostic places] in published
+    (try
+      (= mapped (await (editor-diagnostic doc origin lines diagnostic places origins
+                                          deadline)))
+      (except [Exception]
+        (.debug logger "backend diagnostic dropped" :exc-info True)
+        (= mapped None)))
+    (if (and (is-not mapped None) (not (suppressed-p mapped run.ignores)))
+        (.append result mapped)))
+  (return result))
 
 (def location-request [head offset make whole]
   "make-params of a definition or references request at the generated start

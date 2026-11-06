@@ -24,8 +24,8 @@
 (from pygls.lsp.client [LanguageClient])
 (from pygls.uris [to-fs-path])
 
-(from lispy.lsp.python-view [ShadowManifest compile-view module-names view-path
-                             view-root-for write-pyright-config write-shadows])
+(from lispy.lsp.python-view [ShadowManifest view-path view-root-for write-pyright-config
+                             write-shadows])
 
 (= logger (logging.getLogger __name__))
 
@@ -119,6 +119,13 @@
       (return None))
   (return (find)))
 
+(def resolve-python-diagnostics [init-options]
+  "Whether the backend's diagnostics are forwarded, from the LSP client's
+   initializationOptions key \"pythonDiagnostics\": only false turns them
+   off; missing or None leaves them on (they need a backend all the same)."
+  (return (not (and (isinstance init-options dict)
+                    (is (.get init-options "pythonDiagnostics") False)))))
+
 (def resolve-backend [init-options]
   "The backend name from the LSP client's initializationOptions (a dict or
    None), key \"backend\".  Missing or None: basedpyright when installed,
@@ -164,7 +171,11 @@
 (def backend-settings [view-root]
   (return {"python" {"pythonPath" view-root.python}
            "basedpyright" {"analysis" {"autoImportCompletions" False
-                                       "autoSearchPaths" True}}}))
+                                       "autoSearchPaths" True
+                                       ;; The view root holds a shadow of every
+                                       ;; .lpy of the project: only the open
+                                       ;; buffers are analysed, never them all.
+                                       "diagnosticMode" "openFilesOnly"}}}))
 
 (def settings-section [settings section]
   "The value at dotted section of settings, {} when there is none."
@@ -183,13 +194,13 @@
       ;; basedpyright.analysis; the rest is pyrightconfig.json's.
       (= settings (backend-settings view-root))
       (return [(settings-section settings item.section) for item in params.items])))
+  (deco (client.feature lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)
+    (def publish-diagnostics [params]
+      (._diagnostics-published client.owner client params)))
   (for method in [lsp.CLIENT_REGISTER_CAPABILITY
                   lsp.CLIENT_UNREGISTER_CAPABILITY
                   lsp.WINDOW_WORK_DONE_PROGRESS_CREATE
-                  lsp.PROGRESS
-                  ;; Dropped, never forwarded: the backend's diagnostics land
-                  ;; on generated code the user never wrote.
-                  lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS]
+                  lsp.PROGRESS]
     ((.feature client method) (fn [params] None)))
   (for method in [lsp.WINDOW_LOG_MESSAGE lsp.WINDOW_SHOW_MESSAGE]
     ((.feature client method)
@@ -234,7 +245,19 @@
                                            (lsp.ClientSignatureParameterInformationOptions
                                              :label-offset-support True)))
                        :definition (lsp.DefinitionClientCapabilities)
-                       :references (lsp.ReferenceClientCapabilities))
+                       :references (lsp.ReferenceClientCapabilities)
+                       ;; The version tells a full view's diagnostics from a
+                       ;; request's cursor view's (_diagnostics-published);
+                       ;; pyright reports unused and unreachable code only to
+                       ;; a client that takes the Unnecessary tag.
+                       :publish-diagnostics (lsp.PublishDiagnosticsClientCapabilities
+                                              :version-support True
+                                              :related-information True
+                                              :code-description-support True
+                                              :tag-support
+                                              (lsp.ClientDiagnosticsTagOptions
+                                                :value-set [lsp.DiagnosticTag.Unnecessary
+                                                            lsp.DiagnosticTag.Deprecated])))
       :workspace (lsp.WorkspaceClientCapabilities
                    :configuration True
                    :did-change-watched-files (lsp.DidChangeWatchedFilesClientCapabilities
@@ -256,12 +279,18 @@
    leaves the backend off.  state is idle (not started), running, dead
    (waiting for its restart), off or closed (after shutdown); process is
    the running process.  Documents are synced by full text, keyed by their
-   .lpy uri, as the view-path shadow's uri.  definition-walks-up is True
-   for a backend in DEFINITION-WALKS-UP."
-  (def __init__ [self view-root argv :manifest None :definition-walks-up False]
+   .lpy uri, as the view-path shadow's uri: a buffer's full view
+   (push-buffer), or a request's cursor view, after whose answer the full
+   view is synced back.  Its diagnostics are kept only for a full view's
+   text (_diagnostics-published, diagnostics-for).  definition-walks-up is
+   True for a backend in DEFINITION-WALKS-UP."
+  (def __init__ [self view-root argv :manifest None :check-types True
+                 :definition-walks-up False]
     (= self.view-root view-root)
     (= self.project-root (osp.realpath view-root.project-root))
     (= self.argv argv)
+    ;; write-pyright-config's: False when no diagnostic is forwarded.
+    (= self.check-types check-types)
     (= self.definition-walks-up definition-walks-up)
     (= self.manifest (ife (is manifest None) (ShadowManifest) manifest))
     (= self.state (ife (is argv None) OFF "idle"))
@@ -278,12 +307,19 @@
     ;; spawn: origin is (source, view), the .lpy source and the PythonView
     ;; whose text was sent, or None when the sender did not say (locate).
     (= self._docs {})
-    ;; lpy uri -> the number of its latest push-buffer, so an older compile
-    ;; that finishes last never replaces a newer text.  The numbers come
-    ;; from one counter that is never reset: a document closed and reopened
-    ;; while a push is compiling never gets that push's number again.
-    (= self._pushes {})
-    (= self._push-count 0))
+    ;; lpy uri -> (text, origin) of the buffer's latest full view
+    ;; (push-buffer), kept across spawns: a start opens each in the new
+    ;; process, and a request that synced a cursor view puts it back.
+    (= self._full {})
+    ;; lpy uri -> (text, diagnostics) the backend last published for a
+    ;; full view's text (_diagnostics-published).
+    (= self._diagnostics {})
+    ;; Called with an lpy uri on the loop when its diagnostics arrive; set by
+    ;; Backends.
+    (= self.on-diagnostics None)
+    ;; lpy uri -> its requests in flight (request), which a full view's
+    ;; sync waits for.
+    (= self._in-flight {}))
 
   (deco property
     (def running [self]
@@ -315,7 +351,8 @@
     (os.makedirs root :exist-ok True)
     (write-shadows self.project-root root :manifest self.manifest)
     (write-pyright-config self.project-root root
-                          :import-roots self.manifest.import-roots))
+                          :import-roots self.manifest.import-roots
+                          :check-types self.check-types))
 
   (def _start-task [self]
     "The task starting the backend: the one in progress, else a new one when
@@ -381,6 +418,10 @@
         (do (await (._discard self))
             (return False)))
     (= self.state "running")
+    ;; The buffers pushed while it started: their diagnostics need their
+    ;; text in the backend, which no request may ever send.
+    (for lpy-uri in (list self._full)
+      (._sync-full self lpy-uri))
     (return True))
 
   (async-def _spawn [self]
@@ -486,40 +527,113 @@
       (if (not (await (._ensure-started self deadline)))
           (return failed))
       (= client self._client)
-      (if (and (is-not uri None) (is-not text None))
-          (._sync self uri text :origin origin))
-      (= msg-id (str (uuid.uuid4)))
-      (= answer (.send-request-async client.protocol method params :msg-id msg-id))
-      ;; shielded, so a timeout cancels only this wait: the late answer then
-      ;; resolves a future nobody awaits instead of one already cancelled.
-      (.add-done-callback answer _retrieve)
+      (if (is-not uri None)
+          (= (sub self._in-flight uri) (+ (.get self._in-flight uri 0) 1)))
       (try
-        (return (await (asyncio.wait-for (asyncio.shield answer) (_remaining deadline))))
-        (except [TimeoutError]
-          (.debug logger "python backend: %s timed out" method)
-          (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
-          (return failed)))
+        (if (and (is-not uri None) (is-not text None))
+            (._sync self uri text :origin origin))
+        (= msg-id (str (uuid.uuid4)))
+        (= answer (.send-request-async client.protocol method params :msg-id msg-id))
+        ;; shielded, so a timeout cancels only this wait: the late answer
+        ;; then resolves a future nobody awaits instead of one cancelled.
+        (.add-done-callback answer _retrieve)
+        (try
+          (return (await (asyncio.wait-for (asyncio.shield answer) (_remaining deadline))))
+          (except [TimeoutError]
+            (.debug logger "python backend: %s timed out" method)
+            (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
+            (return failed)))
+        (finally
+          (if (is-not uri None)
+              (._request-done self uri))))
       (except [Exception as e]
         (.debug logger "python backend: %s failed: %s" method e)
         (return failed))))
 
-  (async-def push-buffer [self lpy-uri source]
-    "Send the view of buffer source to a running backend (nothing when it is
-     not running).  A buffer whose view does not compile sends nothing, so
-     the backend keeps the last good text."
+  (def _request-done [self lpy-uri]
+    "A request on document lpy-uri ended.  Once none is left in flight, the
+     backend analyses the buffer's full view again (a cursor view's
+     diagnostics are never forwarded); never while another still waits for
+     its answer over the text it synced."
+    (= left (- (.get self._in-flight lpy-uri 1) 1))
+    (if (> left 0)
+        (do (= (sub self._in-flight lpy-uri) left)
+            (return)))
+    (.pop self._in-flight lpy-uri None)
+    (._sync-full self lpy-uri))
+
+  (def push-buffer [self lpy-uri source view]
+    "Make view, the full PythonView of buffer source (the one compile of
+     the change, never a second), the buffer's text in the backend: sent at
+     once to a running one, else at its start; while requests on the
+     document are in flight, when the last ends (_request-done), never
+     under a request still waiting for its answer over the text it synced.
+     True when the running backend has it or will.  The caller pushes only
+     a view that compiled, so the backend keeps the last good text.  Call
+     on the loop."
+    (= (sub self._full lpy-uri) (, view.text (, source view)))
     (if (not self.running)
+        (return False))
+    (if (> (.get self._in-flight lpy-uri 0) 0)
+        (return True))
+    (return (._sync-full self lpy-uri)))
+
+  (def _sync-full [self lpy-uri]
+    "Sync lpy-uri's latest full view (_full) to a running backend; True when
+     the backend has it.  Never raises."
+    (= full (.get self._full lpy-uri))
+    (if (or (is full None) (not self.running))
+        (return False))
+    (try
+      (return (._sync self lpy-uri (sub full 0) :origin (sub full 1)))
+      (except [Exception]
+        (.debug logger "python backend: cannot sync %s" lpy-uri :exc-info True)
+        (return False))))
+
+  (def _diagnostics-published [self client params]
+    "The backend published diagnostics (publishDiagnostics params) from
+     client's process.  Kept only for the text of a buffer's full view: the
+     document must be one this process has open, at the version published,
+     and its text then the buffer's latest full view (_full), never a
+     request's cursor view, whose text the user does not see.  on-diagnostics
+     then hears of it.  Call on the loop.  Never raises."
+    (try
+      (if (is-not client self._client)
+          (return))
+      (= path (to-fs-path params.uri))
+      (= path (ife (is path None) None (osp.normpath path)))
+      (for [lpy-uri doc] in (list (.items self._docs))
+        (= synced (to-fs-path (sub doc 0)))
+        (if (not (or (== (sub doc 0) params.uri)
+                     (and path synced (== (osp.normpath synced) path))))
+            (continue))
+        (= full (.get self._full lpy-uri))
+        (if (or (is params.version None) (!= params.version (sub doc 1))
+                (is full None) (!= (sub full 0) (sub doc 2)))
+            (return))
+        ;; Related locations are placed now, as locate requires, through
+        ;; the origin of the text the backend analysed.
+        (= origins {lpy-uri (sub full 1)})
+        (= (sub self._diagnostics lpy-uri)
+           (, (sub doc 2)
+              [(, diagnostic [(.locate self info.location.uri :origins origins)
+                              for info in (or diagnostic.related-information [])])
+               for diagnostic in params.diagnostics]))
+        (if (is-not self.on-diagnostics None)
+            (self.on-diagnostics lpy-uri))
         (return))
-    (+= self._push-count 1)
-    (= number self._push-count)
-    (= (sub self._pushes lpy-uri) number)
-    (= path (to-fs-path lpy-uri))
-    (if (is path None)
-        (return))
-    (= [name package import-root] (module-names path))
-    (= view (await (asyncio.to-thread compile-view source :name name :package package
-                                      :import-root import-root)))
-    (if (and (is-not view None) self.running (== (.get self._pushes lpy-uri) number))
-        (._sync self lpy-uri view.text :origin (, source view))))
+      (except [Exception]
+        (.exception logger "lispython LSP: backend diagnostics failed for %s" params.uri))))
+
+  (def diagnostics-for [self lpy-uri text]
+    "The backend's diagnostics for document lpy-uri when they were published
+     for text, the text of its full view, else None: a list of (diagnostic,
+     places), an lsprotocol Diagnostic over text in UTF-16 units and the
+     locate answer for each of its related locations."
+    (= known (.get self._diagnostics lpy-uri))
+    (if (or (is known None) (!= (sub known 0) text))
+        (return None))
+    (return (sub known 1)))
 
   (def locate [self uri :origins None]
     "Where a location the backend answered with, at uri, lives for the
@@ -578,7 +692,8 @@
 
   (def close-document [self lpy-uri]
     "didClose for document lpy-uri if this backend process has it open."
-    (.pop self._pushes lpy-uri None)
+    (.pop self._full lpy-uri None)
+    (.pop self._diagnostics lpy-uri None)
     (= doc (.pop self._docs lpy-uri None))
     (if (and (is-not doc None) self.running)
         (.text-document-did-close self._client
@@ -684,13 +799,20 @@
    document's project is the innermost one holding it, and a document
    outside every folder or outside its project's view never reaches a
    backend.  The backend comes from the initializationOptions given to
-   configure (resolve-backend).  The document-* hooks run in the LSP's
-   synchronous handlers: they never raise, never spawn a backend, and send
-   to one only when it already runs."
+   configure (resolve-backend), and so does python-diagnostics
+   (resolve-python-diagnostics), whether the backend's diagnostics are
+   forwarded.  The document-* hooks run on the LSP's loop and never raise:
+   document-opened starts the backend when its diagnostics are forwarded;
+   the others never start one, and send to one only when it already runs
+   (a start sends the pushed buffers itself).  on-diagnostics, set by the
+   server, is called with an lpy uri when the backend published that
+   buffer's diagnostics."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
     (= self.name None)
+    (= self.python-diagnostics True)
+    (= self.on-diagnostics None)
     (= self.clients {})
     (= self._tasks (set))
     (= self._closed False))
@@ -698,9 +820,26 @@
   (def configure [self init-options]
     (try
       (= self.name (resolve-backend init-options))
+      (= self.python-diagnostics (resolve-python-diagnostics init-options))
       (except [Exception]
         (.exception logger "lispython LSP: cannot resolve the Python backend")
         (= self.name OFF))))
+
+  (deco property
+    (def forwards-diagnostics [self]
+      "Whether a backend's diagnostics reach the editor: a backend is on and
+       pythonDiagnostics is not false."
+      (if (is self.name None)
+          (.configure self None))
+      (return (and self.python-diagnostics (!= self.name OFF)))))
+
+  (def _diagnostics-arrived [self lpy-uri]
+    (if (and self.forwards-diagnostics (is-not self.on-diagnostics None))
+        (try
+          (self.on-diagnostics lpy-uri)
+          (except [Exception]
+            (.exception logger "lispython LSP: publishing diagnostics failed for %s"
+                        lpy-uri)))))
 
   (def _project-root [self path]
     "The real path of the innermost workspace folder holding path, or None."
@@ -742,8 +881,10 @@
                 (.configure self None))
             (= client (BackendClient (view-root-for root :cache-home self.cache-home)
                                      (backend-argv self.name)
+                                     :check-types self.forwards-diagnostics
                                      :definition-walks-up
                                      (in self.name DEFINITION-WALKS-UP)))
+            (= client.on-diagnostics self._diagnostics-arrived)
             (= (sub self.clients root) client)))
     (if (is (.backend-uri client lpy-uri) None)
         (return None))
@@ -778,15 +919,43 @@
     (.add-done-callback task _task-done)
     (.add-done-callback task self._tasks.discard))
 
-  (def document-changed [self lpy-uri get-source]
-    "A buffer opened or changed: push its view (get-source gives its text) to
-     a running backend."
+  (def document-opened [self lpy-uri]
+    "A buffer opened: start its backend without waiting for it
+     (BackendClient.start-soon) when its diagnostics are forwarded, since
+     they come only from a running one.  Call on the loop."
+    (try
+      (if self.forwards-diagnostics
+          (do (= client (.available-client self lpy-uri))
+              (if (is-not client None)
+                  (.start-soon client))))
+      (except [Exception]
+        (.exception logger "lispython LSP: backend start failed for %s" lpy-uri))))
+
+  (def document-changed [self lpy-uri source view]
+    "A buffer opened or changed and view, the PythonView of its source,
+     compiled: push it to the buffer's backend (BackendClient.push-buffer),
+     sent now to a running one, else when one starts.  True when the
+     backend has it and its diagnostics are forwarded, so they will come.
+     Call on the loop."
     (try
       (= client (._existing self lpy-uri))
-      (if (and (is-not client None) client.running)
-          (._schedule self (.push-buffer client lpy-uri (get-source))))
+      (if (or (is client None) (not client.available))
+          (return False))
+      (return (and (.push-buffer client lpy-uri source view) self.forwards-diagnostics))
       (except [Exception]
-        (.exception logger "lispython LSP: backend sync failed for %s" lpy-uri))))
+        (.exception logger "lispython LSP: backend sync failed for %s" lpy-uri)
+        (return False))))
+
+  (def backend-diagnostics [self lpy-uri text]
+    "The backend's diagnostics published for text, the full view of buffer
+     lpy-uri (BackendClient.diagnostics-for: (diagnostic, places) pairs);
+     None when they are not forwarded or not known for text."
+    (if (not self.forwards-diagnostics)
+        (return None))
+    (= client (._existing self lpy-uri))
+    (if (is client None)
+        (return None))
+    (return (.diagnostics-for client lpy-uri text)))
 
   (def document-closed [self lpy-uri]
     (try

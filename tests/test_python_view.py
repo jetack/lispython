@@ -301,13 +301,13 @@ class TestCursor:
 class TestCache:
     def test_by_version_latest_only(self, monkeypatch):
         calls = []
-        real = pv.compile_view
+        real = pv.compile_buffer
 
         def counting(source, **kw):
             calls.append(source)
             return real(source, **kw)
 
-        monkeypatch.setattr(pv, "compile_view", counting)
+        monkeypatch.setattr(pv, "compile_buffer", counting)
         cache = pv.ViewCache()
         first = cache.view("u", 1, "(= a 1)")
         assert cache.view("u", 1, "ignored") is first
@@ -326,7 +326,7 @@ class TestCache:
         # thread, and the view stores its entry after forget dropped it.
         cache = pv.ViewCache()
         calls = []
-        real = pv.compile_view
+        real = pv.compile_buffer
 
         def closing(source, **kw):
             calls.append(source)
@@ -334,7 +334,7 @@ class TestCache:
                 cache.forget("u")
             return real(source, **kw)
 
-        monkeypatch.setattr(pv, "compile_view", closing)
+        monkeypatch.setattr(pv, "compile_buffer", closing)
         args = ("u", 1, "(print a.b)") + ((1, 10) if method == "view_at_cursor" else ())
         getattr(cache, method)(*args)
         getattr(cache, method)(*args)
@@ -348,13 +348,13 @@ class TestCache:
         # forget that came between the hand-off and the start.
         cache = pv.ViewCache()
         calls = []
-        real = pv.compile_view
+        real = pv.compile_buffer
 
         def counting(source, **kw):
             calls.append(source)
             return real(source, **kw)
 
-        monkeypatch.setattr(pv, "compile_view", counting)
+        monkeypatch.setattr(pv, "compile_buffer", counting)
         args = ("u", 1, "(print a.b)") + ((1, 10) if method == "view_at_cursor" else ())
         generation = cache.generation  # read before the hand-off
         cache.forget("u")
@@ -578,7 +578,13 @@ class TestShadows:
         # The config as written, so pkg is found only in the view's src.
         project, root = tmp_path / "project", tmp_path / "view"
         self.overlay_layout(project)
-        assert self.basedpyright_messages(tmp_path, project, root) == []
+        # pkg.stub is stub-only by design: it resolves, with no source.
+        assert (
+            self.basedpyright_messages(
+                tmp_path, project, root, reportMissingModuleSource="none"
+            )
+            == []
+        )
 
     @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
     def test_src_layout_modules_outside_the_view_resolve(self, tmp_path):
@@ -866,6 +872,90 @@ class TestShadows:
         with pytest.raises(ValueError, match="overlaps"):
             pv._refuse_overlap("C:\\work\\project", "c:\\work\\project\\.cache")
 
+    def test_pyright_config_takes_the_projects_rules_never_its_paths(self, tmp_path):
+        # Defects: the project's own checking level and rule overrides never
+        # reach the backend (the user's strictness is ignored); a path
+        # setting is copied, so the backend reads the project's directories
+        # instead of the shadows; the project turns the escape rule back on,
+        # flagging escapes the compiler made.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[tool.pyright]\n"
+            'typeCheckingMode = "basic"\n'
+            "[tool.basedpyright]\n"
+            'typeCheckingMode = "strict"\n'
+            'reportUnusedVariable = "none"\n'
+            'reportInvalidStringEscapeSequence = "error"\n'
+            "strictListInference = true\n"
+            'include = ["elsewhere"]\n'
+            'extraPaths = ["/not/the/view"]\n'
+            'venv = "other"\n'
+        )
+        config = json.loads(
+            open(pv.write_pyright_config(str(project), str(root))).read()
+        )
+        assert config["typeCheckingMode"] == "strict"
+        assert config["reportUnusedVariable"] == "none"
+        assert config["strictListInference"] is True
+        assert config["reportInvalidStringEscapeSequence"] == "none"
+        assert "include" not in config
+        assert config["extraPaths"] == [str(project)]
+        assert config.get("venv") != "other"
+        # pyrightconfig.json wins over pyproject.toml, as for pyright.
+        (project / "pyrightconfig.json").write_text('{"typeCheckingMode": "basic"}')
+        config = json.loads(
+            open(pv.write_pyright_config(str(project), str(root))).read()
+        )
+        assert config["typeCheckingMode"] == "basic"
+        # A malformed file is no settings, never a failed write.
+        (project / "pyrightconfig.json").write_text("{not json")
+        config = json.loads(
+            open(pv.write_pyright_config(str(project), str(root))).read()
+        )
+        assert config["typeCheckingMode"] == "standard"
+
+    def test_pyright_config_reads_jsonc_as_pyright_does(self, tmp_path):
+        # Defect: a pyrightconfig.json with comments or trailing commas,
+        # which pyright accepts, is taken as malformed, so the project's
+        # rules silently fall back to the default; or a "//" or "/*" inside
+        # a string is cut as a comment.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyrightconfig.json").write_text(
+            "{\n"
+            "  // the project's level\n"
+            '  "typeCheckingMode": "strict", /* inline */\n'
+            '  "reportGeneralTypeIssues": "warning",\n'
+            '  "pythonPlatform": "a//b /* c */ \\"d\\"",\n'
+            '  "ignore": ["x",],\n'
+            "}\n"
+        )
+        config = json.loads(
+            open(pv.write_pyright_config(str(project), str(root))).read()
+        )
+        assert config["typeCheckingMode"] == "strict"
+        assert config["reportGeneralTypeIssues"] == "warning"
+        assert config["pythonPlatform"] == 'a//b /* c */ "d"'
+
+    def test_pyright_config_checks_nothing_without_diagnostics(self, tmp_path):
+        # Defect: with pythonDiagnostics false the backend still type-checks
+        # every open buffer, at the project's strictness, for nobody.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyproject.toml").write_text(
+            "[tool.basedpyright]\n"
+            'typeCheckingMode = "strict"\n'
+            'reportUnusedVariable = "error"\n'
+            'pythonVersion = "3.12"\n'
+        )
+        path = pv.write_pyright_config(str(project), str(root), check_types=False)
+        config = json.loads(open(path).read())
+        assert config["typeCheckingMode"] == "off"
+        assert "reportUnusedVariable" not in config
+        # Hover and completion still follow the project's Python.
+        assert config["pythonVersion"] == "3.12"
+
     def test_pyright_config(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
         site = project / ".venv" / "lib" / "python3.99" / "site-packages"
@@ -874,7 +964,11 @@ class TestShadows:
         monkeypatch.setattr(sys, "base_prefix", "/usr")
         path = pv.write_pyright_config(str(project), str(root))
         assert json.loads(open(path).read()) == {
-            "typeCheckingMode": "off",
+            # A project with no settings of its own: "standard" checking,
+            # never basedpyright's own "recommended", which floods code
+            # with no annotations; string escapes are the reader's.
+            "typeCheckingMode": "standard",
+            "reportInvalidStringEscapeSequence": "none",
             "extraPaths": [str(project), str(site)],
             "venvPath": "/envs",
             "venv": "my-venv",
