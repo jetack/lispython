@@ -180,6 +180,7 @@ def test_a_non_attribute_completion_never_waits_for_the_backend(
     items = complete(IMPORTED_CLASS, backends)[2]
     assert answers == []  # no request, so no wait on the start
     assert not client.running  # answered before the backend was up
+    assert wait_running(client)  # and the start was begun, not skipped
     assert kinds_of(items, "defaultdict") == [lsp.CompletionItemKind.Variable]
 
 
