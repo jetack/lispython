@@ -1,0 +1,614 @@
+;; The Python backend client: one Python language server (basedpyright, or
+;; pyrefly) per project, run as a subprocess LSP over the project's view root
+;; (python_view.lpy), so lispython's LSP can ask it about the compiled
+;; buffer (design: the vault page "LSP Python Delegation").
+;;
+;; Nothing here may raise into a feature handler: a backend that is off,
+;; failed to start, died or timed out answers None, and the caller keeps its
+;; own answer.  A plain install (no basedpyright) resolves to "off" and never
+;; spawns anything.
+
+(require lispy.macros *)
+
+(import asyncio)
+(import importlib.util)
+(import logging)
+(import os)
+(import os.path as osp)
+(import pathlib)
+(import shutil)
+(import sysconfig)
+(import uuid)
+
+(from lsprotocol [types as lsp])
+(from pygls.lsp.client [LanguageClient])
+(from pygls.uris [to-fs-path])
+
+(from lispy.lsp.python-view [ShadowManifest compile-view module-names view-path
+                             view-root-for write-pyright-config write-shadows])
+
+(= logger (logging.getLogger __name__))
+
+;; Seconds.  A request waits REQUEST-TIMEOUT for its answer (a first
+;; basedpyright completion takes about 0.9 s); the initialize handshake waits
+;; START-TIMEOUT; shutdown gives the backend SHUTDOWN-TIMEOUT to answer
+;; shutdown, as long again to exit before it is killed, and as long for
+;; pygls' client tasks to end.
+(= REQUEST-TIMEOUT 10)
+(= START-TIMEOUT 30)
+(= SHUTDOWN-TIMEOUT 2)
+
+;; A backend process is started at most this often per BackendClient: the
+;; first spawn and one restart after a crash.  A backend that dies twice is
+;; broken for this project (a bad install, a view it cannot take), and
+;; respawning it on every request would cost a process start per keystroke.
+(= MAX-SPAWNS 2)
+
+;; ---------------------------------------------------------------------------
+;; Backends and the setting
+;; ---------------------------------------------------------------------------
+
+(def _scripts-binary [name]
+  "name's executable in this interpreter's scripts directory, else on PATH,
+   or None."
+  (= exe (or (sysconfig.get-config-var "EXE") ""))
+  (= scripts (sysconfig.get-path "scripts"))
+  (if scripts
+      (do (= candidate (osp.join scripts (+ name exe)))
+          (if (osp.isfile candidate)
+              (return candidate))))
+  (return (shutil.which name)))
+
+(def _package-dir [name]
+  "The directory of installed package name, or None; the package is not
+   imported."
+  (try
+    (= spec (importlib.util.find-spec name))
+    (except [(, ImportError ValueError)]
+      (return None)))
+  (if (or (is spec None) (not spec.submodule-search-locations))
+      (return None))
+  (return (sub (list spec.submodule-search-locations) 0)))
+
+(def _basedpyright-argv []
+  "node running basedpyright's langserver.index.js over stdio, or None.
+   node is nodejs_wheel's own binary, found as nodejs_wheel/executable.py's
+   _program finds it.  The basedpyright-langserver wrapper is never run: it
+   starts node with subprocess.run, so killing the wrapper orphans the node
+   server, which then outlives the LSP."
+  (= package (_package-dir "basedpyright"))
+  (= node-root (_package-dir "nodejs_wheel"))
+  (if (or (is package None) (is node-root None))
+      (return None))
+  (= node (ife (== os.name "nt")
+               (osp.join node-root "node.exe")
+               (osp.join node-root "bin" "node")))
+  (= script (osp.join package "langserver.index.js"))
+  (if (not (and (osp.isfile node) (osp.isfile script)))
+      (return None))
+  (return [node script "--stdio"]))
+
+(def _pyrefly-argv []
+  "The pyrefly binary's language server, or None."
+  (= binary (_scripts-binary "pyrefly"))
+  (if (is binary None)
+      (return None))
+  (return [binary "lsp"]))
+
+;; Backend name -> a function giving its argv, or None when it is not
+;; installed.  "off" is the name of no backend.  A test adds a fake backend
+;; here (any LSP over stdio).
+(= OFF "off")
+(= DEFAULT-BACKEND "basedpyright")
+(= BACKENDS {"basedpyright" _basedpyright-argv
+             "pyrefly" _pyrefly-argv})
+
+(def backend-argv [name]
+  "The argv that starts backend name, or None for off, an unknown name or a
+   backend that is not installed."
+  (= find (.get BACKENDS name))
+  (if (is find None)
+      (return None))
+  (return (find)))
+
+(def resolve-backend [init-options]
+  "The backend name from the LSP client's initializationOptions (a dict or
+   None), key \"backend\".  Missing or None: basedpyright when installed,
+   else off.  A name that is unknown or not installed: off, with a warning,
+   never another backend in its place."
+  (= name (ife (isinstance init-options dict) (.get init-options "backend") None))
+  (if (is name None)
+      (return (ife (is-not (backend-argv DEFAULT-BACKEND) None) DEFAULT-BACKEND OFF)))
+  (if (== name OFF)
+      (return OFF))
+  (if (not (in name BACKENDS))
+      (do (.warning logger "lispython LSP: unknown Python backend %r; backend off" name)
+          (return OFF)))
+  (if (is (backend-argv name) None)
+      (do (.warning logger "lispython LSP: Python backend %r is not installed; backend off"
+                    name)
+          (return OFF)))
+  (return name))
+
+;; ---------------------------------------------------------------------------
+;; One backend process
+;; ---------------------------------------------------------------------------
+
+(class _Client [LanguageClient]
+  "pygls' LanguageClient for one backend process, reporting the process's
+   exit to its BackendClient."
+  (def __init__ [self owner]
+    (.__init__ (super) "lpy-lsp-backend" "v0.1.0")
+    (= self.owner owner))
+
+  (async-def server-exit [self server]
+    (._backend-exited self.owner self server)))
+
+(def _register-handlers [client view-root]
+  "The backend's requests and notifications to the client."
+  (deco (client.feature lsp.WORKSPACE_CONFIGURATION)
+    (def configuration [params]
+      ;; pyright asks python, python.analysis, basedpyright and
+      ;; basedpyright.analysis; only the interpreter is ours to give, the
+      ;; rest is pyrightconfig.json's.
+      (return [(ife (== item.section "python") {"pythonPath" view-root.python} {})
+               for item in params.items])))
+  (for method in [lsp.CLIENT_REGISTER_CAPABILITY
+                  lsp.CLIENT_UNREGISTER_CAPABILITY
+                  lsp.WINDOW_WORK_DONE_PROGRESS_CREATE
+                  lsp.PROGRESS
+                  ;; Dropped, never forwarded: the backend's diagnostics land
+                  ;; on generated code the user never wrote.
+                  lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS]
+    ((.feature client method) (fn [params] None)))
+  (for method in [lsp.WINDOW_LOG_MESSAGE lsp.WINDOW_SHOW_MESSAGE]
+    ((.feature client method)
+     (fn [params] (.debug logger "python backend: %s" params.message)))))
+
+(async-def _drain-stderr [stream]
+  "Read the backend's stderr to its end into the debug log.  pygls' start_io
+   opens it as a pipe and never reads it, so a backend that writes 64 KB to
+   it would block on the full pipe."
+  (try
+    (while True
+      (= chunk (await (.read stream 65536)))
+      (if (not chunk)
+          (break))
+      (.debug logger "python backend stderr: %s"
+              (.rstrip (.decode chunk "utf-8" "replace"))))
+    (except [Exception]
+      (pass))))
+
+(def _client-capabilities []
+  "What lispython's LSP asks a backend for: completion, hover, signature
+   help, definition and references over full-text sync, its configuration,
+   and file changes notified by the client (dynamic registration), so the
+   backend does not watch the view root itself."
+  (return
+    (lsp.ClientCapabilities
+      :text-document (lsp.TextDocumentClientCapabilities
+                       :synchronization (lsp.TextDocumentSyncClientCapabilities)
+                       :completion (lsp.CompletionClientCapabilities)
+                       :hover (lsp.HoverClientCapabilities
+                                :content-format [lsp.MarkupKind.Markdown
+                                                 lsp.MarkupKind.PlainText])
+                       :signature-help (lsp.SignatureHelpClientCapabilities)
+                       :definition (lsp.DefinitionClientCapabilities)
+                       :references (lsp.ReferenceClientCapabilities))
+      :workspace (lsp.WorkspaceClientCapabilities
+                   :configuration True
+                   :did-change-watched-files (lsp.DidChangeWatchedFilesClientCapabilities
+                                               :dynamic-registration True)))))
+
+(def _kill [process]
+  (if (and (is-not process None) (is process.returncode None))
+      (try
+        (.kill process)
+        (except [ProcessLookupError]
+          (pass)))))
+
+(class BackendClient []
+  "The Python backend of one project, over its ViewRoot view-root.  argv
+   starts it; None is the off backend, which never spawns.  The process
+   starts on the first request (request), after the view root's shadows and
+   pyrightconfig.json are written; a process that exits without shutdown is
+   restarted by the next request, once (MAX-SPAWNS), and a second death
+   leaves the backend off.  state is idle (not started), running, dead
+   (waiting for its restart), off or closed (after shutdown); process is
+   the running process.  Documents are synced by full text, keyed by their
+   .lpy uri, as the view-path shadow's uri."
+  (def __init__ [self view-root argv :manifest None]
+    (= self.view-root view-root)
+    (= self.project-root (osp.realpath view-root.project-root))
+    (= self.argv argv)
+    (= self.manifest (ife (is manifest None) (ShadowManifest) manifest))
+    (= self.state (ife (is argv None) OFF "idle"))
+    (= self.spawns 0)
+    (= self.process None)
+    (= self._client None)
+    (= self._stderr-task None)
+    (= self._lock (asyncio.Lock))
+    ;; lpy uri -> [backend uri, version, text last sent], for this spawn.
+    (= self._docs {})
+    ;; lpy uri -> the latest push-buffer's number, so an older compile that
+    ;; finishes last never replaces a newer text.
+    (= self._pushes {}))
+
+  (deco property
+    (def running [self]
+      (return (and (== self.state "running") (is-not self.process None)
+                   (is self.process.returncode None)))))
+
+  (def backend-uri [self lpy-uri]
+    "The backend's uri for document lpy-uri (its shadow's), or None for a
+     document outside the project."
+    (= path (to-fs-path lpy-uri))
+    (if (is path None)
+        (return None))
+    (= shadow (view-path self.project-root self.view-root (osp.realpath path)))
+    (if (is shadow None)
+        (return None))
+    (return (.as-uri (pathlib.Path shadow))))
+
+  (def _prepare-view-root [self]
+    "Write the view root's shadows and pyrightconfig.json.  They compile every
+     .lpy of the project (its macros run), so callers run this in a thread,
+     off the event loop."
+    (= root (os.fspath self.view-root))
+    (os.makedirs root :exist-ok True)
+    (write-shadows self.project-root root :manifest self.manifest)
+    (write-pyright-config self.project-root root
+                          :import-roots self.manifest.import-roots))
+
+  (async-def _ensure-started [self]
+    "True once a backend process runs, spawning one when none has yet or the
+     last one died and a restart is left."
+    (if self.running
+        (return True))
+    (async-with [self._lock]
+      (if (and (== self.state "running") (not self.running))
+          (= self.state "dead"))
+      (cond (== self.state "running")
+            (return True)
+            (in self.state (, OFF "closed"))
+            (return False)
+            (>= self.spawns MAX-SPAWNS)
+            (do (.warning logger "lispython LSP: Python backend for %s died again; backend off"
+                          self.project-root)
+                (= self.state OFF)
+                (return False)))
+      (if (is-not self._client None)
+          ;; the dead process's client: its tasks end, its pipes close
+          (await (._discard self)))
+      (+= self.spawns 1)
+      (try
+        (await (._spawn self))
+        (except [Exception as e]
+          (.warning logger "lispython LSP: Python backend for %s failed to start: %s"
+                    self.project-root e)
+          (await (._discard self))
+          (if (!= self.state "closed")
+              (= self.state (ife (>= self.spawns MAX-SPAWNS) OFF "dead")))
+          (return False)))
+      (if (== self.state "closed")
+          ;; shutdown came during the spawn
+          (do (await (._discard self))
+              (return False)))
+      (= self.state "running")
+      (return True)))
+
+  (async-def _spawn [self]
+    (await (asyncio.to-thread self._prepare-view-root))
+    (= self._docs {})
+    (= root (os.fspath self.view-root))
+    (= root-uri (.as-uri (pathlib.Path root)))
+    (= client (_Client self))
+    (_register-handlers client self.view-root)
+    (= self._client client)
+    (await (.start-io client *self.argv :cwd root))
+    ;; pygls keeps the process in a private field and has no accessor.
+    (= self.process client._server)
+    (if (== self.state "closed")
+        (raise (RuntimeError "shut down while starting")))
+    (= self._stderr-task (asyncio.create-task (_drain-stderr self.process.stderr)))
+    (await (asyncio.wait-for
+             (.initialize-async client
+               (lsp.InitializeParams
+                 ;; The backend exits when this process does, even killed.
+                 :process-id (os.getpid)
+                 :root-uri root-uri
+                 :workspace-folders [(lsp.WorkspaceFolder :uri root-uri :name "lispython-view")]
+                 :capabilities (_client-capabilities)))
+             START-TIMEOUT))
+    (.initialized client (lsp.InitializedParams))
+    (.workspace-did-change-configuration client
+      (lsp.DidChangeConfigurationParams
+        :settings {"python" {"pythonPath" self.view-root.python}})))
+
+  (def _backend-exited [self client process]
+    "A backend process exited: unless shutdown stopped it, its backend is
+     dead until the next request restarts it."
+    (if (and (is client self._client) (== self.state "running"))
+        (do (.warning logger "lispython LSP: Python backend for %s exited (%s)"
+                      self.project-root process.returncode)
+            (= self.state "dead"))))
+
+  (async-def _discard [self]
+    "Kill the current process if it still runs and drop its client."
+    (= client self._client)
+    (= process self.process)
+    (= self._client None)
+    (= self.process None)
+    (= self._docs {})
+    (_kill process)
+    (if (is-not process None)
+        (try
+          (await (asyncio.wait-for (.wait process) SHUTDOWN-TIMEOUT))
+          (except [Exception]
+            (pass))))
+    (if (is-not client None)
+        (try
+          (await (asyncio.wait-for (.stop client) SHUTDOWN-TIMEOUT))
+          (except [Exception]
+            (pass)))))
+
+  (def _sync [self lpy-uri text]
+    "Make the backend's copy of document lpy-uri text: didOpen when it is
+     not open in this process, didChange with the whole text when it
+     changed, nothing otherwise.  False when the document has no backend
+     uri."
+    (= client self._client)
+    (= doc (.get self._docs lpy-uri))
+    (if (is doc None)
+        (do (= uri (.backend-uri self lpy-uri))
+            (if (is uri None)
+                (return False))
+            (.text-document-did-open client
+              (lsp.DidOpenTextDocumentParams
+                :text-document (lsp.TextDocumentItem :uri uri :language-id "python"
+                                                     :version 1 :text text)))
+            (= (sub self._docs lpy-uri) [uri 1 text])
+            (return True)))
+    (if (!= (sub doc 2) text)
+        (do (+= (sub doc 1) 1)
+            (= (sub doc 2) text)
+            (.text-document-did-change client
+              (lsp.DidChangeTextDocumentParams
+                :text-document (lsp.VersionedTextDocumentIdentifier :uri (sub doc 0)
+                                                                    :version (sub doc 1))
+                :content-changes [(lsp.TextDocumentContentChangeWholeDocument :text text)]))))
+    (return True))
+
+  (async-def request [self method params :uri None :text None]
+    "Send request method with params (its lsprotocol params type) to the
+     backend and return its result, or None: the backend is off, failed to
+     start, died, or took REQUEST-TIMEOUT.  The first request spawns the
+     backend.  With uri (the .lpy document's) and text, the backend's copy
+     of that document is made text first: any text, a cursor view's as
+     well as the buffer's.  Never raises but for cancellation."
+    (try
+      (if (not (await (._ensure-started self)))
+          (return None))
+      (= client self._client)
+      (if (and (is-not uri None) (is-not text None))
+          (._sync self uri text))
+      (= msg-id (str (uuid.uuid4)))
+      (= answer (.send-request-async client.protocol method params :msg-id msg-id))
+      ;; shielded, so a timeout cancels only this wait: the late answer then
+      ;; resolves a future nobody awaits instead of one already cancelled.
+      (.add-done-callback answer _retrieve)
+      (try
+        (return (await (asyncio.wait-for (asyncio.shield answer) REQUEST-TIMEOUT)))
+        (except [TimeoutError]
+          (.debug logger "python backend: %s timed out" method)
+          (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
+          (return None)))
+      (except [Exception as e]
+        (.debug logger "python backend: %s failed: %s" method e)
+        (return None))))
+
+  (async-def push-buffer [self lpy-uri source]
+    "Send the view of buffer source to a running backend (nothing when it is
+     not running).  A buffer whose view does not compile sends nothing, so
+     the backend keeps the last good text."
+    (if (not self.running)
+        (return))
+    (= number (+ (.get self._pushes lpy-uri 0) 1))
+    (= (sub self._pushes lpy-uri) number)
+    (= path (to-fs-path lpy-uri))
+    (if (is path None)
+        (return))
+    (= [name package import-root] (module-names path))
+    (= view (await (asyncio.to-thread compile-view source :name name :package package
+                                      :import-root import-root)))
+    (if (and (is-not view None) self.running (== (.get self._pushes lpy-uri) number))
+        (._sync self lpy-uri view.text)))
+
+  (def close-document [self lpy-uri]
+    "didClose for document lpy-uri if this backend process has it open."
+    (.pop self._pushes lpy-uri None)
+    (= doc (.pop self._docs lpy-uri None))
+    (if (and (is-not doc None) self.running)
+        (.text-document-did-close self._client
+          (lsp.DidCloseTextDocumentParams
+            :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))))
+
+  (async-def file-saved [self lpy-uri]
+    "Rewrite a running backend's shadows and config, then tell it the saved
+     file's shadow changed."
+    (if (not self.running)
+        (return))
+    (await (asyncio.to-thread self._prepare-view-root))
+    (= uri (.backend-uri self lpy-uri))
+    (if (and (is-not uri None) self.running)
+        (.workspace-did-change-watched-files self._client
+          (lsp.DidChangeWatchedFilesParams
+            :changes [(lsp.FileEvent :uri uri :type lsp.FileChangeType.Changed)]))))
+
+  (async-def shutdown [self]
+    "Stop the backend for good: shutdown and exit, each bounded by
+     SHUTDOWN-TIMEOUT, then kill it if it still runs.  No request spawns one
+     afterwards."
+    (= self.state "closed")
+    (= client self._client)
+    (if (and (is-not client None) (is-not self.process None)
+             (is self.process.returncode None))
+        (try
+          (await (asyncio.wait-for (.shutdown-async client None) SHUTDOWN-TIMEOUT))
+          (.exit client None)
+          (except [Exception as e]
+            (.debug logger "python backend: shutdown failed: %s" e))))
+    (await (._discard self)))
+
+  (def kill [self]
+    "Kill the process now, without the protocol (the LSP is exiting)."
+    (= self.state "closed")
+    (_kill self.process)))
+
+(def _retrieve [future]
+  "Mark a request future's exception retrieved: one whose wait timed out is
+   failed later by the process exit, with nobody left to read it."
+  (if (not (.cancelled future))
+      (.exception future)))
+
+;; ---------------------------------------------------------------------------
+;; The LSP's backends
+;; ---------------------------------------------------------------------------
+
+(class Backends []
+  "The BackendClient of each workspace project, for lispython's LSP.
+   folders gives the client's workspace folders (objects with .uri); a
+   document's project is the innermost one holding it, and a document
+   outside every folder or outside its project's view never reaches a
+   backend.  The backend comes from the initializationOptions given to
+   configure (resolve-backend).  The document-* hooks run in the LSP's
+   synchronous handlers: they never raise, never spawn a backend, and send
+   to one only when it already runs."
+  (def __init__ [self folders :cache-home None]
+    (= self.folders folders)
+    (= self.cache-home cache-home)
+    (= self.name None)
+    (= self.clients {})
+    (= self._tasks (set))
+    (= self._closed False))
+
+  (def configure [self init-options]
+    (try
+      (= self.name (resolve-backend init-options))
+      (except [Exception]
+        (.exception logger "lispython LSP: cannot resolve the Python backend")
+        (= self.name OFF))))
+
+  (def _project-root [self path]
+    "The real path of the innermost workspace folder holding path, or None."
+    (= real (pathlib.Path (osp.realpath path)))
+    (= best None)
+    (for folder in (self.folders)
+      (= folder-path (to-fs-path folder.uri))
+      (if (is folder-path None)
+          (continue))
+      (= root (osp.realpath folder-path))
+      (if (and (.is-relative-to real root)
+               (or (is best None) (> (len root) (len best))))
+          (= best root)))
+    (return best))
+
+  (def _existing [self lpy-uri]
+    "The BackendClient already made for document lpy-uri's project, or None."
+    (if (not self.clients)
+        (return None))
+    (= path (to-fs-path lpy-uri))
+    (if (is path None)
+        (return None))
+    (return (.get self.clients (self._project-root path))))
+
+  (def client-for [self lpy-uri]
+    "Document lpy-uri's BackendClient, made on demand, or None when the
+     document has no backend."
+    (if self._closed
+        (return None))
+    (= path (to-fs-path lpy-uri))
+    (if (is path None)
+        (return None))
+    (= root (self._project-root path))
+    (if (is root None)
+        (return None))
+    (= client (.get self.clients root))
+    (if (is client None)
+        (do (if (is self.name None)
+                (.configure self None))
+            (= client (BackendClient (view-root-for root :cache-home self.cache-home)
+                                     (backend-argv self.name)))
+            (= (sub self.clients root) client)))
+    (if (is (.backend-uri client lpy-uri) None)
+        (return None))
+    (return client))
+
+  (async-def request [self lpy-uri method params :text None]
+    "BackendClient.request for document lpy-uri's backend, or None when it
+     has none."
+    (try
+      (= client (.client-for self lpy-uri))
+      (except [Exception]
+        (.exception logger "lispython LSP: no Python backend for %s" lpy-uri)
+        (return None)))
+    (if (is client None)
+        (return None))
+    (return (await (.request client method params :uri lpy-uri :text text))))
+
+  (def _schedule [self coroutine]
+    "Run coroutine as a task of the running loop, its failure logged."
+    (= task (asyncio.ensure-future coroutine))
+    (.add self._tasks task)
+    (.add-done-callback task _task-done)
+    (.add-done-callback task self._tasks.discard))
+
+  (def document-changed [self lpy-uri get-source]
+    "A buffer opened or changed: push its view (get-source gives its text) to
+     a running backend."
+    (try
+      (= client (._existing self lpy-uri))
+      (if (and (is-not client None) client.running)
+          (._schedule self (.push-buffer client lpy-uri (get-source))))
+      (except [Exception]
+        (.exception logger "lispython LSP: backend sync failed for %s" lpy-uri))))
+
+  (def document-closed [self lpy-uri]
+    (try
+      (= client (._existing self lpy-uri))
+      (if (is-not client None)
+          (.close-document client lpy-uri))
+      (except [Exception]
+        (.exception logger "lispython LSP: backend close failed for %s" lpy-uri))))
+
+  (def document-saved [self lpy-uri]
+    (try
+      (= client (._existing self lpy-uri))
+      (if (and (is-not client None) client.running)
+          (._schedule self (.file-saved client lpy-uri)))
+      (except [Exception]
+        (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
+
+  (async-def shutdown-all [self]
+    "Shut every backend down (the LSP's shutdown); none starts afterwards."
+    (= self._closed True)
+    (= clients (list (.values self.clients)))
+    (try
+      (await (asyncio.gather *[(.shutdown client) for client in clients]
+                             :return-exceptions True))
+      (except [Exception]
+        (.exception logger "lispython LSP: backend shutdown failed"))))
+
+  (def kill-all [self]
+    "Kill every backend process now (the LSP's exit, a safety net for a
+     client that exits without shutdown)."
+    (= self._closed True)
+    (for client in (list (.values self.clients))
+      (try
+        (.kill client)
+        (except [Exception]
+          (pass))))))
+
+(def _task-done [task]
+  (if (and (not (.cancelled task)) (is-not (.exception task) None))
+      (.error logger "lispython LSP: backend task failed" :exc-info (.exception task))))
