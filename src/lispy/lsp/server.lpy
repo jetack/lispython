@@ -1451,11 +1451,18 @@
                          view))
   (if (is params None)
       (return (, view None)))
-  (= answer (await (.request client method params
-                             :uri doc.uri :text view.text :origin (, doc.source view)
-                             :timeout (ife (is deadline None) None
-                                           (max 0 (- deadline (.time loop)))))))
-  (return (, view answer)))
+  (return (, view (await (view-request client doc view method params deadline)))))
+
+(async-def view-request [client doc view method params deadline :failed None]
+  "The backend's answer to request method with params over view, doc's
+   cursor view, synced as doc's text first; failed (default None) when it
+   gives none (BackendClient.request).  deadline is the loop time it must
+   answer by, or None for the request's default."
+  (return (await (.request client method params
+                           :uri doc.uri :text view.text :origin (, doc.source view)
+                           :timeout (ife (is deadline None) None
+                                         (max 0 (- deadline (.time (asyncio.get-running-loop)))))
+                           :failed failed))))
 
 (async-def backend-answer [client doc line col timeout]
   "(view, items, incomplete): the cursor view of doc, the backend's
@@ -1905,6 +1912,41 @@
 ;; to the editor.
 (= UNMAPPED (object))
 
+;; view-request's failed value in definition-answer: the check gave no answer.
+(= UNCHECKED (object))
+
+(async-def definition-answer [client doc view offset answer deadline]
+  "answer, the backend's definition answer at the word offset code points
+   from view's cursor, checked: [] when it is for an enclosing node, None
+   when that cannot be checked by deadline."
+  ;; basedpyright (DEFINITION-WALKS-UP) answers definition on a name with
+  ;; no declarations (an undefined name or attribute) for the enclosing
+  ;; call or operator: print in (print (+ nosuch 1)).  Its typeDefinition
+  ;; never walks up: it gives the class of the name's type, else the name's
+  ;; own declarations, so it is empty when the name has neither, and then
+  ;; the name has no definition of its own.  The hole: a name with no
+  ;; declarations but a class type (an attribute resolved through
+  ;; __getattr__) gets that class from typeDefinition and keeps the
+  ;; walked-up answer.  A word in an import statement is exempt
+  ;; (view.in-import): typeDefinition misses module and source names there
+  ;; (path in import os.path), and the walk-up never leaves an import,
+  ;; which holds no expression to walk up to.
+  (if (or (not client.definition-walks-up) (not (answer-locations answer))
+          view.in-import)
+      (return answer))
+  (= types (await (view-request client doc view lsp.TEXT_DOCUMENT_TYPE_DEFINITION
+                                (lsp.TypeDefinitionParams
+                                  :text-document (lsp.TextDocumentIdentifier
+                                                   :uri (.backend-uri client doc.uri))
+                                  :position (generated-position view :offset offset))
+                                deadline :failed UNCHECKED)))
+  (cond (is types UNCHECKED)
+        (return None)
+        (not (answer-locations types))
+        (return [])
+        True
+        (return answer)))
+
 (async-def backend-locations [doc line col target method make :whole False]
   "The backend's answer to definition or references request method (params
    from make, location-request) on the word at the 1-based line and
@@ -1917,9 +1959,10 @@
    generated start (cursor-word, as backend-hover).  A location in a compiled view
    maps back to its .lpy (lpy-range), one in a real file passes, one that
    maps nowhere is dropped (editor-location).  whole is
-   location-request's: no request over a fallback view.  REQUEST-TIMEOUT
-   bounds the request and the mapping together: a location whose file has
-   not mapped by then is dropped."
+   location-request's: no request over a fallback view.  A definition
+   answer is checked (definition-answer).  REQUEST-TIMEOUT bounds the
+   requests and the mapping together: a location whose file has not mapped
+   by then is dropped."
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
@@ -1939,6 +1982,12 @@
   (= own {doc.uri (, doc.source view)})
   (= placed [(, (.locate client uri :origins own) uri rng)
              for [uri rng] in (answer-locations answer)])
+  (if (== method lsp.TEXT_DOCUMENT_DEFINITION)
+      (do (= answer (await (definition-answer client doc view offset answer deadline)))
+          (cond (is answer None)
+                (return None)
+                (not (answer-locations answer))
+                (return []))))
   (= origins {})
   (= seen (set))
   (= result [])
