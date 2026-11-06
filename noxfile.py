@@ -12,7 +12,7 @@ PYTHONS = ["3.11", "3.12", "3.13", "3.14", "3.15"]
 @nox.session(python=PYTHONS)
 def tests(session):
     # The lsp extra (basedpyright), so the real-backend tests run too.
-    session.install(".[lsp]", "pytest")
+    session.install(".[lsp,dev]")
     session.run("pytest", *session.posargs)
 
 
@@ -32,6 +32,7 @@ def docs(session):
         str(Path(__file__).parent),
     )
     site_dir = session.create_tmp() + "/site"
-    # The hook tests need mkdocs, which the tests session does not install.
+    # The hook tests also run in the tests session (dev extra has mkdocs); here
+    # they run beside the build that uses the same hooks.
     session.run("pytest", "tests/test_docs_hooks.py")
     session.run("mkdocs", "build", "--strict", "--site-dir", site_dir)

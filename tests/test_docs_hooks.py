@@ -6,12 +6,9 @@ import importlib.util
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("mkdocs")
-
-from mkdocs.config.defaults import MkDocsConfig  # noqa: E402
-from mkdocs.structure.files import File, Files  # noqa: E402
-from mkdocs.structure.pages import Page  # noqa: E402
+from mkdocs.config.defaults import MkDocsConfig
+from mkdocs.structure.files import File, Files
+from mkdocs.structure.pages import Page
 
 HOOKS = Path(__file__).resolve().parent.parent / "docs" / "hooks.py"
 SITE = "https://example.org/docs/"

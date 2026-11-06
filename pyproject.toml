@@ -31,6 +31,8 @@ lpy-lsp = "lispy.lsp:main"
 
 [project.optional-dependencies]
 dev = [
+    # tests/test_docs_hooks.py builds mkdocs' own File/Page objects.
+    "mkdocs>=1.6.1,<2",
     "pre-commit>=3.6.0",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
