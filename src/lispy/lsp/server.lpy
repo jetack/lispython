@@ -52,14 +52,19 @@
 ;; Read one name at a time, on a hover or signature help only: inspecting
 ;; every builtin up front costs the server's start, and completion needs
 ;; only the names (builtin-names).
-(deco functools.cache
 (def builtin-info [name]
   "(signature, doc) of the builtin whose Python name is name, or None when
    it is no builtin-p: the signature as name(params) (the bare name when
    inspect cannot read one) and the first paragraph of its docstring
-   (empty when it has none)."
+   (empty when it has none).  The test comes before the cache
+   (inspect-builtin), so every name hovered does not stay in it."
   (if (not (builtin-p name))
       (return None))
+  (return (inspect-builtin name)))
+
+(deco functools.cache
+(def inspect-builtin [name]
+  "builtin-info of name, a builtin-p name."
   (= obj (getattr builtins name))
   (try
     (= signature f"{name}{(inspect.signature obj)}")
@@ -689,15 +694,16 @@
 ;; ---------------------------------------------------------------------------
 
 (def collect-references [nodes name uri]
-  "The Location of every Symbol in nodes that stands for the same Python
-   name as name (py-name: my-x and my_x are one name), in source order."
-  (= target (py-name name))
+  "The Location of every Symbol in nodes that stands for the same name as
+   name (name-key: my-x and my_x are one name, - and _ are not), in source
+   order."
+  (= target (name-key name))
   (= refs [])
   (= stack (list (reversed nodes)))
   (while stack
     (= node (.pop stack))
     (cond (isinstance node Symbol)
-          (if (== (py-name node.value) target)
+          (if (== (name-key node.value) target)
               (.append refs (lsp.Location :uri uri :range (node-range node))))
           (isinstance node Expression)
           (.extend stack (reversed node.list))
@@ -1329,28 +1335,45 @@
         :text-edit (completion-edit ranges label insert-replace))))
   (return result))
 
-(def item-name [label]
-  "The name a completion label is deduplicated by: its Python name when it
-   spells one (name-spelling-p), else the label itself, so an operator form
-   such as - (py-name _) never hides a Python name _."
-  (return (ife (name-spelling-p label) (py-name label) label)))
+(def name-key [text]
+  "The name text stands for, as references and completion compare names:
+   its Python name when it spells one (name-spelling-p), else text itself,
+   so an operator such as - (py-name _) or -> (py-name _to_) is never the
+   Python name its mangling happens to give."
+  (return (ife (name-spelling-p text) (py-name text) text)))
 
-(def merged-items [view items spellings]
+(def merged-items [doc view items spellings]
   "lispython's own items (lispython-items, then each macro of the view as
    the buffer spells it) followed by items, the backend's (backend-items),
-   whose name (item-name) none of them has: a special form or macro wins
-   over whatever the backend offers by that Python name."
+   whose name (name-key) none of them has: a special form or macro wins
+   over whatever the backend offers by that name.  Over a fallback view
+   (only the text before the cursor compiled) the buffer's definitions the
+   backend could not see (collect-definitions of the whole buffer) follow."
   (= merged (lispython-items))
-  (= taken (set [(item-name item.label) for item in merged]))
+  (= taken (set [(name-key item.label) for item in merged]))
+  ;; view.macros holds Python names, the built-in macros among them (_to_
+  ;; for ->), so a macro is matched with lispython's items by Python name.
+  (= own (set [(py-name item.label) for item in merged]))
   (for name in (sorted view.macros)
     ;; A qualified macro (module.name) is typed as an attribute.
-    (if (and (not-in "." name) (not-in name taken))
-        (do (.add taken name)
-            (.append merged (lsp.CompletionItem :label (.get spellings name name)
+    (if (and (not-in "." name) (not-in name own))
+        (do (= label (.get spellings name name))
+            (.add own name)
+            (.add taken (name-key label))
+            (.append merged (lsp.CompletionItem :label label
                                                 :kind lsp.CompletionItemKind.Keyword
                                                 :detail "macro")))))
-  (for item in items
-    (= name (item-name item.label))
+  (= rest (list items))
+  (if view.fallback
+      (do (try
+            (= defs (collect-definitions (parse doc.source :partial True) doc.uri))
+            (except [Exception]
+              (= defs {})))
+          (.extend rest [(lsp.CompletionItem :label name
+                                             :kind lsp.CompletionItemKind.Variable)
+                         for name in defs])))
+  (for item in rest
+    (= name (name-key item.label))
     (if (not-in name taken)
         (do (.add taken name)
             (.append merged item))))
@@ -1450,7 +1473,7 @@
   (if (not found)
       (return None))
   (if (not view.attribute)
-      (= found (merged-items view found spellings)))
+      (= found (merged-items doc view found spellings)))
   (return (lsp.CompletionList :is-incomplete incomplete :items found)))
 
 (def document-snapshot [doc]
@@ -1860,8 +1883,9 @@
   "The backend's answer to definition or references request method (params
    from make, location-request) on the word at the 1-based line and
    code-point col (Symbol target there), as editor Locations in answer
-   order without repeats: a list, maybe empty, or None when there is no
-   backend, no word, no view or no answer.  doc is a snapshot.  The view
+   order without repeats: a list (empty only when the backend found
+   nothing), or None when there is no backend, no word, no view, no answer,
+   or no location the backend gave maps to the editor.  doc is a snapshot.  The view
    is made with the cursor at the word's end and the request asks at its
    generated start (cursor-word, as backend-hover).  A location in a compiled view
    maps back to its .lpy (lpy-range), one in a real file passes, one that
@@ -1900,6 +1924,11 @@
     (if (not-in key seen)
         (do (.add seen key)
             (.append result location))))
+  ;; Locations the backend found but none of which maps to the editor
+  ;; (generated code, a cache file, a stale shadow) are no answer: the
+  ;; name exists, so the local lookup answers.  Only an empty answer is.
+  (if (and placed (not result))
+      (return None))
   (return result))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
