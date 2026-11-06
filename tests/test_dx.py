@@ -45,8 +45,8 @@ def signature_at(marked, pygls_document=False):
     return None if result is None else result.signatures[0].label
 
 
-LEN = server.BUILTIN_INFO["len"]["signature"]
-PRINT = server.BUILTIN_INFO["print"]["signature"]
+LEN = server.builtin_info("len")[0]
+PRINT = server.builtin_info("print")[0]
 
 
 @pytest.mark.parametrize(

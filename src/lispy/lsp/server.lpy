@@ -2,6 +2,7 @@
 
 (import asyncio)
 (import builtins)
+(import functools)
 (import glob)
 (import inspect)
 (import logging)
@@ -19,15 +20,14 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
-(from lispy.core.compiler.literal [identifier-p])
-(from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
-(from lispy.lsp.python-view [ViewCache lpy-range module-names open-form-closers
-                             partial-span py-name source-prefix view-at-cursor])
+(from lispy.lsp.python-view [ViewCache lpy-range module-names name-key name-spelling-p
+                             open-form-closers partial-span py-name source-prefix
+                             view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT])
 
 (= logger (logging.getLogger __name__))
@@ -42,43 +42,45 @@
 ;; Python builtins introspection
 ;; ---------------------------------------------------------------------------
 
-(def build-builtin-info []
-  "Build a dict of Python builtin names -> {signature, doc, source_file, lineno}."
-  (= info {})
-  (for name in (dir builtins)
-    (if (.startswith name "_")
-        (continue))
-    (= obj (getattr builtins name))
-    (if (and (not (callable obj)) (not (isinstance obj type)))
-        (continue))
-    (= entry {"name" name})
-    ;; Signature
-    (try
-      (do (= sig (inspect.signature obj))
-          (= (sub entry "signature") f"{name}{sig}"))
-      (except [(, ValueError TypeError)]
-        (= (sub entry "signature") name)))
-    ;; Docstring
-    (= doc (inspect.getdoc obj))
-    (if doc
-        (= (sub entry "doc") (sub (.split doc "\n\n") 0))
-        (= (sub entry "doc") ""))
-    ;; Source file
-    (try
-      (do (= source-file (inspect.getfile obj))
-          (try
-            (do (= (, _ lineno) (inspect.getsourcelines obj))
-                (= (sub entry "lineno") lineno))
-            (except [(, OSError TypeError)]
-              (= (sub entry "lineno") 1)))
-          (= (sub entry "source_file") source-file))
-      (except [(, TypeError OSError)]
-        (= (sub entry "source_file") None)
-        (= (sub entry "lineno") None)))
-    (= (sub info name) entry))
-  (return info))
+(def builtin-p [name]
+  "Whether name, a Python name, is a public builtin function or class."
+  (if (.startswith name "_")
+      (return False))
+  (= obj (getattr builtins name None))
+  (return (or (isinstance obj type) (callable obj))))
 
-(= BUILTIN-INFO (build-builtin-info))
+;; Read one name at a time, on a hover or signature help only: inspecting
+;; every builtin up front costs the server's start, and completion needs
+;; only the names (builtin-names).
+(def builtin-info [name]
+  "(signature, doc) of the builtin whose Python name is name, or None when
+   it is no builtin-p: the signature as name(params) (the bare name when
+   inspect cannot read one) and the first paragraph of its docstring
+   (empty when it has none).  The test comes before the cache
+   (inspect-builtin), so every name hovered does not stay in it."
+  (if (not (builtin-p name))
+      (return None))
+  (return (inspect-builtin name)))
+
+(deco functools.cache
+(def inspect-builtin [name]
+  "builtin-info of name, a builtin-p name."
+  (= obj (getattr builtins name))
+  (try
+    (= signature f"{name}{(inspect.signature obj)}")
+    (except [(, ValueError TypeError)]
+      (= signature name)))
+  (= doc (inspect.getdoc obj))
+  (return (, signature (ife doc (sub (.split doc "\n\n") 0) "")))))
+
+(deco functools.cache
+(def builtin-names []
+  "(name, CompletionItemKind) of every builtin-p name, in dir order: Class
+   for a class, else Function."
+  (return (tuple [(, name (ife (isinstance (getattr builtins name) type)
+                               lsp.CompletionItemKind.Class
+                               lsp.CompletionItemKind.Function))
+                  for name in (dir builtins) if (builtin-p name)]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Workspace index
@@ -692,18 +694,24 @@
 ;; ---------------------------------------------------------------------------
 
 (def collect-references [nodes name uri]
-  "Find all occurrences of a symbol name in the AST."
+  "The Location of every Symbol in nodes that stands for the same name as
+   name (name-key: my-x and my_x are one name, - and _ are not), in source
+   order."
+  (= target (name-key name))
   (= refs [])
-  (for node in nodes
-    (if (and (isinstance node Symbol) (== node.value name))
-        (.append refs (lsp.Location :uri uri :range (node-range node))))
-    (if (isinstance node Expression)
-        (.extend refs (collect-references node.list name uri)))
-    (if (and (isinstance node (, Wrapper MetaIndicator))
-             (is-not node.value None))
-        (.extend refs (collect-references [node.value] name uri)))
-    (if (isinstance node GluedHead)
-        (.extend refs (collect-references [node.head node.params] name uri))))
+  (= stack (list (reversed nodes)))
+  (while stack
+    (= node (.pop stack))
+    (cond (isinstance node Symbol)
+          (if (== (name-key node.value) target)
+              (.append refs (lsp.Location :uri uri :range (node-range node))))
+          (isinstance node Expression)
+          (.extend stack (reversed node.list))
+          (isinstance node (, Wrapper MetaIndicator))
+          (if (is-not node.value None)
+              (.append stack node.value))
+          (isinstance node GluedHead)
+          (.extend stack [node.params node.head])))
   (return refs))
 
 ;; ---------------------------------------------------------------------------
@@ -803,14 +811,15 @@
   (return None))
 
 (def builtin-hover [target]
-  "The BUILTIN-INFO hover of Symbol target, or None: the answer when no
+  "The builtin-info hover of Symbol target, or None: the answer when no
    backend gives one."
-  (= bi (.get BUILTIN-INFO (.replace target.value "-" "_")))
-  (if (not bi)
+  (= info (builtin-info (py-name target.value)))
+  (if (is info None)
       (return None))
-  (= hover-md f"```python\n{(sub bi "signature")}\n```\n\n*(Python builtin)*")
-  (if (sub bi "doc")
-      (+= hover-md f"\n\n{(sub bi "doc")}"))
+  (= [signature doc] info)
+  (= hover-md f"```python\n{signature}\n```\n\n*(Python builtin)*")
+  (if doc
+      (+= hover-md f"\n\n{doc}"))
   (return (markdown-hover hover-md target)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_HOVER)
@@ -848,6 +857,12 @@
   ;; Every Python name goes to the backend, the buffer's own bindings too:
   ;; it knows scopes (a function's local never answers for a global of the
   ;; same name), and maps a buffer binding back to the same .lpy place.
+  ;; Once it answered, its answer is final, an empty one included: the
+  ;; local lookup matches by name alone and would name some other binding.
+  ;; The exception is an answer none of whose locations maps to the editor
+  ;; (UNMAPPED, e.g. a name bound only by a macro's expansion): the name
+  ;; exists, so the buffer's own definition of it answers, but never the
+  ;; import or workspace steps, which would jump to another file's name.
   (try
     (= result (await (backend-locations doc line col target lsp.TEXT_DOCUMENT_DEFINITION
                                         (fn [document position]
@@ -856,17 +871,23 @@
     (except [Exception]
       (.debug logger "backend definition failed" :exc-info True)
       (= result None)))
-  (if result
-      (return result))
+  (cond (is result UNMAPPED)
+        (return (buffer-definition doc tree name))
+        (is-not result None)
+        (return result))
   (return (local-definition ls doc tree name))))
+
+(def buffer-definition [doc tree name]
+  "The buffer's own definitions of name (collect-definitions of tree,
+   imports included), or None."
+  (return (or (.get (collect-definitions tree doc.uri) name) None)))
 
 (def local-definition [ls doc tree name]
   "go-to-definition of name without the backend: the buffer's definitions
-   (imports included), the module an import names, the workspace index,
-   then a builtin's source."
+   (imports included), the module an import names, then the workspace
+   index."
   ;; 1. Local definitions in the file
-  (= defs (collect-definitions tree doc.uri))
-  (= local (.get defs name))
+  (= local (buffer-definition doc tree name))
   (if local
       (return local))
 
@@ -904,17 +925,6 @@
       (do (= external [loc for loc in ws-result if (!= loc.uri doc.uri)])
           (if external
               (return external))))
-
-  ;; 4. Python builtins with source files
-  (= builtin-name (.replace name "-" "_"))
-  (= bi (.get BUILTIN-INFO builtin-name))
-  (if (and bi (sub bi "source_file"))
-      (do (= source-path (pathlib.Path (sub bi "source_file")))
-          (if (.exists source-path)
-              (do (= lineno (- (or (sub bi "lineno") 1) 1))
-                  (return [(lsp.Location
-                    :uri (.as-uri source-path)
-                    :range (make-range lineno 0 lineno 0))])))))
   (return None))
 
 ;; ---------------------------------------------------------------------------
@@ -1005,17 +1015,17 @@
                                             :value doc-text))])))
 
 (def builtin-signature-help [func-name]
-  "The BUILTIN-INFO SignatureHelp of a call of func-name, or None: the
+  "The builtin-info SignatureHelp of a call of func-name, or None: the
    answer when neither lispython nor a backend gives one."
   (if (is func-name None)
       (return None))
-  (= bi (.get BUILTIN-INFO (.replace func-name "-" "_")))
-  (if (not bi)
+  (= info (builtin-info (py-name func-name)))
+  (if (is info None)
       (return None))
-  (= doc-str (.get bi "doc" ""))
+  (= [signature doc-str] info)
   (return (lsp.SignatureHelp
             :signatures [(lsp.SignatureInformation
-                           :label (.get bi "signature" func-name)
+                           :label signature
                            :documentation (ife doc-str
                                               (lsp.MarkupContent
                                                 :kind lsp.MarkupKind.Markdown
@@ -1059,18 +1069,11 @@
   (return (builtin-signature-help name))))
 
 ;; ---------------------------------------------------------------------------
-;; Member completion
+;; Completion context
 ;; ---------------------------------------------------------------------------
 
-;; After `recv.` or in the attribute slot of `(. recv ...)`, where recv is
-;; the first parameter of the enclosing method, completion offers only the
-;; enclosing class's members, as pyright and jedi do for `self.`.  Every walk
-;; here runs on an explicit stack, so nesting depth costs no Python frames.
-
-(= _FUNCTION-HEADS (, "def" "async-def"))
-(= _LAMBDA-HEADS (, "lambda" "fn"))
-;; Forms whose body is another scope: an assignment in it is not the method's.
-(= _SCOPE-HEADS (, "def" "async-def" "lambda" "fn" "class" "defmacro"))
+;; Every walk here runs on an explicit stack, so nesting depth costs no
+;; Python frames.
 
 (def head-of [node]
   "The head symbol's text of a non-empty Paren, else None."
@@ -1098,284 +1101,6 @@
             (= node (ife (len node) (sub node -1) None)))
         (return (, path (ife (== (node-end node) cursor) node None)))))
   (return (, path None)))
-
-(def member-access [path leaf]
-  "The receiver name and the attribute typed so far at the cursor, or None.
-   Either the leaf is recv.partial with one dot, or the cursor is in the
-   attribute slot of an open (. recv ...): past recv, or touching a plain
-   second operand."
-  (if (and (isinstance leaf Symbol) (== (.count leaf.value ".") 1))
-      (do (= [recv partial] (.split leaf.value "."))
-          (return (ife recv (, recv partial) None))))
-  (if (or (not path) (!= (head-of (sub path -1)) "."))
-      (return None))
-  (= form (sub path -1))
-  (if (or (not (isinstance (sub form 1) Symbol)) (in "." (. (sub form 1) value)))
-      (return None))
-  (= recv (. (sub form 1) value))
-  (cond (and (== (len form) 2) (is leaf None))
-        (return (, recv ""))
-        (and (== (len form) 3) (is leaf (sub form 2))
-             (isinstance leaf Symbol) (not (in "." leaf.value)))
-        (return (, recv leaf.value)))
-  (return None))
-
-(def decorator-name [node]
-  "A plain-symbol decorator's Python name, builtins.X read as X, or None."
-  (if (not (isinstance node Symbol))
-      (return None))
-  (= [module _ name] (.rpartition node.name "."))
-  (return (ife (== module "builtins") name node.name)))
-
-(def decorator-names [node]
-  "Names of the plain-symbol decorators in a deco form's decorator slot."
-  (= decorators (ife (isinstance node Bracket) node.list [node]))
-  (return [name for name in (map decorator-name decorators)
-           if (is-not name None)]))
-
-(def undecorated [form]
-  "The definition a (deco ...) chain wraps, and its decorators' names."
-  (= decorators [])
-  (while (and (== (head-of form) "deco") (>= (len form) 3))
-    (.extend decorators (decorator-names (sub form 1)))
-    (= form (sub form -1)))
-  (return (, form decorators)))
-
-(def param-names [params]
-  "The Python names a parameter list binds (annotations and defaults skipped)."
-  (= names [])
-  (for param in params.list
-    (if (isinstance param (, Starred DoubleStarred Keyword))
-        (= param param.value))
-    (if (and (isinstance param Symbol) (not (in param.value (, "*" "/"))))
-        (.append names param.name)))
-  (return names))
-
-;; Methods Python makes classmethods implicitly; __new__ is a staticmethod
-;; whose first parameter is the class all the same, decorated or not.
-(= _CLASS-RECEIVER-METHODS (, "__init_subclass__" "__class_getitem__" "__new__"))
-
-(def method-name [method]
-  "A def form's Python name, or None."
-  (= name-node (ife (>= (len method) 2) (def-name-symbol (sub method 1)) None))
-  (return (ife (is-not name-node None) name-node.name None)))
-
-(def receiver-param [method decorators]
-  "The Python name of a method's first parameter, which receives the
-   instance (the class under classmethod), or None for a staticmethod
-   other than __new__ or a non-name first slot."
-  (if (or (and (in "staticmethod" decorators) (!= (method-name method) "__new__"))
-          (< (len method) 3)
-          (not (isinstance (sub method 2) Bracket)))
-      (return None))
-  (= params (sub method 2))
-  (if (and (len params) (isinstance (sub params 0) Symbol)
-           (not (in (. (sub params 0) value) (, "*" "/"))))
-      (return (. (sub params 0) name)))
-  (return None))
-
-(def class-receiver-p [method decorators]
-  "Whether a method's first parameter receives the class, not an instance."
-  (return (or (in "classmethod" decorators)
-              (in (method-name method) _CLASS-RECEIVER-METHODS))))
-
-(def receiver-class [path recv]
-  "The class recv refers to at the cursor and whether recv is the class
-   itself (a classmethod's receiver), or None.  The open functions are
-   walked outward: a method whose receiver is recv answers, another
-   function binding recv shadows it, and a closure that does not bind it
-   sees the enclosing scope's, as Python's scoping does."
-  (= recv (py-name recv))
-  (for i in (range (- (len path) 1) -1 -1)
-    (= node (sub path i))
-    (= head (head-of node))
-    (cond (in head _FUNCTION-HEADS) (= params-at 2)
-          (in head _LAMBDA-HEADS) (= params-at 1)
-          True (continue))
-    ;; Inside the parameter list (a default, say) is the enclosing scope.
-    (if (or (<= (len node) (+ params-at 1))
-            (not (isinstance (sub node params-at) Bracket)))
-        (continue))
-    (if (in head _FUNCTION-HEADS)
-        (do (= j (- i 1))
-            (= decorators [])
-            (while (and (>= j 0) (== (head-of (sub path j)) "deco"))
-              (.extend decorators (decorator-names (sub (sub path j) 1)))
-              (-= j 1))
-            (if (and (>= j 0) (== (head-of (sub path j)) "class")
-                     (== (receiver-param node decorators) recv))
-                (return (, (sub path j) (class-receiver-p node decorators))))))
-    (if (in recv (param-names (sub node params-at)))
-        (return None)))
-  (return None))
-
-(def find-class-at [tree cls]
-  "The class form in tree starting where cls starts, or None."
-  (= start (, cls.lineno cls.col_offset))
-  (= stack (list tree))
-  (while stack
-    (= node (.pop stack))
-    (if (isinstance node (, Wrapper MetaIndicator))
-        (do (if (is-not node.value None)
-                (.append stack node.value))
-            (continue)))
-    (if (or (not (isinstance node Expression))
-            (< start (, node.lineno node.col_offset))
-            (> start (node-end node)))
-        (continue))
-    (if (and (== (head-of node) "class")
-             (== (, node.lineno node.col_offset) start))
-        (return node))
-    (.extend stack node.list))
-  (return None))
-
-(def class-parts [cls]
-  "The bases bracket (or None) and the body forms of a class form."
-  (if (and (> (len cls) 2) (isinstance (sub cls 2) Bracket))
-      (return (, (sub cls 2) (sub cls.list [: 3 None]))))
-  (return (, None (sub cls.list [: 2 None]))))
-
-(def top-level-class [tree name]
-  "The last top-level class whose Python name is name in tree, or None."
-  (= found None)
-  (for form in tree
-    (= definition (sub (undecorated form) 0))
-    (if (and (== (head-of definition) "class") (>= (len definition) 2))
-        (do (= name-node (def-name-symbol (sub definition 1)))
-            (if (and (is-not name-node None) (== name-node.name name))
-                (= found definition)))))
-  (return found))
-
-(def with-targets [items]
-  "The targets of a with form's [context as target ...] items."
-  (= targets [])
-  (if (isinstance items Bracket)
-      (for i in (range 1 (- (len items) 1))
-        (if (and (isinstance (sub items i) Symbol) (== (. (sub items i) value) "as"))
-            (.append targets (sub items (+ i 1))))))
-  (return targets))
-
-(def assignment-targets [form]
-  "The targets an =, augmented assignment, for or with binds, bracket and
-   (, ...) tuple targets flattened."
-  (= head (head-of form))
-  (cond (and (== head "=") (>= (len form) 3) (isinstance (sub form 2) Annotation))
-        (= targets [(sub form 1)])
-        (== head "=")
-        (= targets (sub form.list [: 1 -1]))
-        (and (or (in head augassignop-dict) (in head (, "for" "async-for")))
-             (>= (len form) 2))
-        (= targets [(sub form 1)])
-        (and (in head (, "with" "async-with")) (>= (len form) 2))
-        (= targets (with-targets (sub form 1)))
-        True
-        (return []))
-  (= flat [])
-  (= stack (list (reversed targets)))
-  (while stack
-    (= target (.pop stack))
-    (cond (isinstance target Bracket)
-          (.extend stack (reversed target.list))
-          (== (head-of target) ",")
-          (.extend stack (reversed (sub target.list [: 1 None])))
-          (isinstance target Starred)
-          (.append stack target.value)
-          True
-          (.append flat target)))
-  (return flat))
-
-(def receiver-attribute [target receiver]
-  "The attribute, as written, a target assigns on the receiver whose
-   Python name is receiver (recv.attr or (. recv attr)), or None."
-  (if (and (isinstance target Symbol) (== (.count target.value ".") 1))
-      (do (= [owner attr] (.split target.value "."))
-          (return (ife (and (== (py-name owner) receiver) attr) attr None))))
-  (if (and (== (head-of target) ".") (== (len target) 3)
-           (isinstance (sub target 1) Symbol) (== (. (sub target 1) name) receiver)
-           (isinstance (sub target 2) Symbol) (not (in "." (. (sub target 2) value))))
-      (return (. (sub target 2) value)))
-  (return None))
-
-(def receiver-attributes [method receiver]
-  "Attribute names a method assigns through its receiver, in source order.
-   Nested functions and classes are other scopes and are not walked."
-  (= names [])
-  (= stack (list (reversed (sub method.list [: 3 None]))))
-  (while stack
-    (= node (.pop stack))
-    (if (isinstance node (, Wrapper MetaIndicator))
-        (do (if (is-not node.value None)
-                (.append stack node.value))
-            (continue)))
-    (if (not (isinstance node Expression))
-        (continue))
-    (= head (head-of node))
-    (if (in head _SCOPE-HEADS)
-        (continue))
-    (for target in (assignment-targets node)
-      (= attr (receiver-attribute target receiver))
-      (if (is-not attr None)
-          (.append names attr)))
-    (.extend stack (reversed node.list)))
-  (return names))
-
-(def add-member [members label kind]
-  "Record a member under its Python name; the first spelling seen wins."
-  (.setdefault members (py-name label) (, label kind)))
-
-(def class-members [cls tree class-receiver]
-  "Python name -> (label, CompletionItemKind) of the members of cls and its
-   same-buffer bases, subclass first.  Members are the class body's
-   definitions plus the attributes its methods assign through their
-   receiver; on the class itself (class-receiver) only class-receiver
-   methods' assignments count."
-  (= members {})
-  (= pending [cls])
-  (= visited (set))
-  (while pending
-    (= current (.pop pending 0))
-    (if (in (id current) visited)
-        (continue))
-    (.add visited (id current))
-    (= [bases body] (class-parts current))
-    (= methods [])
-    (for form in body
-      (= [definition decorators] (undecorated form))
-      (= head (head-of definition))
-      (cond
-        (and (in head (, "def" "async-def" "class")) (>= (len definition) 2)
-             (is-not (def-name-symbol (sub definition 1)) None))
-        (do (= name (. (def-name-symbol (sub definition 1)) value))
-            (cond (== head "class")
-                  (add-member members name lsp.CompletionItemKind.Class)
-                  (in "property" decorators)
-                  (add-member members name lsp.CompletionItemKind.Property)
-                  True
-                  (do (add-member members name lsp.CompletionItemKind.Method)
-                      (.append methods (, definition decorators)))))
-
-        (and (== head "type") (type-alias-p definition))
-        (add-member members (. (def-name-symbol (sub definition 1)) value)
-                    lsp.CompletionItemKind.Class)
-
-        (== head "=")
-        (for target in (assignment-targets definition)
-          (if (and (isinstance target Symbol) (not (in "." target.value)))
-              (add-member members target.value lsp.CompletionItemKind.Variable)))))
-    (for [method decorators] in methods
-      (= receiver (receiver-param method decorators))
-      (if (or (is receiver None)
-              (and class-receiver (not (class-receiver-p method decorators))))
-          (continue))
-      (for attr in (receiver-attributes method receiver)
-        (add-member members attr lsp.CompletionItemKind.Variable)))
-    (if (is-not bases None)
-        (for base in bases.list
-          (if (and (isinstance base Symbol) (not (in "." base.value)))
-              (do (= base-class (top-level-class tree base.name))
-                  (if (is-not base-class None)
-                      (.append pending base-class)))))))
-  (return members))
 
 (def line-text [source line]
   "The text of source's 1-based line, the empty string past its end."
@@ -1465,40 +1190,6 @@
             ls ["text_document" "signature_help" "signature_information"
                 "parameter_information" "label_offset_support"])))
 
-(def member-completion [doc line col :insert-replace False]
-  "The member CompletionList at the 1-based line and code-point column,
-   or None when the cursor is not on an attribute of a method's receiver.
-   insert-replace is insert-replace-support's answer for the client."
-  (= prefix (source-prefix doc.source line col))
-  (= closers (open-form-closers prefix))
-  (if (is closers None)
-      (return None))
-  (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))
-  (= access (member-access path leaf))
-  (if (is access None)
-      (return None))
-  (= [recv partial] access)
-  (= found (receiver-class path recv))
-  (if (is found None)
-      (return None))
-  (= [cls class-receiver] found)
-  ;; The whole buffer's class, when it parses, also has the members
-  ;; written after the cursor.
-  (= tree (parse doc.source :partial True))
-  (= whole (find-class-at tree cls))
-  (if (is-not whole None)
-      (= cls whole))
-  (= ranges (completion-ranges doc line col))
-  (= typed (sub ranges 2))
-  (return (lsp.CompletionList
-            :is-incomplete False
-            :items [(lsp.CompletionItem
-                      :label label
-                      :kind kind
-                      :filter-text (filter-text label name typed)
-                      :text-edit (completion-edit ranges label insert-replace))
-                    for [name [label kind]] in (.items (class-members cls tree class-receiver))])))
-
 ;; ---------------------------------------------------------------------------
 ;; Completion
 ;; ---------------------------------------------------------------------------
@@ -1508,82 +1199,42 @@
 ;; only inside defmacro bodies.
 (= _LPY-KEYWORDS [*BUILTIN-MACROS "gensym"])
 
-(def local-completion [doc line col :insert-replace False]
-  "lispython's own completion at the 1-based line and code-point column:
-   on a method receiver's attribute only the class's members
-   (member-completion), else the general list.  The answer when no Python
-   backend does."
-  (try
-    (= members (member-completion doc line col :insert-replace insert-replace))
-    (except [Exception]
-      (.debug logger "member completion failed" :exc-info True)
-      (= members None)))
-  (if (is-not members None)
-      (return members))
-  (return (lsp.CompletionList :is-incomplete False :items (general-items doc))))
-
-(def general-items [doc]
-  "The completion items offered anywhere: special forms, lispython
-   keywords, Python builtins, the buffer's definitions, the workspace's."
+(def lispython-items []
+  "lispython's own completion items: the special forms, then the built-in
+   macros and gensym (_LPY-KEYWORDS), each once."
   (= items [])
   (= seen (set))
-
-  ;; 1. Special forms
-  (for name in SPECIAL-FORM-DOCS
-    (if (not (in name seen))
-        (do (seen.add name)
-            (items.append
-              (lsp.CompletionItem
-                :label name
-                :kind lsp.CompletionItemKind.Keyword
-                :detail "special form")))))
-
-  ;; 2. LisPython-specific keywords
-  (for name in _LPY-KEYWORDS
-    (if (not (in name seen))
-        (do (seen.add name)
-            (items.append
-              (lsp.CompletionItem
-                :label name
-                :kind lsp.CompletionItemKind.Keyword
-                :detail "keyword")))))
-
-  ;; 3. Python builtins
-  (for [name info] in (BUILTIN-INFO.items)
-    (if (not (in name seen))
-        (do (seen.add name)
-            (= kind (ife (isinstance (getattr builtins name None) type)
-                         lsp.CompletionItemKind.Class
-                         lsp.CompletionItemKind.Function))
-            (items.append
-              (lsp.CompletionItem
-                :label name
-                :kind kind
-                :detail (or (.get info "signature") ""))))))
-
-  ;; 4. Symbols from current file
-  (try
-    (= tree (parse doc.source :partial True))
-    (= defs (collect-definitions tree doc.uri))
-    (for name in defs
-      (if (not (in name seen))
-          (do (seen.add name)
-              (items.append
-                (lsp.CompletionItem
-                  :label name
-                  :kind lsp.CompletionItemKind.Variable)))))
-    (except [Exception] (pass)))
-
-  ;; 5. Workspace symbols
-  (for name in WORKSPACE-INDEX
-    (if (not (in name seen))
-        (do (seen.add name)
-            (items.append
-              (lsp.CompletionItem
-                :label name
-                :kind lsp.CompletionItemKind.Variable
-                :detail "workspace")))))
+  (for [names detail] in [(, SPECIAL-FORM-DOCS "special form") (, _LPY-KEYWORDS "keyword")]
+    (for name in names
+      (if (not-in name seen)
+          (do (.add seen name)
+              (.append items (lsp.CompletionItem :label name
+                                                 :kind lsp.CompletionItemKind.Keyword
+                                                 :detail detail))))))
   (return items))
+
+(def general-items [doc :line None]
+  "The completion items offered with no Python backend's answer:
+   lispython's own (lispython-items), the Python builtins (builtin-names),
+   then the buffer's definitions (collect-definitions), each name once."
+  (= items (lispython-items))
+  (= seen (set [item.label for item in items]))
+  (for [name kind] in (builtin-names)
+    (if (not-in name seen)
+        (do (.add seen name)
+            (.append items (lsp.CompletionItem :label name :kind kind)))))
+  (for name in (buffer-definition-names doc line)
+    (if (not-in name seen)
+        (do (.add seen name)
+            (.append items (lsp.CompletionItem :label name
+                                               :kind lsp.CompletionItemKind.Variable)))))
+  (return items))
+
+(def local-completion [doc :line None]
+  "The completion answer when no Python backend gives one: the general
+   list, with no guess at what an attribute's object holds."
+  (return (lsp.CompletionList :is-incomplete False
+                              :items (general-items doc :line line))))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion through the Python backend
@@ -1621,11 +1272,6 @@
         True
         (return (list answer))))
 
-(def name-spelling-p [part]
-  "Whether part spells a Python name: its py-name is an identifier and it
-   holds a letter or digit, so an operator such as - (py-name _) is none."
-  (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
-
 (def buffer-spellings [source]
   "Python name -> the buffer's first spelling of it in source order: every
    Symbol counts, a dotted one (a.my-b) by each of its parts, each only
@@ -1651,18 +1297,29 @@
           (.extend stack [node.params node.head])))
   (return spellings))
 
-(def backend-member-items [doc line col items insert-replace]
-  "The backend's attribute completion items as the buffer's: labelled by
-   the buffer's own spelling of each Python name (none: the backend's
-   name), with filterText and edit over the .lpy word at the cursor.  What
-   is positioned in or tied to the generated code (text_edit,
-   additional_text_edits such as an auto-import, insert_text, command,
-   data) is dropped: it would land on lines the user never wrote."
-  (= spellings (buffer-spellings doc.source))
+(def python-syntax-p [item]
+  "Whether a backend completion item is Python syntax (else, yield), which
+   no lispython form spells: a Keyword item other than a constant the
+   builtins module holds (True, False, None), which lispython writes as
+   Python does."
+  (return (and (== item.kind lsp.CompletionItemKind.Keyword)
+               (not-in item.label (vars builtins)))))
+
+(def backend-items [doc line col items insert-replace spellings]
+  "The backend's completion items as the buffer's: labelled by the
+   buffer's own spelling of each Python name (spellings, buffer-spellings'
+   map; none: the backend's name), with filterText and edit over the .lpy
+   word at the cursor.  What is positioned in or tied to the generated code
+   (text_edit, insert_text, command, data) is dropped: it would land on
+   lines the user never wrote.  So is an item with additional_text_edits
+   (an auto-import of a symbol the buffer never binds), and a Python
+   keyword (python-syntax-p)."
   (= ranges (completion-ranges doc line col))
   (= typed (sub ranges 2))
   (= result [])
   (for item in items
+    (if (or (python-syntax-p item) item.additional-text-edits)
+        (continue))
     (= name item.label)
     (= label (.get spellings name name))
     (.append result
@@ -1680,26 +1337,64 @@
         :text-edit (completion-edit ranges label insert-replace))))
   (return result))
 
-(def with-backend-kinds [result items]
-  "result's items, each whose label is one of the backend items' Python
-   names taking that item's kind (a special form or keyword keeps its own):
-   the backend knows that an imported defaultdict is a class.  An item with
-   additional_text_edits (an auto-import of a symbol the buffer never
-   binds) names some other object, so it gives no kind."
-  (= kinds {})
-  (for item in items
-    (if (and (is-not item.kind None) (not item.additional-text-edits))
-        (.setdefault kinds item.label item.kind)))
-  (for item in result.items
-    (if (!= item.kind lsp.CompletionItemKind.Keyword)
-        (do (= kind (.get kinds (py-name item.label)))
-            (if (is-not kind None)
-                (= item.kind kind)))))
-  (return result))
+(def buffer-definition-names [doc line]
+  "The names doc's definitions bind (collect-definitions), in source order,
+   the one home of that list: over its partial parse and, since a form left
+   open at the 1-based line (None: no cursor) swallows the rest of that
+   parse, over the text from the first later line that opens a form in
+   column 0, read as a top-level form (as Emacs's beginning-of-defun reads
+   one).  Limits: only the form open at the cursor is skipped, so a second
+   form left open after it loses the definitions after that one; and a ( in
+   column 0 inside a multi-line string is taken for a form's start."
+  (= lines (.split doc.source "\n"))
+  (= texts [doc.source])
+  (for i in (range (ife (is line None) (len lines) line) (len lines))
+    (if (.startswith (sub lines i) "(")
+        (do (.append texts (.join "\n" (sub lines [: i None])))
+            (break))))
+  (= names {})
+  (for text in texts
+    (try
+      (.update names (collect-definitions (parse text :partial True) doc.uri))
+      (except [Exception]
+        (pass))))
+  (return (list names)))
 
-;; Seconds the local list waits for the backend's kinds off an attribute:
-;; they only refine it, so a slow backend never holds up typing.
-(= KINDS-TIMEOUT 0.5)
+(def merged-items [doc line view items spellings]
+  "lispython's own items (lispython-items, then each macro of the view as
+   the buffer spells it) followed by items, the backend's (backend-items),
+   whose name (name-key) none of them has: a special form or macro wins
+   over whatever the backend offers by that name.  Over a fallback view
+   (only the text before the cursor compiled) the buffer's definitions the
+   backend could not see (buffer-definition-names at the 1-based line)
+   follow."
+  (= merged (lispython-items))
+  (= taken (set [(name-key item.label) for item in merged]))
+  ;; view.macros holds name-keys, as taken does.
+  (for name in (sorted view.macros)
+    ;; A qualified macro (module.name) is typed as an attribute.
+    (if (and (not-in "." name) (not-in name taken))
+        (do (= label (.get spellings name name))
+            (.add taken name)
+            (.append merged (lsp.CompletionItem :label label
+                                                :kind lsp.CompletionItemKind.Keyword
+                                                :detail "macro")))))
+  (= rest (list items))
+  (if view.fallback
+      (.extend rest [(lsp.CompletionItem :label name
+                                         :kind lsp.CompletionItemKind.Variable)
+                     for name in (buffer-definition-names doc line)]))
+  (for item in rest
+    (= name (name-key item.label))
+    (if (not-in name taken)
+        (do (.add taken name)
+            (.append merged item))))
+  (return merged))
+
+;; Seconds a completion off an attribute waits for a backend already
+;; running: its answer only refines the local list, so a slow backend never
+;; holds up typing.
+(= MERGE-TIMEOUT 0.5)
 
 (def attribute-context-p [source line col]
   "Whether the cursor may be on an attribute name: a dot right before the
@@ -1753,43 +1448,45 @@
   (return (, view answer)))
 
 (async-def backend-answer [client doc line col timeout]
-  "(view, items): the cursor view of doc and the backend's completion
-   items there, [] when either is missing (backend-request)."
+  "(view, items, incomplete): the cursor view of doc, the backend's
+   completion items there ([] when either is missing, backend-request) and
+   whether the backend marked its list incomplete."
   (= [view answer] (await (backend-request
                             client doc line col timeout lsp.TEXT_DOCUMENT_COMPLETION
                             (fn [document view]
                               (lsp.CompletionParams :text-document document
                                                     :position (generated-position view))))))
-  (return (, view (completion-items answer))))
+  (return (, view (completion-items answer)
+             (and (isinstance answer lsp.CompletionList) (is answer.is-incomplete True)))))
 
 (async-def backend-completion [doc line col insert-replace]
   "The completion answer with the Python backend's help, or None when it
    gives none (no backend, a buffer with no Python view, no items), and
    local-completion is the answer.  doc is a snapshot (document-snapshot).
    On an attribute the backend's items alone answer, and the request may
-   start the backend; elsewhere the local list does, with the kinds of an
-   already running backend within KINDS-TIMEOUT, and a backend not yet
-   running is started without waiting for it (start-soon)."
+   start the backend; elsewhere lispython's own items merged with the
+   backend's (merged-items) do, from an already running backend within
+   MERGE-TIMEOUT, and a backend not yet running is started without
+   waiting for it (start-soon)."
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
   (= attribute (attribute-context-p doc.source line col))
   (if (and (not attribute) (not client.running))
-      ;; Kinds come from a running backend only: start one for the next
-      ;; keystroke, and answer this one now.
+      ;; Start one for the next keystroke, and answer this one now.
       (do (.start-soon client)
           (return None)))
-  (= [view items] (await (backend-answer client doc line col
-                                         (ife attribute None KINDS-TIMEOUT))))
+  (= [view items incomplete] (await (backend-answer client doc line col
+                                                    (ife attribute None MERGE-TIMEOUT))))
   (if (not items)
       (return None))
-  (if view.attribute
-      (return (lsp.CompletionList
-                :is-incomplete False
-                :items (backend-member-items doc line col items insert-replace))))
-  (return (with-backend-kinds
-            (local-completion doc line col :insert-replace insert-replace)
-            items)))
+  (= spellings (buffer-spellings doc.source))
+  (= found (backend-items doc line col items insert-replace spellings))
+  (if (not found)
+      (return None))
+  (if (not view.attribute)
+      (= found (merged-items doc line view found spellings)))
+  (return (lsp.CompletionList :is-incomplete incomplete :items found)))
 
 (def document-snapshot [doc]
   "doc's text, version and position codec as they are now.  A handler that
@@ -1890,7 +1587,7 @@
 (def hover-request [head offset]
   "make-params of a hover at the generated start of the restored word
    (offset code points from the view's cursor), or of none when head, the
-   hovered symbol's Python name, is a macro of the view."
+   hovered symbol's name-key, is a macro of the view."
   (return (fn [document view]
             (ife (in head view.macros)
                  None
@@ -1924,7 +1621,7 @@
       (return None))
   (= [start end offset] word)
   (= [view answer] (await (backend-request client doc line end None lsp.TEXT_DOCUMENT_HOVER
-                                           (hover-request (py-name target.value) offset))))
+                                           (hover-request (name-key target.value) offset))))
   (if (not (isinstance answer lsp.Hover))
       (return None))
   (= contents (hover-contents answer.contents (buffer-spellings doc.source)))
@@ -1968,7 +1665,7 @@
   "make-params of a signature help at the view's cursor, or of none when
    head, the innermost open form's head symbol (or None), is a macro of the
    view."
-  (= head (ife (is head None) None (py-name head)))
+  (= head (ife (is head None) None (name-key head)))
   (return (fn [document view]
             (ife (in head view.macros)
                  None
@@ -2006,7 +1703,7 @@
     (= [line col] (cursor-of doc params.position))
     (except [Exception]
       (.debug logger "completion position failed" :exc-info True)
-      (return (lsp.CompletionList :is-incomplete False :items (general-items doc)))))
+      (return (local-completion doc))))
   (= insert-replace (insert-replace-support ls))
   (try
     (= result (await (backend-completion doc line col insert-replace)))
@@ -2015,7 +1712,7 @@
       (= result None)))
   (if (is-not result None)
       (return result))
-  (return (local-completion doc line col :insert-replace insert-replace))))
+  (return (local-completion doc :line line))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend
@@ -2184,7 +1881,7 @@
   "make-params of a definition or references request at the generated start
    of the restored word (offset code points from the view's cursor), built
    by make from the document and that position, or of none when head, the
-   symbol's Python name, is a macro of the view, or when whole (the request
+   symbol's name-key, is a macro of the view, or when whole (the request
    needs the whole buffer, as references do) and the view is a fallback:
    only the text before the cursor compiled, so the backend would miss
    every use after it, and its partial answer would replace the complete
@@ -2194,12 +1891,18 @@
                  None
                  (make document (generated-position view :offset offset))))))
 
+;; backend-locations' answer when the backend found locations but none maps
+;; to the editor.
+(= UNMAPPED (object))
+
 (async-def backend-locations [doc line col target method make :whole False]
   "The backend's answer to definition or references request method (params
    from make, location-request) on the word at the 1-based line and
    code-point col (Symbol target there), as editor Locations in answer
-   order without repeats: a list, maybe empty, or None when there is no
-   backend, no word, no view or no answer.  doc is a snapshot.  The view
+   order without repeats: a list (empty only when the backend found
+   nothing); UNMAPPED when no location the backend gave maps to the
+   editor; None when there is no backend, no word, no view or no answer.
+   doc is a snapshot.  The view
    is made with the cursor at the word's end and the request asks at its
    generated start (cursor-word, as backend-hover).  A location in a compiled view
    maps back to its .lpy (lpy-range), one in a real file passes, one that
@@ -2216,7 +1919,7 @@
   (= [start end offset] word)
   (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
   (= [view answer] (await (backend-request client doc line end REQUEST-TIMEOUT method
-                                           (location-request (py-name target.value)
+                                           (location-request (name-key target.value)
                                                              offset make whole))))
   (if (is answer None)
       (return None))
@@ -2238,6 +1941,12 @@
     (if (not-in key seen)
         (do (.add seen key)
             (.append result location))))
+  ;; Locations the backend found but none of which maps to the editor
+  ;; (generated code, a cache file, a stale shadow) are no answer: the
+  ;; name exists, so the buffer's own lookup answers.  Only an empty
+  ;; answer is final.
+  (if (and placed (not result))
+      (return UNMAPPED))
   (return result))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
@@ -2246,11 +1955,11 @@
   (if (is found None)
       (return None))
   (= [doc tree line col target] found)
-  (= local (collect-references tree target.value doc.uri))
   (if (in target.value SPECIAL-FORM-DOCS)
-      (return local))
+      (return (collect-references tree target.value doc.uri)))
   ;; A local binding goes to the backend too: its uses in other .lpy files
-  ;; are what references across files are for.
+  ;; are what references across files are for.  Its answer, once given, is
+  ;; final (as in definition); a macro is never asked (location-request).
   (= context (or (getattr params "context" None)
                  (lsp.ReferenceContext :include-declaration True)))
   (try
@@ -2263,9 +1972,9 @@
     (except [Exception]
       (.debug logger "backend references failed" :exc-info True)
       (= result None)))
-  (if result
+  (if (and (is-not result None) (is-not result UNMAPPED))
       (return result))
-  (return local)))
+  (return (collect-references tree target.value doc.uri))))
 
 (deco (server.feature lsp.WORKSPACE_SYMBOL)
 (def workspace-symbol [ls params]

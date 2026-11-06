@@ -433,238 +433,33 @@ class TestImportBindings:
         assert server.find_import_for_name(tree, "sep") is not None
 
 
-class TestMemberCompletion:
-    """After a method receiver's dot, completion offers the class's members.
+def local_references(source, line, character):
+    """(line, character) of each local reference at the position (no backend
+    serves URI)."""
+    from lsprotocol import types as lsp
 
-    ``|`` in a source marks the cursor; it is removed before completing.
-    """
-
-    BASE = "(class Base []\n  (= inherited 1))\n"
-    CLASS = (
-        BASE + "(class A [Base]\n"
-        "  (= class-var 1)\n"
-        "  (def __init__ [self]\n"
-        "    (= self.x 1)\n"
-        "    (= (. self y) 2)\n"
-        "    (+= self.count 1)\n"
-        "    (= self.z ^int))\n"
-        "  (def before [self] 1)\n"
-        "  (def here [self]\n"
-        "    {})\n"
-        "  (def after [self] 1))\n"
+    params = lsp.ReferenceParams(
+        text_document=lsp.TextDocumentIdentifier(uri=URI),
+        position=lsp.Position(line=line, character=character),
+        context=lsp.ReferenceContext(include_declaration=True),
     )
-    MEMBERS = {
-        "inherited", "class-var", "__init__", "x", "y", "count", "z",
-        "before", "here", "after",
-    }  # fmt: skip
+    found = asyncio.run(server.references(ls_with(source), params))
+    return [(loc.range.start.line, loc.range.start.character) for loc in found]
 
-    @staticmethod
-    def complete(source):
-        before, after = source.split("|")
-        line = before.count("\n")
-        character = len(before) - (before.rfind("\n") + 1)
-        result = run_completion(ls_with(before + after), position(line, character))
-        return line, character, result.items
 
-    def labels(self, source):
-        return {item.label for item in self.complete(source)[2]}
+def test_local_references_compare_python_names():
+    # Defect: references compare spellings, so my_x misses the my-x it
+    # stands for (one Python name).
+    source = "(= my-x 1)\n(print my_x)\n(print my-y)"
+    assert local_references(source, 1, 8) == [(0, 3), (1, 7)]
 
-    @pytest.mark.parametrize(
-        "body, typed",
-        [("self.|", 0), ("self.ba|", 2), ("(. self |)", 0), ("(. self ba|)", 2)],
-    )
-    def test_receiver_dot_offers_exactly_the_class_members(self, body, typed):
-        line, character, items = self.complete(self.CLASS.format(body))
-        assert {item.label for item in items} == self.MEMBERS
-        for item in items:
-            start, end = item.text_edit.range.start, item.text_edit.range.end
-            assert (start.line, start.character) == (line, character - typed)
-            assert (end.line, end.character) == (line, character)
-            assert item.text_edit.new_text == item.label
 
-    def test_unclosed_buffer_offers_the_members_written_so_far(self):
-        source = "(class A []\n  (= v 1)\n  (def f [self]\n    (= self.a 1)\n    self.|"
-        assert self.labels(source) == {"v", "f", "a"}
-
-    def test_the_receiver_is_the_first_parameter_by_name(self):
-        source = "(class A []\n  (def f [this]\n    (= this.a 1)\n    this.|))"
-        assert self.labels(source) == {"f", "a"}
-
-    @pytest.mark.parametrize(
-        "source",
-        [
-            "(class A []\n  (deco staticmethod (def f [self]\n    self.|)))",
-            "(class A []\n  (deco builtins.staticmethod (def f [self]\n    self.|)))",
-            "(def f [self]\n  self.|)",
-            "(class A []\n  (def f [self]\n    (fn [self] self.|)))",
-            "(class A []\n  (def f [self]\n    (. self| )))",
-        ],
-        ids=[
-            "staticmethod",
-            "builtins.staticmethod",
-            "function",
-            "shadowing lambda",
-            "touching receiver",
-        ],
-    )
-    def test_no_member_context_keeps_the_general_completion(self, source):
-        before, after = source.split("|")
-        line = before.count("\n") + 1
-        column = len(before) - (before.rfind("\n") + 1)
-        document = SimpleNamespace(source=before + after, uri=URI)
-        assert server.member_completion(document, line, column) is None
-        assert "print" in self.labels(source)
-
-    @pytest.mark.parametrize(
-        "statement",
-        [
-            "(= (, self.p self.q) (, 1 2))",
-            "(for [self.p (, _ self.q)] in xs (pass))",
-            "(async-for self.p in xs (= self.q 1))",
-            "(with [(open x) as self.p (open y) as [self.q]] (pass))",
-            "(async-with [(open x) as (, self.p self.q)] (pass))",
-        ],
-    )
-    def test_tuple_loop_and_with_targets_are_attributes(self, statement):
-        source = f"(class A []\n  (def f [self]\n    {statement}\n    self.|))"
-        assert self.labels(source) == {"f", "p", "q"}
-
-    @pytest.mark.parametrize(
-        "method, opening, closing",
-        [
-            ("__init_subclass__", "(def __init_subclass__ [cls]", ")"),
-            ("__init-subclass__", "(def __init-subclass__ [cls]", ")"),
-            ("__class_getitem__", "(def __class_getitem__ [cls]", ")"),
-            ("__new__", "(def __new__ [cls]", ")"),
-            ("__new__", "(deco staticmethod (def __new__ [cls]", "))"),
-        ],
-        ids=[
-            "__init_subclass__",
-            "hyphenated __init_subclass__",
-            "__class_getitem__",
-            "__new__",
-            "staticmethod __new__",
-        ],
-    )
-    def test_implicit_class_receivers_skip_instance_attributes(
-        self, method, opening, closing
-    ):
-        source = (
-            "(class A []\n"
-            "  (def __init__ [self] (= self.instance-attr 1))\n"
-            f"  {opening}\n"
-            "    (= cls.class-attr 1)\n"
-            f"    cls.|){closing}"
-        )
-        assert self.labels(source) == {"__init__", method, "class-attr"}
-
-    def test_names_compare_as_python_names(self):
-        # my-self/my_self, my-attr/my_attr and my-base/my_base are one name
-        # each; the first spelling seen is the label.
-        source = (
-            "(class my-base []\n  (= inherited 1))\n"
-            "(class A [my_base]\n"
-            "  (def f [my-self]\n"
-            "    (= my_self.my-attr 1)\n"
-            "    (= (. my-self my_attr) 2)\n"
-            "    my_self.|))"
-        )
-        assert self.labels(source) == {"f", "my-attr", "inherited"}
-
-    @pytest.mark.parametrize(
-        "source, expected",
-        [
-            (
-                "(class A []\n"
-                "  (def i [self] (= self.instance-attr 1))\n"
-                "  (deco builtins.classmethod (def c [cls]\n"
-                "    (= cls.class-attr 1)\n"
-                "    cls.|)))",
-                {"i": "Method", "c": "Method", "class-attr": "Variable"},
-            ),
-            (
-                "(class A []\n"
-                "  (deco builtins.property (def p [self] 1))\n"
-                "  (def f [self]\n"
-                "    self.|))",
-                {"p": "Property", "f": "Method"},
-            ),
-        ],
-        ids=["builtins.classmethod", "builtins.property"],
-    )
-    def test_a_builtins_decorator_reads_as_the_builtin(self, source, expected):
-        items = self.complete(source)[2]
-        assert {item.label: item.kind.name for item in items} == expected
-
-    def test_the_edit_range_is_in_utf16_units(self):
-        from pygls.workspace import TextDocument
-
-        source = '(class A []\n  (def f [self]\n    (print "\U0001f600" self.ab)))'
-        document = TextDocument(URI, source)
-        ls = SimpleNamespace(
-            workspace=SimpleNamespace(get_text_document=lambda uri: document)
-        )
-        # After "self.ab": 22 code points, 23 UTF-16 units (the emoji is two).
-        [item, *_] = run_completion(ls, position(2, 23)).items
-        start, end = item.text_edit.range.start, item.text_edit.range.end
-        assert (start.line, start.character, end.line, end.character) == (2, 21, 2, 23)
-
-    def test_members_replace_the_word_and_filter_by_the_typed_spelling(self):
-        # Defects: accepting mid-word leaves the rest of the word behind (no
-        # replace range); my-x is dropped once the user types my_ (no
-        # filterText), or once they type my- (filterText always my_x).
-        from lsprotocol import types as lsp
-
-        def complete(source):
-            before, after = source.split("|")
-            line = before.count("\n")
-            character = len(before) - (before.rfind("\n") + 1)
-            ls = ls_with(before + after)
-            ls.client_capabilities = lsp.ClientCapabilities(
-                text_document=lsp.TextDocumentClientCapabilities(
-                    completion=lsp.CompletionClientCapabilities(
-                        completion_item=lsp.ClientCompletionItemOptions(
-                            insert_replace_support=True
-                        )
-                    )
-                )
-            )
-            result = run_completion(ls, position(line, character))
-            return character, {item.label: item for item in result.items}
-
-        source = (
-            "(class A []\n"
-            "  (def __init__ [self] (= self.my-x 1))\n"
-            "  (def f [self]\n"
-            "    self.{}))"
-        )
-        character, items = complete(source.format("my|-x"))
-        edit = items["my-x"].text_edit
-        assert (edit.new_text, items["my-x"].filter_text) == ("my-x", "my_x")
-        assert (edit.insert.start.character, edit.insert.end.character) == (
-            character - 2,
-            character,
-        )
-        assert (edit.replace.start.character, edit.replace.end.character) == (
-            character - 2,
-            character + 2,
-        )
-        _, items = complete(source.format("my-|"))
-        assert items["my-x"].filter_text == "my-x"
-
-    def test_a_classmethod_receiver_skips_instance_attributes(self):
-        source = (
-            "(class A []\n"
-            "  (def i [self] (= self.instance-attr 1))\n"
-            "  (deco classmethod (def c [cls]\n"
-            "    (= cls.class-attr 1)\n"
-            "    cls.|)))"
-        )
-        assert self.labels(source) == {"i", "c", "class-attr"}
-
-    def test_a_closure_sees_the_methods_receiver(self):
-        source = "(class A []\n  (def f [self]\n    (def g [] self.|)))"
-        assert self.labels(source) == {"f"}
+def test_an_operator_is_never_the_name_its_mangling_gives():
+    # Defect: references compare Python names, and - mangles to _, so
+    # references on - list every _ and those on _ list the -.
+    source = "(= _ 1)\n(print (- 3 _))"
+    assert local_references(source, 1, 8) == [(1, 8)]
+    assert local_references(source, 0, 3) == [(0, 3), (1, 12)]
 
 
 def test_an_operator_never_spells_a_name():
@@ -672,29 +467,6 @@ def test_an_operator_never_spells_a_name():
     # backend member _ is relabelled "-"; ? (py-name _p) likewise.
     spellings = server.buffer_spellings("(- a b)\n(? c)\n(= x._ x._p)")
     assert (spellings.get("_", "_"), spellings["_p"]) == ("_", "_p")
-
-
-def test_an_auto_import_item_gives_no_kind():
-    # Defect: a symbol the buffer never binds (offered with an import edit)
-    # sets the kind of the buffer's own name.
-    from lsprotocol import types as lsp
-
-    local = lsp.CompletionList(
-        is_incomplete=False,
-        items=[lsp.CompletionItem(label="foo", kind=lsp.CompletionItemKind.Variable)],
-    )
-    edit = lsp.TextEdit(
-        range=lsp.Range(
-            start=lsp.Position(line=0, character=0),
-            end=lsp.Position(line=0, character=0),
-        ),
-        new_text="from m import foo\n",
-    )
-    imported = lsp.CompletionItem(
-        label="foo", kind=lsp.CompletionItemKind.Class, additional_text_edits=[edit]
-    )
-    [item] = server.with_backend_kinds(local, [imported]).items
-    assert item.kind == lsp.CompletionItemKind.Variable
 
 
 def test_completion_reads_the_view_generation_before_the_hand_off(
@@ -754,3 +526,24 @@ def test_a_real_file_range_counts_in_the_editors_units(tmp_path, encoding, start
     )
     got = server.file_range(doc, path.as_uri(), utf16)
     assert (got.start.line, got.start.character, got.end.character) == (1, start, end)
+
+
+def test_a_hover_on_a_non_builtin_name_caches_nothing():
+    # Defect: the builtin lookup's cache keeps an entry (None) for every
+    # name hovered, so it grows with every name a session hovers.
+    caches = [f for f in vars(server).values() if hasattr(f, "cache_info")]
+
+    def cached():
+        return sum(f.cache_info().currsize for f in caches)
+
+    run_hover(ls_with("(print 1)"), position(0, 2))  # a builtin may be cached
+    before = cached()
+    assert run_hover(ls_with("(no-such-name 1)"), position(0, 3)) is None
+    assert cached() == before
+
+
+def test_a_dotted_name_compares_part_by_part():
+    # Defect: a dotted symbol is no name spelling as a whole, so it is
+    # compared as written and self.my_v misses the self.my-v it stands for.
+    source = "(= self.my-v 1)\n(print self.my_v)"
+    assert local_references(source, 1, 9) == [(0, 3), (1, 7)]

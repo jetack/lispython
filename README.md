@@ -64,9 +64,8 @@ lpy -m pytest
 LisPython ships with a language server (`lpy-lsp`) that speaks LSP over stdio. It provides:
 
 - Diagnostics (parse / compile errors)
-- Completions (special forms, builtins, file/workspace symbols)
-- Hover documentation for special forms and builtins
-- Signature help for special forms and builtins
+- Completions: special forms and macros, plus the Python backend's names (attributes, scopes, imports); without a backend, special forms, macros, builtins and the file's own definitions
+- Hover and signature help: lispython's forms and macros answered locally, Python names through the backend (builtins without one)
 - Document symbols and workspace symbol search
 - Go-to-definition, including across `.lpy` files in the workspace
 
