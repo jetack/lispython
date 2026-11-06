@@ -1,0 +1,1586 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="LisPython is a Lisp-flavored syntax for Python: .lpy source compiles to Python AST and runs on CPython, with Clojure-style macros.">
+      
+      
+      
+        <link rel="canonical" href="https://jetack.github.io/lispython/0.6.0/syntax/reference/">
+      
+      
+        <link rel="prev" href="../expressions/">
+      
+      
+        <link rel="next" href="../../macros/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.1">
+    
+    
+      
+        <title>Form Reference - LisPython</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+  
+
+
+  
+  
+
+<script id="__analytics">function __md_analytics(){function e(){dataLayer.push(arguments)}window.dataLayer=window.dataLayer||[],e("js",new Date),e("config","G-4S2VF6T0D0"),document.addEventListener("DOMContentLoaded",(function(){document.forms.search&&document.forms.search.query.addEventListener("blur",(function(){this.value&&e("event","search",{search_term:this.value})}));document$.subscribe((function(){var t=document.forms.feedback;if(void 0!==t)for(var a of t.querySelectorAll("[type=submit]"))a.addEventListener("click",(function(a){a.preventDefault();var n=document.location.pathname,d=this.getAttribute("data-md-value");e("event","feedback",{page:n,data:d}),t.firstElementChild.disabled=!0;var r=t.querySelector(".md-feedback__note [data-md-value='"+d+"']");r&&(r.hidden=!1)})),t.hidden=!1})),location$.subscribe((function(t){e("config","G-4S2VF6T0D0",{page_path:t.pathname})}))}));var t=document.createElement("script");t.async=!0,t.src="https://www.googletagmanager.com/gtag/js?id=G-4S2VF6T0D0",document.getElementById("__analytics").insertAdjacentElement("afterEnd",t)}</script>
+  
+    <script>"undefined"!=typeof __md_analytics&&__md_analytics()</script>
+  
+
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#form-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="LisPython" class="md-header__button md-logo" aria-label="LisPython" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LisPython
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Form Reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jetack/lispython" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jetack/lispython
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../why-lispy/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Why LisPy?
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../usage/getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Usage
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../overview/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Syntax
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../macros/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Macros
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="LisPython" class="md-nav__button md-logo" aria-label="LisPython" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    LisPython
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jetack/lispython" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jetack/lispython
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../why-lispy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Why LisPy?
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Usage
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Usage
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../usage/getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../usage/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command Line Interface
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Syntax
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Syntax
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../statements/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Statements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../expressions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Expressions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form Reference
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Form Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#statements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Statements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#expressions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expressions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#macro-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Macro system
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#built-in-macros" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Built-in macros
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../macros/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Macros
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#statements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Statements
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#expressions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expressions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#macro-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Macro system
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#built-in-macros" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Built-in macros
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/jetack/lispython/edit/main/docs/syntax/reference.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="form-reference">Form Reference<a class="headerlink" href="#form-reference" title="Permanent link">&para;</a></h1>
+<p>Every LisPython form with its usage and a one-line description: the same
+text the editor shows on hover. Each form links to its examples on the
+Statements, Expressions and Macros pages.</p>
+<h2 id="statements">Statements<a class="headerlink" href="#statements" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Form</th>
+<th>Usage</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../statements/#function-definitions"><code>def</code></a></td>
+<td><code>(def name [args] body...)</code></td>
+<td>Define a function. Arguments are given in a bracket list. An optional docstring can follow the argument list.</td>
+</tr>
+<tr>
+<td><a href="../statements/#async-function-definitions"><code>async-def</code></a></td>
+<td><code>(async-def name [args] body...)</code></td>
+<td>Define an async function (coroutine).</td>
+</tr>
+<tr>
+<td><a href="../statements/#deco"><code>deco</code></a></td>
+<td><code>(deco decorator definition) or (deco [decorator ...] definition)</code></td>
+<td>Apply a decorator to the following function/class definition.</td>
+</tr>
+<tr>
+<td><a href="../statements/#return"><code>return</code></a></td>
+<td><code>(return value)</code></td>
+<td>Return a value from a function.</td>
+</tr>
+<tr>
+<td><a href="../statements/#class-definition"><code>class</code></a></td>
+<td><code>(class name [bases] body...)</code></td>
+<td>Define a class. Bases are given in a bracket list.</td>
+</tr>
+<tr>
+<td><a href="../statements/#type-alias"><code>type</code></a></td>
+<td><code>(type Name value)</code><br><code>(type Name[T] value)</code></td>
+<td>Define a type alias (Python 3.12+).</td>
+</tr>
+<tr>
+<td><a href="../statements/#del"><code>del</code></a></td>
+<td><code>(del target...)</code></td>
+<td>Delete a name or item.</td>
+</tr>
+<tr>
+<td><a href="../statements/#assignment"><code>=</code></a></td>
+<td><code>(= target... value) or (= target ^annotation value), value optional after an annotation</code></td>
+<td>Assignment statement.</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>+=</code></a></td>
+<td><code>(+= target value...)</code></td>
+<td>Augmented assignment (<code>target += value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>-=</code></a></td>
+<td><code>(-= target value...)</code></td>
+<td>Augmented assignment (<code>target -= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>*=</code></a></td>
+<td><code>(*= target value...)</code></td>
+<td>Augmented assignment (<code>target *= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>/=</code></a></td>
+<td><code>(/= target value...)</code></td>
+<td>Augmented assignment (<code>target /= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>//=</code></a></td>
+<td><code>(//= target value...)</code></td>
+<td>Augmented assignment (<code>target //= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>%=</code></a></td>
+<td><code>(%= target value...)</code></td>
+<td>Augmented assignment (<code>target %= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>**=</code></a></td>
+<td><code>(**= target value...)</code></td>
+<td>Augmented assignment (<code>target **= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>&lt;&lt;=</code></a></td>
+<td><code>(&lt;&lt;= target value...)</code></td>
+<td>Augmented assignment (<code>target &lt;&lt;= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>&gt;&gt;=</code></a></td>
+<td><code>(&gt;&gt;= target value...)</code></td>
+<td>Augmented assignment (<code>target &gt;&gt;= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>|=</code></a></td>
+<td><code>(|= target value...)</code></td>
+<td>Augmented assignment (<code>target |= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>^=</code></a></td>
+<td><code>(^= target value...)</code></td>
+<td>Augmented assignment (<code>target ^= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>&amp;=</code></a></td>
+<td><code>(&amp;= target value...)</code></td>
+<td>Augmented assignment (<code>target &amp;= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#augmented-assignment"><code>@=</code></a></td>
+<td><code>(@= target value...)</code></td>
+<td>Augmented assignment (<code>target @= value</code>).</td>
+</tr>
+<tr>
+<td><a href="../statements/#for"><code>for</code></a></td>
+<td><code>(for target in iterable body...)</code></td>
+<td>For loop. <code>target</code> is bound to each element of <code>iterable</code>.</td>
+</tr>
+<tr>
+<td><a href="../statements/#asynchronous-for"><code>async-for</code></a></td>
+<td><code>(async-for target in iterable body...)</code></td>
+<td>Async for loop — use inside <code>async-def</code>.</td>
+</tr>
+<tr>
+<td><a href="../statements/#while"><code>while</code></a></td>
+<td><code>(while test body...)</code></td>
+<td>While loop.</td>
+</tr>
+<tr>
+<td><a href="../statements/#if"><code>if</code></a></td>
+<td><code>(if test then else...)</code></td>
+<td>Conditional statement. Compiles to Python <code>if/else</code>.</td>
+</tr>
+<tr>
+<td><a href="../statements/#do-block"><code>do</code></a></td>
+<td><code>(do body...)</code></td>
+<td>A statement block grouping several statements where one statement is expected (e.g. an <code>if</code> branch); not an expression.</td>
+</tr>
+<tr>
+<td><a href="../statements/#with"><code>with</code></a></td>
+<td><code>(with [context as target ...] body...), each as target optional</code></td>
+<td>Context manager statement.</td>
+</tr>
+<tr>
+<td><a href="../statements/#asynchronous-with"><code>async-with</code></a></td>
+<td><code>(async-with [context as target ...] body...), each as target optional</code></td>
+<td>Async context manager — use inside <code>async-def</code>.</td>
+</tr>
+<tr>
+<td><a href="../statements/#match"><code>case</code></a></td>
+<td><code>(case pattern as name if guard body...), as name and if guard optional</code></td>
+<td>One arm of a <code>match</code>: a pattern, an optional <code>as</code> name and <code>if</code> guard, then the body.</td>
+</tr>
+<tr>
+<td><a href="../statements/#raise"><code>raise</code></a></td>
+<td><code>(raise), (raise exception) or (raise exception from cause)</code></td>
+<td>Raise an exception.</td>
+</tr>
+<tr>
+<td><a href="../statements/#try"><code>try</code></a></td>
+<td><code>(try body... (except ...)... (else ...) (finally ...))</code></td>
+<td>Try/except/finally statement.</td>
+</tr>
+<tr>
+<td><a href="../statements/#try"><code>except</code></a></td>
+<td><code>(except [type ... as name] body...) or (except body...), as name optional</code></td>
+<td>Exception handler clause of a <code>try</code>.</td>
+</tr>
+<tr>
+<td><a href="../statements/#try"><code>else</code></a></td>
+<td><code>(else body...)</code></td>
+<td>Clause of a <code>try</code> that runs when no exception was raised.</td>
+</tr>
+<tr>
+<td><a href="../statements/#try"><code>finally</code></a></td>
+<td><code>(finally body...)</code></td>
+<td>Clause of a <code>try</code> that always runs on exit.</td>
+</tr>
+<tr>
+<td><a href="../statements/#except-clause"><code>except*</code></a></td>
+<td><code>(except* [type ... as name] body...), as name optional</code></td>
+<td>Exception-group handler clause of a <code>try</code> (Python 3.11+).</td>
+</tr>
+<tr>
+<td><a href="../statements/#assert"><code>assert</code></a></td>
+<td><code>(assert test) or (assert test message)</code></td>
+<td>Assert that a condition is true.</td>
+</tr>
+<tr>
+<td><a href="../statements/#import"><code>import</code></a></td>
+<td><code>(import module)</code><br><code>(import module as alias)</code></td>
+<td>Import a module.</td>
+</tr>
+<tr>
+<td><a href="../statements/#from-import"><code>from</code></a></td>
+<td><code>(from module [names...])</code><br><code>(from module [name as alias ...])</code></td>
+<td>Import specific names from a module.</td>
+</tr>
+<tr>
+<td><a href="../statements/#lazy-imports"><code>lazy-import</code></a></td>
+<td><code>(lazy-import module)</code><br><code>(lazy-import module as alias)</code></td>
+<td>Import a module lazily: it is loaded on first use (Python 3.15+).</td>
+</tr>
+<tr>
+<td><a href="../statements/#lazy-imports"><code>lazy-from</code></a></td>
+<td><code>(lazy-from module [names...])</code><br><code>(lazy-from module [name as alias ...])</code></td>
+<td>Import names from a module lazily: it is loaded on first use (Python 3.15+).</td>
+</tr>
+<tr>
+<td><a href="../statements/#global"><code>global</code></a></td>
+<td><code>(global name...)</code></td>
+<td>Declare names as global variables.</td>
+</tr>
+<tr>
+<td><a href="../statements/#nonlocal"><code>nonlocal</code></a></td>
+<td><code>(nonlocal name...)</code></td>
+<td>Declare names as nonlocal variables.</td>
+</tr>
+<tr>
+<td><a href="../statements/#pass"><code>pass</code></a></td>
+<td><code>(pass)</code></td>
+<td>No-op placeholder statement.</td>
+</tr>
+<tr>
+<td><a href="../statements/#break"><code>break</code></a></td>
+<td><code>(break)</code></td>
+<td>Break out of a loop.</td>
+</tr>
+<tr>
+<td><a href="../statements/#continue"><code>continue</code></a></td>
+<td><code>(continue)</code></td>
+<td>Continue to the next loop iteration.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="expressions">Expressions<a class="headerlink" href="#expressions" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Form</th>
+<th>Usage</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../statements/#match"><code>match</code></a></td>
+<td><code>(match subject (case ...)...)</code></td>
+<td>Structural pattern matching (Python 3.10+).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#boolean-operators"><code>and</code></a></td>
+<td><code>(and value...)</code></td>
+<td>Logical AND (short-circuit).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#boolean-operators"><code>or</code></a></td>
+<td><code>(or value...)</code></td>
+<td>Logical OR (short-circuit).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>|</code></a></td>
+<td><code>(| a b ...)</code><br><code>(| pattern pattern...)</code></td>
+<td>Bitwise OR as an operator; inside a <code>case</code>, an or-pattern matching any alternative.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>+</code></a></td>
+<td></td>
+<td>Arithmetic addition / unary positive.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>-</code></a></td>
+<td></td>
+<td>Arithmetic subtraction / unary negative.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>*</code></a></td>
+<td></td>
+<td>Arithmetic multiplication / iterable unpacking.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>/</code></a></td>
+<td></td>
+<td>True division.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>//</code></a></td>
+<td></td>
+<td>Floor (integer) division.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>%</code></a></td>
+<td></td>
+<td>Modulo (remainder).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>**</code></a></td>
+<td></td>
+<td>Exponentiation.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>@</code></a></td>
+<td></td>
+<td>Matrix multiplication.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>&lt;&lt;</code></a></td>
+<td></td>
+<td>Bitwise left shift.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>&gt;&gt;</code></a></td>
+<td></td>
+<td>Bitwise right shift.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>^</code></a></td>
+<td></td>
+<td>Bitwise XOR.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#binary-operators"><code>&amp;</code></a></td>
+<td></td>
+<td>Bitwise AND.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#not"><code>not</code></a></td>
+<td></td>
+<td>Logical NOT.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_1"><code>~</code></a></td>
+<td></td>
+<td>Bitwise NOT / unquote (inside quasiquote).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_2"><code>==</code></a></td>
+<td><code>(== a b...)</code></td>
+<td>Equality test.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_3"><code>&gt;</code></a></td>
+<td><code>(&gt; a b...)</code></td>
+<td>Greater than.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_4"><code>!=</code></a></td>
+<td><code>(!= a b...)</code></td>
+<td>Inequality test.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_5"><code>&lt;</code></a></td>
+<td><code>(&lt; a b...)</code></td>
+<td>Less than.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_6"><code>&lt;=</code></a></td>
+<td><code>(&lt;= a b...)</code></td>
+<td>Less than or equal.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_7"><code>&gt;=</code></a></td>
+<td><code>(&gt;= a b...)</code></td>
+<td>Greater than or equal.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#is"><code>is</code></a></td>
+<td><code>(is a b...)</code></td>
+<td>Identity test (<code>x is y</code>).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#is-not"><code>is-not</code></a></td>
+<td><code>(is-not a b...)</code></td>
+<td>Negated identity test (<code>x is not y</code>).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#in"><code>in</code></a></td>
+<td><code>(in a b...)</code></td>
+<td>Membership test (<code>x in y</code>).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#not-in"><code>not-in</code></a></td>
+<td><code>(not-in a b...)</code></td>
+<td>Negated membership test (<code>x not in y</code>).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#_8"><code>:=</code></a></td>
+<td><code>(:= name value)</code></td>
+<td>Walrus operator (assignment expression).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#lambda"><code>lambda</code></a></td>
+<td><code>(lambda [args] body)</code></td>
+<td>Anonymous function (lambda expression).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#if-expression"><code>ife</code></a></td>
+<td><code>(ife test then else), else optional</code></td>
+<td>Ternary conditional expression (<code>then if test else else</code>).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#tuple"><code>,</code></a></td>
+<td><code>(, a b c)</code></td>
+<td>Tuple literal.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#await"><code>await</code></a></td>
+<td><code>(await value)</code></td>
+<td>Await a coroutine.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#yield"><code>yield</code></a></td>
+<td><code>(yield) or (yield value)</code></td>
+<td>Yield a value from a generator.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#yield-from"><code>yield-from</code></a></td>
+<td><code>(yield-from iterable)</code></td>
+<td>Yield all values from a sub-generator.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#formatted-string-literals"><code>f-string</code></a></td>
+<td><code>f"text {expr} more"</code></td>
+<td>Formatted string literal (f-string).</td>
+</tr>
+<tr>
+<td><a href="../expressions/#attribute"><code>.</code></a></td>
+<td><code>(. value attr...)</code></td>
+<td>Attribute access (<code>obj.attr</code>); <code>(. obj a b)</code> is <code>obj.a.b</code>.</td>
+</tr>
+<tr>
+<td><a href="../expressions/#subscription"><code>sub</code></a></td>
+<td><code>(sub value index...)</code></td>
+<td>Subscript access (<code>obj[index]</code>); more indexes subscript again.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="macro-system">Macro system<a class="headerlink" href="#macro-system" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Form</th>
+<th>Usage</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../../macros/#quote"><code>'</code></a></td>
+<td></td>
+<td>Quote — prevent evaluation; return the form as data.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#syntax-quote"><code>`</code></a></td>
+<td></td>
+<td>Quasiquote — like quote but allows unquote (<code>~</code>) splicing.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#unquote-splicing"><code>~@</code></a></td>
+<td></td>
+<td>Unquote-splice — splice a list into a quasiquote.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#macro-definition"><code>defmacro</code></a></td>
+<td><code>(defmacro name [args] body...)</code></td>
+<td>Define a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#require"><code>require</code></a></td>
+<td><code>(require module)</code><br><code>(require module *)</code><br><code>(require module [names...])</code></td>
+<td>Import macros from a LisPython macro module at compile time. <code>(require module)</code> registers every macro as <code>module.name</code>, <code>*</code> registers every macro unqualified, and a list registers exactly those names — an empty <code>[]</code> registers none.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="built-in-macros">Built-in macros<a class="headerlink" href="#built-in-macros" title="Permanent link">&para;</a></h2>
+<p>A <code>.lpy</code> file needs <code>(require lispy.macros *)</code> before it can use the built-in macros (<code>cond</code>, <code>-&gt;</code>, <code>fn</code>, ...); the REPL and nREPL load them already.</p>
+<table>
+<thead>
+<tr>
+<th>Form</th>
+<th>Usage</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="../../macros/#cond"><code>cond</code></a></td>
+<td><code>(cond test then test then ... else)</code></td>
+<td>Nested <code>if</code> statements: each test/then pair is one branch (<code>elif</code> after the first) and a trailing odd operand is the final <code>else</code>. It is a statement and yields no value: use <code>conde</code> for a value, and <code>(do ...)</code> for a branch of several forms.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#conde"><code>conde</code></a></td>
+<td><code>(conde test then test then ... else)</code></td>
+<td>The expression form of <code>cond</code>: a chain of <code>ife</code> whose trailing odd operand is the final else. Always give the else: with an even number of operands the last test is never evaluated and its then is the else.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#-"><code>-&gt;</code></a></td>
+<td><code>(-&gt; value form ...)</code></td>
+<td>Thread-first: insert <code>value</code> as the first argument of the first form, that result as the first argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value: <code>(-&gt; x f (g 2))</code> is <code>g(f(x), 2)</code>.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#-_1"><code>-&gt;&gt;</code></a></td>
+<td><code>(-&gt;&gt; value form ...)</code></td>
+<td>Thread-last: insert <code>value</code> as the last argument of the first form, that result as the last argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value, but the steps after it then thread first instead of last: write every step as a parenthesised call.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#as-"><code>as-&gt;</code></a></td>
+<td><code>(as-&gt; value name form ...)</code></td>
+<td>Bind <code>name</code> to <code>value</code>, then to each form's result in turn, and yield the last result, so <code>name</code> can stand anywhere in a form. An expression: each form is evaluated once, left to right, in the caller's scope.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#fn"><code>fn</code></a></td>
+<td><code>(fn [args] body)</code></td>
+<td>Alias of <code>lambda</code>: an anonymous function whose body is one expression.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#comment"><code>comment</code></a></td>
+<td><code>(comment body...)</code></td>
+<td>Ignore the body: nothing in it is compiled or evaluated, and the form expands to <code>None</code>.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#when"><code>when</code></a></td>
+<td><code>(when test body...)</code></td>
+<td>An <code>if</code> statement with no else, whose branch runs every body form in order. A statement: it yields no value.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#inc"><code>inc</code></a></td>
+<td><code>(inc value)</code></td>
+<td>The expression <code>value + 1</code>; <code>value</code> itself is left unchanged.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#dec"><code>dec</code></a></td>
+<td><code>(dec value)</code></td>
+<td>The expression <code>value - 1</code>; <code>value</code> itself is left unchanged.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#_1"><code>++</code></a></td>
+<td><code>(++ target)</code></td>
+<td>The statement <code>target += 1</code>.</td>
+</tr>
+<tr>
+<td><a href="../../macros/#-_2"><code>--</code></a></td>
+<td><code>(-- target)</code></td>
+<td>The statement <code>target -= 1</code>.</td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+
+
+
+  
+  
+
+
+
+  
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../expressions/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Expressions">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Expressions
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../../macros/" class="md-footer__link md-footer__link--next" aria-label="Next: Macros">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Macros
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2023-2026 Jetack
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.indexes", "navigation.instant", "navigation.footer", "content.action.edit", "content.tabs.link", "header.repo", "header.version"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

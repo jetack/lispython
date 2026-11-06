@@ -1,0 +1,21 @@
+# LisPython
+
+> LisPython is a Lisp-flavored syntax for Python: .lpy source compiles to Python AST and runs on CPython, with Clojure-style macros.
+
+A `.lpy` file needs `(require lispy.macros *)` before it can use the built-in macros (`cond`, `->`, `fn`, ...); the REPL and nREPL load them already.
+
+The syntax reference for writing LisPython, in one file: [llms-syntax.txt](https://jetack.github.io/lispython/0.6.0/llms-syntax.txt).
+
+Every page below in one file: [llms-full.txt](https://jetack.github.io/lispython/0.6.0/llms-full.txt).
+
+## Docs
+
+- [Home](https://jetack.github.io/lispython/0.6.0/): What is LisPython?
+- [Why LisPy?](https://jetack.github.io/lispython/0.6.0/why-lispy/): Just a new syntax for Python, Python Interop: 100% Compatible with Vanila Python, Macro system, Structural editing
+- [Getting Started](https://jetack.github.io/lispython/0.6.0/usage/getting-started/): Simple Web REPL, Installation
+- [Command Line Interface](https://jetack.github.io/lispython/0.6.0/usage/cli/): REPL, Run from source, Run translation, Run Tests (for development)
+- [Overview](https://jetack.github.io/lispython/0.6.0/syntax/overview/): example, Lexical syntax
+- [Statements](https://jetack.github.io/lispython/0.6.0/syntax/statements/): Function Definitions, `return`, Class Definition, Generic Functions and Classes, Type Alias, `del`, Assignment, Augmented Assignment, Type Annotations, `for`, `while`, `if`, `do` block, `with`, `match`, `raise`, `try`, `assert`, `import`, `global`, `nonlocal`, `pass`, `break`, `continue`
+- [Expressions](https://jetack.github.io/lispython/0.6.0/syntax/expressions/): Operators, `:=`, Statements are not expressions, `lambda`, `if` expression, Collection Literals, Comprehensions, `await`, `yield`, `yield from`, Function Call, Formatted String Literals, Template String Literals, Attribute, Method Call, Subscription, Slice
+- [Form Reference](https://jetack.github.io/lispython/0.6.0/syntax/reference/): Statements, Expressions, Macro system, Built-in macros
+- [Macros](https://jetack.github.io/lispython/0.6.0/macros/): Expression Nodes, quote, syntax-quote, unquote, unquote-splicing, Macro Definition, `require`, Built-in macros, gensym
