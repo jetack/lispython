@@ -144,6 +144,29 @@ def test_string_in_a_field_with_the_same_quote(lexer):
     assert toks[-1] == (Name, "y")
 
 
+@pytest.mark.parametrize("prefix", ["rf", "f", "t"])
+def test_backslash_before_a_brace_is_a_lone_backslash(lexer, prefix):
+    # A backslash never escapes a brace (scan_string_body): \{ opens a field.
+    toks = tokens(lexer, prefix + '"\\{x}" y')
+    assert (Name, "x") in toks
+    assert [v for t, v in toks if t is String.Interpol] == ["{", "}"]
+    assert toks[-1] == (Name, "y")
+
+
+def test_backslash_before_a_doubled_brace(lexer):
+    # \{{ is a backslash and a literal brace: no field, the " closes it.
+    toks = tokens(lexer, 'rf"\\{{" y')
+    assert not [v for t, v in toks if t is String.Interpol]
+    assert toks[-1] == (Name, "y")
+
+
+def test_soft_keywords_are_lispython_forms(lexer):
+    for name in ["match", "case", "type"]:
+        assert kind_of(lexer, f"({name} x)", name) is Keyword, name
+    # lazy is a soft keyword on Python 3.15+, not a lispython form.
+    assert kind_of(lexer, "(f lazy)", "lazy") is Name
+
+
 def test_derived_form_names(lexer):
     """Every built-in macro and every lettered special form, as a head."""
     for name in form_docs.BUILTIN_MACROS:

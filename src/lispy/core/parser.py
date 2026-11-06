@@ -90,6 +90,11 @@ def _token_patterns(in_field, field_level=False):
     ⚠️ Never let a token run past the delimiter and cut it back there: a
     symbol runs to the next "}", which in a spec chain f"{x:{x:{x:...}}}" is
     past every field, so each field would rescan the rest of the source.
+
+    ``lispy/highlight.py`` builds its Pygments rules from these patterns and
+    their labels (and from ``_STRING_TYPES``, the string prefix tuples and the
+    body stops): a new token label needs a ``_LABEL_ACTIONS`` entry there, or
+    that module refuses to import.
     """
     end = "$|:|!(?!=)" if field_level else "$"
     if in_field:

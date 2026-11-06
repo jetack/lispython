@@ -10,8 +10,10 @@ Nothing here restates the language. Token boundaries are the reader's own
 patterns (``_token_patterns`` in ``lispy.core.parser``, numbers and string
 prefixes included); the form names come from ``lispy.form_docs`` (special
 forms, the ``type`` alias, built-in macros), and the Python names from
-``keyword`` and ``builtins``. Only Pygments imports this module (through the
-entry point) and the tests, so Pygments is not a runtime dependency.
+``keyword`` and ``builtins``. Only Pygments (through the entry point) and the
+tests import this module, so Pygments is not a runtime dependency. Loading it
+imports ``lispy``, which installs the ``.lpy`` import hook process-wide, and
+Pygments loads every plugin lexer on a filename lookup or ``guess_lexer``.
 """
 
 import builtins
@@ -36,6 +38,8 @@ from lispy import form_docs
 from lispy.core.compiler.literal import PLAIN_STRING_PREFIXES
 from lispy.core.parser import (
     _F_STRING_PREFIXES,
+    _INTERPOLATED_BODY_STOP,
+    _PLAIN_BODY_STOP,
     _STRING_TYPES,
     _T_STRING_PREFIXES,
     _token_patterns,
@@ -43,13 +47,9 @@ from lispy.core.parser import (
 )
 
 _MACROS = frozenset(form_docs.BUILTIN_MACROS)
-# Python's soft keywords with a letter: "_" is one only in a match pattern and
-# is otherwise an ordinary name.
-_KEYWORDS = (
-    frozenset(form_docs.ALL_FORMS) - _MACROS
-    | frozenset(keyword.kwlist)
-    | {k for k in keyword.softkwlist if any(c.isalpha() for c in k)}
-)
+# The soft keywords lispython reads (match, case, type) are its forms;
+# keyword.softkwlist would add one per Python release that lispython lacks.
+_KEYWORDS = frozenset(form_docs.ALL_FORMS) - _MACROS | frozenset(keyword.kwlist)
 _CONSTANTS = frozenset(special_literals)
 _BUILTINS = {
     name: Name.Exception
@@ -141,6 +141,10 @@ _STRING_ESCAPE = (
     r"|[\\abfnrtv\"'\n])"
 )
 _BYTES_ESCAPE = r"\\(?:x[0-9a-fA-F]{2}|[0-7]{1,3}|[\\abfnrtv\"'\n])"
+# The braces an f/t-string body stops at and a plain one does not.
+_BRACES = "".join(
+    sorted(set(_INTERPOLATED_BODY_STOP.pattern) - set(_PLAIN_BODY_STOP.pattern))
+)
 
 
 def _prefix_kinds():
@@ -190,16 +194,18 @@ def _string_body(kind, quote):
     if "r" not in kind:
         rules.append((_BYTES_ESCAPE if kind == "b" else _STRING_ESCAPE, String.Escape))
     # A backslash and the character after it are one pair, raw too, so \"
-    # never closes the string.
-    rules.append((r"\\[\s\S]", String))
-    stops = re.escape("\\" + quote[0])
-    if kind.startswith("i"):
+    # never closes the string; but a backslash never escapes a brace
+    # (scan_string_body), so before one it is a lone backslash.
+    interpolated = kind.startswith("i")
+    braces = re.escape(_BRACES) if interpolated else ""
+    rules.append((rf"\\[^{braces}]" if braces else r"\\[\s\S]", String))
+    stops = re.escape("\\" + quote[0]) + braces
+    if interpolated:
         rules += [
             (r"\{\{|\}\}", String.Escape),
             (r"\{", String.Interpol, "field"),
             (r"\}", String),
         ]
-        stops += r"\{\}"
     rules += [(f"[^{stops}]+", String), (f"[{stops}]", String)]
     return rules
 
