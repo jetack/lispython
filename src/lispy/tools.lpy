@@ -51,10 +51,19 @@
       (sys.path.insert 0 current))
   (return (.join "." parts)))
 
-(= SCOPE {"__builtins__" __builtins__
-          "__name__" "__main__"
-          "__package__" (detect-package-name)
-          "__macro_namespace" {}})
+(= MAIN-PACKAGE (detect-package-name))
+
+(def main-scope []
+  "A new __main__ scope in the working directory's package.  SCOPE, the one
+   the REPL and nREPL sessions share, is one; a translation that names no
+   scope compiles in a new one, since every module unit compiles in its own
+   scope and must not reset the session's macros."
+  (return {"__builtins__" __builtins__
+           "__name__" "__main__"
+           "__package__" MAIN-PACKAGE
+           "__macro_namespace" {}}))
+
+(= SCOPE (main-scope))
 
 (def ast-to-python [st]
   ;; ast.unparse recurses and gives up on a shallower AST than compile()
@@ -67,8 +76,10 @@
              from None))))
 
 (def src-to-python-org [src :include-meta False :scope None]
+  "src's Python, compiled as a module unit in scope (default a new
+   main-scope)."
   (if (is scope None)
-      (= scope SCOPE))
+      (= scope (main-scope)))
   (return (.join "\n" (map ast-to-python
                            (compile-unit
                              (parse src)
@@ -76,8 +87,6 @@
                              :include-meta include-meta)))))
 
 (def src-to-python [src :include-meta False :scope None :format True]
-  (if (is scope None)
-      (= scope SCOPE))
   (= raw-pysrc (src-to-python-org src :include-meta include-meta :scope scope))
   (if format
       (return (format-python-source raw-pysrc))
@@ -121,7 +130,7 @@
                     "__macro_namespace" {}})
           (if (is-not name None)
               (= (sub scope "__name__") name)))
-      (= scope SCOPE))
+      (= scope (main-scope)))
   (= pysrc (src-to-python src :include-meta include_meta :scope scope :format format))
   (if no_lispy
       (return pysrc))

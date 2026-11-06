@@ -48,6 +48,11 @@ follows [Semantic Versioning](https://semver.org/).
   scope instead of the session's, so a file-less `eval` no longer sees the
   definitions they make. Editor clients should send `file` with `complete`,
   `docs`, `macroexpand` and `annotate` too, to answer from the same scope.
+- `lispy.tools.src_to_python`, `src_to_python_org` and `l2py_s` called
+  without a scope compile each source as a module of its own, in a new
+  scope, instead of in the REPL session's shared `SCOPE`: a macro one call
+  defines is no longer visible to the next, and a call no longer resets
+  the session's macros. Pass `scope=` to `src_to_python(_org)` to share one.
 - Upgrading: a `.pyc` that 0.6.0 compiled for a module using a built-in
   macro without a `require` keeps its old code until the source changes;
   touch the file or delete its `__pycache__`.

@@ -82,6 +82,18 @@ def test_prelude_in_repl_and_nrepl_evals(capsys):
     assert tools.nrepl_eval("(inc 1)", {})["value"] == "2"
 
 
+def test_a_translation_is_its_own_unit(monkeypatch):
+    # A translation naming no scope is a module of its own: it neither sees
+    # the REPL session's macros nor resets them.
+    session = tools.main_scope()
+    monkeypatch.setattr(tools, "SCOPE", session)
+    defmacro = "(defmacro sq [x] (return `(* ~x ~x)))"
+    compile_unit(parse(defmacro), session, start=UnitStart.CONTINUE)
+    assert tools.src_to_python_org("(sq 2)") == "sq(2)"
+    assert tools.l2py_s("(sq 2)", no_lispy=True, format=False) == "sq(2)"
+    assert "sq" in session["__macro_namespace"]
+
+
 def test_prelude_in_l2py_s_and_l2py_f(tmp_path):
     assert tools.l2py_s("(inc 1)", fresh_scope=True, no_lispy=True, format=False) == (
         "1 + 1"
