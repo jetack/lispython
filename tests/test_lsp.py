@@ -7,6 +7,7 @@ parse, so the error itself is reported.
 
 import asyncio
 import importlib
+import pathlib
 import re
 import sys
 import threading
@@ -16,6 +17,7 @@ import pytest
 
 import lispy.macros
 from lispy import form_docs
+from lispy.core import nodes
 from lispy.core.compiler import features
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
 from lispy.core.parser import parse
@@ -626,6 +628,7 @@ def test_abandoned_keystrokes_queue_no_cursor_view_compiles(slow_views, tmp_path
         return await asyncio.wait_for(live, 10)
 
     view, answer = asyncio.run(scenario())
+    assert not server.CURSOR_COMPILES
     assert (view.version, view.col) == (1, 9)
     assert slow_views.calls == [(1, 1), (1, 9)]
     assert slow_views.most == 1
@@ -646,6 +649,7 @@ def test_a_newer_version_supersedes_pending_cursor_views(slow_views, tmp_path):
         return await asyncio.wait_for(asyncio.gather(stale, *latest), 10)
 
     stale, *latest = asyncio.run(scenario())
+    assert not server.CURSOR_COMPILES
     assert stale == (None, None)
     assert [view.version for view, _ in latest] == [3, 3]
     assert slow_views.calls == [(1, 1), (3, 1)]
@@ -660,6 +664,42 @@ def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "cursor_view", cursor_view)
     with pytest.raises(RuntimeError, match="compile failed"):
         asyncio.run(asyncio.wait_for(view_of(tmp_path, 1), 10))
+    assert not server.CURSOR_COMPILES
+
+
+def cursor_view_references(path):
+    """The nearest enclosing def's name (None at top level) of every symbol
+    spelled exactly cursor-view in the lispython source at path."""
+    stack = [(form, None) for form in parse(path.read_text())]
+    found = []
+    while stack:
+        node, def_name = stack.pop()
+        if isinstance(node, nodes.Paren) and len(node) > 1:
+            if nodes.atom_text(node[0]) in ("def", "async-def"):
+                def_name = nodes.atom_text(node[1])
+        if isinstance(node, nodes.Symbol):
+            if nodes.atom_text(node) == "cursor-view":
+                found.append(def_name)
+        elif isinstance(node, nodes.Expression):
+            stack.extend((child, def_name) for child in node)
+        elif isinstance(node, nodes.Wrapper):
+            stack.append((node.value, def_name))
+    return found
+
+
+def test_cursor_view_is_compiled_only_through_the_scheduler():
+    # Defect: a handler calling asyncio.to-thread cursor-view directly brings
+    # back one abandoned compile per keystroke, unbounded.
+    lsp = pathlib.Path(server.__file__).parent
+    sites = sorted(
+        (path.name, def_name)
+        for path in lsp.glob("*.lpy")
+        for def_name in cursor_view_references(path)
+    )
+    assert sites == [
+        ("server.lpy", "cursor-view"),
+        ("server.lpy", "run-cursor-compiles"),
+    ]
 
 
 def test_completion_on_an_unreadable_document_gives_the_general_list(tmp_path):
