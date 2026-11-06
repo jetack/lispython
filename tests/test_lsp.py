@@ -257,10 +257,12 @@ class TestRequireSelection:
             "(require m [a] b)",
             '(require m "ab")',
             "(require m :as x)",
+            "(require)",
         ],
     )
     def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
         assert self._find(form + "\n(print 1)", "print") is None
+        assert server.builtin_macro_doc(parse(form + "\n(cond)"), "cond") is None
 
 
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,

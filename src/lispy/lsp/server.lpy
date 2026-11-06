@@ -289,8 +289,8 @@
   (cond
     ;; (require module): macros are registered as module.name
     (== kind REQUIRE-QUALIFIED)
-    (do (= prefix (+ (str (sub node 1)) "."))
-        (if (and (> (len node) 1) (.startswith name prefix))
+    (do (= prefix (ife (> (len node) 1) (+ (str (sub node 1)) ".") None))
+        (if (and prefix (.startswith name prefix))
             (return (sub name [: (len prefix) None]))))
     ;; (require module *): every macro, names unknown without importing
     (== kind REQUIRE-ALL)
