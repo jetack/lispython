@@ -247,6 +247,12 @@
       (return (and (== self.state "running") (is-not self.process None)
                    (is self.process.returncode None)))))
 
+  (deco property
+    (def available [self]
+      "False when the backend is off or shut down: a request answers None
+       without trying, so a caller need not prepare one."
+      (return (not-in self.state (, OFF "closed")))))
+
   (def backend-uri [self lpy-uri]
     "The backend's uri for document lpy-uri (its shadow's), or None for a
      document outside the project."

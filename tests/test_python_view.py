@@ -150,6 +150,17 @@ class TestCursor:
         gen, lpy = locate(view.text, "fo"), locate(src, "fo")
         assert view.map.to_lpy(*plus(gen, 1)) == plus(lpy, 1)
 
+    def test_cursor_mid_word(self):
+        # Defect: the rest of the word glues onto the sentinel (one symbol,
+        # ___lpy_cursor___-top), so a cursor inside a word has no view.
+        src = "(= my-x 1)\n(print my-x.fo-o zz-top)"
+        view = pv.view_at_cursor(src, *plus(locate(src, "fo-o"), 2))
+        assert view.text == "my_x = 1\nprint(my_x.fo, zz_top)"
+        assert view.cursor == plus(locate(view.text, "fo"), 2)
+        assert (view.partial, view.attribute) == ("fo", True)
+        gen, lpy = locate(view.text, "zz_top"), locate(src, "zz-top")
+        assert view.map.to_lpy(*plus(gen, 3)) == plus(lpy, 3)
+
     def test_mangled_partial(self):
         src = "(= my-x 1)\n(print my-x.dd-e?)"
         view = pv.view_at_cursor(src, *plus(locate(src, "dd-e?"), 5))
@@ -192,7 +203,7 @@ class TestCursor:
     )
     def test_prefix_stays_in_the_source(self, src, partial, line):
         view = pv.view_at_cursor(src, *plus(locate(src, partial), len(partial)))
-        assert (view.text, view.partial) == (line, partial)
+        assert (view.text, view.partial, view.attribute) == (line, partial, False)
         gen = locate(line, pv.py_name(partial))
         assert view.cursor == plus(gen, len(pv.py_name(partial)))
         assert view.map.to_lpy(*plus(gen, 1)) == plus(locate(src, partial), 1)
