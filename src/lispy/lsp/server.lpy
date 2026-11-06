@@ -1163,13 +1163,18 @@ or an extra usage line names no usage key."
         (return (, recv leaf.value)))
   (return None))
 
+(def decorator-name [node]
+  "A plain-symbol decorator's name, builtins.X read as X, or None."
+  (if (not (isinstance node Symbol))
+      (return None))
+  (= [module _ name] (.rpartition node.value "."))
+  (return (ife (== module "builtins") name node.value)))
+
 (def decorator-names [node]
   "Names of the plain-symbol decorators in a deco form's decorator slot."
-  (if (isinstance node Symbol)
-      (return [node.value]))
-  (if (isinstance node Bracket)
-      (return [d.value for d in node.list if (isinstance d Symbol)]))
-  (return []))
+  (= decorators (ife (isinstance node Bracket) node.list [node]))
+  (return [name for name in (map decorator-name decorators)
+           if (is-not name None)]))
 
 (def undecorated [form]
   "The definition a (deco ...) chain wraps, and its decorators' names."
@@ -1201,6 +1206,18 @@ or an extra usage line names no usage key."
       (return (. (sub params 0) value)))
   (return None))
 
+;; Methods Python makes classmethods implicitly; __new__ is a staticmethod
+;; whose first parameter is the class all the same.
+(= _CLASS-RECEIVER-METHODS (, "__init_subclass__" "__class_getitem__" "__new__"))
+
+(def class-receiver-p [method decorators]
+  "Whether a method's first parameter receives the class, not an instance."
+  (if (in "classmethod" decorators)
+      (return True))
+  (= name-node (ife (>= (len method) 2) (def-name-symbol (sub method 1)) None))
+  (return (and (is-not name-node None)
+               (in name-node.value _CLASS-RECEIVER-METHODS))))
+
 (def receiver-class [path recv]
   "The class recv refers to at the cursor and whether recv is the class
    itself (a classmethod's receiver), or None.  The open functions are
@@ -1225,7 +1242,7 @@ or an extra usage line names no usage key."
               (-= j 1))
             (if (and (>= j 0) (== (head-of (sub path j)) "class")
                      (== (receiver-param node decorators) recv))
-                (return (, (sub path j) (in "classmethod" decorators))))))
+                (return (, (sub path j) (class-receiver-p node decorators))))))
     (if (in recv (param-names (sub node params-at)))
         (return None)))
   (return None))
@@ -1267,15 +1284,28 @@ or an extra usage line names no usage key."
                 (= found definition)))))
   (return found))
 
+(def with-targets [items]
+  "The targets of a with form's [context as target ...] items."
+  (= targets [])
+  (if (isinstance items Bracket)
+      (for i in (range 1 (- (len items) 1))
+        (if (and (isinstance (sub items i) Symbol) (== (. (sub items i) value) "as"))
+            (.append targets (sub items (+ i 1))))))
+  (return targets))
+
 (def assignment-targets [form]
-  "The targets an = or augmented assignment binds, bracket targets flattened."
+  "The targets an =, augmented assignment, for or with binds, bracket and
+   (, ...) tuple targets flattened."
   (= head (head-of form))
   (cond (and (== head "=") (>= (len form) 3) (isinstance (sub form 2) Annotation))
         (= targets [(sub form 1)])
         (== head "=")
         (= targets (sub form.list [: 1 -1]))
-        (and (in head augassignop-dict) (>= (len form) 2))
+        (and (or (in head augassignop-dict) (in head (, "for" "async-for")))
+             (>= (len form) 2))
         (= targets [(sub form 1)])
+        (and (in head (, "with" "async-with")) (>= (len form) 2))
+        (= targets (with-targets (sub form 1)))
         True
         (return []))
   (= flat [])
@@ -1284,6 +1314,8 @@ or an extra usage line names no usage key."
     (= target (.pop stack))
     (cond (isinstance target Bracket)
           (.extend stack (reversed target.list))
+          (== (head-of target) ",")
+          (.extend stack (reversed (sub target.list [: 1 None])))
           (isinstance target Starred)
           (.append stack target.value)
           True
@@ -1329,7 +1361,7 @@ or an extra usage line names no usage key."
   "Member name -> CompletionItemKind of cls and its same-buffer bases,
    subclass first.  Members are the class body's definitions plus the
    attributes its methods assign through their receiver; on the class
-   itself (class-receiver) only classmethods' assignments count."
+   itself (class-receiver) only class-receiver methods' assignments count."
   (= members {})
   (= pending [cls])
   (= visited (set))
@@ -1366,7 +1398,7 @@ or an extra usage line names no usage key."
     (for [method decorators] in methods
       (= receiver (receiver-param method decorators))
       (if (or (is receiver None)
-              (and class-receiver (not (in "classmethod" decorators))))
+              (and class-receiver (not (class-receiver-p method decorators))))
           (continue))
       (for attr in (receiver-attributes method receiver)
         (.setdefault members attr lsp.CompletionItemKind.Variable)))

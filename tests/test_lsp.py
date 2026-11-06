@@ -416,14 +416,66 @@ class TestMemberCompletion:
         "source",
         [
             "(class A []\n  (deco staticmethod (def f [self]\n    self.|)))",
+            "(class A []\n  (deco builtins.staticmethod (def f [self]\n    self.|)))",
             "(def f [self]\n  self.|)",
             "(class A []\n  (def f [self]\n    (fn [self] self.|)))",
             "(class A []\n  (def f [self]\n    (. self| )))",
         ],
-        ids=["staticmethod", "function", "shadowing lambda", "touching receiver"],
+        ids=[
+            "staticmethod",
+            "builtins.staticmethod",
+            "function",
+            "shadowing lambda",
+            "touching receiver",
+        ],
     )
     def test_no_member_context_keeps_the_general_completion(self, source):
+        before, after = source.split("|")
+        line = before.count("\n") + 1
+        column = len(before) - (before.rfind("\n") + 1)
+        document = SimpleNamespace(source=before + after, uri=URI)
+        assert server.member_completion(document, line, column) is None
         assert "print" in self.labels(source)
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "(= (, self.p self.q) (, 1 2))",
+            "(for [self.p (, _ self.q)] in xs (pass))",
+            "(async-for self.p in xs (= self.q 1))",
+            "(with [(open x) as self.p (open y) as [self.q]] (pass))",
+            "(async-with [(open x) as (, self.p self.q)] (pass))",
+        ],
+    )
+    def test_tuple_loop_and_with_targets_are_attributes(self, statement):
+        source = f"(class A []\n  (def f [self]\n    {statement}\n    self.|))"
+        assert self.labels(source) == {"f", "p", "q"}
+
+    @pytest.mark.parametrize(
+        "method", ["__init_subclass__", "__class_getitem__", "__new__"]
+    )
+    def test_implicit_class_receivers_skip_instance_attributes(self, method):
+        source = (
+            "(class A []\n"
+            "  (def __init__ [self] (= self.instance-attr 1))\n"
+            f"  (def {method} [cls]\n"
+            "    (= cls.class-attr 1)\n"
+            "    cls.|))"
+        )
+        assert self.labels(source) == {"__init__", method, "class-attr"}
+
+    def test_the_edit_range_is_in_utf16_units(self):
+        from pygls.workspace import TextDocument
+
+        source = '(class A []\n  (def f [self]\n    (print "\U0001f600" self.ab)))'
+        document = TextDocument(URI, source)
+        ls = SimpleNamespace(
+            workspace=SimpleNamespace(get_text_document=lambda uri: document)
+        )
+        # After "self.ab": 22 code points, 23 UTF-16 units (the emoji is two).
+        [item, *_] = server.completion(ls, position(2, 23)).items
+        start, end = item.text_edit.range.start, item.text_edit.range.end
+        assert (start.line, start.character, end.line, end.character) == (2, 21, 2, 23)
 
     def test_a_classmethod_receiver_skips_instance_attributes(self):
         source = (
