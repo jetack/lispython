@@ -22,6 +22,15 @@ def test_conde_without_else_is_refused(operands):
     assert "final else" in info.value.msg
 
 
+@pytest.mark.parametrize("operands", ["1 2", "x 1 y 2", "x\n  1 y\n  2.5"])
+def test_conde_error_is_at_the_call(operands):
+    # Literal operands reach a macro unwrapped, so the error is placed by the
+    # expander at the call, whatever the operands are.
+    with pytest.raises(LispyCompileError) as info:
+        src_to_python_org(PREAMBLE + f"(x)\n  (conde {operands})")
+    assert (info.value.lineno, info.value.offset) == (3, 3)
+
+
 def test_conde_with_else_compiles():
     assert (
         src_to_python_org(PREAMBLE + "(conde x 1 y 2 3)") == "1 if x else 2 if y else 3"
