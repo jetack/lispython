@@ -9,6 +9,7 @@ import asyncio
 import importlib
 import re
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -547,3 +548,131 @@ def test_a_dotted_name_compares_part_by_part():
     # compared as written and self.my_v misses the self.my-v it stands for.
     source = "(= self.my-v 1)\n(print self.my_v)"
     assert local_references(source, 1, 9) == [(0, 3), (1, 7)]
+
+
+# ---------------------------------------------------------------------------
+# Cursor-view compiles (scheduled-cursor-view): one per document at a time,
+# never one for a request nobody waits for any more.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slow_views(monkeypatch):
+    """cursor_view replaced by one that blocks until release is set (so a
+    compile is in flight for as long as a test needs) and records the
+    (version, col) of each compile and the most run at once."""
+    record = SimpleNamespace(
+        calls=[],
+        running=0,
+        most=0,
+        started=threading.Event(),
+        release=threading.Event(),
+    )
+    lock = threading.Lock()
+
+    def cursor_view(uri, version, source, line, col, *rest):
+        with lock:
+            record.calls.append((version, col))
+            record.running += 1
+            record.most = max(record.most, record.running)
+        record.started.set()
+        try:
+            record.release.wait(10)
+            return SimpleNamespace(version=version, col=col)
+        finally:
+            with lock:
+                record.running -= 1
+
+    monkeypatch.setattr(server, "cursor_view", cursor_view)
+    try:
+        yield record
+    finally:
+        record.release.set()
+
+
+def view_of(tmp_path, version, timeout=None, col=1):
+    """backend_request's (view, answer) of a buffer at version and col,
+    asking the backend nothing (make-params gives None)."""
+    document = server.TextDocument(
+        (tmp_path / "m.lpy").as_uri(), "(= x 1)\n", version=version
+    )
+    client = SimpleNamespace(backend_uri=lambda uri: uri)
+    return server.backend_request(
+        client, document, 1, col, timeout, "m", lambda *a: None
+    )
+
+
+async def until(condition, limit=5):
+    """Poll condition on the loop until it holds, at most limit seconds."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + limit
+    while not condition():
+        assert loop.time() < deadline, "condition never held"
+        await asyncio.sleep(0.005)
+
+
+def test_abandoned_keystrokes_queue_no_cursor_view_compiles(slow_views, tmp_path):
+    # Defect: every keystroke whose completion gave up waiting (MERGE-TIMEOUT)
+    # still compiles its view, all at once in the executor, and the next
+    # request that does wait is served only after every one of them.
+    async def scenario():
+        await view_of(tmp_path, 1, timeout=0.01, col=1)
+        await until(slow_views.started.is_set)
+        for col in range(2, 7):
+            assert await view_of(tmp_path, 1, timeout=0.01, col=col) == (None, None)
+        live = asyncio.ensure_future(view_of(tmp_path, 1, col=9))
+        await asyncio.sleep(0)
+        slow_views.release.set()
+        return await asyncio.wait_for(live, 10)
+
+    view, answer = asyncio.run(scenario())
+    assert (view.version, view.col) == (1, 9)
+    assert slow_views.calls == [(1, 1), (1, 9)]
+    assert slow_views.most == 1
+
+
+def test_a_newer_version_supersedes_pending_cursor_views(slow_views, tmp_path):
+    # Defects: a view of a version the buffer already left is compiled (its
+    # macros run for an answer nobody can use); two callers of one view
+    # compile it twice.
+    async def scenario():
+        asyncio.ensure_future(view_of(tmp_path, 1))
+        await until(slow_views.started.is_set)
+        stale = asyncio.ensure_future(view_of(tmp_path, 2))
+        await asyncio.sleep(0)
+        latest = [asyncio.ensure_future(view_of(tmp_path, 3)) for _ in range(2)]
+        await asyncio.sleep(0)
+        slow_views.release.set()
+        return await asyncio.wait_for(asyncio.gather(stale, *latest), 10)
+
+    stale, *latest = asyncio.run(scenario())
+    assert stale == (None, None)
+    assert [view.version for view, _ in latest] == [3, 3]
+    assert slow_views.calls == [(1, 1), (3, 1)]
+
+
+def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
+    # Defect: an exception in the compile thread never reaches the waiter,
+    # so the request hangs instead of failing into the handler's except.
+    def cursor_view(*args):
+        raise RuntimeError("compile failed")
+
+    monkeypatch.setattr(server, "cursor_view", cursor_view)
+    with pytest.raises(RuntimeError, match="compile failed"):
+        asyncio.run(asyncio.wait_for(view_of(tmp_path, 1), 10))
+
+
+def test_completion_on_an_unreadable_document_gives_the_general_list(tmp_path):
+    # Defect: a document that is not open is read from disk by pygls, and a
+    # missing file raises out of the handler instead of answering.
+    uri = (tmp_path / "missing.lpy").as_uri()
+    document = server.TextDocument(uri)
+    ls = SimpleNamespace(
+        workspace=SimpleNamespace(get_text_document=lambda uri: document, folders={})
+    )
+    params = SimpleNamespace(
+        text_document=SimpleNamespace(uri=uri),
+        position=SimpleNamespace(line=0, character=0),
+    )
+    labels = {item.label for item in run_completion(ls, params).items}
+    assert {"ife", "print"} <= labels
