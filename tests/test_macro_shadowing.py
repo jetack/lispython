@@ -246,3 +246,28 @@ def test_binding_sites_route_through_binding_name():
     assert set(readers) <= set(NON_BINDING_NAME_READS), readers
     # The allowlist stays current: every entry still reads a name.
     assert set(NON_BINDING_NAME_READS) <= set(readers), readers
+
+
+# --- LSP diagnostics compile the buffer as a unit ---------------------------
+
+
+@pytest.fixture
+def lsp_server():
+    pytest.importorskip("pygls")
+    import importlib
+
+    # lispy.lsp re-exports the server *object* as ``server``; take the module.
+    return importlib.import_module("lispy.lsp.server")
+
+
+def test_diagnostics_of_a_clean_buffer_use_the_prelude(lsp_server):
+    src = "(= x (inc 1))\n(defmacro twice [a] (return a))\n(= y (twice x))\n"
+    assert lsp_server.compute_diagnostics(src, "file:///buffer.lpy") == []
+
+
+def test_diagnostics_report_a_binding_of_a_macro_at_its_symbol(lsp_server):
+    src = "(= a 1)\n(def inc [x] (+ x 100))\n"
+    [diagnostic] = lsp_server.compute_diagnostics(src, "file:///buffer.lpy")
+    assert BUILT_IN in diagnostic.message
+    start = diagnostic.range.start
+    assert (start.line, start.character) == (1, 5)

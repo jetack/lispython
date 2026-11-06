@@ -259,9 +259,8 @@ def test_nrepl_file_scopes(session, tmp_path):
 
 def test_only_compile_unit_reaches_macroexpand_then_compile():
     # Policy: compile_unit is the one entry point of compilation, so every
-    # unit gets the prelude and the opt-out. Allowlist: the module itself,
-    # and the LSP server until its diagnostics move to the view.
-    allowed = {"lispy/core/macro.py", "lispy/lsp/server.lpy"}
+    # unit gets the prelude and the opt-out. Allowlist: the module itself.
+    allowed = {"lispy/core/macro.py"}
     pattern = re.compile(r"macroexpand[-_]then[-_]compile")
     offenders = [
         path.relative_to(SRC).as_posix()
