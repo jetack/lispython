@@ -4,7 +4,7 @@
 
 LisPython is Python written as s-expressions: a `.lpy` file compiles to a Python AST and runs on CPython, so Python's semantics, built-ins and standard library apply unchanged. This file covers only what differs from Python.
 
-A `.lpy` file needs `(require lispy.macros *)` before it can use the built-in macros (`cond`, `->`, `fn`, ...); the REPL and nREPL load them already.
+The built-in macros (`cond`, `->`, `fn`, ...) load in every module with no `require`: `.lpy` files, `lpy -c`, the REPL, nREPL, `l2py` and the LSP. Making `(require lispy.macros [-> cond])` a module's first form (after an optional docstring) keeps only those, and `(require lispy.macros [])` none. Binding a name that is an active macro is a compile error.
 
 ---
 
@@ -1224,7 +1224,7 @@ Statements, Expressions and Macros pages.
 
 ## Built-in macros
 
-A `.lpy` file needs `(require lispy.macros *)` before it can use the built-in macros (`cond`, `->`, `fn`, ...); the REPL and nREPL load them already.
+The built-in macros (`cond`, `->`, `fn`, ...) load in every module with no `require`: `.lpy` files, `lpy -c`, the REPL, nREPL, `l2py` and the LSP. Making `(require lispy.macros [-> cond])` a module's first form (after an optional docstring) keeps only those, and `(require lispy.macros [])` none. Binding a name that is an active macro is a compile error.
 
 | Form | Usage | Description |
 | --- | --- | --- |
@@ -1323,7 +1323,7 @@ To load only some of them, make `(require lispy.macros <selection>)` the module'
 ```
 A bare `(require lispy.macros)` leaves only the qualified `(lispy.macros.inc ...)` names. A later `require` of `lispy.macros` only adds macros.
 
-Binding a name that is an active macro (`def`, `class`, `=`, parameters, a `defmacro`'s parameters and locals, loop and `with` targets, imports, match captures, ...) is a compile error, because `(inc ...)` would still expand the macro. Rename the binding, or opt out of that macro with a selection that omits it. A hyphenated macro name is compared as a Python name, so a binding `my_x` clashes with a macro `my-x`; a macro spelled otherwise (`->`, `--`, `ok?`) clashes only with a binding of that same spelling, not with the name it mangles to (`_to_`, `__`, `ok_p`).
+Binding a name that is an active macro (`def`, `class`, `=`, parameters, a `defmacro`'s parameters and locals, loop and `with` targets, imports, match captures, ...) is a compile error, because `(inc ...)` would still expand the macro. Rename the binding, or opt out of that macro with a selection that omits it. A hyphenated name is one name with its Python name, so a binding `my_x` clashes with a macro `my-x` and a binding `my-x` with a macro `my_x`; any other spelling (`->`, `--`, `ok?`) clashes only with that same spelling, not with the name it mangles to (`_to_`, `__`, `ok_p`).
 
 The Python version in each example is what `l2py` prints.
 

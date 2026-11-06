@@ -2,7 +2,7 @@
 
 > LisPython is a Lisp-flavored syntax for Python: .lpy source compiles to Python AST and runs on CPython, with Clojure-style macros.
 
-A `.lpy` file needs `(require lispy.macros *)` before it can use the built-in macros (`cond`, `->`, `fn`, ...); the REPL and nREPL load them already.
+The built-in macros (`cond`, `->`, `fn`, ...) load in every module with no `require`: `.lpy` files, `lpy -c`, the REPL, nREPL, `l2py` and the LSP. Making `(require lispy.macros [-> cond])` a module's first form (after an optional docstring) keeps only those, and `(require lispy.macros [])` none. Binding a name that is an active macro is a compile error.
 
 The syntax reference for writing LisPython, in one file: [llms-syntax.txt](https://jetack.github.io/lispython/0.6.0/llms-syntax.txt).
 

@@ -1404,7 +1404,7 @@ Statements, Expressions and Macros pages.</p>
 </tbody>
 </table>
 <h2 id="built-in-macros">Built-in macros<a class="headerlink" href="#built-in-macros" title="Permanent link">&para;</a></h2>
-<p>A <code>.lpy</code> file needs <code>(require lispy.macros *)</code> before it can use the built-in macros (<code>cond</code>, <code>-&gt;</code>, <code>fn</code>, ...); the REPL and nREPL load them already.</p>
+<p>The built-in macros (<code>cond</code>, <code>-&gt;</code>, <code>fn</code>, ...) load in every module with no <code>require</code>: <code>.lpy</code> files, <code>lpy -c</code>, the REPL, nREPL, <code>l2py</code> and the LSP. Making <code>(require lispy.macros [-&gt; cond])</code> a module's first form (after an optional docstring) keeps only those, and <code>(require lispy.macros [])</code> none. Binding a name that is an active macro is a compile error.</p>
 <table>
 <thead>
 <tr>
