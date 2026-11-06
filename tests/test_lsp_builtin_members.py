@@ -223,7 +223,7 @@ def test_a_buffer_that_does_not_compile_gives_the_local_answer(
     [
         "(require lispy.macros *)\n(wh|en 1 2)",
         "(require lispy.macros *)\n(co|nd 1 2)",
-        "(defmacro twice [x] x)\n(twi|ce 1)",
+        "(defmacro twice [x] (return x))\n(twi|ce 1)",
         "(i|fe 1 2 3)",
     ],
     ids=["when", "cond", "defmacro", "special form"],
@@ -243,11 +243,19 @@ def test_lispython_forms_never_reach_the_backend_on_hover(
     [
         "(require lispy.macros *)\n(when x |)",
         "(require lispy.macros *)\n(print (when x |))",
+        "(require lispy.macros *)\n(print (-> x |))",
         "(require lispy.macros *)\n(cond x |)",
-        "(defmacro twice [x] x)\n(twice |)",
+        "(defmacro twice [x] (return x))\n(twice |)",
         "(print (ife x |))",
     ],
-    ids=["when", "when in a call", "cond", "defmacro", "special form"],
+    ids=[
+        "when",
+        "when in a call",
+        "macro in a call",
+        "cond",
+        "defmacro",
+        "special form",
+    ],
 )
 def test_lispython_forms_never_reach_the_backend_on_signature_help(
     signature_help, backend_requests, marked
