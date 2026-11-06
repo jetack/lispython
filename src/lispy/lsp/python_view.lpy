@@ -12,6 +12,8 @@
 
 (import ast)
 (import builtins)
+(import contextlib)
+(import errno)
 (import glob)
 (import hashlib)
 (import json)
@@ -21,8 +23,15 @@
 (import shutil)
 (import sys)
 (import tempfile)
+(import threading)
 (import time)
 (import warnings)
+
+(try
+  (import fcntl)
+  (except [ImportError]
+    (= fcntl None)
+    (import msvcrt)))
 
 (from lispy.core.nodes [Symbol])
 (from lispy.core.parser [parse tokenize])
@@ -329,17 +338,54 @@
     (= self.partial None)
     (= self.fallback False)))
 
-(def compile-view [source :package "" :name "__main__"]
+;; Who holds each import root on sys.path: directory -> [users, the entry
+;; _on-sys-path inserted or None], under _SYS-PATH-LOCK, since threads
+;; compiling at once share one sys.path.
+(= _SYS-PATH-LOCK (threading.Lock))
+(= _SYS-PATH-USERS {})
+
+(deco contextlib.contextmanager
+  (def _on-sys-path [directory]
+    "Keep directory on sys.path for the body (nothing for None): inserted
+     first by the first user when absent, and that entry removed when the
+     last user leaves, so sys.path ends as it was."
+    (if (is directory None)
+        (do (yield)
+            (return)))
+    (with [_SYS-PATH-LOCK]
+      (= users (.get _SYS-PATH-USERS directory))
+      (if (is users None)
+          (do (= users [0 None])
+              (if (not (in directory sys.path))
+                  (do (.insert sys.path 0 directory)
+                      (= (sub users 1) directory)))
+              (= (sub _SYS-PATH-USERS directory) users)))
+      (+= (sub users 0) 1))
+    (try
+      (yield)
+      (finally
+        (with [_SYS-PATH-LOCK]
+          (-= (sub users 0) 1)
+          (if (== (sub users 0) 0)
+              (do (del (sub _SYS-PATH-USERS directory))
+                  (for [i entry] in (enumerate sys.path)
+                    (if (is entry (sub users 1))
+                        (do (del (sub sys.path i))
+                            (break)))))))))))
+
+(def compile-view [source :package "" :name "__main__" :import-root None]
   "The PythonView of source, or None when it does not become Python: a parse
    or compile error, a failing macro, a nesting too deep to unparse.  The
    parse is strict, as diagnostics' is.  Macros run as compute-diagnostics
-   already runs them; the generated module is never compiled or executed."
+   already runs them, with import-root (module-names' third item) on
+   sys.path, so a relative require imports its package; the generated
+   module is never compiled or executed."
   (= scope {"__builtins__" builtins
             "__name__" name
             "__package__" package
             "__macro_namespace" {}})
   (try
-    (with [(warnings.catch-warnings)]
+    (with [(warnings.catch-warnings) (_on-sys-path import-root)]
       (warnings.simplefilter "ignore")
       (= module (ast.Module :body (list (macroexpand-then-compile (parse source) scope))
                             :type-ignores (list)))
@@ -374,7 +420,7 @@
                 (+= found (.count (.split v ".") word)))))))
   (return found))
 
-(def view-at-cursor [source line col :package "" :name "__main__"]
+(def view-at-cursor [source line col :package "" :name "__main__" :import-root None]
   "The PythonView of source for a request at 1-based line, code-point col,
    or None.  The partial word before the cursor (name characters back to a
    dot, space, bracket, quote, comma or ;, less a leading prefix such as :
@@ -383,7 +429,8 @@
    before the cursor with its open forms closed is compiled instead.  The
    sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
-   partial's Python name and the map follows that edit."
+   partial's Python name and the map follows that edit.  import-root is
+   compile-view's."
   (= lines (.split source "\n"))
   (if (not (<= 1 line (len lines)))
       (return None))
@@ -396,13 +443,14 @@
   (= marked (.join "\n" lines))
   (= sentinel-end (+ start (len CURSOR-SENTINEL)))
   (= fallback False)
-  (= view (compile-view marked :package package :name name))
+  (= view (compile-view marked :package package :name name :import-root import-root))
   (if (is view None)
       (do (= prefix (source-prefix marked line sentinel-end))
           (= closers (open-form-closers prefix))
           (if (is closers None)
               (return None))
-          (= view (compile-view (+ prefix closers) :package package :name name))
+          (= view (compile-view (+ prefix closers) :package package :name name
+                                :import-root import-root))
           (= fallback True)))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
@@ -438,20 +486,22 @@
     (= self._views {})
     (= self._cursor-views {}))
 
-  (def view [self uri version source :package "" :name "__main__"]
+  (def view [self uri version source :package "" :name "__main__" :import-root None]
     (= hit (.get self._views uri))
     (if (and (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
-    (= result (compile-view source :package package :name name))
+    (= result (compile-view source :package package :name name :import-root import-root))
     (= (sub self._views uri) (, version result))
     (return result))
 
-  (def view-at-cursor [self uri version source line col :package "" :name "__main__"]
+  (def view-at-cursor [self uri version source line col
+                       :package "" :name "__main__" :import-root None]
     (= key (, version line col))
     (= hit (.get self._cursor-views uri))
     (if (and (is-not hit None) (== (sub hit 0) key))
         (return (sub hit 1)))
-    (= result (view-at-cursor source line col :package package :name name))
+    (= result (view-at-cursor source line col :package package :name name
+                              :import-root import-root))
     (= (sub self._cursor-views uri) (, key result))
     (return result))
 
@@ -467,7 +517,10 @@
 (class ViewRoot []
   "The cache directory a Python backend analyses for one project (path,
    also its os.fspath), and python, the interpreter the backend should
-   resolve imports with: this process's own."
+   resolve imports with: this process's own.  Every server of the project
+   shares it, so its writers take its lock file (_view-root-lock) and never
+   act through a link out of it (_check-in-root); a view root that overlaps
+   the project is refused (_refuse-overlap)."
   (def __init__ [self path project-root python]
     (= self.path path)
     (= self.project-root project-root)
@@ -492,15 +545,81 @@
                     (osp.abspath project-root)
                     sys.executable)))
 
-(def _write-if-changed [path content]
-  "Write content to path unless it already holds it; True when written.
-   Through a temporary file of a unique name beside it (two servers may
-   share one view root) and os.replace, so a backend reading the file never
-   sees half of it; the temporary file is removed when the write fails, and
-   the OSError propagates.  A symlink at path (a mirrored .py a shadow now
-   replaces) is never read, whatever the file it names holds, and os.replace
-   puts the file in its place without writing through it: the .py it names
-   is left alone."
+;; The view root's lock file: neither .py, link nor temporary, so the orphan
+;; sweep leaves it, and never linked over by a package overlay.
+(= _LOCK-NAME ".lock")
+
+(def _lock-fd [fd]
+  "Take an exclusive lock on the open file fd, waiting for it."
+  (if (is-not fcntl None)
+      (return (fcntl.flock fd fcntl.LOCK_EX)))
+  ;; msvcrt.locking gives up after ten one-second tries (EDEADLOCK, or
+  ;; EACCES); a sweep may be longer, so contention is retried, nothing else.
+  (while True
+    (try
+      (msvcrt.locking fd msvcrt.LK_LOCK 1)
+      (return)
+      (except [OSError as e]
+        (if (not (in e.errno (, errno.EDEADLOCK errno.EACCES)))
+            (raise))))))
+
+(def _unlock-fd [fd]
+  (if (is-not fcntl None)
+      (fcntl.flock fd fcntl.LOCK_UN)
+      (msvcrt.locking fd msvcrt.LK_UNLCK 1)))
+
+(deco contextlib.contextmanager
+  (def _view-root-lock [root]
+    "Hold root's lock file exclusively (making root first).  Servers of one
+     project share its view root, and one server's link over a view
+     directory would otherwise land another's writes and removals in the
+     project.  The lock belongs to an open file, so each public writer takes
+     it once and never inside another."
+    (os.makedirs root :exist-ok True)
+    (= fd (os.open (osp.join root _LOCK-NAME)
+                   (| os.O_RDWR os.O_CREAT (getattr os "O_NOFOLLOW" 0))
+                   0o600))
+    (try
+      (_lock-fd fd)
+      (try
+        (yield)
+        (finally
+          (_unlock-fd fd)))
+      (finally
+        (os.close fd)))))
+
+(def _check-in-root [root directory]
+  "Raise OSError unless directory is root or a path below it that reaches no
+   link: an act in it could otherwise land in the project a link names."
+  (= rel (osp.relpath directory root))
+  (if (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep))
+          (!= (osp.realpath directory)
+              (osp.normpath (osp.join (osp.realpath root) rel))))
+      (raise (OSError f"{directory} leaves the view root {root}"))))
+
+(def _refuse-overlap [project-root view-root]
+  "Raise ValueError when view-root is project-root or either holds the
+   other: the shadow sweep deletes every .py and link under the view root.
+   Paths on two drives never overlap (commonpath refuses them)."
+  (= project (osp.realpath project-root))
+  (= root (osp.realpath (os.fspath view-root)))
+  (if (!= (osp.normcase (sub (osp.splitdrive project) 0))
+          (osp.normcase (sub (osp.splitdrive root) 0)))
+      (return None))
+  (if (in (osp.commonpath [project root]) (, project root))
+      (raise (ValueError
+               f"view root {root} overlaps the project {project}: it must be a cache outside it"))))
+
+(def _write-if-changed [root path content]
+  "Write content to path, in view root root, unless it already holds it;
+   True when written.  Through a temporary file of a unique name beside it
+   and os.replace, so a backend reading the file never sees half of it; the
+   temporary file is removed when the write fails, and the OSError
+   propagates, as it does when path's directory leaves root
+   (_check-in-root).  A symlink at path (a mirrored .py a shadow now
+   replaces) is never read, whatever the file it names holds, and
+   os.replace puts the file in its place without writing through it: the
+   .py it names is left alone."
   (if (not (osp.islink path))
       (try
         (with [(open path "r" :encoding "utf-8") as f]
@@ -509,33 +628,40 @@
         (except [(, OSError ValueError)]
           (pass))))
   (= directory (osp.dirname path))
+  (_check-in-root root directory)
   (os.makedirs directory :exist-ok True)
+  (_check-in-root root directory)
   (= [fd tmp] (tempfile.mkstemp :dir directory :suffix _TEMP-SUFFIX))
   (try
     (with [(os.fdopen fd "w" :encoding "utf-8") as f]
       (.write f content))
+    (_check-in-root root directory)
     (os.replace tmp path)
     (except [BaseException]
       (_remove-quietly tmp)
       (raise)))
   (return True))
 
-(def _link-if-changed [path target]
-  "Make path a symlink to target unless it already is one; True when made.
-   Created under a unique temporary name and moved over path with
-   os.replace, as _write-if-changed writes.  A view directory at path (one
-   that held .lpy shadows and no longer does) is removed first; rmtree
+(def _link-if-changed [root path target]
+  "Make path, in view root root, a symlink to target unless it already is
+   one; True when made.  Created under a unique temporary name and moved
+   over path with os.replace, as _write-if-changed writes, and refused
+   (OSError) when path's directory leaves root.  A view directory at path
+   (one that held .lpy shadows and no longer does) is removed first; rmtree
    unlinks the links in it, never what they name."
   (if (and (osp.islink path) (== (os.readlink path) target))
       (return False))
+  (= directory (osp.dirname path))
+  (_check-in-root root directory)
   (if (and (osp.isdir path) (not (osp.islink path)))
       (shutil.rmtree path))
-  (= directory (osp.dirname path))
   (os.makedirs directory :exist-ok True)
   (= tmp (osp.join directory
                    f".{(osp.basename path)}.{(.hex (os.urandom 8))}{_TEMP-SUFFIX}"))
+  (_check-in-root root directory)
   (os.symlink target tmp)
   (try
+    (_check-in-root root directory)
     (os.replace tmp path)
     (except [BaseException]
       (_remove-quietly tmp)
@@ -555,15 +681,19 @@
   "Make directory, under root, a real directory: a symlink or file standing
    for one of its components below root (a package overlay linked a
    directory that now holds .lpy) is removed first, since a shadow written
-   under it would land in the project itself."
+   under it would land in the project itself.  OSError when directory
+   leaves root (_check-in-root)."
   (= current root)
   (= rel (osp.relpath directory root))
   (if (!= rel os.curdir)
       (for part in (.split rel os.sep)
+        (= parent current)
         (= current (osp.join current part))
         (if (or (osp.islink current)
                 (and (osp.lexists current) (not (osp.isdir current))))
-            (os.remove current))))
+            (do (_check-in-root root parent)
+                (os.remove current)))))
+  (_check-in-root root directory)
   (os.makedirs directory :exist-ok True))
 
 ;; Every temporary file of the view root ends so.  The orphan sweep leaves
@@ -654,7 +784,7 @@
             (not (osp.isfile target)))
         (continue))
     (try
-      (_link-if-changed path target)
+      (_link-if-changed root path target)
       (.add links path)
       (except [OSError as e]
         (.warning logger "lispython view: cannot link %s: %s" path e)))))
@@ -689,9 +819,9 @@
    file link, a subdirectory with no .lpy at any depth as one directory
    link, never walked.  Left out: .lpy files, a .py that a shadow replaces
    (its .lpy wins on import), _pruned-p directories, and the view root's
-   pyrightconfig.json.  Each link made or kept is added to links; a failure
-   is logged and skipped."
-  (= config (osp.join root PYRIGHT-CONFIG))
+   pyrightconfig.json and lock file.  Each link made or kept is added to
+   links; a failure is logged and skipped."
+  (= reserved (, (osp.join root PYRIGHT-CONFIG) (osp.join root _LOCK-NAME)))
   (= stack [package])
   (while stack
     (= directory (.pop stack))
@@ -710,7 +840,7 @@
         (in target source-dirs)
         (.append stack target)
 
-        (or (in path shadows) (in path links) (== path config)
+        (or (in path shadows) (in path links) (in path reserved)
             (ife dir-p
                  (_pruned-p directory name)
                  (or (.endswith name ".lpy") (not (osp.isfile target)))))
@@ -718,7 +848,7 @@
 
         True
         (try
-          (_link-if-changed path target)
+          (_link-if-changed root path target)
           (.add links path)
           (except [OSError as e]
             (.warning logger "lispython view: cannot link %s: %s" path e)))))))
@@ -727,27 +857,34 @@
   "Remove what under root no current source accounts for: every symlink and
    .py file that is neither a shadow nor a link of this sweep, every
    temporary file older than _TEMP-MAX-AGE, then every directory left empty
-   (bottom up, never root).  Other files, pyrightconfig.json among them, are
-   never touched.  A directory link is unlinked, never followed."
+   (bottom up, never root).  Other files, pyrightconfig.json and the lock
+   file among them, are never touched.  A directory link is unlinked, never
+   followed, and nothing is removed in a directory that leaves root
+   (_check-in-root): that one is logged and skipped."
   (= stale-before (- (time.time) _TEMP-MAX-AGE))
   (for [dirpath dirnames filenames] in (os.walk root :topdown False :followlinks False)
     (for name in (+ dirnames filenames)
       (= path (osp.join dirpath name))
-      (cond
-        (or (in path shadows) (in path links))
-        (pass)
+      (try
+        (cond
+          (or (in path shadows) (in path links))
+          (pass)
 
-        (.endswith name _TEMP-SUFFIX)
-        (try
+          (.endswith name _TEMP-SUFFIX)
           (if (< (. (os.lstat path) st_mtime) stale-before)
-              (_remove-quietly path))
-          (except [OSError]
-            (pass)))
+              (do (_check-in-root root dirpath)
+                  (os.remove path)))
 
-        (or (osp.islink path) (and (.endswith name ".py") (osp.isfile path)))
-        (_remove-quietly path)))
+          (or (osp.islink path) (and (.endswith name ".py") (osp.isfile path)))
+          (do (_check-in-root root dirpath)
+              (os.remove path)))
+        (except [FileNotFoundError]
+          (pass))
+        (except [OSError as e]
+          (.warning logger "lispython view: cannot remove %s: %s" path e))))
     (if (!= dirpath root)
         (try
+          (_check-in-root root dirpath)
           (os.rmdir dirpath)
           (except [OSError]
             (pass))))))
@@ -763,11 +900,22 @@
    shadow are linked in (_mirror-py-files).  One file that cannot be read
    or written is logged and left out of the manifest, so the next sweep
    tries it again; the rest go on.  Then _sweep-orphans clears what no
-   current source accounts for.  Returns the sorted shadow paths."
+   current source accounts for.  Each source compiles with its import root
+   on sys.path (a relative require imports its package), which is left as
+   it was.  A view root that overlaps the project is a ValueError before
+   anything is touched; the whole sweep holds the view root's lock, and
+   nothing is written or removed through a link out of it.  Returns the
+   sorted shadow paths."
+  (_refuse-overlap project-root view-root)
   (if (is manifest None)
       (= manifest (ShadowManifest)))
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
+  (with [(_view-root-lock root)]
+    (return (_write-shadows project-root root manifest))))
+
+(def _write-shadows [project-root root manifest]
+  "write-shadows' sweep, under the view root's lock."
   (= sources (project-sources project-root))
   (= current (set sources))
   (for path in (list manifest.sources)
@@ -809,9 +957,10 @@
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e)
         (continue)))
     (try
-      (= view (compile-view source :name (sub names 0) :package (sub names 1)))
+      (= view (compile-view source :name (sub names 0) :package (sub names 1)
+                            :import-root (sub names 2)))
       (if (is-not view None)
-          (do (_write-if-changed shadow view.text)
+          (do (_write-if-changed root shadow view.text)
               (= (sub shadows shadow) lpy-path)))
       (= (sub manifest.sources lpy-path) (, stamp names (is-not view None)))
       (except [OSError as e]
@@ -842,28 +991,38 @@
   "Write view-root's pyrightconfig.json when it changed: type checking off
    (only completion and navigation are asked for), the search paths, and
    the environment of this process's interpreter.  The search paths are,
-   in order, the view-root counterpart of every import root other than the
-   project root (ShadowManifest.import-roots; <view>/src in a src layout),
+   in order, the view-root counterpart of every import root strictly inside
+   the project (ShadowManifest.import-roots; <view>/src in a src layout;
+   one above the project, which lies inside a package, is left out),
    so import pkg finds the shadows before any real directory of uncompiled
-   .lpy; then the project and its .venv site-packages.  pyright's config has
-   no interpreter path; it takes a virtualenv as venvPath (its parent) and
-   venv (its name), so a base interpreter is left to the backend's own
-   discovery and to ViewRoot.python, sent as python.pythonPath.  Returns the
-   path."
+   .lpy; then those import roots themselves, so what the view lacks of one
+   (a pure-.py package, a top-level .py or .pyi, an extension module beside
+   the shadowed packages) still resolves; then the project and its .venv
+   site-packages.  pyright's config has no interpreter path; it takes a
+   virtualenv as venvPath (its parent) and venv (its name), so a base
+   interpreter is left to the backend's own discovery and to
+   ViewRoot.python, sent as python.pythonPath.  A view root that overlaps
+   the project is a ValueError; the write holds the view root's lock.
+   Returns the path."
+  (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
-  (= extra [])
+  (= root (osp.abspath (os.fspath view-root)))
+  (= roots [])
   (for import-root in (or import-roots [])
-    (= view-dir (_view-dir project-root view-root (osp.abspath import-root)))
-    (if (and (is-not view-dir None) (!= (osp.abspath import-root) project-root)
-             (not (in view-dir extra)))
-        (.append extra view-dir)))
-  (.append extra project-root)
+    (= import-root (osp.abspath import-root))
+    (if (and (!= import-root project-root) (not (in import-root roots))
+             (is-not (_view-dir project-root root import-root) None))
+        (.append roots import-root)))
+  (= extra (+ [(_view-dir project-root root import-root) for import-root in roots]
+              roots
+              [project-root]))
   (.extend extra (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
                                               "site-packages"))))
   (= config {"typeCheckingMode" "off" "extraPaths" extra})
   (if (!= sys.prefix sys.base-prefix)
       (do (= (sub config "venvPath") (osp.dirname sys.prefix))
           (= (sub config "venv") (osp.basename sys.prefix))))
-  (= path (osp.join (os.fspath view-root) PYRIGHT-CONFIG))
-  (_write-if-changed path (+ (json.dumps config :indent 2 :sort-keys True) "\n"))
+  (= path (osp.join root PYRIGHT-CONFIG))
+  (with [(_view-root-lock root)]
+    (_write-if-changed root path (+ (json.dumps config :indent 2 :sort-keys True) "\n")))
   (return path))

@@ -7,10 +7,12 @@ Expected positions are read off the source and generated text with
 import hashlib
 import importlib
 import json
+import ntpath
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -288,17 +290,65 @@ class TestShadows:
             ("pkg.a.m", "pkg.a", str(src)),
         ]
 
+    def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):
+        # An open buffer compiles as its shadow does: its import root on
+        # sys.path while its macros load, and sys.path as it was after.
+        pkg = tmp_path / "src" / "pvcurpkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        names = ["pvcurpkg", "pvcurpkg.mac"]
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        src = "(require .mac *)\n(= yy (twice 2))"
+        path = list(sys.path)
+        try:
+            view = pv.ViewCache().view_at_cursor(
+                "u",
+                1,
+                src,
+                *plus(locate(src, "yy"), 2),
+                package="pvcurpkg",
+                name="pvcurpkg.mod",
+                import_root=str(tmp_path / "src"),
+            )
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        assert view is not None and view.text.endswith("\nyy = 2 + 2")
+        assert sys.path == path
+
+    def test_import_root_stays_on_sys_path_while_any_user_holds_it(self):
+        # Two compiles overlapping on one import root, the first ending first:
+        # the root stays for the second and goes with it.
+        root = "/nonexistent/pv-overlap-root"
+        path = list(sys.path)
+        first, second = pv._on_sys_path(root), pv._on_sys_path(root)
+        first.__enter__()
+        second.__enter__()
+        try:
+            first.__exit__(None, None, None)
+            assert sys.path[0] == root
+        finally:
+            second.__exit__(None, None, None)
+        assert sys.path == path
+
     def test_relative_require_in_a_src_layout(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pvsrcpkg"
         self.write(pkg / "__init__.py", "")
         self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
         self.write(pkg / "mod.lpy", "(require .mac *)\n(= y (twice 2))")
-        monkeypatch.syspath_prepend(str(project / "src"))
-        for name in ["pvsrcpkg", "pvsrcpkg.mac"]:
+        names = ["pvsrcpkg", "pvsrcpkg.mac"]
+        for name in names:
             monkeypatch.delitem(sys.modules, name, raising=False)
-        pv.write_shadows(str(project), str(root))
+        path = list(sys.path)
+        try:
+            pv.write_shadows(str(project), str(root))
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
         assert "y = 2 + 2" in (root / "src" / "pvsrcpkg" / "mod.py").read_text()
+        assert sys.path == path
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
@@ -317,7 +367,7 @@ class TestShadows:
             str(project), str(root), import_roots=manifest.import_roots
         )
         extra = json.loads(open(path).read())["extraPaths"]
-        assert extra == [str(root / "src"), str(project)]
+        assert extra == [str(root / "src"), str(project / "src"), str(project)]
 
         (pkg / "helper.py").unlink()
         self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py
@@ -401,18 +451,16 @@ class TestShadows:
         assert sorted(os.listdir(pkg / "util")) == ["__init__.py", "x.py"]
         assert (pkg / "sub" / "other.py").exists()
 
-    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
-    def test_overlay_resolves_for_basedpyright(self, tmp_path):
-        project, root = tmp_path / "project", tmp_path / "view"
-        self.overlay_layout(project)
+    def basedpyright_messages(self, tmp_path, project, root, **settings):
+        """basedpyright's diagnostics on the view's src/pkg/m.py, under the
+        view root's config as written plus settings."""
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
         path = pv.write_pyright_config(
             str(project), str(root), import_roots=manifest.import_roots
         )
-        # The config as written, so pkg is found only in the view's src.
         config = json.loads(open(path).read())
-        config["reportMissingImports"] = "error"
+        config.update(settings, reportMissingImports="error")
         check = tmp_path / "check" / "pyrightconfig.json"
         self.write(check, json.dumps(config))
         out = subprocess.run(
@@ -424,7 +472,163 @@ class TestShadows:
         )
         report = json.loads(out.stdout)
         assert report["summary"]["filesAnalyzed"] == 1
-        assert [d["message"] for d in report["generalDiagnostics"]] == []
+        return [d["message"] for d in report["generalDiagnostics"]]
+
+    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
+    def test_overlay_resolves_for_basedpyright(self, tmp_path):
+        # The config as written, so pkg is found only in the view's src.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.overlay_layout(project)
+        assert self.basedpyright_messages(tmp_path, project, root) == []
+
+    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
+    def test_src_layout_modules_outside_the_view_resolve(self, tmp_path):
+        # Only pkg is in the view: a pure-.py package, a top-level .py and a
+        # stub-only module beside it resolve from the real src, while pkg.m2,
+        # which exists only as .lpy, resolves from the view's shadow, and so
+        # does pkg.both, whose stale .py beside it in the real src lacks new.
+        project, root = tmp_path / "project", tmp_path / "view"
+        src = project / "src"
+        imports = (
+            "(import other)\n(import single)\n(import stubbed)\n(import pkg.m2)\n"
+            "(from pkg.both [new])"
+        )
+        for name, text in [
+            ("pkg/__init__.py", ""),
+            ("pkg/m.lpy", imports),
+            ("pkg/m2.lpy", "(= z 1)"),
+            ("pkg/both.lpy", "(= new 1)"),
+            ("pkg/both.py", "old = 1"),
+            ("other/__init__.py", ""),
+            ("single.py", "s = 1"),
+            ("stubbed.pyi", "t: int"),
+        ]:
+            self.write(src / name, text)
+        messages = self.basedpyright_messages(
+            tmp_path,
+            project,
+            root,
+            reportMissingModuleSource="none",
+            reportAttributeAccessIssue="error",
+        )
+        assert messages == []
+
+    def snapshot(self, top):
+        """Every entry under top, links unfollowed: kind and content."""
+        tree = {}
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in dirnames + filenames:
+                path = os.path.join(dirpath, name)
+                if os.path.islink(path):
+                    entry = ("link", os.readlink(path))
+                elif os.path.isdir(path):
+                    entry = ("dir",)
+                else:
+                    with open(path, "rb") as f:
+                        entry = ("file", f.read())
+                tree[os.path.relpath(path, top)] = entry
+        return tree
+
+    def util_layout(self, project):
+        for name, text in [
+            ("pkg/__init__.py", ""),
+            ("pkg/m.lpy", "(= m 1)"),
+            ("pkg/util/__init__.py", ""),
+            ("pkg/util/x.py", "val = 1"),
+            ("pkg/util/y.lpy", "(= y 1)"),
+        ]:
+            self.write(project / name, text)
+
+    def test_servers_sharing_a_view_root_never_touch_the_project(
+        self, tmp_path, monkeypatch
+    ):
+        # "fresh" sees pkg/util/y.lpy and writes view/pkg/util/y.py; "stale"
+        # does not, so it links view/pkg/util into the project.  "stale"
+        # starts while "fresh" pauses with view/pkg/util a real directory:
+        # under the lock it waits, so "fresh" writes its shadow (the link
+        # guard alone keeps the project intact but loses the shadow).
+        real_sources, real_dir = pv.project_sources, pv._real_view_dir
+        paused = threading.Event()
+
+        def sources(project_root):
+            found = real_sources(project_root)
+            if threading.current_thread().name == "stale":
+                found = [p for p in found if not p.endswith("y.lpy")]
+            return found
+
+        def slow_dir(root, directory):
+            real_dir(root, directory)
+            util = directory.endswith(os.path.join("pkg", "util"))
+            fresh = threading.current_thread().name == "fresh"
+            if fresh and util and not paused.is_set():
+                paused.set()
+                time.sleep(0.15)
+
+        monkeypatch.setattr(pv, "project_sources", sources)
+        monkeypatch.setattr(pv, "_real_view_dir", slow_dir)
+        for repeat in range(5):
+            project, root = tmp_path / f"project{repeat}", tmp_path / f"view{repeat}"
+            self.util_layout(project)
+            before = self.snapshot(project)
+            paused.clear()
+            errors, shadows = [], {}
+
+            def run(wait, project=project, root=root):
+                try:
+                    assert not wait or paused.wait(5)
+                    name = threading.current_thread().name
+                    shadows[name] = pv.write_shadows(str(project), str(root))
+                except BaseException as e:
+                    errors.append(e)
+
+            threads = [
+                threading.Thread(target=run, args=(False,), name="fresh"),
+                threading.Thread(target=run, args=(True,), name="stale"),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+            assert not any(thread.is_alive() for thread in threads)
+            assert errors == []
+            assert str(root / "pkg" / "util" / "y.py") in shadows["fresh"]
+            assert self.snapshot(project) == before
+
+    def test_no_write_or_removal_through_a_foreign_link(self, tmp_path, monkeypatch):
+        # A writer that takes no lock links view/pkg/util into the project
+        # right after it was made a real directory.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.util_layout(project)
+        util, view_util = project / "pkg" / "util", str(root / "pkg" / "util")
+        real_dir = pv._real_view_dir
+
+        def foreign(root, directory):
+            real_dir(root, directory)
+            if directory == view_util:
+                shutil.rmtree(directory)
+                os.symlink(util, directory)
+
+        monkeypatch.setattr(pv, "_real_view_dir", foreign)
+        before = self.snapshot(project)
+        pv.write_shadows(str(project), str(root))
+        assert self.snapshot(project) == before
+
+    @pytest.mark.parametrize("where", ["same", "inside", "around"])
+    def test_overlapping_view_root_is_refused(self, tmp_path, where):
+        project = tmp_path / "project"
+        root = {
+            "same": project,
+            "inside": project / ".cache" / "view",
+            "around": tmp_path,
+        }[where]
+        self.write(project / "top.lpy", "(= a 1)")
+        self.write(project / "keep.py", "k = 1")
+        before = self.snapshot(project)
+        with pytest.raises(ValueError, match="overlaps"):
+            pv.write_shadows(str(project), str(root))
+        with pytest.raises(ValueError, match="overlaps"):
+            pv.write_pyright_config(str(project), str(root))
+        assert self.snapshot(project) == before
 
     def test_shadow_replaces_a_link_of_the_same_text(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
@@ -453,7 +657,7 @@ class TestShadows:
         self.write(root / "tmplive.tmp", "theirs")
         (project / "lib" / "m.lpy").unlink()
         pv.write_shadows(str(project), str(root))
-        assert sorted(os.listdir(root)) == ["tmplive.tmp", "top.py"]
+        assert sorted(os.listdir(root)) == [".lock", "tmplive.tmp", "top.py"]
 
     def test_unreadable_source_keeps_its_shadow(self, tmp_path):
         if os.geteuid() == 0:
@@ -547,6 +751,21 @@ class TestShadows:
         assert os.fspath(pv.view_root_for(str(project))).startswith(
             str(tmp_path / "x" / "lispython")
         )
+
+    def test_pyright_config_leaves_out_import_roots_above_the_project(self, tmp_path):
+        # A project inside a package: its modules' import root lies above it.
+        project, root = tmp_path / "pkg" / "project", tmp_path / "view"
+        project.mkdir(parents=True)
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=[str(tmp_path)]
+        )
+        assert json.loads(open(path).read())["extraPaths"] == [str(project)]
+
+    def test_overlap_check_takes_two_drives_as_apart(self, monkeypatch):
+        monkeypatch.setattr(pv, "osp", ntpath)
+        pv._refuse_overlap("C:\\work\\project", "D:\\cache\\view")
+        with pytest.raises(ValueError, match="overlaps"):
+            pv._refuse_overlap("C:\\work\\project", "c:\\work\\project\\.cache")
 
     def test_pyright_config(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
