@@ -1452,3 +1452,32 @@ def test_a_stray_closer_in_a_field_never_breaks_the_cursor_view_or_gate(src):
     source = src.replace("|", "")
     pv.view_at_cursor(source, line, col)
     server.attribute_context_p(source, line, col)  # must not raise
+
+
+class TestSpelledConstants:
+    """A Constant the unparse spells as an operation (-1, 1+2j, a nan) re-parses
+    as a UnaryOp/BinOp.  Without the rule it gets no map entry, so its
+    diagnostic falls back to the enclosing statement's span (None if tagged)."""
+
+    def check(self, src, spelled, expected):
+        view = view_of(src)
+        assert spelled in view.text
+        line, col = locate(view.text, spelled)
+        start, end = (line, col), (line, col + len(spelled))
+        for tagged in (False, True):
+            assert pv.lpy_diagnostic_range(view, src, start, end, tagged) == expected
+
+    def test_complex_token(self):
+        src = "(print 1+2j x)"
+        line, col = locate(src, "1+2j")
+        self.check(src, "1+2j", ((line, col), (line, col + 4)))
+
+    def test_macro_negative(self):
+        src = "(defmacro neg [] (return (- 0 1)))\n(print (neg) x)"
+        line, col = locate(src, "(neg)")
+        self.check(src, "-1", ((line, col), (line, col + 5)))
+
+    def test_macro_nan(self):
+        src = '(defmacro nan [] (return (float "nan")))\n(print (nan) x)'
+        line, col = locate(src, "(nan)")
+        self.check(src, "1e309-1e309", ((line, col), (line, col + 5)))
