@@ -883,50 +883,55 @@ or an extra usage line names no usage key."
             (return True))))
   (return False))
 
+(def markdown-hover [value target]
+  (return (lsp.Hover
+            :contents (lsp.MarkupContent :kind lsp.MarkupKind.Markdown :value value)
+            :range (node-range target))))
+
+(def form-hover [tree target]
+  "lispython's own hover of Symbol target, or None: the alias doc on the
+   type of a type alias, else a special form's doc.  It answers before any
+   backend, which knows no lispython form."
+  (if (and (== target.value "type") (alias-keyword-p tree target))
+      (return (markdown-hover TYPE-ALIAS-DOC target)))
+  (= doc-text (.get SPECIAL-FORM-DOCS target.value))
+  (if doc-text
+      (return (markdown-hover doc-text target)))
+  (return None))
+
+(def builtin-hover [target]
+  "The BUILTIN-INFO hover of Symbol target, or None: the answer when no
+   backend gives one."
+  (= bi (.get BUILTIN-INFO (.replace target.value "-" "_")))
+  (if (not bi)
+      (return None))
+  (= hover-md f"```python\n{(sub bi "signature")}\n```\n\n*(Python builtin)*")
+  (if (sub bi "doc")
+      (+= hover-md f"\n\n{(sub bi "doc")}"))
+  (return (markdown-hover hover-md target)))
+
 (deco (server.feature lsp.TEXT_DOCUMENT_HOVER)
-(def hover [ls params]
-  (= doc (.get-text-document ls.workspace params.text_document.uri))
+(async-def hover [ls params]
+  (= doc (document-snapshot (.get-text-document ls.workspace params.text_document.uri)))
   (try
     (= tree (parse doc.source :partial True))
+    (= [line col] (cursor-of doc params.position))
     (except [Exception]
       (return None)))
-  (= pos params.position)
-  (= target (node-at-position tree pos.line pos.character))
-  (if (is target None)
+  (= target (node-at-position tree (- line 1) col))
+  (if (not (isinstance target Symbol))
       (return None))
-  ;; Look up documentation for the symbol
-  (if (isinstance target Symbol)
-      (do
-        (= name target.value)
-        (if (and (== name "type") (alias-keyword-p tree target))
-            (return (lsp.Hover
-              :contents (lsp.MarkupContent
-                :kind lsp.MarkupKind.Markdown
-                :value TYPE-ALIAS-DOC)
-              :range (node-range target))))
-        ;; 1. LisPython special forms
-        (= doc-text (.get SPECIAL-FORM-DOCS name))
-        (if doc-text
-            (return (lsp.Hover
-              :contents (lsp.MarkupContent
-                :kind lsp.MarkupKind.Markdown
-                :value doc-text)
-              :range (node-range target))))
-        ;; 2. Python builtins
-        (= builtin-name (.replace name "-" "_"))
-        (= bi (.get BUILTIN-INFO builtin-name))
-        (if bi
-            (do (= sig (sub bi "signature"))
-                (= doc-body (sub bi "doc"))
-                (= hover-md f"```python\n{sig}\n```\n\n*(Python builtin)*")
-                (if doc-body
-                    (+= hover-md f"\n\n{doc-body}"))
-                (return (lsp.Hover
-                  :contents (lsp.MarkupContent
-                    :kind lsp.MarkupKind.Markdown
-                    :value hover-md)
-                  :range (node-range target)))))))
-  (return None)))
+  (= local (form-hover tree target))
+  (if (is-not local None)
+      (return local))
+  (try
+    (= result (await (backend-hover doc line col target)))
+    (except [Exception]
+      (.debug logger "backend hover failed" :exc-info True)
+      (= result None)))
+  (if (is-not result None)
+      (return result))
+  (return (builtin-hover target))))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DEFINITION)
 (def definition [ls params]
@@ -1000,8 +1005,8 @@ or an extra usage line names no usage key."
 ;; Signature help
 ;; ---------------------------------------------------------------------------
 
-(def find-enclosing-function [source line col]
-  "Name of the innermost call open at the cursor, or None.
+(def open-form-heads [source line col]
+  "The heads of the forms open at the cursor, outermost first.
 
    line is 1-based and col a 0-based code-point column: the coordinates
    tokenize() reports.  The scan runs over the lexer's own tokens, so
@@ -1010,11 +1015,11 @@ or an extra usage line names no usage key."
    delimits them.  An opening ending in ( contributes its head symbol (None
    when the head is not a symbol, or when a ' or ` quotes the form as data;
    an unquote ~( is code again); [ and { contribute None.  Never raises: a
-   buffer the lexer cannot read has no enclosing call."
+   buffer the lexer cannot read has no open form."
   (try
     (= tokens (list (tokenize source)))
     (except [Exception]
-      (return None)))
+      (return (list))))
   (= cursor (, line col))
   (= stack [])
   (for i in (range (len tokens))
@@ -1040,10 +1045,19 @@ or an extra usage line names no usage key."
 
       (and (== tktype "closing") stack)
       (.pop stack)))
-  (for name in (reversed stack)
+  (return stack))
+
+(def innermost-named [heads]
+  "The innermost head symbol among open-form-heads' heads, or None."
+  (for name in (reversed heads)
     (if (is-not name None)
         (return name)))
   (return None))
+
+(def find-enclosing-function [source line col]
+  "Name of the innermost call open at the cursor whose head is a symbol, or
+   None (open-form-heads)."
+  (return (innermost-named (open-form-heads source line col))))
 
 (def cursor-of [doc pos]
   "The LSP position pos as tokenize() coordinates: (1-based line, code-point column).
@@ -1059,16 +1073,12 @@ or an extra usage line names no usage key."
                   (lsp.Position :line pos.line :character pos.character)))
   (return (, (+ server-pos.line 1) server-pos.character)))
 
-(deco (server.feature
-        lsp.TEXT_DOCUMENT_SIGNATURE_HELP
-        (lsp.SignatureHelpOptions :trigger-characters ["("]))
-(def signature-help [ls params]
-  (= doc (.get-text-document ls.workspace params.text_document.uri))
-  (= [line col] (cursor-of doc params.position))
-  (= func-name (find-enclosing-function doc.source line col))
+(def local-signature-help [func-name]
+  "lispython's own SignatureHelp for a call of func-name (None: no call): a
+   special form's documented usage, else a Python builtin's BUILTIN-INFO
+   signature, else None."
   (if (is func-name None)
       (return None))
-
   ;; 1. Special forms
   (= doc-text (.get SPECIAL-FORM-DOCS func-name))
   (if doc-text
@@ -1096,7 +1106,31 @@ or an extra usage line names no usage key."
                                                 :value doc-str)
                                               None))]))))
 
-  (return None)))
+  (return None))
+
+;; The innermost open form decides, not the innermost named one: in
+;; (print ((. x sort) |)) the call being typed is the method's, which only
+;; the backend knows, while (print (when x |)) is inside a form no backend
+;; knows, so the local answer (none) stands rather than print's.
+(deco (server.feature
+        lsp.TEXT_DOCUMENT_SIGNATURE_HELP
+        (lsp.SignatureHelpOptions :trigger-characters ["("]))
+(async-def signature-help [ls params]
+  (= doc (document-snapshot (.get-text-document ls.workspace params.text_document.uri)))
+  (= [line col] (cursor-of doc params.position))
+  (= heads (open-form-heads doc.source line col))
+  (if (not heads)
+      (return None))
+  (= head (sub heads -1))
+  (if (not-in head SPECIAL-FORM-DOCS)
+      (do (try
+            (= result (await (backend-signature-help doc line col head)))
+            (except [Exception]
+              (.debug logger "backend signature help failed" :exc-info True)
+              (= result None)))
+          (if (is-not result None)
+              (return result))))
+  (return (local-signature-help (innermost-named heads)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Member completion
@@ -1417,6 +1451,11 @@ or an extra usage line names no usage key."
                       (.append pending base-class)))))))
   (return members))
 
+(def line-text [source line]
+  "The text of source's 1-based line, the empty string past its end."
+  (= lines (.split source "\n"))
+  (return (ife (<= 1 line (len lines)) (sub lines (- line 1)) "")))
+
 (def client-position [doc line character]
   "The 1-based line and code-point character as an LSP Position in client
    units, through the document's position codec (a test double without one
@@ -1433,8 +1472,7 @@ or an extra usage line names no usage key."
    the partial word before the cursor (partial-span, the word the Python
    view restores), replace that and the rest of the name run after the
    cursor; both in client units."
-  (= lines (.split doc.source "\n"))
-  (= text (ife (<= 1 line (len lines)) (sub lines (- line 1)) ""))
+  (= text (line-text doc.source line))
   (= [start end] (partial-span text (min col (len text))))
   (= start-pos (client-position doc line start))
   (return (, (lsp.Range :start start-pos :end (client-position doc line col))
@@ -1627,13 +1665,14 @@ or an extra usage line names no usage key."
                            :package package :name name :import-root import-root
                            :generation generation)))
 
-(def generated-position [view]
-  "view.cursor as an LSP Position over view.text, in UTF-16 units: the
-   backend client negotiates no position encoding, so the backend counts
-   in the protocol's default."
+(def generated-position [view :offset 0]
+  "view.cursor, offset code points along its line, as an LSP Position over
+   view.text, in UTF-16 units: the backend client negotiates no position
+   encoding, so the backend counts in the protocol's default."
   (= [line col] view.cursor)
   (return (.position-to-client-units (PositionCodec) (.split view.text "\n")
-                                     (lsp.Position :line (- line 1) :character col))))
+                                     (lsp.Position :line (- line 1)
+                                                   :character (+ col offset)))))
 
 (def completion-items [answer]
   "The items of a completion answer: a list, a CompletionList or None."
@@ -1729,8 +1768,7 @@ or an extra usage line names no usage key."
    word (x.a|, (.me| x)) or an operand past the receiver of an open
    (. recv ...).  A cheap gate only, read before any view is compiled:
    the Python view's attribute decides."
-  (= lines (.split source "\n"))
-  (= text (ife (<= 1 line (len lines)) (sub lines (- line 1)) ""))
+  (= text (line-text source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
   (if (and (> start 0) (== (sub text (- start 1)) "."))
@@ -1745,31 +1783,45 @@ or an extra usage line names no usage key."
   (= form (sub path -1))
   (return (or (> (len form) 2) (and (== (len form) 2) (is leaf None)))))
 
-(async-def backend-answer [client doc line col timeout]
-  "(view, items): the cursor view of doc and the backend's completion
-   items there, [] when either is missing.  timeout (None: the request's
-   default, start included) bounds the view and the request together."
+(async-def backend-request [client doc line col timeout method make-params]
+  "(view, answer): the cursor view of doc at the 1-based line and
+   code-point col, and the backend's answer to request method there, or
+   None for either that is missing.  make-params builds the request's
+   params from the backend's TextDocumentIdentifier and the view; None
+   sends no request.  timeout (None: the request's default, start
+   included) bounds the view and the request together."
   (= loop (asyncio.get-running-loop))
   (= deadline (ife (is timeout None) None (+ (.time loop) timeout)))
   (= path (to-fs-path doc.uri))
   (if (is path None)
-      (return (, None [])))
+      (return (, None None)))
   (= [name package import-root] (module-names path))
   (= making (asyncio.to-thread cursor-view doc.uri doc.version doc.source line col
                                name package import-root view-cache.generation))
   (try
     (= view (await (ife (is deadline None) making (asyncio.wait-for making timeout))))
     (except [TimeoutError]
-      (return (, None []))))
+      (return (, None None))))
   (if (is view None)
-      (return (, None [])))
-  (= params (lsp.CompletionParams
-              :text-document (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
-              :position (generated-position view)))
-  (= answer (await (.request client lsp.TEXT_DOCUMENT_COMPLETION params
+      (return (, None None)))
+  (= params (make-params (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
+                         view))
+  (if (is params None)
+      (return (, view None)))
+  (= answer (await (.request client method params
                              :uri doc.uri :text view.text
                              :timeout (ife (is deadline None) None
                                            (max 0 (- deadline (.time loop)))))))
+  (return (, view answer)))
+
+(async-def backend-answer [client doc line col timeout]
+  "(view, items): the cursor view of doc and the backend's completion
+   items there, [] when either is missing (backend-request)."
+  (= [view answer] (await (backend-request
+                            client doc line col timeout lsp.TEXT_DOCUMENT_COMPLETION
+                            (fn [document view]
+                              (lsp.CompletionParams :text-document document
+                                                    :position (generated-position view))))))
   (return (, view (completion-items answer))))
 
 (async-def backend-completion [doc line col insert-replace]
@@ -1808,6 +1860,187 @@ or an extra usage line names no usage key."
   (return (TextDocument doc.uri doc.source
                         :version (getattr doc "version" None)
                         :position-codec (getattr doc "position_codec" None))))
+
+;; ---------------------------------------------------------------------------
+;; Hover and signature help through the Python backend
+;; ---------------------------------------------------------------------------
+
+;; A Python identifier in a backend's text: a word that starts with no digit
+;; (the e5 of 1e5 is none).
+(= _PY-IDENTIFIER (re.compile "(?<!\\w)[^\\W\\d]\\w*"))
+
+(def python-to-buffer [text spellings]
+  "(new-text, mapped): text with each Python identifier the buffer spells
+   otherwise (spellings is buffer-spellings', keyed by Python name) written
+   as the buffer does (my_x as my-x), and a function taking an offset into
+   text to the same place in new-text.  A name the buffer never spells
+   stays as it is."
+  (= pieces [])
+  ;; (old start, old end, new start, new end) of each replaced name
+  (= edits [])
+  (= done 0)
+  (= shift 0)
+  (for m in (.finditer _PY-IDENTIFIER text)
+    (= spelled (.get spellings (.group m)))
+    (if (or (is spelled None) (== spelled (.group m)))
+        (continue))
+    (.append pieces (sub text [: done (.start m)]))
+    (.append pieces spelled)
+    (.append edits (, (.start m) (.end m)
+                      (+ (.start m) shift) (+ (.start m) shift (len spelled))))
+    (+= shift (- (len spelled) (len (.group m))))
+    (= done (.end m)))
+  (.append pieces (sub text [: done None]))
+  (def mapped [offset]
+    (= delta 0)
+    (for [old-start old-end new-start new-end] in edits
+      (cond (>= offset old-end)
+            (= delta (- new-end old-end))
+            (> offset old-start)
+            (return (min (+ new-start (- offset old-start)) new-end))
+            True
+            (break)))
+    (return (+ offset delta)))
+  (return (, (.join "" pieces) mapped)))
+
+(def markdown-to-buffer [text spellings]
+  "Markdown text with python-to-buffer applied inside its fenced code blocks
+   only: the prose around them (a docstring) is the library's words, where
+   a name the buffer happens to spell may be an ordinary word."
+  (= lines (.split text "\n"))
+  (= fenced False)
+  (for i in (range (len lines))
+    (cond (.startswith (.lstrip (sub lines i)) "```")
+          (= fenced (not fenced))
+          fenced
+          (= (sub lines i) (sub (python-to-buffer (sub lines i) spellings) 0))))
+  (return (.join "\n" lines)))
+
+(def marked-markdown [contents]
+  "The markdown of a hover's deprecated MarkedString contents: a string
+   (markdown already), a {language value} block, or a list of either."
+  (cond (isinstance contents str)
+        (return contents)
+        (isinstance contents lsp.MarkedStringWithLanguage)
+        (return f"```{contents.language}\n{contents.value}\n```")
+        (isinstance contents (, list tuple))
+        (return (.join "\n\n" (map marked-markdown contents))))
+  (return ""))
+
+(def documentation-to-buffer [documentation spellings]
+  "A backend's documentation (MarkupContent, a string or None) with the
+   buffer's spellings in its markdown code blocks; plain text is kept as
+   it is, since nothing there tells a name from prose."
+  (if (and (isinstance documentation lsp.MarkupContent)
+           (== documentation.kind lsp.MarkupKind.Markdown))
+      (return (lsp.MarkupContent
+                :kind lsp.MarkupKind.Markdown
+                :value (markdown-to-buffer documentation.value spellings))))
+  (return documentation))
+
+(def hover-contents [contents spellings]
+  "A backend Hover's contents as the buffer's MarkupContent, or None when
+   it is empty (documentation-to-buffer; MarkedString forms become
+   markdown)."
+  (if (not (isinstance contents lsp.MarkupContent))
+      (= contents (lsp.MarkupContent :kind lsp.MarkupKind.Markdown
+                                     :value (marked-markdown contents))))
+  (if (not (.strip contents.value))
+      (return None))
+  (return (documentation-to-buffer contents spellings)))
+
+(def hover-request [head offset]
+  "make-params of a hover at the generated start of the restored word
+   (offset code points from the view's cursor), or of none when head, the
+   hovered symbol's Python name, is a macro of the view."
+  (return (fn [document view]
+            (ife (in head view.macros)
+                 None
+                 (lsp.HoverParams :text-document document
+                                  :position (generated-position view :offset offset))))))
+
+(async-def backend-hover [doc line col target]
+  "The backend's Hover of the word at the 1-based line and code-point col
+   (Symbol target there), or None: no backend, no word, target names a
+   macro, no view, no answer.  doc is a snapshot.  The view is made with the
+   cursor at the word's end, so its partial is the whole word, and the
+   hover asks at the word's generated start.  Its names take the buffer's
+   spellings, and its range is the .lpy word: the backend's lies in
+   generated code."
+  (= client (.available-client backends doc.uri))
+  (if (is client None)
+      (return None))
+  (= text (line-text doc.source line))
+  (= [start end] (partial-span text (min col (len text))))
+  (if (== start end)
+      (return None))
+  (= offset (- (len (py-name (sub text [: start end])))))
+  (= [view answer] (await (backend-request client doc line end None lsp.TEXT_DOCUMENT_HOVER
+                                           (hover-request (py-name target.value) offset))))
+  (if (not (isinstance answer lsp.Hover))
+      (return None))
+  (= contents (hover-contents answer.contents (buffer-spellings doc.source)))
+  (if (is contents None)
+      (return None))
+  (return (lsp.Hover :contents contents
+                     :range (lsp.Range :start (client-position doc line start)
+                                       :end (client-position doc line end)))))
+
+;; Parameter labels given as offsets (label_offset_support) are mapped
+;; through the label's relabel.  Both count code points; a label holding a
+;; character outside the BMP (two UTF-16 units) would put them off by one.
+(def signature-to-buffer [signature spellings]
+  "A backend SignatureInformation with the buffer's spellings: its label, a
+   string parameter label, an offset parameter label mapped through the
+   label's relabel, and the markdown code blocks of its documentation."
+  (= [label mapped] (python-to-buffer signature.label spellings))
+  (= parameters None)
+  (if (is-not signature.parameters None)
+      (= parameters
+         [(lsp.ParameterInformation
+            :label (ife (isinstance parameter.label str)
+                        (sub (python-to-buffer parameter.label spellings) 0)
+                        (, (mapped (sub parameter.label 0))
+                           (mapped (sub parameter.label 1))))
+            :documentation (documentation-to-buffer parameter.documentation spellings))
+          for parameter in signature.parameters]))
+  (return (lsp.SignatureInformation
+            :label label
+            :documentation (documentation-to-buffer signature.documentation spellings)
+            :parameters parameters
+            :active-parameter signature.active-parameter)))
+
+(def signature-request [head]
+  "make-params of a signature help at the view's cursor, or of none when
+   head, the innermost open form's head symbol (or None), is a macro of the
+   view."
+  (= head (ife (is head None) None (py-name head)))
+  (return (fn [document view]
+            (ife (in head view.macros)
+                 None
+                 (lsp.SignatureHelpParams :text-document document
+                                          :position (generated-position view))))))
+
+(async-def backend-signature-help [doc line col head]
+  "The backend's SignatureHelp at the 1-based line and code-point col, its
+   names in the buffer's spellings, or None: no backend, head (the
+   innermost open form's head symbol, None when it has none) is a macro, no
+   view, no signature.  doc is a snapshot.  The cursor view puts the
+   sentinel where the argument is typed, so the backend sees the call."
+  (= client (.available-client backends doc.uri))
+  (if (is client None)
+      (return None))
+  (= [view answer] (await (backend-request client doc line col None
+                                           lsp.TEXT_DOCUMENT_SIGNATURE_HELP
+                                           (signature-request head))))
+  (if (or (not (isinstance answer lsp.SignatureHelp)) (not answer.signatures))
+      (return None))
+  (= spellings (buffer-spellings doc.source))
+  (return (lsp.SignatureHelp
+            :signatures [(signature-to-buffer signature spellings)
+                         for signature in answer.signatures]
+            :active-signature answer.active-signature
+            :active-parameter answer.active-parameter)))
 
 (deco (server.feature
         lsp.TEXT_DOCUMENT_COMPLETION

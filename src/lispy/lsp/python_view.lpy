@@ -336,11 +336,14 @@
    generated Python (a dot right before it: x.a, (. x a), a.b.c), and
    fallback, True when only the text before the cursor compiled; its tree
    is None, since its text was edited after the parse (and may not parse:
-   x.)."
-  (def __init__ [self text position-map tree]
+   x.).  macros is the Python name (py-name) of every macro the buffer's
+   compile had registered once expanded: a name there is a lispython form at
+   a call's head, which no Python backend knows."
+  (def __init__ [self text position-map tree :macros (frozenset)]
     (= self.text text)
     (= self.map position-map)
     (= self.tree tree)
+    (= self.macros macros)
     (= self.cursor None)
     (= self.partial None)
     (= self.attribute False)
@@ -404,10 +407,12 @@
       (= module (python-interpolations module))
       (= text (ast.unparse module))
       (= tree (ast.parse text))
-      (= position-map (build-position-map module tree source text)))
+      (= position-map (build-position-map module tree source text))
+      ;; Keys are the spellings a defmacro or require registered.
+      (= macros (frozenset (map py-name (.get scope "__macro_namespace" {})))))
     (except [Exception]
       (return None)))
-  (return (PythonView text position-map tree)))
+  (return (PythonView text position-map tree :macros macros)))
 
 ;; Stands in for the word at the cursor: a plain name, unchanged by mangling,
 ;; that compiles wherever a symbol does.

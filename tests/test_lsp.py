@@ -49,6 +49,11 @@ def run_completion(ls, params):
     return asyncio.run(server.completion(ls, params))
 
 
+def run_hover(ls, params):
+    """The hover handler's answer (it is a coroutine)."""
+    return asyncio.run(server.hover(ls, params))
+
+
 def position(line, character):
     return SimpleNamespace(
         text_document=SimpleNamespace(uri=URI),
@@ -89,7 +94,7 @@ def test_definition_hover_and_references(buffer):
     assert location.range.start.line == 0
     refs = server.references(ls, position(0, 5))
     assert [r.range.start.line for r in refs][:2] == [0, 1]
-    assert server.hover(ls, position(0, 1)) is not None
+    assert run_hover(ls, position(0, 1)) is not None
 
 
 def test_completion(buffer):
@@ -160,12 +165,12 @@ def test_type_alias_definition():
 
 
 def test_type_alias_hover_on_the_keyword():
-    hover = server.hover(ls_with("(type Alias int)"), position(0, 2))
+    hover = run_hover(ls_with("(type Alias int)"), position(0, 2))
     assert "type alias" in hover.contents.value
 
 
 def test_type_call_keeps_the_builtin_hover():
-    hover = server.hover(ls_with("(type x)\n(type A int)"), position(0, 2))
+    hover = run_hover(ls_with("(type x)\n(type A int)"), position(0, 2))
     assert "Python builtin" in hover.contents.value
 
 
@@ -292,7 +297,7 @@ def test_an_extra_usage_key_without_form_usage_is_refused():
 
 
 def test_def_hover_shows_the_compilers_arguments():
-    hover = server.hover(ls_with("(def f [x] x)"), position(0, 2))
+    hover = run_hover(ls_with("(def f [x] x)"), position(0, 2))
     assert "(def name [args] body...)" in hover.contents.value
     assert "[params]" not in hover.contents.value
 

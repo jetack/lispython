@@ -1,6 +1,7 @@
 """Editor features beyond the parse-tolerance contract in test_lsp.py:
 signatureHelp, workspace/symbol, nREPL completion kinds and .nrepl-port."""
 
+import asyncio
 import functools
 import importlib
 import types
@@ -40,7 +41,7 @@ def signature_at(marked, pygls_document=False):
         character = len(lines[-1])
     pos = SimpleNamespace(line=len(lines) - 1, character=character)
     params = SimpleNamespace(text_document=SimpleNamespace(uri=URI), position=pos)
-    result = server.signature_help(ls_with(document), params)
+    result = asyncio.run(server.signature_help(ls_with(document), params))
     return None if result is None else result.signatures[0].label
 
 
