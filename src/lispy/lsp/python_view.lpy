@@ -214,27 +214,6 @@
   (= end (_name-end text start))
   (if (and (< start end) (== (py-name (sub text [: start end])) name))
       (return (, (, line start) (, line end))))
-  (return (_dotted-component-span text line col end-col name)))
-
-(def _dotted-component-span [text line col end-col name]
-  "The span of the component of the dotted symbol at col that an Attribute
-   ending at end-col names, or None.  The compiler measures such an
-   Attribute's end in Python name lengths (a.x->y ends 8 past a, not 6), so
-   the component is the one where the Python lengths so far reach end-col."
-  (= reach col)
-  (= start col)
-  (while (< start (len text))
-    (= end (_name-end text start))
-    (if (== end start)
-        (return None))
-    (= component (py-name (sub text [: start end])))
-    (+= reach (len component))
-    (if (and (== reach end-col) (== component name))
-        (return (, (, line start) (, line end))))
-    (if (or (>= reach end-col) (>= end (len text)) (!= (sub text end) "."))
-        (return None))
-    (+= reach 1)
-    (= start (+ end 1)))
   (return None))
 
 (class _GeneratedColumns []
