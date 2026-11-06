@@ -932,3 +932,23 @@ class TestBodyEmptiedByDo:
         assert stmt_to_dump("(if x (do (f) (do (g))))") == ast.dump(
             ast.parse("if x:\n    f()\n    g()")
         )
+
+
+class TestDefmacroBody:
+    """A defmacro with no statement in its body is refused at the defmacro
+    itself, not at no position inside its generated def."""
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "(defmacro m [])",
+            "(defmacro m [x])",
+            "(defmacro m [] (do))",
+            "(defmacro m [] ^int)",
+        ],
+    )
+    def test_refused_at_the_defmacro(self, src):
+        with pytest.raises(LispyCompileError) as info:
+            src_to_python_org("(do\n  " + src + ")")
+        assert info.value.msg.startswith("(def ...) needs a body: ")
+        assert (info.value.lineno, info.value.offset) == (2, 3)

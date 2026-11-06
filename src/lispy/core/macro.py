@@ -48,7 +48,9 @@ def define_macro(sexp, scope, include_meta=True):
         raise LispyCompileError(
             f"(defmacro ...) expects an undotted name, got {name}", name
         )
-    transformed = defmacro_transform(sexp)
+    # The generated def sits at the defmacro, so every refusal of its parts
+    # (body, parameters, annotation) is placed at the .lpy form.
+    transformed = macro_expansion_nodes(defmacro_transform(sexp), sexp)
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
     # Binding checks stay on: a parameter or local named like an active macro
