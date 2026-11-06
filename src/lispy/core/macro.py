@@ -5,6 +5,7 @@ from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import (
     ACTIVE_MACROS,
     constant_compile,
+    hyphenated_name_p,
     string_node_value,
 )
 from lispy.core.compiler.utils import compile_nesting_errors
@@ -163,17 +164,27 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
 
 def active_macro_kind(scope):
     """The check_binding lookup (compiler/literal.py) over scope's macros as
-    they stand when a binding compiles: a Python name's "built-in" (its
-    macro is the prelude's own), "macro" or None. Compared by Python name,
-    since my-x and my_x are one Python name; a dotted key (lispy.macros.inc,
-    from (require mod)) is never a bare name."""
+    they stand when a binding compiles: for a binding's Python name and
+    spelling, "built-in" (its macro is the prelude's own), "macro" or None. A
+    dotted key (lispy.macros.inc, from (require mod)) is never a bare name."""
 
-    def kind(name):
+    def kind(name, spelling):
         namespace = scope.get("__macro_namespace") or {}
         prelude = scope.get(PRELUDE_KEY) or {}
         found = None
         for key, macro in namespace.items():
-            if "." in key or Symbol(key).name != name:
+            if "." in key:
+                continue
+            # Lookup is by spelling, so a binding hides a macro only when a
+            # call meant for the binding could be spelled as the macro. A
+            # hyphenated name's Python name is a second spelling of it (my-x
+            # and my_x are one name); an operator-spelled key (->, --) mangles
+            # to a name nobody calls it by (_to_, __), so only its own
+            # spelling clashes.
+            if hyphenated_name_p(key):
+                if Symbol(key).name != name:
+                    continue
+            elif key != spelling:
                 continue
             if prelude.get(key) is macro:
                 return "built-in"

@@ -184,6 +184,36 @@ def test_compared_by_python_name():
     assert info.value.msg.startswith("cannot bind 'my_x': it is a macro here, so (my_x")
 
 
+# A macro spelled other than as a hyphenated name mangles to a name nobody
+# calls it by (-> is _to_), so binding that name hides no macro call.
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(= _to_ 1)\n(print _to_)",
+        "(= as_to_ 1)",
+        "(= __ 1)",
+        "(defmacro ok? [] (return 1))\n(= ok_p 1)",
+    ],
+)
+def test_an_operator_macro_does_not_clash_by_python_name(src):
+    translate(src)
+
+
+@pytest.mark.parametrize(
+    "src, spelling",
+    [
+        ["(= -> 1)", "->"],
+        ["(= as-> 1)", "as->"],
+        ["(= -- 1)", "--"],
+        ["(defmacro ok? [] (return 1))\n(= ok? 1)", "ok?"],
+    ],
+)
+def test_an_operator_macro_clashes_with_its_own_spelling(src, spelling):
+    with pytest.raises(LispyCompileError) as info:
+        translate(src)
+    assert info.value.msg.startswith(f"cannot bind '{spelling}': it is a")
+
+
 def test_a_macro_generated_binding_is_at_the_call():
     src = "(defmacro setinc [] (return '(= inc 1)))\n\n  (setinc)"
     with pytest.raises(LispyCompileError) as info:

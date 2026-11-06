@@ -343,10 +343,11 @@ def symbol_name(sexp):
 # name_compile for a stored undotted name, binding_name for every other name
 # slot (parameters, def/class names, imports, except, patterns, type
 # parameters). core/macro.py sets the value around compiling a unit's
-# forms: a callable from a Python name to "built-in" (a prelude macro),
-# "macro" (any other) or None. None outside a unit, and while require
-# compiles its generated import, means no check; defmacro's generated def
-# is checked, since its parameters and locals are bindings.
+# forms: a callable from a binding's Python name and spelling to
+# "built-in" (a prelude macro), "macro" (any other) or None. None outside a
+# unit, and while require compiles its generated import, means no check;
+# defmacro's generated def is checked, since its parameters and locals are
+# bindings.
 ACTIVE_MACROS = contextvars.ContextVar("lispy_active_macros", default=None)
 
 
@@ -355,10 +356,12 @@ def check_binding(name, node, spelling=None):
     that Python name is active; ``spelling`` (default: the symbol's text) is
     how the bound name is written."""
     active = ACTIVE_MACROS.get()
-    kind = active(name) if active is not None else None
-    if kind is None:
+    if active is None:
         return
     spelling = atom_text(node) if spelling is None else spelling
+    kind = active(name, spelling)
+    if kind is None:
+        return
     if kind == "built-in":
         raise LispyCompileError(
             f"cannot bind '{spelling}': it is a built-in macro here, so "
@@ -402,6 +405,19 @@ def module_path(sexp, relative=False):
     for part in rest:
         python_name(part, sexp)
     return [path, level]
+
+
+def hyphenated_name_p(text):
+    """Whether ``text`` is a name written with hyphens as word separators
+    (``my-x``, ``inc``): its Python name is ``text`` with each ``-`` as ``_``
+    and no hyphen leads, trails or doubles. Anything else (``->``, ``--``,
+    ``ok?``) is mangled into its Python name rather than spelled as it."""
+    name = Symbol(text).name
+    return (
+        identifier_p(name)
+        and name == text.replace("-", "_")
+        and "" not in text.split("-")
+    )
 
 
 def plain_name_p(sexp):
