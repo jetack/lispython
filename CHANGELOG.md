@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- A Pygments lexer for lispython (`lispy.highlight.LispythonLexer`),
+  registered through the `pygments.lexers` entry point under the aliases
+  `lispython` and `lpy` and the `*.lpy` filename, so Markdown fences, Sphinx
+  and anything else highlighting through Pygments colour `;` comments,
+  `:keyword` arguments, lispython's forms and built-in macros, Python's
+  keywords and builtins, and f/t-string fields. It needs Pygments installed;
+  lispython itself does not depend on it. The docs' code blocks use it.
+
 ### Changed
 
 - A number-shaped digit-led symbol in a match pattern (value pattern,

@@ -283,6 +283,7 @@ dependencies = [
 dev = [
     { name = "mkdocs" },
     { name = "pre-commit" },
+    { name = "pygments" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "toml" },
@@ -291,6 +292,7 @@ docs = [
     { name = "mike" },
     { name = "mkdocs-macros-plugin" },
     { name = "mkdocs-material" },
+    { name = "pygments" },
 ]
 lsp = [
     { name = "basedpyright" },
@@ -306,6 +308,8 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pygls", specifier = ">=2.0" },
+    { name = "pygments", marker = "extra == 'dev'", specifier = ">=2.19" },
+    { name = "pygments", marker = "extra == 'docs'", specifier = ">=2.19" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "toml", marker = "extra == 'dev'", specifier = ">=0.10.2" },
