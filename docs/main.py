@@ -77,7 +77,7 @@ class Section(NamedTuple):
 
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 _ATX = re.compile(r"^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
-CODE_SPAN = re.compile(r"(`+)(.+?)\1")
+CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 
 
 def markdown_lines(text):

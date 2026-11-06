@@ -87,3 +87,16 @@ def test_a_longer_fence_is_not_closed_by_a_shorter_one(hooks, site):
     assert rewrite(hooks, site, text).split("\n")[-1] == (
         f"[b]({SITE}syntax/statements/)"
     )
+
+
+@pytest.mark.parametrize("opener", ["`", "``"])
+def test_a_backtick_run_closes_a_span_only_against_a_run_of_equal_length(
+    hooks, site, opener
+):
+    # CommonMark: no span here, because the only later run has another length,
+    # so the link between them is live text and must be rewritten.
+    closer = "```" if opener == "``" else "``"
+    text = f"{opener}a [l](statements.md) {closer}"
+    assert rewrite(hooks, site, text) == (
+        f"{opener}a [l]({SITE}syntax/statements/) {closer}"
+    )
