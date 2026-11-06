@@ -49,8 +49,8 @@
 
 (def py-name [text]
   "The Python name lispython text stands for (Symbol.name, the compiler's
-   mangling): members, receivers and classes are compared by it, since
-   my-attr and my_attr are one Python attribute."
+   mangling): the LSP compares names by it, since my-attr and my_attr are
+   one Python name."
   (return (. (Symbol text) name)))
 
 (def source-prefix [source line col]

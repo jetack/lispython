@@ -284,7 +284,7 @@ def test_the_hover_range_is_the_lpy_word(hover):
     assert (start.line, start.character, end.line, end.character) == (1, 10, 1, 14)
 
 
-PRINT_HOVER = server.BUILTIN_INFO["print"]["signature"]
+PRINT_HOVER = server.builtin_info("print")[0]
 
 
 def test_backend_off_gives_the_local_answer(hover, signature_help, off_backends):

@@ -174,9 +174,9 @@ def test_an_imported_class_is_one_class_item(complete, idle, monkeypatch):
     # Regression TASK-1014: an imported defaultdict was a Variable, shown
     # beside the nREPL's class item as a second defaultdict. The first
     # completion starts the backend without waiting; once it runs, the
-    # next one has its kinds. A loaded box may answer past KINDS-TIMEOUT,
+    # next one has its items. A loaded box may answer past MERGE-TIMEOUT,
     # which this test does not pin.
-    monkeypatch.setattr(server, "KINDS_TIMEOUT", 30)
+    monkeypatch.setattr(server, "MERGE_TIMEOUT", 30)
     backends, client = idle
     complete(IMPORTED_CLASS, backends)
     assert wait_running(client)
@@ -196,43 +196,50 @@ def test_auto_import_completions_are_off(
         "(= default-x 1)\n(defau)",
         version=None,
     )
-    _, items = run_on_loop(server.backend_answer(client, document, 2, 6, None))
+    _, items, _ = run_on_loop(server.backend_answer(client, document, 2, 6, None))
     assert "default_x" in {item.label for item in items}  # it did answer
     assert "defaultdict" not in {item.label for item in items}
 
 
-LOCAL_MEMBERS = {"__init__", "my-x", "f"}
+def assert_fallback_list(labels):
+    """labels is the local list: a special form, a builtin, the buffer's own
+    class, and no attribute of self guessed (only the backend has
+    __class__)."""
+    assert {"ife", "print", "A"} <= labels
+    assert "__class__" not in labels
 
 
 @pytest.mark.parametrize(
     "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
 )
-def test_a_backend_with_no_items_gives_the_local_members(
+def test_a_backend_with_no_items_gives_the_fallback_list(
     complete, backend_requests, empty
 ):
     # Defect: an empty backend answer is returned as is: no completion.
     backend_requests.answer["value"] = empty
     labels = set(by_label(complete(CLASS.format("self.|"))[2]))
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
-    assert labels == LOCAL_MEMBERS
+    assert_fallback_list(labels)
 
 
-def test_backend_off_gives_the_local_members(complete, off_backends, monkeypatch):
+def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch):
     # Defect: an off backend still has a view compiled (the buffer's macros
     # run) for a request that cannot be answered.
     views = []
     monkeypatch.setattr(server, "cursor_view", lambda *a: views.append(a))
     labels = set(by_label(complete(CLASS.format("self.|"), off_backends)[2]))
-    assert (labels, views) == (LOCAL_MEMBERS, [])
+    assert views == []
+    assert_fallback_list(labels)
 
 
-def test_a_buffer_that_does_not_compile_gives_the_local_members(
+def test_a_buffer_that_does_not_compile_gives_the_fallback_list(
     complete, backend_requests
 ):
     # An earlier refused form: neither the buffer nor its prefix compiles,
     # so there is no view to ask the backend about.
     labels = set(by_label(complete("(def)\n" + CLASS.format("self.|"))[2]))
-    assert (labels, backend_requests.sent) == (LOCAL_MEMBERS, [])
+    assert backend_requests.sent == []
+    assert_fallback_list(labels)
     # The backend does answer the same buffer once it compiles.
     labels = set(by_label(complete(CLASS.format("self.|"))[2]))
     assert "__class__" in labels and backend_requests.sent
