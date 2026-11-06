@@ -1897,6 +1897,17 @@
                  (lsp.HoverParams :text-document document
                                   :position (generated-position view :offset offset))))))
 
+(def cursor-word [doc line col]
+  "(start, end, offset) of the word at the 1-based line and code-point col
+   of doc (partial-span), or None when there is none: a backend asks about
+   it over a view made with the cursor at end, at offset code points from
+   that view's cursor, the word's generated start."
+  (= text (line-text doc.source line))
+  (= [start end] (partial-span text (min col (len text))))
+  (if (== start end)
+      (return None))
+  (return (, start end (- (len (py-name (sub text [: start end])))))))
+
 (async-def backend-hover [doc line col target]
   "The backend's Hover of the word at the 1-based line and code-point col
    (Symbol target there), or None: no backend, no word, target names a
@@ -1908,11 +1919,10 @@
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
-  (= text (line-text doc.source line))
-  (= [start end] (partial-span text (min col (len text))))
-  (if (== start end)
+  (= word (cursor-word doc line col))
+  (if (is word None)
       (return None))
-  (= offset (- (len (py-name (sub text [: start end])))))
+  (= [start end offset] word)
   (= [view answer] (await (backend-request client doc line end None lsp.TEXT_DOCUMENT_HOVER
                                            (hover-request (py-name target.value) offset))))
   (if (not (isinstance answer lsp.Hover))
@@ -2191,7 +2201,7 @@
    order without repeats: a list, maybe empty, or None when there is no
    backend, no word, no view or no answer.  doc is a snapshot.  The view
    is made with the cursor at the word's end and the request asks at its
-   generated start, as backend-hover does.  A location in a compiled view
+   generated start (cursor-word, as backend-hover).  A location in a compiled view
    maps back to its .lpy (lpy-range), one in a real file passes, one that
    maps nowhere is dropped (editor-location).  whole is
    location-request's: no request over a fallback view.  REQUEST-TIMEOUT
@@ -2200,12 +2210,11 @@
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
-  (= text (line-text doc.source line))
-  (= [start end] (partial-span text (min col (len text))))
-  (if (== start end)
+  (= word (cursor-word doc line col))
+  (if (is word None)
       (return None))
+  (= [start end offset] word)
   (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
-  (= offset (- (len (py-name (sub text [: start end])))))
   (= [view answer] (await (backend-request client doc line end REQUEST-TIMEOUT method
                                            (location-request (py-name target.value)
                                                              offset make whole))))
