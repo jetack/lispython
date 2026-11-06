@@ -895,3 +895,37 @@ class TestAnnotatedAssignmentSimple:
     def test_one_operand_attribute_target_is_refused(self):
         with pytest.raises(LispyCompileError, match="missing its attr"):
             stmt_to_dump("(= (. a) ^int 1)")
+
+
+class TestBodyEmptiedByDo:
+    """A body of only empty ``(do)`` forms has no statement, and Python has no
+    bodiless block: it is refused at the form like an operand-less body, never
+    left as ``if x:`` for compile() or the reader of l2py output to meet."""
+
+    @pytest.mark.parametrize(
+        ("src", "msg"),
+        [
+            ("(if x (do))", "(if ...) needs a body"),
+            ("(require lispy.macros *)\n(when ((g) x))", "(if ...) needs a body"),
+            ("(while x (do))", "(while ...) needs a body"),
+            ("(for a in b (do))", "(for ...) needs a body"),
+            ("(with [a] (do))", "(with ...) needs a body"),
+            ("(try (do) (finally 1))", "(try ...) needs a body"),
+            ("(try 1 (except [E] (do)))", "(except ...) needs a body"),
+            ("(try 1 (finally (do)))", "(finally ...) needs a body"),
+            ("(try 1 (except E 2) (else (do)))", "(else ...) needs a body"),
+            ("(match x (case 1 (do)))", "(case ...) needs a body"),
+        ],
+    )
+    def test_refused(self, src, msg):
+        with pytest.raises(LispyCompileError) as info:
+            src_to_python_org(src)
+        assert info.value.msg.startswith(msg + ": ")
+
+    def test_def_with_only_empty_do_is_pass_like_an_empty_def(self):
+        assert stmt_to_dump("(def f [] (do))") == stmt_to_dump("(def f [])")
+
+    def test_nonempty_do_body_still_compiles(self):
+        assert stmt_to_dump("(if x (do (f) (do (g))))") == ast.dump(
+            ast.parse("if x:\n    f()\n    g()")
+        )

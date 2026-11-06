@@ -166,6 +166,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A body that compiles to no statement, such as `(when test)` or
+  `(if x (do))`, is a compile error at the form (`(if ...) needs a body`)
+  for `if`, `while`, `for`, `with`, `try`, `except`, `else`, `finally` and
+  `case`, where it printed `if x:` with nothing under it. `def` with such a
+  body compiles to `pass`, as an empty `def` already did.
 - An invalid escape in a string (`"\d"`) warns at the .lpy file and line of
   the string, where it named `<unknown>` line 1.
 - A malformed number glued to a keyword (`(= a 1if)`, `0x1for`, `1jor`) is
