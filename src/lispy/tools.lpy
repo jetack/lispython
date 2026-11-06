@@ -623,17 +623,27 @@
             (= (sub _NREPL-FILE-SCOPES key) scope))))
   (return scope))
 
+;; id(scope) -> (scope, lock), under _NREPL-FILE-SCOPES-LOCK.  A side table,
+;; never a key in the scope, which is the user's globals (completion would
+;; offer it, pickling fails, and code that clears its globals would swap
+;; it).  The entry keeps the scope alive, so its id is never reused.
+(= _NREPL-SCOPE-LOCKS {})
+
 (def nrepl-scope-lock [scope]
-  "The lock of scope's macro table, created on first use (dict.setdefault
-   is atomic, so every thread gets the same one).  Connections are served
-   on threads and share the session scope and file scopes.  Compiling (an
-   eval's compile phase, a macroexpand) holds it, so two compiles never
-   reshape one table at once and completion, which takes its snapshot
-   under it, never sees a table half reset by a unit start.  Running code
-   holds no lock and may still add to the table (a compiled defmacro or
-   require), so every iteration over the table or scope is over a snapshot
-   (list/dict), never the live dict."
-  (return (.setdefault scope "__nrepl_lock" (threading.RLock))))
+  "The lock of scope's macro table, created on first use.  Connections are
+   served on threads and share the session scope and file scopes.
+   Compiling (an eval's compile phase, a macroexpand) holds it, so two
+   compiles never reshape one table at once and completion, which takes
+   its snapshot under it, never sees a table half reset by a unit start.
+   Running code holds no lock and may still add to the table (a compiled
+   defmacro or require), so every iteration over the table or scope is
+   over a snapshot (list/dict), never the live dict."
+  (with [_NREPL-FILE-SCOPES-LOCK]
+    (= entry (.get _NREPL-SCOPE-LOCKS (id scope)))
+    (if (is entry None)
+        (do (= entry (, scope (threading.RLock)))
+            (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
+  (return (sub entry 1)))
 
 (def _nrepl-request-scope [msg field scope]
   "The scope a request runs in: the file's when its field names a file (a

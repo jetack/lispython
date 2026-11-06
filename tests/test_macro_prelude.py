@@ -359,6 +359,15 @@ def test_nrepl_top_region_keeps_the_files_macro_of_a_built_in_name(session, tmp_
     assert expand_in(session, path, "(inc 1)") == "(+ 1 1000)"
 
 
+def test_nrepl_scope_lock_is_not_in_the_scope(session, tmp_path):
+    # The lock lives beside the scope, never in the user's globals.
+    path = tmp_path / "f.lpy"
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    reply = request(session, op="complete", prefix="__nr", file=str(path))
+    assert reply["completions"] == []
+    assert tools.nrepl_scope_lock(session) is tools.nrepl_scope_lock(session)
+
+
 @pytest.mark.parametrize("opted_out_first", [True, False])
 def test_nrepl_reload_after_the_first_form_changes(session, tmp_path, opted_out_first):
     # A file scope persists across loads; each load starts from the whole
