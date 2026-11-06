@@ -45,12 +45,33 @@ def hover(lsp_buffer, run_on_loop, real_backends):
     return run
 
 
+def signature_capabilities(label_offsets):
+    """An editor's capabilities, advertising labelOffsetSupport or not."""
+    return lsp.ClientCapabilities(
+        text_document=lsp.TextDocumentClientCapabilities(
+            signature_help=lsp.SignatureHelpClientCapabilities(
+                signature_information=lsp.ClientSignatureInformationOptions(
+                    parameter_information=lsp.ClientSignatureParameterInformationOptions(
+                        label_offset_support=label_offsets
+                    )
+                )
+            )
+        )
+    )
+
+
 @pytest.fixture
 def signature_help(lsp_buffer, run_on_loop, real_backends):
-    """signature_help(marked, backends=real_backends) -> SignatureHelp or None."""
+    """signature_help(marked, backends=real_backends, label_offsets=True) ->
+    SignatureHelp or None, for an editor advertising labelOffsetSupport as
+    label_offsets says."""
 
-    def run(marked, backends=real_backends):
-        ls, uri, position = lsp_buffer(marked, backends)
+    def run(marked, backends=real_backends, label_offsets=True):
+        ls, uri, position = lsp_buffer(
+            marked,
+            backends,
+            client_capabilities=signature_capabilities(label_offsets),
+        )
         params = lsp.SignatureHelpParams(
             text_document=lsp.TextDocumentIdentifier(uri=uri), position=position
         )
@@ -158,17 +179,21 @@ def test_hover_shows_the_buffer_spelling(hover):
     assert "my_fn" not in text and "my_arg" not in text and "ok_p" not in text
 
 
-def test_signature_help_shows_the_buffer_spelling(signature_help):
-    # Defects: the label shows my_arg/ok_p; or an offset parameter label
-    # keeps the backend's offsets, which point into the Python label and so
-    # off by one into the relabelled one (my-arg: Any read as "y-arg: Any,").
-    result = signature_help(USER_FUNCTION + "(my-fn 1 |)")
+@pytest.mark.parametrize("label_offsets", [True, False], ids=["offsets", "strings"])
+def test_signature_help_shows_the_buffer_spelling(signature_help, label_offsets):
+    # Defects: the label shows my_arg/ok_p; an offset parameter label keeps
+    # the backend's offsets, which point into the Python label and so off
+    # by one into the relabelled one (my-arg: Any read as "y-arg: Any,");
+    # or an editor that never advertised labelOffsetSupport is sent
+    # offsets it cannot read, and highlights no parameter.
+    result = signature_help(USER_FUNCTION + "(my-fn 1 |)", label_offsets=label_offsets)
     [signature] = result.signatures
     assert "my-arg" in signature.label and "ok?" in signature.label
     assert "my_arg" not in signature.label and "ok_p" not in signature.label
     texts = []
     for parameter in signature.parameters:
         label = parameter.label
+        assert isinstance(label, str) is not label_offsets
         if not isinstance(label, str):
             label = signature.label[label[0] : label[1]]
         texts.append(label.split(":")[0].strip())

@@ -1124,7 +1124,9 @@ or an extra usage line names no usage key."
   (= head (sub heads -1))
   (if (not-in head SPECIAL-FORM-DOCS)
       (do (try
-            (= result (await (backend-signature-help doc line col head)))
+            (= result (await (backend-signature-help
+                               doc line col head
+                               :offsets (label-offset-support ls))))
             (except [Exception]
               (.debug logger "backend signature help failed" :exc-info True)
               (= result None)))
@@ -1512,17 +1514,31 @@ or an extra usage line names no usage key."
   (= spelled (hyphen-spelling name))
   (return (ife (is spelled None) label spelled)))
 
-(def insert-replace-support [ls]
-  "Whether the client takes an InsertReplaceEdit in a completion item
-   (textDocument.completion.completionItem.insertReplaceSupport); False
-   before initialize and for a test double without capabilities."
+(def client-capability-p [ls path]
+  "Whether the client advertises the capability at path (attribute names
+   below ClientCapabilities) as True; False before initialize and for a
+   test double without capabilities."
   (try
     (= value (getattr ls "client_capabilities" None))
-    (for attr in ["text_document" "completion" "completion_item" "insert_replace_support"]
+    (for attr in path
       (= value (getattr value attr None)))
     (except [Exception]
       (return False)))
   (return (is value True)))
+
+(def insert-replace-support [ls]
+  "Whether the client takes an InsertReplaceEdit in a completion item
+   (textDocument.completion.completionItem.insertReplaceSupport)."
+  (return (client-capability-p
+            ls ["text_document" "completion" "completion_item" "insert_replace_support"])))
+
+(def label-offset-support [ls]
+  "Whether the client takes a signature parameter label as offsets into the
+   signature's label (textDocument.signatureHelp.signatureInformation
+   .parameterInformation.labelOffsetSupport)."
+  (return (client-capability-p
+            ls ["text_document" "signature_help" "signature_information"
+                "parameter_information" "label_offset_support"])))
 
 (def member-completion [doc line col :insert-replace False]
   "The member CompletionList at the 1-based line and code-point column,
@@ -1986,22 +2002,28 @@ or an extra usage line names no usage key."
                      :range (lsp.Range :start (client-position doc line start)
                                        :end (client-position doc line end)))))
 
-;; Parameter labels given as offsets (label_offset_support) are mapped
-;; through the label's relabel.  Both count code points; a label holding a
-;; character outside the BMP (two UTF-16 units) would put them off by one.
-(def signature-to-buffer [signature spellings]
+;; The backend is always asked for offset parameter labels (backend.lpy
+;; _client-capabilities), which are mapped through the label's relabel;
+;; an editor that never advertised labelOffsetSupport gets the text they
+;; span instead.  Both count code points; a label holding a character
+;; outside the BMP (two UTF-16 units) would put them off by one.
+(def signature-to-buffer [signature spellings :offsets False]
   "A backend SignatureInformation with the buffer's spellings: its label, a
    string parameter label, an offset parameter label mapped through the
-   label's relabel, and the markdown code blocks of its documentation."
+   label's relabel (as offsets when offsets, label-offset-support's answer
+   for the editor, else as the text they span), and the markdown code
+   blocks of its documentation."
   (= [label mapped] (python-to-buffer signature.label spellings))
+  (def parameter-label [parameter]
+    (if (isinstance parameter.label str)
+        (return (sub (python-to-buffer parameter.label spellings) 0)))
+    (= span (, (mapped (sub parameter.label 0)) (mapped (sub parameter.label 1))))
+    (return (ife offsets span (sub label [: (sub span 0) (sub span 1)]))))
   (= parameters None)
   (if (is-not signature.parameters None)
       (= parameters
          [(lsp.ParameterInformation
-            :label (ife (isinstance parameter.label str)
-                        (sub (python-to-buffer parameter.label spellings) 0)
-                        (, (mapped (sub parameter.label 0))
-                           (mapped (sub parameter.label 1))))
+            :label (parameter-label parameter)
             :documentation (documentation-to-buffer parameter.documentation spellings))
           for parameter in signature.parameters]))
   (return (lsp.SignatureInformation
@@ -2021,12 +2043,13 @@ or an extra usage line names no usage key."
                  (lsp.SignatureHelpParams :text-document document
                                           :position (generated-position view))))))
 
-(async-def backend-signature-help [doc line col head]
+(async-def backend-signature-help [doc line col head :offsets False]
   "The backend's SignatureHelp at the 1-based line and code-point col, its
    names in the buffer's spellings, or None: no backend, head (the
    innermost open form's head symbol, None when it has none) is a macro, no
    view, no signature.  doc is a snapshot.  The cursor view puts the
-   sentinel where the argument is typed, so the backend sees the call."
+   sentinel where the argument is typed, so the backend sees the call.
+   offsets is signature-to-buffer's."
   (= client (.available-client backends doc.uri))
   (if (is client None)
       (return None))
@@ -2037,7 +2060,7 @@ or an extra usage line names no usage key."
       (return None))
   (= spellings (buffer-spellings doc.source))
   (return (lsp.SignatureHelp
-            :signatures [(signature-to-buffer signature spellings)
+            :signatures [(signature-to-buffer signature spellings :offsets offsets)
                          for signature in answer.signatures]
             :active-signature answer.active-signature
             :active-parameter answer.active-parameter)))
