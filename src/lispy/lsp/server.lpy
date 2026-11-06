@@ -20,6 +20,7 @@
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 (from lispy.lsp.python-view [open-form-closers py-name source-prefix])
+(from lispy.lsp.backend [Backends])
 
 (= logger (logging.getLogger __name__))
 
@@ -240,6 +241,11 @@ or an extra usage line names no usage key."
     (except [RuntimeError]
       ;; Not (return []): an empty bracket compiles to a bare return.
       (return (list)))))
+
+;; The Python backend of each workspace project (lispy.lsp.backend).  Its
+;; document hooks never raise and never start a backend, so the handlers
+;; below behave as they did whether or not one is installed.
+(= backends (Backends workspace-folders))
 
 (def index-required-modules [tree]
   "Find all (require module-name ...) forms in tree and index those packages."
@@ -797,6 +803,10 @@ or an extra usage line names no usage key."
 ;; LSP event handlers
 ;; ---------------------------------------------------------------------------
 
+(deco (server.feature lsp.INITIALIZE)
+(def on-initialize [ls params]
+  (.configure backends params.initialization_options)))
+
 (deco (server.feature lsp.INITIALIZED)
 (def on-initialized [ls params]
   (= folders (ife ls.workspace.folders
@@ -805,21 +815,44 @@ or an extra usage line names no usage key."
   (if folders
       (index-workspace folders))))
 
+(def buffer-source-getter [ls uri]
+  (return (fn [] (. (.get-text-document ls.workspace uri) source))))
+
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
   (= uri params.text_document.uri)
   (index-file uri)
-  (publish-diagnostics ls uri)))
+  (publish-diagnostics ls uri)
+  (.document-changed backends uri (buffer-source-getter ls uri))))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_CHANGE)
 (def did-change [ls params]
-  (publish-diagnostics ls params.text_document.uri)))
+  (= uri params.text_document.uri)
+  (publish-diagnostics ls uri)
+  (.document-changed backends uri (buffer-source-getter ls uri))))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
 (def did-save [ls params]
   (= uri params.text_document.uri)
   (index-file uri)
-  (publish-diagnostics ls uri)))
+  (publish-diagnostics ls uri)
+  (.document-saved backends uri)))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_DID_CLOSE)
+(def did-close [ls params]
+  (.document-closed backends params.text_document.uri)))
+
+;; pygls' own shutdown awaits this before it answers, so every backend has
+;; exited by the time the client sends exit.
+(deco (server.feature lsp.SHUTDOWN)
+(async-def on-shutdown [ls *args]
+  (await (.shutdown-all backends))))
+
+;; A client that exits without shutdown: kill what still runs, since the LSP
+;; process ends right after this.
+(deco (server.feature lsp.EXIT)
+(def on-exit [ls *args]
+  (.kill-all backends)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
 (def document-symbol [ls params]

@@ -9,11 +9,14 @@ import importlib
 import json
 import ntpath
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import warnings
+from types import SimpleNamespace
 
 import pytest
 
@@ -793,3 +796,89 @@ class TestShadows:
 def test_moved_helpers_keep_one_home():
     for name in ["open_form_closers", "source_prefix", "py_name"]:
         assert getattr(server, name) is getattr(pv, name)
+
+
+def test_concurrent_filter_swaps_leave_the_filters_as_they_were():
+    # Defect: two threads inside warnings.catch_warnings at once (a view
+    # compiling in a worker while the LSP's loop compiles diagnostics)
+    # restore the filters out of order, leaving one's "ignore" in force.
+    from lispy.core.errors import filtered_warnings
+
+    original = list(warnings.filters)
+    a_in, a_go, b_in, b_go = (threading.Event() for _ in range(4))
+
+    def a():
+        with filtered_warnings("ignore"):
+            a_in.set()
+            a_go.wait(5)
+
+    def b():
+        with filtered_warnings("always"):
+            b_in.set()
+            b_go.wait(5)
+
+    first = threading.Thread(target=a)
+    first.start()
+    assert a_in.wait(5)
+    second = threading.Thread(target=b)
+    second.start()
+    # Without the lock b is inside now; with it, only once a has left.
+    b_in.wait(0.2)
+    a_go.set()
+    first.join(5)
+    b_go.set()
+    second.join(5)
+    assert warnings.filters == original
+
+
+SLOW_MACRO = """\
+(defmacro slow []
+  (= gate (__import__ "lpy_test_gate"))
+  (.set gate.entered)
+  (.wait gate.release 10)
+  (return 1))
+(= x (slow))
+"""
+
+
+def test_a_slow_macro_in_a_view_never_holds_up_another_compile(monkeypatch):
+    # Defect: compiling a view holds a process-wide lock across the user's
+    # macros, so the LSP loop's diagnostics wait at a backslash literal for
+    # as long as a worker's macro runs, and a hanging macro freezes the LSP.
+    gate = SimpleNamespace(entered=threading.Event(), release=threading.Event())
+    monkeypatch.setitem(sys.modules, "lpy_test_gate", gate)
+    worker = threading.Thread(target=pv.compile_view, args=(SLOW_MACRO,))
+    worker.start()
+    try:
+        assert gate.entered.wait(10)
+        done = threading.Event()
+
+        def diagnostics():
+            server.compute_diagnostics('(= s "a\\nb")', "file:///other.lpy")
+            done.set()
+
+        threading.Thread(target=diagnostics, daemon=True).start()
+        # Released only after: the other compile must finish meanwhile.
+        assert done.wait(5)
+    finally:
+        gate.release.set()
+        worker.join(10)
+
+
+def test_catch_warnings_has_one_home():
+    # Rule: every swap of the process-wide warning filters goes through
+    # errors.filtered_warnings, whose lock keeps threads from undoing each
+    # other's swaps; a second catch_warnings site would bypass it.
+    root = os.path.dirname(lispy.__file__)
+    allowed = {os.path.join(root, "core", "errors.py")}
+    offenders = []
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            if not filename.endswith((".py", ".lpy")) or path in allowed:
+                continue
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            if re.search(r"warnings\.catch[_-]warnings|import catch", text):
+                offenders.append(path)
+    assert offenders == []

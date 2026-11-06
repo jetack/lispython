@@ -70,6 +70,8 @@ LisPython ships with a language server (`lpy-lsp`) that speaks LSP over stdio. I
 - Document symbols and workspace symbol search
 - Go-to-definition, including across `.lpy` files in the workspace
 
+`pip install "lispython[lsp]"` adds basedpyright, a Python language server the LSP can run over the compiled code of each workspace project. The `backend` initialization option picks it: `"basedpyright"` (the default when installed), `"pyrefly"` (when the `pyrefly` binary is installed) or `"off"`.
+
 ## nREPL Server
 LisPython includes an nREPL server for REPL-driven development:
 

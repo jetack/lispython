@@ -1,0 +1,711 @@
+"""The LSP's Python backend client (lispy.lsp.backend).
+
+The real-backend tests share one basedpyright process on one event loop in a
+background thread (a basedpyright start costs about a second and 400 MB). The
+others run a fake backend, a tiny pygls server whose hover answers with its
+pid, its copy of the document and the configuration the client gave it, each
+on its own loop; none needs basedpyright installed.
+"""
+
+import asyncio
+import contextlib
+import importlib
+import json
+import os
+import signal
+import sys
+import textwrap
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+from lsprotocol import types as lsp
+from pygls.lsp.client import LanguageClient
+
+import lispy  # noqa: F401  (registers the .lpy importer)
+
+backend = importlib.import_module("lispy.lsp.backend")
+pv = importlib.import_module("lispy.lsp.python_view")
+
+# argv: [--slow-init SECONDS] [--linger].  --slow-init delays the answer to
+# initialize; --linger keeps the process alive 30 s after its stdin closes
+# with no exit notification, as a backend that does not notice its client is
+# gone.
+FAKE_SERVER = textwrap.dedent(
+    """\
+    import asyncio
+    import json
+    import os
+    import sys
+    import time
+
+    from lsprotocol import types
+    from pygls.lsp.server import LanguageServer
+
+    server = LanguageServer("fake-backend", "0")
+    config = {}
+
+
+    @server.feature(types.INITIALIZE)
+    async def initialize(ls, params):
+        if "--slow-init" in sys.argv:
+            await asyncio.sleep(float(sys.argv[sys.argv.index("--slow-init") + 1]))
+
+
+    @server.feature(types.INITIALIZED)
+    async def initialized(ls, params):
+        items = [types.ConfigurationItem(section=s) for s in ("python", "x.y")]
+        config["answer"] = await ls.workspace_configuration_async(
+            types.ConfigurationParams(items=items)
+        )
+
+
+    @server.feature(types.TEXT_DOCUMENT_HOVER)
+    async def hover(ls, params):
+        for _ in range(500):
+            if "answer" in config:
+                break
+            await asyncio.sleep(0.01)
+        doc = ls.workspace.get_text_document(params.text_document.uri)
+        text = doc.source
+        answer = {"pid": os.getpid(), "text": text, "config": config.get("answer")}
+        return types.Hover(contents=json.dumps(answer))
+
+
+    @server.feature(types.EXIT)
+    def exit(ls, *args):
+        config["exited"] = True
+
+
+    server.start_io()
+    if "--linger" in sys.argv and "exited" not in config:
+        time.sleep(30)
+    """
+)
+
+
+def locate(text, word, nth=0):
+    """(0-based line, column) of the nth occurrence of word."""
+    index = -1
+    for _ in range(nth + 1):
+        index = text.index(word, index + 1)
+    return text.count("\n", 0, index), index - (text.rfind("\n", 0, index) + 1)
+
+
+def hover_params(uri, line=0, character=0):
+    return lsp.HoverParams(
+        text_document=lsp.TextDocumentIdentifier(uri=uri),
+        position=lsp.Position(line=line, character=character),
+    )
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    """Every process the backend client starts (pygls' start_io calls
+    asyncio.create_subprocess_exec)."""
+    calls = []
+    original = asyncio.create_subprocess_exec
+
+    async def counting(*args, **kwargs):
+        calls.append(args)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", counting)
+    return calls
+
+
+@pytest.fixture
+def project(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.lpy").write_text("(= y 1)\n")
+    return root
+
+
+def view_root(project, tmp_path):
+    return pv.view_root_for(str(project), cache_home=str(tmp_path / "cache"))
+
+
+@pytest.fixture
+def fake_script(tmp_path):
+    script = tmp_path / "fake_backend.py"
+    script.write_text(FAKE_SERVER)
+    return str(script)
+
+
+@pytest.fixture
+def fake_argv(fake_script):
+    return [sys.executable, fake_script]
+
+
+@pytest.fixture
+def fake_default(monkeypatch, fake_argv):
+    """The fake stands for basedpyright, the default backend, so Backends
+    resolves to it whether or not basedpyright is installed."""
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: fake_argv)
+
+
+def fake_hover(answer):
+    """The fake backend's hover as a dict (pid, text, config), or None."""
+    return None if answer is None else json.loads(answer.contents)
+
+
+def run_bounded(coroutine, timeout=30):
+    async def bounded():
+        async with asyncio.timeout(timeout):
+            return await coroutine
+
+    return asyncio.run(bounded())
+
+
+def gone(pid):
+    """Whether process pid has ended (absent, or a zombie nobody reaped yet)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+async def wait_gone(pid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while not gone(pid):
+        if time.monotonic() > deadline:
+            return False
+        await asyncio.sleep(0.02)
+    return True
+
+
+def kill_quietly(pid):
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+# ---------------------------------------------------------------------------
+# Setting and off
+# ---------------------------------------------------------------------------
+
+
+def test_backend_setting(monkeypatch):
+    # Defect: the default picks basedpyright whether or not it is installed,
+    # or an explicit backend that is missing falls back to another one.
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["node", "bp"])
+    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
+    assert backend.resolve_backend(None) == "basedpyright"
+    assert backend.resolve_backend({"backend": None}) == "basedpyright"
+    assert backend.resolve_backend({"backend": "pyrefly"}) == "off"
+    assert backend.resolve_backend({"backend": "no-such"}) == "off"
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: None)
+    assert backend.resolve_backend(None) == "off"
+    assert backend.resolve_backend({}) == "off"
+
+
+@pytest.mark.parametrize(
+    "init_options, installed",
+    [({"backend": "off"}, True), ({"backend": "no-such"}, True), (None, False)],
+)
+def test_off_never_spawns(
+    init_options, installed, project, tmp_path, fake_argv, spawned, monkeypatch
+):
+    # Defect: an off or unknown backend starts the installed default in its
+    # place, the default starts on a plain install, or a request on an off
+    # backend raises.
+    argv = fake_argv if installed else None
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: argv)
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    backends.configure(init_options)
+    uri = (project / "main.lpy").as_uri()
+    answer = run_bounded(
+        backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, hover_params(uri), text="x")
+    )
+    assert answer is None
+    assert spawned == []
+
+
+def test_a_document_belongs_to_its_innermost_folder(tmp_path):
+    # Defect: a document is put in a workspace folder that does not hold it
+    # (it then has no view, so no backend) or in an outer folder rather
+    # than the project nested in it; or a file outside every folder (a
+    # dependency opened by go-to-definition) gets a backend.
+    outer = tmp_path / "ws"
+    project = outer / "project"
+    project.mkdir(parents=True)
+    other = tmp_path / "another-workspace-folder"
+    other.mkdir()
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (outer, project, other)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    backends.configure(None)
+    outside = tmp_path / "elsewhere.lpy"
+    assert backends.client_for(outside.as_uri()) is None
+    inside = backends.client_for((project / "main.lpy").as_uri())
+    assert inside is not None and inside.project_root == os.path.realpath(project)
+
+
+def test_buffer_hooks_never_start_a_backend(project, tmp_path, fake_default, spawned):
+    # Defect: opening, editing or saving a buffer spawns the backend (a
+    # process per project on a plain edit) or compiles a view for nobody.
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    uri = (project / "main.lpy").as_uri()
+    assert backends.client_for(uri).state == "idle"
+    read = []
+
+    def source():
+        read.append(True)
+        return "(= y 2)\n"
+
+    async def scenario():
+        backends.document_changed(uri, source)
+        backends.document_saved(uri)
+        backends.document_closed(uri)
+        others = asyncio.all_tasks() - {asyncio.current_task()}
+        await asyncio.gather(*others)
+
+    run_bounded(scenario())
+    assert spawned == []
+    assert read == []
+
+
+# ---------------------------------------------------------------------------
+# Fake backend: starts, crashes, shutdown, buffer sync, configuration
+# ---------------------------------------------------------------------------
+
+
+def fake_client(project, tmp_path, argv):
+    client = backend.BackendClient(view_root(project, tmp_path), argv)
+    uri = (project / "main.lpy").as_uri()
+    params = hover_params(client.backend_uri(uri))
+
+    async def hover(text="t"):
+        return fake_hover(
+            await client.request(lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=text)
+        )
+
+    return client, hover
+
+
+def test_crashed_backend_restarts_once(project, tmp_path, fake_argv, spawned):
+    # Defect: a backend that crashed stays dead for the session, or one that
+    # keeps crashing is respawned on every request.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+
+    async def crash():
+        process = client.process
+        os.kill(process.pid, signal.SIGKILL)
+        await process.wait()
+
+    async def scenario():
+        try:
+            first = await hover()
+            assert (first["pid"], first["text"]) == (client.process.pid, "t")
+            await crash()
+            second = await hover()
+            assert second is not None and second["pid"] != first["pid"]
+            await crash()
+            assert await hover() is None
+            assert await hover() is None
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
+    assert len(spawned) == 2
+
+
+def test_cancelled_requests_never_cost_a_start(project, tmp_path, fake_argv, spawned):
+    # Defect: cancelling a request (the editor's $/cancelRequest) while the
+    # backend starts cancels the start: each cancel uses up a spawn and can
+    # leave a process nobody stops, and two of them turn the backend off.
+    client, hover = fake_client(project, tmp_path, fake_argv + ["--slow-init", "1"])
+
+    async def cancelled_hover():
+        task = asyncio.create_task(hover())
+        while not spawned:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def scenario():
+        try:
+            await cancelled_hover()
+            await cancelled_hover()
+            assert await hover() is not None
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
+    assert len(spawned) == 1
+
+
+def test_a_slow_start_is_bounded_and_goes_on(
+    project, tmp_path, fake_argv, spawned, monkeypatch
+):
+    # Defect: the first request waits for the whole start (every shadow
+    # compiled, then initialize) however long it takes, or a request that
+    # gave up waiting stops the start, so no request ever finds it running.
+    monkeypatch.setattr(backend, "REQUEST_TIMEOUT", 0.3)
+    client, hover = fake_client(project, tmp_path, fake_argv + ["--slow-init", "1"])
+
+    async def scenario():
+        try:
+            started = time.monotonic()
+            assert await hover() is None
+            assert time.monotonic() - started < 0.9
+            # A request that answers None at once (a backend gone off)
+            # never yields to the loop: sleep, so the timeout can fire.
+            while (answer := await hover()) is None:
+                await asyncio.sleep(0.01)
+            assert answer["pid"] == client.process.pid
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario(), timeout=10)
+    assert len(spawned) == 1
+
+
+def test_shutdown_ends_the_backend(project, tmp_path, fake_argv, spawned):
+    # Defect: the backend process outlives the LSP's shutdown, or a request
+    # after shutdown starts a new one that nobody stops.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+    pids = []
+
+    async def scenario():
+        try:
+            pids.append((await hover())["pid"])
+            process = client.process
+            await client.shutdown()
+            assert process.returncode is not None
+            assert await hover() is None
+        finally:
+            for pid in pids:
+                kill_quietly(pid)
+
+    run_bounded(scenario())
+    assert len(spawned) == 1
+
+
+def test_a_cancelled_discard_still_cleans_up(project, tmp_path, fake_argv):
+    # Defect: shutdown cancels a start while it is discarding a client, and
+    # that client's pygls tasks and stderr drain are left running, with
+    # nobody to stop them, after shutdown has returned.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+
+    async def scenario():
+        try:
+            assert await hover() is not None
+            discard = asyncio.create_task(client._discard())
+            await asyncio.sleep(0)
+            discard.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await discard
+        finally:
+            await client.shutdown()
+        return asyncio.all_tasks() - {asyncio.current_task()}
+
+    assert run_bounded(scenario()) == set()
+
+
+def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
+    # Defect: the backend's workspace/configuration request for "python"
+    # does not get python.pythonPath, so it resolves imports with whatever
+    # interpreter it finds on PATH, not this project's.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+
+    async def scenario():
+        try:
+            return (await hover())["config"]
+        finally:
+            await client.shutdown()
+
+    assert run_bounded(scenario()) == [{"pythonPath": client.view_root.python}, {}]
+
+
+def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):
+    # Defect: edits to a buffer never reach a running backend, so it answers
+    # for the text of the last request; or a closed buffer stays open in it.
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    uri = (project / "main.lpy").as_uri()
+    params = hover_params(backends.client_for(uri).backend_uri(uri))
+
+    async def backend_text():
+        answer = await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params)
+        return None if answer is None else fake_hover(answer)["text"]
+
+    async def scenario():
+        try:
+            await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params, text="old")
+            backends.document_changed(uri, lambda: "(= my-y 2)")
+            while (text := await backend_text()) == "old":
+                await asyncio.sleep(0.01)
+            assert text == "my_y = 2"
+            backends.document_closed(uri)
+            # Closed, the backend reads the document's uri from disk: the
+            # shadow of main.lpy as saved, not the buffer.
+            assert await backend_text() == "y = 1"
+        finally:
+            await backends.shutdown_all()
+
+    # Bounds the poll for the pushed text too.
+    run_bounded(scenario(), timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# The lpy-lsp server process and its backends
+# ---------------------------------------------------------------------------
+
+# Runs lispython's LSP with the fake as basedpyright, the default backend, and
+# one extra request, lispy-test/backendHover, that hovers through the
+# server's own Backends (no feature routes to a backend yet).
+LAUNCHER = textwrap.dedent(
+    """\
+    import sys
+
+    import lispy  # noqa: F401
+    from lsprotocol import types
+
+    from lispy.lsp import backend
+
+    fake = [sys.executable, sys.argv[1], "--linger"]
+    backend.BACKENDS["basedpyright"] = lambda: fake
+
+    from lispy.lsp.server import backends, server  # noqa: E402
+
+
+    @server.feature("lispy-test/backendHover")
+    async def backend_hover(ls, params):
+        uri = params["uri"] if isinstance(params, dict) else params.uri
+        client = backends.client_for(uri)
+        if client is None:
+            return None
+        doc = types.TextDocumentIdentifier(uri=client.backend_uri(uri))
+        hover = types.HoverParams(
+            text_document=doc, position=types.Position(line=0, character=0)
+        )
+        answer = await backends.request(uri, types.TEXT_DOCUMENT_HOVER, hover)
+        return None if answer is None else answer.contents
+
+
+    server.start_io()
+    """
+)
+
+pytestmark_lsp = pytest.mark.skipif(
+    not os.path.isdir("/proc/self"), reason="reads process state from /proc"
+)
+
+
+class LspSession:
+    """lpy-lsp in a subprocess, initialized over project."""
+
+    def __init__(self, tmp_path, fake_script, project):
+        self.launcher = tmp_path / "launch_lsp.py"
+        self.launcher.write_text(LAUNCHER)
+        self.fake_script = fake_script
+        self.project = project
+        self.uri = (project / "main.lpy").as_uri()
+        self.client = LanguageClient("test", "0")
+        self.client.feature(lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)(lambda p: None)
+        self.pids = []
+
+    async def start(self, init_options):
+        await self.client.start_io(
+            sys.executable, str(self.launcher), self.fake_script, cwd=str(self.project)
+        )
+        folder = lsp.WorkspaceFolder(uri=self.project.as_uri(), name="p")
+        await self.client.initialize_async(
+            lsp.InitializeParams(
+                capabilities=lsp.ClientCapabilities(),
+                root_uri=self.project.as_uri(),
+                workspace_folders=[folder],
+                initialization_options=init_options,
+            )
+        )
+        self.client.initialized(lsp.InitializedParams())
+        self.client.text_document_did_open(
+            lsp.DidOpenTextDocumentParams(
+                text_document=lsp.TextDocumentItem(
+                    uri=self.uri, language_id="lpy", version=1, text="(= y 1)\n"
+                )
+            )
+        )
+
+    async def backend_hover(self):
+        """The fake's hover through the server, as a dict, or None."""
+        answer = await self.client.protocol.send_request_async(
+            "lispy-test/backendHover", {"uri": self.uri}
+        )
+        if answer is None:
+            return None
+        answer = json.loads(answer)
+        if answer["pid"] not in self.pids:
+            self.pids.append(answer["pid"])
+        return answer
+
+    def change(self, version, text):
+        self.client.text_document_did_change(
+            lsp.DidChangeTextDocumentParams(
+                text_document=lsp.VersionedTextDocumentIdentifier(
+                    uri=self.uri, version=version
+                ),
+                content_changes=[lsp.TextDocumentContentChangeWholeDocument(text=text)],
+            )
+        )
+
+    def close(self):
+        self.client.text_document_did_close(
+            lsp.DidCloseTextDocumentParams(
+                text_document=lsp.TextDocumentIdentifier(uri=self.uri)
+            )
+        )
+
+    async def exit(self):
+        """Send exit; the server's exit code."""
+        self.client.exit(None)
+        return await asyncio.wait_for(self.client._server.wait(), 5)
+
+    async def stop(self):
+        server = self.client._server
+        if server is not None and server.returncode is None:
+            server.kill()
+        for pid in self.pids:
+            kill_quietly(pid)
+        await asyncio.wait_for(self.client.stop(), 5)
+
+
+@pytestmark_lsp
+def test_lsp_server_drives_its_backend(tmp_path, fake_script, project):
+    # Defect: the server's did-change, did-close or shutdown hooks are not
+    # wired: edits never reach the backend, a closed buffer stays open in it,
+    # or the backend outlives the server's shutdown.
+    session = LspSession(tmp_path, fake_script, project)
+
+    async def scenario():
+        try:
+            await session.start(None)
+            first = await session.backend_hover()
+            assert first["text"] == "y = 1"
+            session.change(2, "(= my-y 2)")
+            while (answer := await session.backend_hover())["text"] == "y = 1":
+                await asyncio.sleep(0.01)
+            assert answer["text"] == "my_y = 2"
+            session.close()
+            assert (await session.backend_hover())["text"] == "y = 1"
+            await asyncio.wait_for(session.client.shutdown_async(None), 5)
+            assert await wait_gone(first["pid"])
+            assert await session.exit() == 0
+        finally:
+            await session.stop()
+
+    run_bounded(scenario())
+
+
+@pytestmark_lsp
+def test_lsp_exit_without_shutdown_kills_the_backend(tmp_path, fake_script, project):
+    # Pins the outcome, not the exit hook: after an exit with no shutdown,
+    # no backend outlives the server.  Deleting on-exit alone does not fail
+    # it, since asyncio's subprocess transport also kills the child when the
+    # server's interpreter exits; on-exit is the explicit guarantee.
+    session = LspSession(tmp_path, fake_script, project)
+
+    async def scenario():
+        try:
+            await session.start(None)
+            pid = (await session.backend_hover())["pid"]
+            await session.exit()
+            assert await wait_gone(pid)
+        finally:
+            await session.stop()
+
+    run_bounded(scenario())
+
+
+@pytestmark_lsp
+def test_lsp_honours_backend_off(tmp_path, fake_script, project):
+    # Defect: the server never reads its initializationOptions, so the
+    # user's "backend": "off" is ignored and the default backend starts.
+    session = LspSession(tmp_path, fake_script, project)
+
+    async def scenario():
+        try:
+            await session.start({"backend": "off"})
+            assert await session.backend_hover() is None
+        finally:
+            await session.stop()
+
+    run_bounded(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Real backend: basedpyright
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def loop():
+    """One event loop in a background thread for the shared real backend."""
+    event_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=event_loop.run_forever, daemon=True)
+    thread.start()
+    yield event_loop
+    event_loop.call_soon_threadsafe(event_loop.stop)
+    thread.join(10)
+    event_loop.close()
+
+
+def on_loop(event_loop, coroutine, timeout=30):
+    return asyncio.run_coroutine_threadsafe(coroutine, event_loop).result(timeout)
+
+
+@pytest.fixture(scope="session")
+def real(loop, tmp_path_factory):
+    argv = backend.backend_argv("basedpyright")
+    if argv is None:
+        pytest.skip("basedpyright is not installed (the lsp extra)")
+    root = tmp_path_factory.mktemp("real-project")
+    (root / "main.lpy").write_text("(= y 1)\n")
+    (root / "helper.lpy").write_text(
+        '(def greet [name]\n  "Say hello to name."\n  (return name))\n'
+    )
+    cache = tmp_path_factory.mktemp("real-cache")
+    client = backend.BackendClient(
+        pv.view_root_for(str(root), cache_home=str(cache)), argv
+    )
+    yield client, root
+    process = client.process
+    on_loop(loop, client.shutdown())
+    assert process is None or process.returncode is not None
+
+
+def real_hover(loop, real, source, word, nth=0):
+    """basedpyright's hover text on word in the view of source, sent as
+    main.lpy's text."""
+    client, root = real
+    uri = (root / "main.lpy").as_uri()
+    view = pv.compile_view(source)
+    line, character = locate(view.text, word, nth)
+    params = hover_params(client.backend_uri(uri), line, character)
+    answer = on_loop(
+        loop, client.request(lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=view.text)
+    )
+    assert answer is not None
+    return answer.contents.value
+
+
+def test_real_backend_analyses_the_synced_text(loop, real):
+    # Defect: the text a request carries never reaches the backend (didOpen
+    # or didChange missing), so it answers for the file on disk, (= y 1).
+    path_hover = real_hover(loop, real, "(import os)\n(= x os.path)", "path")
+    assert "path: Module" in path_hover
+    sep_hover = real_hover(loop, real, "(import os)\n(= x os.sep)", "sep")
+    assert "(variable) sep: LiteralString" in sep_hover
+
+
+def test_real_backend_resolves_a_sibling_lpy_module(loop, real):
+    # Defect: the backend starts before the shadows are written, so an
+    # import of another .lpy module of the project does not resolve.
+    text = real_hover(loop, real, "(from helper [greet])\n(greet 1)", "greet", 1)
+    assert "Say hello to name." in text
