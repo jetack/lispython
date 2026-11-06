@@ -277,3 +277,39 @@ def test_an_answer_that_maps_nowhere_gives_the_local_answer(
     found = navigate(server.definition, MACRO_BUFFER)
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_DEFINITION]
     assert spans(found) == [("main.lpy", 1, 3, 1, 7)]
+
+
+def test_an_unmapped_answer_never_jumps_to_another_file(
+    navigate, backend_requests, real_backends, backend_project, monkeypatch
+):
+    # Defect: the backend located the name only in generated code, and the
+    # local fallback's workspace step jumps to an unrelated definition of
+    # that name in another file; only the buffer's own definitions may answer.
+    uri = (backend_project / "main.lpy").as_uri()
+    shadow = real_backends.available_client(uri).backend_uri(uri)
+    other = lsp.Location(
+        uri=(backend_project / "other.lpy").as_uri(),
+        range=lsp.Range(
+            start=lsp.Position(line=0, character=5),
+            end=lsp.Position(line=0, character=13),
+        ),
+    )
+    monkeypatch.setattr(server, "WORKSPACE_INDEX", {"made-x": [other]})
+    backend_requests.answer["replace"] = lambda request: [
+        lsp.Location(
+            uri=shadow,
+            range=generated_range(request["text"], "___defmacro_temp___swap"),
+        )
+    ]
+    marked = "(defmacro swap [a b] `(= [~a ~b] [~b ~a]))\n(print made-|x)\n"
+    assert navigate(server.definition, marked) is None
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_DEFINITION]
+
+
+def test_a_name_that_mangles_like_a_macro_reaches_the_backend(
+    navigate, backend_requests
+):
+    # Defect: macro heads are compared by Python name, and -> mangles to
+    # _to_, so a variable _to_ is taken for the macro and never asked about.
+    navigate(server.definition, "(require lispy.macros *)\n(= _to_ 1)\n(print _to|_)")
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_DEFINITION]

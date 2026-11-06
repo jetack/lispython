@@ -540,3 +540,10 @@ def test_a_hover_on_a_non_builtin_name_caches_nothing():
     before = cached()
     assert run_hover(ls_with("(no-such-name 1)"), position(0, 3)) is None
     assert cached() == before
+
+
+def test_a_dotted_name_compares_part_by_part():
+    # Defect: a dotted symbol is no name spelling as a whole, so it is
+    # compared as written and self.my_v misses the self.my-v it stands for.
+    source = "(= self.my-v 1)\n(print self.my_v)"
+    assert local_references(source, 1, 9) == [(0, 3), (1, 7)]

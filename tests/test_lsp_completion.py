@@ -402,3 +402,12 @@ def test_an_auto_import_item_never_appears(merged, backend_requests, marked):
     labels = set(by_label(merged(marked)[2]))
     assert "my-x" in labels
     assert "imported_name" not in labels
+
+
+def test_the_fallback_list_keeps_the_definitions_after_the_cursor(
+    complete, off_backends
+):
+    # Defect: the form left open at the cursor swallows the rest of the
+    # partial parse, so with no backend helper is not offered.
+    marked = "(def main []\n  (hel|\n(def helper [] 1)"
+    assert "helper" in by_label(complete(marked, off_backends)[2])
