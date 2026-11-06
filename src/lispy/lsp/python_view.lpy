@@ -25,7 +25,6 @@
 (import tempfile)
 (import threading)
 (import time)
-(import warnings)
 
 (try
   (import fcntl)
@@ -39,6 +38,7 @@
 (from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.compiler.utils [python-interpolations])
 (from lispy.core.importer [package-root])
+(from lispy.core.errors [filtered-warnings])
 
 (= logger (logging.getLogger __name__))
 
@@ -385,8 +385,10 @@
             "__package__" package
             "__macro_namespace" {}})
   (try
-    (with [(warnings.catch-warnings) (_on-sys-path import-root)]
-      (warnings.simplefilter "ignore")
+    ;; The LSP compiles views in worker threads: the filter swap goes through
+    ;; filtered-warnings, whose lock keeps concurrent swaps from undoing
+    ;; each other.
+    (with [(filtered-warnings "ignore") (_on-sys-path import-root)]
       (= module (ast.Module :body (list (macroexpand-then-compile (parse source) scope))
                             :type-ignores (list)))
       (= module (python-interpolations module))

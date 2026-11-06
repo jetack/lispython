@@ -3,10 +3,9 @@ import io
 import keyword
 import re
 import tokenize
-import warnings
 
 from lispy.core.compiler.features import require
-from lispy.core.errors import LispyCompileError, compile_warning
+from lispy.core.errors import LispyCompileError, compile_warning, filtered_warnings
 from lispy.core.nodes import GluedHead, Node, Symbol, atom_text
 from lispy.core.utils import binop_dict, boolop_dict, compare_dict, unaryop_dict
 
@@ -63,8 +62,9 @@ def literal_value(text, node, malformed=False):
     """
     try:
         # Only an escape or a malformed number makes literal_eval warn.
-        # catch_warnings swaps the process-wide filters (not thread-safe, and
-        # it resets the warning registry a REPL, nREPL or LSP session keeps),
+        # catch_warnings swaps the process-wide filters (under
+        # filtered_warnings' lock, which a concurrent compile may hold) and
+        # resets the warning registry a REPL, nREPL or LSP session keeps,
         # so it is entered only for text that can warn.
         [value, caught] = _literal_eval(text, malformed or "\\" in text)
     except (SyntaxError, ValueError) as err:
@@ -94,8 +94,7 @@ def _literal_eval(text, record):
     try:
         if not record:
             return [ast.literal_eval(text), caught]
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with filtered_warnings("always", record=True) as caught:
             return [ast.literal_eval(text), caught]
     except SyntaxError as err:
         warned = [w for w in caught if issubclass(w.category, SyntaxWarning)]

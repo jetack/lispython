@@ -29,14 +29,15 @@
 
 (= logger (logging.getLogger __name__))
 
-;; Seconds.  A request waits REQUEST-TIMEOUT for its answer (a first
-;; basedpyright completion takes about 0.9 s); the initialize handshake waits
-;; START-TIMEOUT; shutdown gives the backend SHUTDOWN-TIMEOUT to answer
-;; shutdown, as long again to exit before it is killed, and as long for
-;; pygls' client tasks to end.
+;; Seconds.  A request waits REQUEST-TIMEOUT in all, for the backend's start
+;; and its answer (a first basedpyright completion takes about 0.9 s); the
+;; start's initialize handshake gives up after START-TIMEOUT.  Shutdown gives
+;; a backend SHUTDOWN-TIMEOUT to answer shutdown and exit, then kills it and
+;; waits KILL-TIMEOUT for the process and as long for pygls' client tasks.
 (= REQUEST-TIMEOUT 10)
 (= START-TIMEOUT 30)
 (= SHUTDOWN-TIMEOUT 2)
+(= KILL-TIMEOUT 0.5)
 
 ;; A backend process is started at most this often per BackendClient: the
 ;; first spawn and one restart after a crash.  A backend that dies twice is
@@ -227,12 +228,17 @@
     (= self.process None)
     (= self._client None)
     (= self._stderr-task None)
-    (= self._lock (asyncio.Lock))
+    ;; The one start in progress (_start), shared by every request that
+    ;; waits for it.
+    (= self._starting None)
     ;; lpy uri -> [backend uri, version, text last sent], for this spawn.
     (= self._docs {})
-    ;; lpy uri -> the latest push-buffer's number, so an older compile that
-    ;; finishes last never replaces a newer text.
-    (= self._pushes {}))
+    ;; lpy uri -> the number of its latest push-buffer, so an older compile
+    ;; that finishes last never replaces a newer text.  The numbers come
+    ;; from one counter that is never reset: a document closed and reopened
+    ;; while a push is compiling never gets that push's number again.
+    (= self._pushes {})
+    (= self._push-count 0))
 
   (deco property
     (def running [self]
@@ -260,42 +266,71 @@
     (write-pyright-config self.project-root root
                           :import-roots self.manifest.import-roots))
 
-  (async-def _ensure-started [self]
-    "True once a backend process runs, spawning one when none has yet or the
-     last one died and a restart is left."
+  (def _start-task [self]
+    "The task starting the backend: the one in progress, else a new one when
+     none runs and a start is left (MAX-SPAWNS), else None.  Synchronous, so
+     two requests on the loop never start two processes."
+    (if (and (is-not self._starting None) (not (.done self._starting)))
+        (return self._starting))
+    (if (and (== self.state "running") (not self.running))
+        ;; exited, and server_exit has not reported it yet
+        (= self.state "dead"))
+    (cond (in self.state (, OFF "closed"))
+          (return None)
+          (>= self.spawns MAX-SPAWNS)
+          (do (.warning logger "lispython LSP: Python backend for %s failed twice; backend off"
+                        self.project-root)
+              (= self.state OFF)
+              (return None)))
+    (+= self.spawns 1)
+    (= self._starting (asyncio.create-task (._start self)))
+    (return self._starting))
+
+  (async-def _ensure-started [self deadline]
+    "True once a backend process runs, waiting for its start until deadline
+     (the loop's clock).  The start is a task of its own, awaited shielded:
+     a request that is cancelled (the editor's $/cancelRequest) or runs out
+     of time stops waiting, never the start, which a later request finds
+     done.  Only a start that fails or a process that exits uses up a spawn."
     (if self.running
         (return True))
-    (async-with [self._lock]
-      (if (and (== self.state "running") (not self.running))
-          (= self.state "dead"))
-      (cond (== self.state "running")
-            (return True)
-            (in self.state (, OFF "closed"))
-            (return False)
-            (>= self.spawns MAX-SPAWNS)
-            (do (.warning logger "lispython LSP: Python backend for %s died again; backend off"
-                          self.project-root)
-                (= self.state OFF)
-                (return False)))
+    (= task (._start-task self))
+    (if (is task None)
+        (return False))
+    (try
+      (return (await (asyncio.wait-for (asyncio.shield task) (_remaining deadline))))
+      (except [TimeoutError]
+        (return False))
+      (except [asyncio.CancelledError]
+        ;; shutdown cancelled the start: no backend, not a cancelled request
+        (if (.cancelled task)
+            (return False))
+        (raise))))
+
+  (async-def _start [self]
+    "Start a backend process; True when it runs.  Cancelled only by
+     shutdown."
+    (try
       (if (is-not self._client None)
           ;; the dead process's client: its tasks end, its pipes close
           (await (._discard self)))
-      (+= self.spawns 1)
-      (try
-        (await (._spawn self))
-        (except [Exception as e]
-          (.warning logger "lispython LSP: Python backend for %s failed to start: %s"
-                    self.project-root e)
-          (await (._discard self))
-          (if (!= self.state "closed")
-              (= self.state (ife (>= self.spawns MAX-SPAWNS) OFF "dead")))
-          (return False)))
-      (if (== self.state "closed")
-          ;; shutdown came during the spawn
-          (do (await (._discard self))
-              (return False)))
-      (= self.state "running")
-      (return True)))
+      (await (._spawn self))
+      (except [Exception as e]
+        (.warning logger "lispython LSP: Python backend for %s failed to start: %s"
+                  self.project-root e)
+        (await (._discard self))
+        (if (!= self.state "closed")
+            (= self.state (ife (>= self.spawns MAX-SPAWNS) OFF "dead")))
+        (return False))
+      (except [asyncio.CancelledError]
+        (await (._discard self))
+        (raise)))
+    (if (== self.state "closed")
+        ;; shutdown came during the spawn
+        (do (await (._discard self))
+            (return False)))
+    (= self.state "running")
+    (return True))
 
   (async-def _spawn [self]
     (await (asyncio.to-thread self._prepare-view-root))
@@ -343,12 +378,12 @@
     (_kill process)
     (if (is-not process None)
         (try
-          (await (asyncio.wait-for (.wait process) SHUTDOWN-TIMEOUT))
+          (await (asyncio.wait-for (.wait process) KILL-TIMEOUT))
           (except [Exception]
             (pass))))
     (if (is-not client None)
         (try
-          (await (asyncio.wait-for (.stop client) SHUTDOWN-TIMEOUT))
+          (await (asyncio.wait-for (.stop client) KILL-TIMEOUT))
           (except [Exception]
             (pass)))))
 
@@ -385,9 +420,12 @@
      start, died, or took REQUEST-TIMEOUT.  The first request spawns the
      backend.  With uri (the .lpy document's) and text, the backend's copy
      of that document is made text first: any text, a cursor view's as
-     well as the buffer's.  Never raises but for cancellation."
+     well as the buffer's.  REQUEST-TIMEOUT bounds the whole call, the
+     backend's start included; a start that takes longer goes on, for the
+     next request.  Never raises but for cancellation."
+    (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
     (try
-      (if (not (await (._ensure-started self)))
+      (if (not (await (._ensure-started self deadline)))
           (return None))
       (= client self._client)
       (if (and (is-not uri None) (is-not text None))
@@ -398,7 +436,7 @@
       ;; resolves a future nobody awaits instead of one already cancelled.
       (.add-done-callback answer _retrieve)
       (try
-        (return (await (asyncio.wait-for (asyncio.shield answer) REQUEST-TIMEOUT)))
+        (return (await (asyncio.wait-for (asyncio.shield answer) (_remaining deadline))))
         (except [TimeoutError]
           (.debug logger "python backend: %s timed out" method)
           (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
@@ -413,7 +451,8 @@
      the backend keeps the last good text."
     (if (not self.running)
         (return))
-    (= number (+ (.get self._pushes lpy-uri 0) 1))
+    (+= self._push-count 1)
+    (= number self._push-count)
     (= (sub self._pushes lpy-uri) number)
     (= path (to-fs-path lpy-uri))
     (if (is path None)
@@ -446,24 +485,37 @@
             :changes [(lsp.FileEvent :uri uri :type lsp.FileChangeType.Changed)]))))
 
   (async-def shutdown [self]
-    "Stop the backend for good: shutdown and exit, each bounded by
-     SHUTDOWN-TIMEOUT, then kill it if it still runs.  No request spawns one
-     afterwards."
+    "Stop the backend for good: cancel a start in progress, send shutdown
+     and exit and wait for the process to end, all within SHUTDOWN-TIMEOUT,
+     then kill it if it still runs (KILL-TIMEOUT more at most).  No request
+     spawns one afterwards."
     (= self.state "closed")
+    (= deadline (+ (.time (asyncio.get-running-loop)) SHUTDOWN-TIMEOUT))
+    (= starting self._starting)
+    (if (and (is-not starting None) (not (.done starting)))
+        (do (.cancel starting)
+            (await (asyncio.gather starting :return-exceptions True))))
     (= client self._client)
-    (if (and (is-not client None) (is-not self.process None)
-             (is self.process.returncode None))
+    (= process self.process)
+    (if (and (is-not client None) (is-not process None) (is process.returncode None))
         (try
-          (await (asyncio.wait-for (.shutdown-async client None) SHUTDOWN-TIMEOUT))
+          (await (asyncio.wait-for (.shutdown-async client None) (_remaining deadline)))
           (.exit client None)
+          (await (asyncio.wait-for (.wait process) (_remaining deadline)))
           (except [Exception as e]
-            (.debug logger "python backend: shutdown failed: %s" e))))
+            (.debug logger "python backend: no clean exit: %s" e))))
     (await (._discard self)))
 
   (def kill [self]
     "Kill the process now, without the protocol (the LSP is exiting)."
     (= self.state "closed")
+    (if (is-not self._starting None)
+        (.cancel self._starting))
     (_kill self.process)))
+
+(def _remaining [deadline]
+  "Seconds left until deadline on the running loop's clock, never below 0."
+  (return (max 0 (- deadline (.time (asyncio.get-running-loop))))))
 
 (def _retrieve [future]
   "Mark a request future's exception retrieved: one whose wait timed out is
