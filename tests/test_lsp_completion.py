@@ -104,6 +104,7 @@ def complete(loop, project, real_backends, monkeypatch):
         line = before.count("\n")
         character = len(before) - (before.rfind("\n") + 1)
         document = TextDocument(uri, before + after, version=next(versions))
+        run.document = document
         ls = SimpleNamespace(
             workspace=SimpleNamespace(get_text_document=lambda uri: document),
             client_capabilities=capabilities(insert_replace),
@@ -254,6 +255,8 @@ def requests(project, real_backends, monkeypatch):
 
     async def request(method, params, **kwargs):
         sent.append(method)
+        if "during" in answer:
+            answer["during"]()
         if "value" in answer:
             return answer["value"]
         return await real_request(method, params, **kwargs)
@@ -290,3 +293,15 @@ def test_a_buffer_that_does_not_compile_gives_the_local_members(complete, reques
     # The backend does answer the same buffer once it compiles.
     labels = set(by_label(complete(CLASS.format("self.|"))[2]))
     assert "__class__" in labels and requests.sent
+
+
+def test_an_edit_during_the_request_never_moves_the_answer(complete, requests):
+    # Defect: the handler reads the live document after its awaits, so an
+    # edit made meanwhile (here: the buffer emptied) gives the old cursor
+    # column against the new text: the range starts at column 0 and the
+    # typed my- is lost from the filterText.
+    requests.answer["during"] = lambda: setattr(complete.document, "_source", "")
+    line, character, items = complete(CLASS.format("self.my-|"))
+    item = by_label(items)["my-x"]
+    assert item.filter_text == "my-x"
+    assert item.text_edit.insert.start.character == character - 3
