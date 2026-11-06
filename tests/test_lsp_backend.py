@@ -151,14 +151,20 @@ def test_off_never_spawns(
     assert spawned == []
 
 
-def test_document_outside_the_workspace_has_no_backend(project, tmp_path, fake_argv):
-    # Defect: a file outside every workspace folder (a dependency opened by
-    # go-to-definition) gets a backend over a project it is not in.
-    folder = SimpleNamespace(uri=project.as_uri())
-    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+def test_a_document_belongs_to_its_innermost_folder(tmp_path):
+    # Defect: a document is put in a workspace folder that does not hold it
+    # (it then has no view, so no backend) or in an outer folder rather
+    # than the project nested in it; or a file outside every folder (a
+    # dependency opened by go-to-definition) gets a backend.
+    outer = tmp_path / "ws"
+    project = outer / "project"
+    project.mkdir(parents=True)
+    other = tmp_path / "another-workspace-folder"
+    other.mkdir()
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (outer, project, other)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
     backends.configure(None)
     outside = tmp_path / "elsewhere.lpy"
-    outside.write_text("(= z 1)\n")
     assert backends.client_for(outside.as_uri()) is None
     inside = backends.client_for((project / "main.lpy").as_uri())
     assert inside is not None and inside.project_root == os.path.realpath(project)
