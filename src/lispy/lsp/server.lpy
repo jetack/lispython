@@ -1342,13 +1342,34 @@
    Python name its mangling happens to give."
   (return (ife (name-spelling-p text) (py-name text) text)))
 
-(def merged-items [doc view items spellings]
+(def buffer-definition-names [doc line]
+  "The names doc's definitions bind (collect-definitions), in source order:
+   over its partial parse and, since a form left open at the 1-based line
+   swallows the rest of that parse, over the text from the first later line
+   that opens a form in column 0, read as a top-level form (as Emacs's
+   beginning-of-defun reads one)."
+  (= lines (.split doc.source "\n"))
+  (= texts [doc.source])
+  (for i in (range line (len lines))
+    (if (.startswith (sub lines i) "(")
+        (do (.append texts (.join "\n" (sub lines [: i None])))
+            (break))))
+  (= names {})
+  (for text in texts
+    (try
+      (.update names (collect-definitions (parse text :partial True) doc.uri))
+      (except [Exception]
+        (pass))))
+  (return (list names)))
+
+(def merged-items [doc line view items spellings]
   "lispython's own items (lispython-items, then each macro of the view as
    the buffer spells it) followed by items, the backend's (backend-items),
    whose name (name-key) none of them has: a special form or macro wins
    over whatever the backend offers by that name.  Over a fallback view
    (only the text before the cursor compiled) the buffer's definitions the
-   backend could not see (collect-definitions of the whole buffer) follow."
+   backend could not see (buffer-definition-names at the 1-based line)
+   follow."
   (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
   ;; view.macros holds Python names, the built-in macros among them (_to_
@@ -1365,13 +1386,9 @@
                                                 :detail "macro")))))
   (= rest (list items))
   (if view.fallback
-      (do (try
-            (= defs (collect-definitions (parse doc.source :partial True) doc.uri))
-            (except [Exception]
-              (= defs {})))
-          (.extend rest [(lsp.CompletionItem :label name
-                                             :kind lsp.CompletionItemKind.Variable)
-                         for name in defs])))
+      (.extend rest [(lsp.CompletionItem :label name
+                                         :kind lsp.CompletionItemKind.Variable)
+                     for name in (buffer-definition-names doc line)]))
   (for item in rest
     (= name (name-key item.label))
     (if (not-in name taken)
@@ -1473,7 +1490,7 @@
   (if (not found)
       (return None))
   (if (not view.attribute)
-      (= found (merged-items doc view found spellings)))
+      (= found (merged-items doc line view found spellings)))
   (return (lsp.CompletionList :is-incomplete incomplete :items found)))
 
 (def document-snapshot [doc]
