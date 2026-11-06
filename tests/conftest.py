@@ -71,9 +71,12 @@ def run_on_loop():
 @pytest.fixture(scope="session")
 def backend_project(tmp_path_factory):
     """The workspace folder of the backend tests; its main.lpy is the file
-    every buffer is opened as."""
+    every buffer is opened as. helpers.py is a user .py module beside it,
+    written before any backend starts (the view root mirrors it then); no
+    buffer names it unless it imports it, so it changes no other answer."""
     root = tmp_path_factory.mktemp("backend-project")
     (root / "main.lpy").write_text("(= y 1)\n")
+    (root / "helpers.py").write_text("def my_helper(alpha, beta):\n    return alpha\n")
     return root
 
 

@@ -13,8 +13,11 @@ The tests share the session's basedpyright over one tmp project
 the cursor; it is removed first.
 """
 
+import ast
 import importlib
 import inspect
+import re
+import shutil
 
 import pytest
 from lsprotocol import types as lsp
@@ -164,6 +167,64 @@ def test_signature_help_in_a_list_method_call_shows_its_parameters(
 def test_another_type_and_method(signature_help):
     marked = '(= d {"a" 1})\n(.get d |)'
     shows_any(signature_labels(signature_help(marked)), dict, "get")
+
+
+def assert_parameters(text, names):
+    assert text is not None
+    for name in names:
+        assert re.search(rf"\b{name}\b", text), (name, text)
+
+
+# shutil.copyfile: its runtime parameters are the stub's too (os.path.join's
+# are not: a, *p at runtime, a, *paths in typeshed).
+STDLIB = "(import shutil as sh)\n"
+COPYFILE = list(inspect.signature(shutil.copyfile).parameters)
+
+
+def test_hover_on_a_stdlib_function_through_a_module_alias(hover):
+    # Defect: a module attribute reached through an alias gets the local
+    # answer (none: copyfile is no builtin), or the alias itself.
+    text = hover_text(hover(STDLIB + '(sh.copy|file "a" "b")'))
+    assert_parameters(text, COPYFILE)
+    assert "copyfile" in text
+
+
+def test_signature_help_in_a_stdlib_call(signature_help):
+    result = signature_help(STDLIB + '(sh.copyfile "a" |)')
+    assert_parameters(signature_labels(result)[0], COPYFILE)
+    assert result.signatures[0].active_parameter == 1 or result.active_parameter == 1
+
+
+def helper_parameters(backend_project):
+    """my_helper's parameter names, read from the project's helpers.py."""
+    tree = ast.parse((backend_project / "helpers.py").read_text())
+    [function] = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    return function.name, [arg.arg for arg in function.args.args]
+
+
+HELPER = "(from helpers [my-helper])\n"
+
+
+def test_hover_on_a_user_py_module_function(hover, backend_project):
+    # Defects: a name from the project's own .py module is not resolved
+    # (the view root lacks it), or shows its Python spelling my_helper.
+    name, parameters = helper_parameters(backend_project)
+    text = hover_text(hover(HELPER + "(my-hel|per 1 2)"))
+    assert_parameters(text, parameters)
+    assert name.replace("_", "-") in text and name not in text
+
+
+def test_signature_help_in_a_user_py_module_call(signature_help, backend_project):
+    _, parameters = helper_parameters(backend_project)
+    result = signature_help(HELPER + "(my-helper 1 |)")
+    [signature] = result.signatures
+    assert_parameters(signature.label, parameters)
+    labels = [
+        signature.label[start:end]
+        for start, end in (parameter.label for parameter in signature.parameters)
+    ]
+    assert [label.split(":")[0].strip() for label in labels] == parameters
+    assert signature.active_parameter == 1 or result.active_parameter == 1
 
 
 # ok? is ok_p in Python: one character longer, so every offset after it in a
