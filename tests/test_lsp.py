@@ -353,3 +353,88 @@ class TestImportBindings:
         tree = parse("(lazy-import os.path as p)\n(lazy-from os [sep])", partial=True)
         assert set(server.collect_definitions(tree, URI)) == {"p", "sep"}
         assert server.find_import_for_name(tree, "sep") is not None
+
+
+class TestMemberCompletion:
+    """After a method receiver's dot, completion offers the class's members.
+
+    ``|`` in a source marks the cursor; it is removed before completing.
+    """
+
+    BASE = "(class Base []\n  (= inherited 1))\n"
+    CLASS = (
+        BASE + "(class A [Base]\n"
+        "  (= class-var 1)\n"
+        "  (def __init__ [self]\n"
+        "    (= self.x 1)\n"
+        "    (= (. self y) 2)\n"
+        "    (+= self.count 1)\n"
+        "    (= self.z ^int))\n"
+        "  (def before [self] 1)\n"
+        "  (def here [self]\n"
+        "    {})\n"
+        "  (def after [self] 1))\n"
+    )
+    MEMBERS = {
+        "inherited", "class-var", "__init__", "x", "y", "count", "z",
+        "before", "here", "after",
+    }  # fmt: skip
+
+    @staticmethod
+    def complete(source):
+        before, after = source.split("|")
+        line = before.count("\n")
+        character = len(before) - (before.rfind("\n") + 1)
+        result = server.completion(ls_with(before + after), position(line, character))
+        return line, character, result.items
+
+    def labels(self, source):
+        return {item.label for item in self.complete(source)[2]}
+
+    @pytest.mark.parametrize(
+        "body, typed",
+        [("self.|", 0), ("self.ba|", 2), ("(. self |)", 0), ("(. self ba|)", 2)],
+    )
+    def test_receiver_dot_offers_exactly_the_class_members(self, body, typed):
+        line, character, items = self.complete(self.CLASS.format(body))
+        assert {item.label for item in items} == self.MEMBERS
+        for item in items:
+            start, end = item.text_edit.range.start, item.text_edit.range.end
+            assert (start.line, start.character) == (line, character - typed)
+            assert (end.line, end.character) == (line, character)
+            assert item.text_edit.new_text == item.label
+
+    def test_unclosed_buffer_offers_the_members_written_so_far(self):
+        source = "(class A []\n  (= v 1)\n  (def f [self]\n    (= self.a 1)\n    self.|"
+        assert self.labels(source) == {"v", "f", "a"}
+
+    def test_the_receiver_is_the_first_parameter_by_name(self):
+        source = "(class A []\n  (def f [this]\n    (= this.a 1)\n    this.|))"
+        assert self.labels(source) == {"f", "a"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "(class A []\n  (deco staticmethod (def f [self]\n    self.|)))",
+            "(def f [self]\n  self.|)",
+            "(class A []\n  (def f [self]\n    (fn [self] self.|)))",
+            "(class A []\n  (def f [self]\n    (. self| )))",
+        ],
+        ids=["staticmethod", "function", "shadowing lambda", "touching receiver"],
+    )
+    def test_no_member_context_keeps_the_general_completion(self, source):
+        assert "print" in self.labels(source)
+
+    def test_a_classmethod_receiver_skips_instance_attributes(self):
+        source = (
+            "(class A []\n"
+            "  (def i [self] (= self.instance-attr 1))\n"
+            "  (deco classmethod (def c [cls]\n"
+            "    (= cls.class-attr 1)\n"
+            "    cls.|)))"
+        )
+        assert self.labels(source) == {"i", "c", "class-attr"}
+
+    def test_a_closure_sees_the_methods_receiver(self):
+        source = "(class A []\n  (def f [self]\n    (def g [] self.|)))"
+        assert self.labels(source) == {"f"}
