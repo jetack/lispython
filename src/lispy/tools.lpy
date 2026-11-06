@@ -27,6 +27,7 @@
 (= HAS_RUFF (shutil.which "ruff"))
 
 (from lispy.core.nodes *)
+(from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
 (from lispy.core.compiler.utils [compile-nesting-errors python-interpolations])
@@ -38,27 +39,14 @@
   (print (format-compile-error (attach-source err filename source))
          :file sys.stderr))
 
-(def has-init-file [dir-path]
-  (return (or (osp.exists (osp.join dir-path "__init__.py"))
-              (osp.exists (osp.join dir-path "__init__.lpy")))))
-
 (def detect-package-name [:path None]
-  "Detect package name from directory by checking for __init__.py or __init__.lpy"
+  "The package of path's directory (default the working directory), by
+   __init__.py or __init__.lpy (package-root), adding the package's import
+   root to sys.path."
   (= dir-path (ife (is path None)
                    (os.getcwd)
                    (osp.dirname (osp.abspath path))))
-  (if (not (has-init-file dir-path))
-      (return ""))
-  ;; Walk up to find package root
-  (= parts [])
-  (= current dir-path)
-  (while (has-init-file current)
-    (parts.insert 0 (osp.basename current))
-    (= parent (osp.dirname current))
-    (if (== parent current)
-        (break))
-    (= current parent))
-  ;; Add parent of package root to sys.path if needed
+  (= [current parts] (package-root dir-path))
   (if (and parts (not (in current sys.path)))
       (sys.path.insert 0 current))
   (return (.join "." parts)))

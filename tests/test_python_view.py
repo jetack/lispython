@@ -173,6 +173,36 @@ class TestCursor:
         src = '(= my-x 1)\n(print f"{my-x.'
         assert pv.view_at_cursor(src, 2, len('(print f"{my-x.')) is None
 
+    @pytest.mark.parametrize(
+        ["src", "partial", "line"],
+        [
+            ("(print *ar)", "ar", "print(*ar)"),
+            ("(print **kw-a)", "kw-a", "print(**kw_a)"),
+            ("(f :ke-y 1)", "ke-y", "f(ke_y=1)"),
+            ("(print a,bb)", "bb", "print(a, bb)"),
+        ],
+    )
+    def test_prefix_stays_in_the_source(self, src, partial, line):
+        view = pv.view_at_cursor(src, *plus(locate(src, partial), len(partial)))
+        assert (view.text, view.partial) == (line, partial)
+        gen = locate(line, pv.py_name(partial))
+        assert view.cursor == plus(gen, len(pv.py_name(partial)))
+        assert view.map.to_lpy(*plus(gen, 1)) == plus(locate(src, partial), 1)
+
+    @pytest.mark.parametrize(
+        ["src", "partial"],
+        [
+            ("(f :ke)", ":ke"),  # a keyword with no value does not compile
+            ("(print ~@xs)", "~@xs"),  # an unquote-splice outside a quasiquote
+            ("(print x.class)", "class"),  # restored as a keyword: no Python
+            ("(print a+b)", "a+b"),  # an operator symbol, no name
+            ('(print "my-wo")', "my-wo"),  # inside a string literal
+            ('(print f"ab-c{x}")', "ab-c"),  # inside an f-string's text
+        ],
+    )
+    def test_cursor_on_no_identifier_is_none(self, src, partial):
+        assert pv.view_at_cursor(src, *plus(locate(src, partial), len(partial))) is None
+
     def test_sentinel_already_in_the_buffer_is_none(self):
         src = f"(= {pv.CURSOR_SENTINEL} 1)\n(print my-x.fo)"
         assert pv.view_at_cursor(src, *plus(locate(src, "fo"), 2)) is None
@@ -206,13 +236,100 @@ class TestShadows:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    def test_module_names(self, tmp_path):
-        root = str(tmp_path)
+    def test_module_names_follow_packages_not_the_project_root(self, tmp_path):
+        # src layout: src is no package, so it is the import root of pkg.
+        src = tmp_path / "src"
+        for parts in [("pkg", "__init__.py"), ("pkg", "a", "__init__.lpy")]:
+            self.write(src.joinpath(*parts), "")
         names = [
-            pv.module_names(root, os.path.join(root, *parts))
-            for parts in [("top.lpy",), ("pkg", "__init__.lpy"), ("pkg", "a", "m.lpy")]
+            pv.module_names(str(tmp_path.joinpath(*parts)))
+            for parts in [
+                ("top.lpy",),
+                ("src", "pkg", "mod.lpy"),
+                ("src", "pkg", "a", "__init__.lpy"),
+                ("src", "pkg", "a", "m.lpy"),
+            ]
         ]
-        assert names == [("top", ""), ("pkg", "pkg"), ("pkg.a.m", "pkg.a")]
+        assert names == [
+            ("top", "", str(tmp_path)),
+            ("pkg.mod", "pkg", str(src)),
+            ("pkg.a", "pkg.a", str(src)),
+            ("pkg.a.m", "pkg.a", str(src)),
+        ]
+
+    def test_relative_require_in_a_src_layout(self, tmp_path, monkeypatch):
+        project, root = tmp_path / "project", tmp_path / "view"
+        pkg = project / "src" / "pvsrcpkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(pkg / "mod.lpy", "(require .mac *)\n(= y (twice 2))")
+        monkeypatch.syspath_prepend(str(project / "src"))
+        for name in ["pvsrcpkg", "pvsrcpkg.mac"]:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        pv.write_shadows(str(project), str(root))
+        assert "y = 2 + 2" in (root / "src" / "pvsrcpkg" / "mod.py").read_text()
+
+    def test_src_layout_config_and_mirrored_py(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        pkg = project / "src" / "pkg"
+        self.write(pkg / "__init__.py", "from .helper import h")
+        self.write(pkg / "helper.py", "h = 1")
+        self.write(pkg / "m.lpy", "(= m 1)")
+        self.write(pkg / "notes.txt", "")
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        assert manifest.import_roots == [str(project / "src")]
+        for name in ["__init__.py", "helper.py"]:
+            assert os.readlink(root / "src" / "pkg" / name) == str(pkg / name)
+        assert not (root / "src" / "pkg" / "notes.txt").exists()
+
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        extra = json.loads(open(path).read())["extraPaths"]
+        assert extra == [str(root / "src"), str(project)]
+
+        (pkg / "helper.py").unlink()
+        self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        assert not os.path.lexists(root / "src" / "pkg" / "helper.py")
+        init = root / "src" / "pkg" / "__init__.py"
+        assert not init.is_symlink() and init.read_text() == "i = 1"
+        assert (pkg / "__init__.py").read_text() == "from .helper import h"
+
+    def test_sweep_follows_no_directory_link_and_skips_environments(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= a 1)")
+        (project / "sub").mkdir()
+        (project / "sub" / "up").symlink_to(project)  # a loop
+        (project / "alias.lpy").symlink_to(project / "top.lpy")
+        self.write(project / "venv" / "pyvenv.cfg", "")
+        for skipped in ["venv", "node_modules", "__pycache__", "site-packages"]:
+            self.write(project / skipped / "dep.lpy", "(= d 1)")
+        assert pv.write_shadows(str(project), str(root)) == [str(root / "top.py")]
+
+    def test_one_unwritable_file_leaves_the_rest(self, tmp_path):
+        if os.geteuid() == 0:
+            pytest.skip("root writes through the read-only directory")
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= a 1)")
+        self.write(project / "locked" / "m.lpy", "(= m 1)")
+        (root / "locked").mkdir(parents=True)
+        (root / "locked").chmod(0o500)
+        # Another writer's temporary file beside a shadow is not touched.
+        self.write(root / "top.py.tmp", "theirs")
+        manifest = pv.ShadowManifest()
+        try:
+            shadows = pv.write_shadows(str(project), str(root), manifest=manifest)
+        finally:
+            (root / "locked").chmod(0o700)
+        assert shadows == [str(root / "top.py")]
+        assert list(manifest.sources) == [str(project / "top.lpy")]
+        assert (root / "top.py.tmp").read_text() == "theirs"
+        assert os.listdir(root / "locked") == []
+        # Writable again: the next sweep writes the file it missed.
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        assert (root / "locked" / "m.py").read_text() == "m = 1"
 
     def test_written_updated_and_removed(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
