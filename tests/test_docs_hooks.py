@@ -199,9 +199,15 @@ def test_a_listed_page_not_rendered_in_a_later_build_keeps_its_last_render(
     assert "BODY syntax/statements.md" in out["llms-syntax.txt"]
 
 
-def test_a_nav_page_never_rendered_is_named_as_such(hooks, tmp_path):
-    with pytest.raises(PluginError, match="not rendered"):
-        build(hooks, tmp_path, LISTED, render={"macros.md"})
+def test_a_build_that_did_not_render_every_page_leaves_the_llms_files_alone(
+    hooks, tmp_path
+):
+    # A cold mkdocs build --dirty: unchanged pages never reach on_page_markdown.
+    names = ("llms.txt", "llms-full.txt", "llms-syntax.txt")
+    for name in names:
+        (tmp_path / name).write_text(f"LAST {name}\n", encoding="utf-8")
+    out = build(hooks, tmp_path, LISTED, render={"macros.md"})
+    assert out == {name: f"LAST {name}\n" for name in names}
 
 
 def test_a_versioned_site_url_without_a_trailing_slash_keeps_its_version(

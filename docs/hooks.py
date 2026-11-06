@@ -13,6 +13,7 @@ generated tables, never ``{{ form_index() }}``).
 """
 
 import importlib.util
+import logging
 import posixpath
 import re
 from pathlib import Path
@@ -39,11 +40,14 @@ _spec = importlib.util.spec_from_file_location(
 docs_main = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(docs_main)
 
-# src_uri -> rendered markdown. Never cleared: mkdocs serve/build --dirty skips
-# on_page_markdown for unchanged pages, so their last render must survive.
-# Entries are overwritten whenever a page renders, and the output is selected
-# through the current nav, so a page removed from the nav never appears.
+# src_uri -> rendered markdown. Never cleared, so a rebuild in the same process
+# (mkdocs serve --dirty skips on_page_markdown for unchanged pages) keeps their
+# last render. A cold ``build --dirty`` starts with it empty: on_post_build then
+# leaves the llms files as the last full build wrote them. Entries are
+# overwritten whenever a page renders, and the output is selected through the
+# current nav, so a page removed from the nav never appears.
 _pages = {}
+_log = logging.getLogger("mkdocs.hooks.llms")
 _nav = []
 
 
@@ -132,7 +136,6 @@ def _description(page, markdown):
 
 
 def on_post_build(config):
-    pages = [p for p in _nav if p.file.src_uri in _pages]
     nav_by_src = {p.file.src_uri: p for p in _nav}
     listed = config.extra.get("llms_syntax_pages")
     if not listed:
@@ -143,14 +146,21 @@ def on_post_build(config):
             raise PluginError(
                 f"extra.llms_syntax_pages lists {src!r}, which is not a nav page"
             )
-        if src not in _pages:
-            raise PluginError(
-                f"extra.llms_syntax_pages lists {src!r}, which was not rendered "
-                "in this build"
-            )
         if nav_by_src[src] in syntax:
             raise PluginError(f"extra.llms_syntax_pages lists {src!r} twice")
         syntax.append(nav_by_src[src])
+    # The files are derived from every nav page's rendered markdown: a build
+    # that has not rendered them all (a cold --dirty build skips unchanged
+    # pages) cannot produce them, so it leaves the previous ones alone.
+    missing = [p for p in _nav if p.file.src_uri not in _pages]
+    if missing:
+        _log.info(
+            "llms*.txt left as the last full build wrote them: %d of %d pages "
+            "were not rendered in this build (--dirty skips unchanged pages)",
+            len(missing),
+            len(_nav),
+        )
+        return
     site_dir = Path(config.site_dir)
     header = [
         f"# {config.site_name}",
@@ -171,12 +181,12 @@ def on_post_build(config):
         "## Docs",
         "",
     ]
-    for page in pages:
+    for page in _nav:
         description = _description(page, _pages[page.file.src_uri])
         entry = f"- [{page.title}]({_url(page, config)})"
         index.append(f"{entry}: {description}" if description else entry)
     full = [*header, BUILTIN_MACROS_NOTE]
-    for page in pages:
+    for page in _nav:
         full += _page_block(page, config)
     syntax_file = [
         f"# {config.site_name} syntax reference",
