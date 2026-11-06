@@ -318,6 +318,12 @@
       (return node)))
   (return None))
 
+(def builtin-macro-name-p [name]
+  "Whether `name` could be a built-in macro in some buffer: its last dotted
+   part (a qualified (require module) call is module.name) is one. A cheap
+   test to make before parsing the buffer for builtin-macro-doc."
+  (return (in (sub (.rpartition name ".") 2) BUILTIN-MACROS)))
+
 (def builtin-macro-doc [tree name]
   "The hover markdown of the built-in macro `name` refers to, or None: only
    where the buffer requires it from the built-in macro modules, since a
@@ -968,11 +974,13 @@
 (def form-signature-help [source func-name]
   "lispython's own SignatureHelp for a form headed func-name (None: no head),
    or None: a special form's documented usage, else the docstring usage of
-   a built-in macro the buffer source requires."
+   a built-in macro the buffer source requires.  The buffer is parsed only
+   when func-name could name a built-in macro (builtin-macro-name-p)."
   (if (is func-name None)
       (return None))
   (= doc-text (or (.get SPECIAL-FORM-DOCS func-name)
-                  (builtin-macro-doc (parse source :partial True) func-name)))
+                  (and (builtin-macro-name-p func-name)
+                       (builtin-macro-doc (parse source :partial True) func-name))))
   (if (not doc-text)
       (return None))
   (= m (re.search "```\\n(.+?)\\n```" doc-text re.DOTALL))
@@ -1481,13 +1489,10 @@
 ;; Completion
 ;; ---------------------------------------------------------------------------
 
-(= _LPY-KEYWORDS
-   ["defn" "cond" "conde" "ife" "when" "unless"
-    "do" "deco" "require" "fn" "match" "case"
-    "async-def" "async-for" "async-with"
-    "yield-from" "except*"
-    "->" "->>" "as->"
-    "gensym" "pprint"])
+;; The names offered as "keyword" beyond the special forms: the built-in macros
+;; (BUILTIN-MACROS, never a hand list) and `gensym`, a function that exists
+;; only inside defmacro bodies.
+(= _LPY-KEYWORDS [*BUILTIN-MACROS "gensym"])
 
 (def local-completion [doc line col :insert-replace False]
   "lispython's own completion at the 1-based line and code-point column:

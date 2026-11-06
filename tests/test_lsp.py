@@ -274,6 +274,13 @@ class TestRequireSelection:
         assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
 
 
+def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
+    items = server.general_items(SimpleNamespace(source="", uri=URI))
+    keywords = {i.label for i in items if i.detail == "keyword"}
+    assert set(form_docs.BUILTIN_MACROS) <= keywords
+    assert not keywords & {"defn", "unless", "pprint"}
+
+
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,
 # the table its error messages quote, so the two cannot drift.
 FORM_KEYS = sorted(k for k in FORM_USAGE if k not in HEADLESS_FORMS)
