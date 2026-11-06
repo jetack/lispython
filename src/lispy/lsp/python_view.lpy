@@ -53,6 +53,20 @@
    one Python name."
   (return (. (Symbol text) name)))
 
+(def name-spelling-p [part]
+  "Whether part spells a Python name: its py-name is an identifier and it
+   holds a letter or digit, so an operator such as - (py-name _) is none."
+  (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
+
+(def name-key [text]
+  "The name text stands for, as the LSP compares names (references,
+   completion, macro heads): each .-separated part its Python name when it
+   spells one (name-spelling-p), else as written, so self.my-v is
+   self.my_v while an operator such as - (py-name _) or -> (py-name _to_)
+   is never the Python name its mangling happens to give."
+  (return (.join "." [(ife (name-spelling-p part) (py-name part) part)
+                      for part in (.split text ".")])))
+
 (def source-prefix [source line col]
   "The text of source before the 1-based line and code-point column."
   (= lines (.split source "\n"))
@@ -346,7 +360,7 @@
    generated Python (a dot right before it: x.a, (. x a), a.b.c), and
    fallback, True when only the text before the cursor compiled; its tree
    is None, since its text was edited after the parse (and may not parse:
-   x.).  macros is the Python name (py-name) of every macro the buffer's
+   x.).  macros is the name (name-key) of every macro the buffer's
    compile had registered once expanded: a name there is a lispython form at
    a call's head, which no Python backend knows."
   (def __init__ [self text position-map tree :macros (frozenset)]
@@ -474,7 +488,7 @@
       (= tree (ast.parse text))
       (= position-map (build-position-map module tree source text))
       ;; Keys are the spellings a defmacro or require registered.
-      (= macros (frozenset (map py-name (.get scope "__macro_namespace" {})))))
+      (= macros (frozenset (map name-key (.get scope "__macro_namespace" {})))))
     (except [Exception]
       (return None)))
   (return (PythonView text position-map tree :macros macros)))

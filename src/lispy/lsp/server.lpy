@@ -20,14 +20,14 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
-(from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
-(from lispy.lsp.python-view [ViewCache lpy-range module-names open-form-closers
-                             partial-span py-name source-prefix view-at-cursor])
+(from lispy.lsp.python-view [ViewCache lpy-range module-names name-key name-spelling-p
+                             open-form-closers partial-span py-name source-prefix
+                             view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT])
 
 (= logger (logging.getLogger __name__))
@@ -859,6 +859,10 @@
   ;; same name), and maps a buffer binding back to the same .lpy place.
   ;; Once it answered, its answer is final, an empty one included: the
   ;; local lookup matches by name alone and would name some other binding.
+  ;; The exception is an answer none of whose locations maps to the editor
+  ;; (UNMAPPED, e.g. a name bound only by a macro's expansion): the name
+  ;; exists, so the buffer's own definition of it answers, but never the
+  ;; import or workspace steps, which would jump to another file's name.
   (try
     (= result (await (backend-locations doc line col target lsp.TEXT_DOCUMENT_DEFINITION
                                         (fn [document position]
@@ -867,17 +871,23 @@
     (except [Exception]
       (.debug logger "backend definition failed" :exc-info True)
       (= result None)))
-  (if (is-not result None)
-      (return result))
+  (cond (is result UNMAPPED)
+        (return (buffer-definition doc tree name))
+        (is-not result None)
+        (return result))
   (return (local-definition ls doc tree name))))
+
+(def buffer-definition [doc tree name]
+  "The buffer's own definitions of name (collect-definitions of tree,
+   imports included), or None."
+  (return (or (.get (collect-definitions tree doc.uri) name) None)))
 
 (def local-definition [ls doc tree name]
   "go-to-definition of name without the backend: the buffer's definitions
    (imports included), the module an import names, then the workspace
    index."
   ;; 1. Local definitions in the file
-  (= defs (collect-definitions tree doc.uri))
-  (= local (.get defs name))
+  (= local (buffer-definition doc tree name))
   (if local
       (return local))
 
@@ -1203,7 +1213,7 @@
                                                  :detail detail))))))
   (return items))
 
-(def general-items [doc]
+(def general-items [doc :line None]
   "The completion items offered with no Python backend's answer:
    lispython's own (lispython-items), the Python builtins (builtin-names),
    then the buffer's definitions (collect-definitions), each name once."
@@ -1213,21 +1223,18 @@
     (if (not-in name seen)
         (do (.add seen name)
             (.append items (lsp.CompletionItem :label name :kind kind)))))
-  (try
-    (= defs (collect-definitions (parse doc.source :partial True) doc.uri))
-    (except [Exception]
-      (= defs {})))
-  (for name in defs
+  (for name in (buffer-definition-names doc line)
     (if (not-in name seen)
         (do (.add seen name)
             (.append items (lsp.CompletionItem :label name
                                                :kind lsp.CompletionItemKind.Variable)))))
   (return items))
 
-(def local-completion [doc]
+(def local-completion [doc :line None]
   "The completion answer when no Python backend gives one: the general
    list, with no guess at what an attribute's object holds."
-  (return (lsp.CompletionList :is-incomplete False :items (general-items doc))))
+  (return (lsp.CompletionList :is-incomplete False
+                              :items (general-items doc :line line))))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion through the Python backend
@@ -1264,11 +1271,6 @@
         (return (list answer.items))
         True
         (return (list answer))))
-
-(def name-spelling-p [part]
-  "Whether part spells a Python name: its py-name is an identifier and it
-   holds a letter or digit, so an operator such as - (py-name _) is none."
-  (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
 
 (def buffer-spellings [source]
   "Python name -> the buffer's first spelling of it in source order: every
@@ -1335,22 +1337,18 @@
         :text-edit (completion-edit ranges label insert-replace))))
   (return result))
 
-(def name-key [text]
-  "The name text stands for, as references and completion compare names:
-   its Python name when it spells one (name-spelling-p), else text itself,
-   so an operator such as - (py-name _) or -> (py-name _to_) is never the
-   Python name its mangling happens to give."
-  (return (ife (name-spelling-p text) (py-name text) text)))
-
 (def buffer-definition-names [doc line]
-  "The names doc's definitions bind (collect-definitions), in source order:
-   over its partial parse and, since a form left open at the 1-based line
-   swallows the rest of that parse, over the text from the first later line
-   that opens a form in column 0, read as a top-level form (as Emacs's
-   beginning-of-defun reads one)."
+  "The names doc's definitions bind (collect-definitions), in source order,
+   the one home of that list: over its partial parse and, since a form left
+   open at the 1-based line (None: no cursor) swallows the rest of that
+   parse, over the text from the first later line that opens a form in
+   column 0, read as a top-level form (as Emacs's beginning-of-defun reads
+   one).  Limits: only the form open at the cursor is skipped, so a second
+   form left open after it loses the definitions after that one; and a ( in
+   column 0 inside a multi-line string is taken for a form's start."
   (= lines (.split doc.source "\n"))
   (= texts [doc.source])
-  (for i in (range line (len lines))
+  (for i in (range (ife (is line None) (len lines) line) (len lines))
     (if (.startswith (sub lines i) "(")
         (do (.append texts (.join "\n" (sub lines [: i None])))
             (break))))
@@ -1372,15 +1370,12 @@
    follow."
   (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
-  ;; view.macros holds Python names, the built-in macros among them (_to_
-  ;; for ->), so a macro is matched with lispython's items by Python name.
-  (= own (set [(py-name item.label) for item in merged]))
+  ;; view.macros holds name-keys, as taken does.
   (for name in (sorted view.macros)
     ;; A qualified macro (module.name) is typed as an attribute.
-    (if (and (not-in "." name) (not-in name own))
+    (if (and (not-in "." name) (not-in name taken))
         (do (= label (.get spellings name name))
-            (.add own name)
-            (.add taken (name-key label))
+            (.add taken name)
             (.append merged (lsp.CompletionItem :label label
                                                 :kind lsp.CompletionItemKind.Keyword
                                                 :detail "macro")))))
@@ -1592,7 +1587,7 @@
 (def hover-request [head offset]
   "make-params of a hover at the generated start of the restored word
    (offset code points from the view's cursor), or of none when head, the
-   hovered symbol's Python name, is a macro of the view."
+   hovered symbol's name-key, is a macro of the view."
   (return (fn [document view]
             (ife (in head view.macros)
                  None
@@ -1626,7 +1621,7 @@
       (return None))
   (= [start end offset] word)
   (= [view answer] (await (backend-request client doc line end None lsp.TEXT_DOCUMENT_HOVER
-                                           (hover-request (py-name target.value) offset))))
+                                           (hover-request (name-key target.value) offset))))
   (if (not (isinstance answer lsp.Hover))
       (return None))
   (= contents (hover-contents answer.contents (buffer-spellings doc.source)))
@@ -1670,7 +1665,7 @@
   "make-params of a signature help at the view's cursor, or of none when
    head, the innermost open form's head symbol (or None), is a macro of the
    view."
-  (= head (ife (is head None) None (py-name head)))
+  (= head (ife (is head None) None (name-key head)))
   (return (fn [document view]
             (ife (in head view.macros)
                  None
@@ -1717,7 +1712,7 @@
       (= result None)))
   (if (is-not result None)
       (return result))
-  (return (local-completion doc))))
+  (return (local-completion doc :line line))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend
@@ -1886,7 +1881,7 @@
   "make-params of a definition or references request at the generated start
    of the restored word (offset code points from the view's cursor), built
    by make from the document and that position, or of none when head, the
-   symbol's Python name, is a macro of the view, or when whole (the request
+   symbol's name-key, is a macro of the view, or when whole (the request
    needs the whole buffer, as references do) and the view is a fallback:
    only the text before the cursor compiled, so the backend would miss
    every use after it, and its partial answer would replace the complete
@@ -1896,13 +1891,18 @@
                  None
                  (make document (generated-position view :offset offset))))))
 
+;; backend-locations' answer when the backend found locations but none maps
+;; to the editor.
+(= UNMAPPED (object))
+
 (async-def backend-locations [doc line col target method make :whole False]
   "The backend's answer to definition or references request method (params
    from make, location-request) on the word at the 1-based line and
    code-point col (Symbol target there), as editor Locations in answer
    order without repeats: a list (empty only when the backend found
-   nothing), or None when there is no backend, no word, no view, no answer,
-   or no location the backend gave maps to the editor.  doc is a snapshot.  The view
+   nothing); UNMAPPED when no location the backend gave maps to the
+   editor; None when there is no backend, no word, no view or no answer.
+   doc is a snapshot.  The view
    is made with the cursor at the word's end and the request asks at its
    generated start (cursor-word, as backend-hover).  A location in a compiled view
    maps back to its .lpy (lpy-range), one in a real file passes, one that
@@ -1919,7 +1919,7 @@
   (= [start end offset] word)
   (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
   (= [view answer] (await (backend-request client doc line end REQUEST-TIMEOUT method
-                                           (location-request (py-name target.value)
+                                           (location-request (name-key target.value)
                                                              offset make whole))))
   (if (is answer None)
       (return None))
@@ -1943,9 +1943,10 @@
             (.append result location))))
   ;; Locations the backend found but none of which maps to the editor
   ;; (generated code, a cache file, a stale shadow) are no answer: the
-  ;; name exists, so the local lookup answers.  Only an empty answer is.
+  ;; name exists, so the buffer's own lookup answers.  Only an empty
+  ;; answer is final.
   (if (and placed (not result))
-      (return None))
+      (return UNMAPPED))
   (return result))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
@@ -1971,7 +1972,7 @@
     (except [Exception]
       (.debug logger "backend references failed" :exc-info True)
       (= result None)))
-  (if (is-not result None)
+  (if (and (is-not result None) (is-not result UNMAPPED))
       (return result))
   (return (collect-references tree target.value doc.uri))))
 
