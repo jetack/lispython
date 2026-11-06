@@ -6,8 +6,9 @@ import pytest
 from lispy.core.compiler.expr import expr_compile
 from lispy.core.compiler.literal import string_compile
 from lispy.core.errors import LispyCompileError
+from lispy.core.macro import compile_unit, macroexpand_then_compile
 from lispy.core.nodes import Constant, String, Symbol, data_to_generator_expression
-from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
+from lispy.tools import parse, src_to_python_org
 
 PREAMBLE = "(require lispy.macros *)\n"
 
@@ -133,7 +134,7 @@ class TestRawValueInExpansion:
         assert src_to_python_org(src) == "f(g(5))"
 
     def test_converted_value_takes_the_macro_call_position(self):
-        stl = macroexpand_then_compile(parse(PREAMBLE + "\n  (-> 1 (f))"))
+        stl = compile_unit(parse(PREAMBLE + "\n  (-> 1 (f))"), {})
         [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
         [arg] = call.args
         assert (arg.lineno, arg.col_offset) == (3, 2)
@@ -252,7 +253,7 @@ class TestScalarDataRoundTrip:
         [("(-> ... (f))", ...), ("(-> 1e400 (f))", INF), ("(-> None (f))", None)],
     )
     def test_threaded_scalar(self, src, value):
-        stl = macroexpand_then_compile(parse(PREAMBLE + src))
+        stl = compile_unit(parse(PREAMBLE + src), {})
         [call] = [n for n in ast.walk(stl[-1]) if isinstance(n, ast.Call)]
         [arg] = call.args
         assert same_value(eval(compile(ast.Expression(arg), "<arg>", "eval")), value)

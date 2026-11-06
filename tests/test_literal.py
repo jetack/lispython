@@ -6,7 +6,8 @@ import warnings
 import pytest
 
 from lispy.core.errors import LispyCompileError, compile_errors
-from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
+from lispy.core.macro import macroexpand_then_compile
+from lispy.tools import parse, src_to_python_org
 
 from .utils import stmt_to_dump
 
@@ -219,7 +220,8 @@ class TestStringLineEndings:
 
 
 def compile_lpy(src, scope=None):
-    from lispy.tools import macroexpand_then_compile, parse
+    from lispy.core.macro import macroexpand_then_compile
+    from lispy.tools import parse
 
     return macroexpand_then_compile(
         parse(src), {"__macro_namespace": {}} if scope is None else scope

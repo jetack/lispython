@@ -17,7 +17,8 @@ import pytest
 import lispy.tools as tools
 from lispy.core.compiler import features
 from lispy.core.errors import LispyCompileError, compile_errors, format_compile_error
-from lispy.tools import macroexpand_then_compile, parse
+from lispy.core.macro import macroexpand_then_compile
+from lispy.tools import parse
 
 OLD = (3, 11, 13)
 

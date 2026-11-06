@@ -45,7 +45,7 @@ def define_macro(sexp, scope, include_meta=True):
     transformed = defmacro_transform(sexp)
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
-    body = macroexpand_then_compile([transformed], include_meta=include_meta)
+    body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
     with compile_nesting_errors(body):
         code = compile(ast.Interactive(body=body), "macro-defining", "single")
     eval(code, scope)
@@ -55,7 +55,7 @@ def define_macro(sexp, scope, include_meta=True):
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
     try:
-        body = macroexpand_then_compile([transformed], include_meta=include_meta)
+        body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
         with compile_nesting_errors(body):
             code = compile(ast.Interactive(body=body), "macro-requiring", "single")
         eval(code, scope)
@@ -71,14 +71,14 @@ def require_macro(sexp, scope, include_meta=True):
     return transformed if include_meta else None
 
 
-def macroexpand(sexp, scope=globals(), include_meta=True):
+def macroexpand(sexp, scope, include_meta=True):
     expanded = True
     while expanded:
         sexp, expanded = macroexpand_1_and_check(sexp, scope, include_meta=include_meta)
     return sexp
 
 
-def macroexpand_1(sexp, scope=globals()):
+def macroexpand_1(sexp, scope):
     return macroexpand_1_and_check(sexp, scope)[0]
 
 
@@ -134,7 +134,7 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     return sexp
 
 
-def macroexpand_1_and_check(sexp, scope=globals(), in_quasi=False, include_meta=True):
+def macroexpand_1_and_check(sexp, scope, in_quasi=False, include_meta=True):
     """One expansion pass over ``sexp``: ``(new sexp, whether any macro call
     was expanded)``. Iterative (see _expand_1), so a form nested past the
     recursion limit expands like any other."""
@@ -150,7 +150,88 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
     )
 
 
-def macroexpand_then_compile(sexp_list, scope=globals(), include_meta=True):
+def macroexpand_then_compile(sexp_list, scope, include_meta=True):
     return stmt_list_compile(
         sexp_list_expand(sexp_list, scope, include_meta=include_meta)
     )
+
+
+# The built-in macros every compilation unit starts with (Clojure's
+# clojure.core refer): copied into the unit's compile-time scope only, so
+# they emit no code and a module's runtime __macro_namespace holds only its
+# own defmacros and explicit requires. The scope keeps the copy under this
+# key, which marks it seeded (a persistent scope, such as a REPL session, is
+# seeded once) and lets an opt-out remove exactly those entries.
+PRELUDE_KEY = "__macro_prelude"
+PRELUDE_MODULE = "lispy.macros"
+
+
+def _prelude_source_p(scope):
+    """Whether scope compiles lispy.macros itself (or a submodule), the
+    prelude's source: importing it there would be circular."""
+    for value in (scope.get("__name__"), scope.get("__package__")):
+        if isinstance(value, str) and (
+            value == PRELUDE_MODULE or value.startswith(PRELUDE_MODULE + ".")
+        ):
+            return True
+    return False
+
+
+def seed_prelude(scope):
+    """Give scope the prelude macros, once. A name the scope already defines
+    keeps its own macro."""
+    if PRELUDE_KEY in scope:
+        return
+    if _prelude_source_p(scope):
+        prelude = {}
+    else:
+        import lispy.macros
+
+        prelude = dict(getattr(lispy.macros, "__macro_namespace"))
+    scope[PRELUDE_KEY] = prelude
+    namespace = scope.setdefault("__macro_namespace", {})
+    for name, macro in prelude.items():
+        namespace.setdefault(name, macro)
+
+
+def _opt_out_form_p(forms):
+    """Whether the unit's first form, after one docstring, is
+    ``(require lispy.macros ...)``: the unit then gets only that require's
+    selection of the built-in macros."""
+    forms = list(forms[:2])
+    if forms and isinstance(forms[0], String):
+        forms = forms[1:]
+    if not forms:
+        return False
+    form = forms[0]
+    return (
+        isinstance(form, Paren)
+        and len(form) >= 2
+        and atom_text(form.list[0]) == "require"
+        and atom_text(form.list[1]) == PRELUDE_MODULE
+    )
+
+
+def _drop_prelude(scope):
+    """Remove the prelude's entries from scope's macros, by identity: a macro
+    the unit defined under a prelude name stays."""
+    namespace = scope.setdefault("__macro_namespace", {})
+    for name, macro in scope.get(PRELUDE_KEY, {}).items():
+        if namespace.get(name) is macro:
+            del namespace[name]
+
+
+def compile_unit(forms, scope, *, opt_out=True, include_meta=True):
+    """Compile one unit of source (a module, a REPL input, an editor view)
+    to a list of Python statements, expanding macros in scope.
+
+    The one entry point of compilation: scope gets the prelude macros first.
+    With opt_out (module semantics), a unit whose first form is
+    ``(require lispy.macros <selection>)`` keeps only that selection of them;
+    elsewhere (a REPL session's later inputs) such a require only adds.
+    """
+    forms = list(forms)
+    seed_prelude(scope)
+    if opt_out and _opt_out_form_p(forms):
+        _drop_prelude(scope)
+    return macroexpand_then_compile(forms, scope, include_meta=include_meta)

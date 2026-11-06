@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from lispy.core.errors import LispyCompileError
-from lispy.core.macro import macroexpand
+from lispy.core.macro import macroexpand, macroexpand_then_compile
 from lispy.core.nodes import (
     Annotation,
     Bracket,
@@ -24,7 +24,7 @@ from lispy.core.nodes import (
     Unquote,
     Wrapper,
 )
-from lispy.tools import macroexpand_then_compile, parse
+from lispy.tools import parse
 
 
 def compile_src(src):

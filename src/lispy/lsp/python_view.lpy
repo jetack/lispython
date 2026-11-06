@@ -34,7 +34,7 @@
 
 (from lispy.core.nodes [Symbol])
 (from lispy.core.parser [parse tokenize])
-(from lispy.core.macro [macroexpand-then-compile])
+(from lispy.core.macro [compile-unit])
 (from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.compiler.utils [python-interpolations])
 (from lispy.core.importer [package-root])
@@ -481,7 +481,7 @@
             "__macro_namespace" {}})
   (try
     (with [(_on-sys-path import-root)]
-      (= module (ast.Module :body (list (macroexpand-then-compile (parse source) scope))
+      (= module (ast.Module :body (list (compile-unit (parse source) scope))
                             :type-ignores (list)))
       (= module (python-interpolations module))
       (= text (ast.unparse module))

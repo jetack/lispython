@@ -16,7 +16,8 @@ import lispy.core.compiler.features as features_module
 import lispy.core.compiler.stmt as stmt_module
 import lispy.core.compiler.utils as compiler_utils_module
 from lispy.core.errors import LispyCompileError, compile_errors
-from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
+from lispy.core.macro import macroexpand_then_compile
+from lispy.tools import parse, src_to_python_org
 
 KEYWORD = "if is a Python keyword and cannot be used as a name"
 

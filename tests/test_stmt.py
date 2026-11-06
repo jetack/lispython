@@ -4,7 +4,8 @@ import enum
 import pytest
 
 from lispy.core.errors import LispyCompileError, compile_errors
-from lispy.tools import macroexpand_then_compile, parse, src_to_python_org
+from lispy.core.macro import compile_unit, macroexpand_then_compile
+from lispy.tools import parse, src_to_python_org
 
 from .utils import stmt_to_dump
 
@@ -473,7 +474,7 @@ class TestEmptyLiteralOperands:
     def test_def_matches_ast_parse(self, lispy, python):
         # Compared piecewise: the FunctionDef's own fields (type_params)
         # differ by version in dumps.
-        [got] = macroexpand_then_compile(parse(lispy))
+        [got] = compile_unit(parse(lispy), {})
         [want] = ast.parse(python).body
         assert ast.dump(got.args) == ast.dump(want.args)
         assert ast.dump(ast.Module(got.body, [])) == ast.dump(ast.Module(want.body, []))
@@ -792,7 +793,7 @@ class TestFormArity:
 
     def test_deco_stacks(self):
         # Compared piecewise: FunctionDef dumps differ by version (type_params).
-        [got] = macroexpand_then_compile(parse("(deco [a b] (deco c (def f [] (g))))"))
+        [got] = compile_unit(parse("(deco [a b] (deco c (def f [] (g))))"), {})
         [want] = ast.parse("@a\n@b\n@c\ndef f():\n    g()").body
         assert ast.dump(ast.Module(got.decorator_list, [])) == ast.dump(
             ast.Module(want.decorator_list, [])
@@ -884,7 +885,7 @@ class TestAnnotatedAssignmentSimple:
         ],
     )
     def test_simple_is_set_for_a_name_target(self, lispy, simple):
-        [node] = macroexpand_then_compile(parse(lispy))
+        [node] = compile_unit(parse(lispy), {})
         assert isinstance(node, ast.AnnAssign)
         assert node.simple == simple
 
