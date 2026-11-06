@@ -963,6 +963,19 @@ def test_real_pyrefly_reads_the_written_config(project, tmp_path):
     with open(path, "rb") as f:
         written = tomllib.load(f)
     assert {key: written[key] for key in PYREFLY_RULES} == PYREFLY_RULES
+    # As an editor starts the LSP, unactivated: pyrefly would otherwise find
+    # this venv through VIRTUAL_ENV or the python3 on PATH without the
+    # config's interpreter.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("VIRTUAL_ENV", "CONDA_PREFIX")
+    }
+    env["PATH"] = os.pathsep.join(
+        entry
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if not entry.startswith(sys.prefix)
+    )
     found = subprocess.run(
         [
             backend.backend_argv("pyrefly")[0],
@@ -973,6 +986,7 @@ def test_real_pyrefly_reads_the_written_config(project, tmp_path):
             path,
         ],
         cwd=os.fspath(root),
+        env=env,
         capture_output=True,
         text=True,
         timeout=60,
