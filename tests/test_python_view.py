@@ -8,7 +8,10 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -207,6 +210,34 @@ class TestCursor:
         src = f"(= {pv.CURSOR_SENTINEL} 1)\n(print my-x.fo)"
         assert pv.view_at_cursor(src, *plus(locate(src, "fo"), 2)) is None
 
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings: 3.14+")
+    def test_t_string_field(self):
+        # Interpolation.str is the field's source, so it spells the sentinel
+        # too: that text is no second identifier.
+        src = '(= my-x 1)\n(print t"{my-x}")'
+        view = pv.view_at_cursor(src, *plus(locate(src, "my-x", 1), 4))
+        assert view is not None
+        assert (view.text, view.partial) == (pv.compile_view(src).text, "my-x")
+        assert view.cursor == plus(locate(view.text, "my_x", 1), 4)
+
+    def test_generated_text_is_not_parsed_again(self, monkeypatch):
+        # compile_view's parse is the one inside its error handling; a parse
+        # of the same text after it would raise out of the request.
+        real, seen = pv.ast.parse, set()
+
+        def parse_once(text, *args, **kwargs):
+            if isinstance(text, str) and pv.CURSOR_SENTINEL in text:
+                if text in seen:
+                    raise SyntaxError("parsed twice")
+                seen.add(text)
+            return real(text, *args, **kwargs)
+
+        monkeypatch.setattr(pv.ast, "parse", parse_once)
+        src = "(= my-x 1)\n(print my-x.fo)"
+        view = pv.view_at_cursor(src, *plus(locate(src, "fo"), 2))
+        assert view is not None and view.text == "my_x = 1\nprint(my_x.fo)"
+        assert view.tree is None  # the tree held the sentinel and old columns
+
 
 class TestCache:
     def test_by_version_latest_only(self, monkeypatch):
@@ -281,7 +312,6 @@ class TestShadows:
         assert manifest.import_roots == [str(project / "src")]
         for name in ["__init__.py", "helper.py"]:
             assert os.readlink(root / "src" / "pkg" / name) == str(pkg / name)
-        assert not (root / "src" / "pkg" / "notes.txt").exists()
 
         path = pv.write_pyright_config(
             str(project), str(root), import_roots=manifest.import_roots
@@ -306,7 +336,138 @@ class TestShadows:
         self.write(project / "venv" / "pyvenv.cfg", "")
         for skipped in ["venv", "node_modules", "__pycache__", "site-packages"]:
             self.write(project / skipped / "dep.lpy", "(= d 1)")
-        assert pv.write_shadows(str(project), str(root)) == [str(root / "top.py")]
+        # Each path to a file is its own module, so the link gets a shadow too.
+        assert pv.write_shadows(str(project), str(root)) == [
+            str(root / "alias.py"),
+            str(root / "top.py"),
+        ]
+
+    def overlay_layout(self, project):
+        pkg = project / "src" / "pkg"
+        imports = "(import pkg.util.x)\n(import pkg.stub)\n(from pkg.util.x [val])"
+        for name, text in [
+            ("__init__.py", ""),
+            ("m.lpy", imports),
+            ("stub.pyi", "s: int"),
+            ("py.typed", ""),
+            ("fast.cpython-314-x86_64-linux-gnu.so", ""),
+            ("util/__init__.py", ""),
+            ("util/x.py", "val = 1"),
+            ("sub/__init__.py", ""),
+            ("sub/other.py", ""),
+            ("sub/deep/inner.lpy", "(= i 1)"),
+            ("__pycache__/m.cpython-314.pyc", ""),
+            (".cache/c.lpy", "(= c 1)"),
+        ]:
+            self.write(pkg / name, text)
+        return pkg
+
+    def test_package_is_overlaid_whole(self, tmp_path):
+        # The view's pkg is a regular package that hides the real one, so
+        # whatever it lacks of the real package does not resolve.
+        project, root = tmp_path / "project", tmp_path / "view"
+        pkg = self.overlay_layout(project)
+        view = root / "src" / "pkg"
+        pv.write_shadows(str(project), str(root))
+        linked = ["__init__.py", "stub.pyi", "py.typed", "util", "sub/other.py"]
+        for name in linked + ["fast.cpython-314-x86_64-linux-gnu.so"]:
+            assert os.readlink(view / name) == str(pkg / name)
+        assert not (view / "sub").is_symlink()
+        assert (view / "sub" / "deep" / "inner.py").read_text() == "i = 1"
+        for name in ["m.lpy", "__pycache__", ".cache", "sub/deep/inner.lpy"]:
+            assert not os.path.lexists(view / name)
+
+        # A .lpy in a linked directory makes it a view directory; its shadow
+        # is never written through the old link into the project.
+        self.write(pkg / "util" / "y.lpy", "(= y 1)")
+        pv.write_shadows(str(project), str(root))
+        assert not (view / "util").is_symlink()
+        assert (view / "util" / "y.py").read_text() == "y = 1"
+        assert os.readlink(view / "util" / "x.py") == str(pkg / "util" / "x.py")
+        assert sorted(os.listdir(pkg / "util")) == ["__init__.py", "x.py", "y.lpy"]
+
+        # With no .lpy left under them, view directories become links again.
+        (pkg / "util" / "y.lpy").unlink()
+        (pkg / "sub" / "deep" / "inner.lpy").unlink()
+        pv.write_shadows(str(project), str(root))
+        assert os.readlink(view / "util") == str(pkg / "util")
+        assert os.readlink(view / "sub") == str(pkg / "sub")
+        assert sorted(os.listdir(pkg / "sub")) == ["__init__.py", "deep", "other.py"]
+
+        # With no shadow left, every link goes, unlinked and never followed.
+        (pkg / "m.lpy").unlink()
+        pv.write_shadows(str(project), str(root))
+        assert not os.path.lexists(root / "src")
+        assert sorted(os.listdir(pkg / "util")) == ["__init__.py", "x.py"]
+        assert (pkg / "sub" / "other.py").exists()
+
+    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
+    def test_overlay_resolves_for_basedpyright(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.overlay_layout(project)
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        # The config as written, so pkg is found only in the view's src.
+        config = json.loads(open(path).read())
+        config["reportMissingImports"] = "error"
+        check = tmp_path / "check" / "pyrightconfig.json"
+        self.write(check, json.dumps(config))
+        out = subprocess.run(
+            ["basedpyright", "--outputjson", "-p", str(check)]
+            + [str(root / "src" / "pkg" / "m.py")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        report = json.loads(out.stdout)
+        assert report["summary"]["filesAnalyzed"] == 1
+        assert [d["message"] for d in report["generalDiagnostics"]] == []
+
+    def test_shadow_replaces_a_link_of_the_same_text(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        pkg = project / "pkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "a.lpy", "(= a 1)")
+        self.write(pkg / "m.py", "m = 1")
+        pv.write_shadows(str(project), str(root))
+        shadow = root / "pkg" / "m.py"
+        assert shadow.is_symlink()
+        self.write(pkg / "m.lpy", "(= m 1)")  # compiles to m.py's very text
+        assert str(shadow) in pv.write_shadows(str(project), str(root))
+        assert not shadow.is_symlink() and shadow.read_text() == "m = 1"
+        assert (pkg / "m.py").read_text() == "m = 1"
+
+    def test_stale_temporaries_and_empty_directories_go(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= a 1)")
+        self.write(project / "lib" / "m.lpy", "(= m 1)")
+        pv.write_shadows(str(project), str(root))
+        old = time.time() - 2 * 3600
+        self.write(root / "tmpdead.tmp", "")
+        os.utime(root / "tmpdead.tmp", (old, old))
+        (root / ".top.py.dead.tmp").symlink_to(project / "top.lpy")
+        os.utime(root / ".top.py.dead.tmp", (old, old), follow_symlinks=False)
+        self.write(root / "tmplive.tmp", "theirs")
+        (project / "lib" / "m.lpy").unlink()
+        pv.write_shadows(str(project), str(root))
+        assert sorted(os.listdir(root)) == ["tmplive.tmp", "top.py"]
+
+    def test_unreadable_source_keeps_its_shadow(self, tmp_path):
+        if os.geteuid() == 0:
+            pytest.skip("root reads the unreadable file")
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= a 1)")
+        shadows = [str(root / "top.py")]
+        assert pv.write_shadows(str(project), str(root)) == shadows
+        (project / "top.lpy").chmod(0)
+        try:
+            assert pv.write_shadows(str(project), str(root)) == shadows
+        finally:
+            (project / "top.lpy").chmod(0o600)
+        assert (root / "top.py").read_text() == "a = 1"
 
     def test_one_unwritable_file_leaves_the_rest(self, tmp_path):
         if os.geteuid() == 0:
@@ -315,6 +476,7 @@ class TestShadows:
         self.write(project / "top.lpy", "(= a 1)")
         self.write(project / "locked" / "m.lpy", "(= m 1)")
         (root / "locked").mkdir(parents=True)
+        self.write(root / "locked" / "keep.txt", "")  # not an empty dir to sweep
         (root / "locked").chmod(0o500)
         # Another writer's temporary file beside a shadow is not touched.
         self.write(root / "top.py.tmp", "theirs")
@@ -326,7 +488,7 @@ class TestShadows:
         assert shadows == [str(root / "top.py")]
         assert list(manifest.sources) == [str(project / "top.lpy")]
         assert (root / "top.py.tmp").read_text() == "theirs"
-        assert os.listdir(root / "locked") == []
+        assert os.listdir(root / "locked") == ["keep.txt"]
         # Writable again: the next sweep writes the file it missed.
         pv.write_shadows(str(project), str(root), manifest=manifest)
         assert (root / "locked" / "m.py").read_text() == "m = 1"
