@@ -353,3 +353,194 @@ class TestImportBindings:
         tree = parse("(lazy-import os.path as p)\n(lazy-from os [sep])", partial=True)
         assert set(server.collect_definitions(tree, URI)) == {"p", "sep"}
         assert server.find_import_for_name(tree, "sep") is not None
+
+
+class TestMemberCompletion:
+    """After a method receiver's dot, completion offers the class's members.
+
+    ``|`` in a source marks the cursor; it is removed before completing.
+    """
+
+    BASE = "(class Base []\n  (= inherited 1))\n"
+    CLASS = (
+        BASE + "(class A [Base]\n"
+        "  (= class-var 1)\n"
+        "  (def __init__ [self]\n"
+        "    (= self.x 1)\n"
+        "    (= (. self y) 2)\n"
+        "    (+= self.count 1)\n"
+        "    (= self.z ^int))\n"
+        "  (def before [self] 1)\n"
+        "  (def here [self]\n"
+        "    {})\n"
+        "  (def after [self] 1))\n"
+    )
+    MEMBERS = {
+        "inherited", "class-var", "__init__", "x", "y", "count", "z",
+        "before", "here", "after",
+    }  # fmt: skip
+
+    @staticmethod
+    def complete(source):
+        before, after = source.split("|")
+        line = before.count("\n")
+        character = len(before) - (before.rfind("\n") + 1)
+        result = server.completion(ls_with(before + after), position(line, character))
+        return line, character, result.items
+
+    def labels(self, source):
+        return {item.label for item in self.complete(source)[2]}
+
+    @pytest.mark.parametrize(
+        "body, typed",
+        [("self.|", 0), ("self.ba|", 2), ("(. self |)", 0), ("(. self ba|)", 2)],
+    )
+    def test_receiver_dot_offers_exactly_the_class_members(self, body, typed):
+        line, character, items = self.complete(self.CLASS.format(body))
+        assert {item.label for item in items} == self.MEMBERS
+        for item in items:
+            start, end = item.text_edit.range.start, item.text_edit.range.end
+            assert (start.line, start.character) == (line, character - typed)
+            assert (end.line, end.character) == (line, character)
+            assert item.text_edit.new_text == item.label
+
+    def test_unclosed_buffer_offers_the_members_written_so_far(self):
+        source = "(class A []\n  (= v 1)\n  (def f [self]\n    (= self.a 1)\n    self.|"
+        assert self.labels(source) == {"v", "f", "a"}
+
+    def test_the_receiver_is_the_first_parameter_by_name(self):
+        source = "(class A []\n  (def f [this]\n    (= this.a 1)\n    this.|))"
+        assert self.labels(source) == {"f", "a"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "(class A []\n  (deco staticmethod (def f [self]\n    self.|)))",
+            "(class A []\n  (deco builtins.staticmethod (def f [self]\n    self.|)))",
+            "(def f [self]\n  self.|)",
+            "(class A []\n  (def f [self]\n    (fn [self] self.|)))",
+            "(class A []\n  (def f [self]\n    (. self| )))",
+        ],
+        ids=[
+            "staticmethod",
+            "builtins.staticmethod",
+            "function",
+            "shadowing lambda",
+            "touching receiver",
+        ],
+    )
+    def test_no_member_context_keeps_the_general_completion(self, source):
+        before, after = source.split("|")
+        line = before.count("\n") + 1
+        column = len(before) - (before.rfind("\n") + 1)
+        document = SimpleNamespace(source=before + after, uri=URI)
+        assert server.member_completion(document, line, column) is None
+        assert "print" in self.labels(source)
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            "(= (, self.p self.q) (, 1 2))",
+            "(for [self.p (, _ self.q)] in xs (pass))",
+            "(async-for self.p in xs (= self.q 1))",
+            "(with [(open x) as self.p (open y) as [self.q]] (pass))",
+            "(async-with [(open x) as (, self.p self.q)] (pass))",
+        ],
+    )
+    def test_tuple_loop_and_with_targets_are_attributes(self, statement):
+        source = f"(class A []\n  (def f [self]\n    {statement}\n    self.|))"
+        assert self.labels(source) == {"f", "p", "q"}
+
+    @pytest.mark.parametrize(
+        "method, opening, closing",
+        [
+            ("__init_subclass__", "(def __init_subclass__ [cls]", ")"),
+            ("__init-subclass__", "(def __init-subclass__ [cls]", ")"),
+            ("__class_getitem__", "(def __class_getitem__ [cls]", ")"),
+            ("__new__", "(def __new__ [cls]", ")"),
+            ("__new__", "(deco staticmethod (def __new__ [cls]", "))"),
+        ],
+        ids=[
+            "__init_subclass__",
+            "hyphenated __init_subclass__",
+            "__class_getitem__",
+            "__new__",
+            "staticmethod __new__",
+        ],
+    )
+    def test_implicit_class_receivers_skip_instance_attributes(
+        self, method, opening, closing
+    ):
+        source = (
+            "(class A []\n"
+            "  (def __init__ [self] (= self.instance-attr 1))\n"
+            f"  {opening}\n"
+            "    (= cls.class-attr 1)\n"
+            f"    cls.|){closing}"
+        )
+        assert self.labels(source) == {"__init__", method, "class-attr"}
+
+    def test_names_compare_as_python_names(self):
+        # my-self/my_self, my-attr/my_attr and my-base/my_base are one name
+        # each; the first spelling seen is the label.
+        source = (
+            "(class my-base []\n  (= inherited 1))\n"
+            "(class A [my_base]\n"
+            "  (def f [my-self]\n"
+            "    (= my_self.my-attr 1)\n"
+            "    (= (. my-self my_attr) 2)\n"
+            "    my_self.|))"
+        )
+        assert self.labels(source) == {"f", "my-attr", "inherited"}
+
+    @pytest.mark.parametrize(
+        "source, expected",
+        [
+            (
+                "(class A []\n"
+                "  (def i [self] (= self.instance-attr 1))\n"
+                "  (deco builtins.classmethod (def c [cls]\n"
+                "    (= cls.class-attr 1)\n"
+                "    cls.|)))",
+                {"i": "Method", "c": "Method", "class-attr": "Variable"},
+            ),
+            (
+                "(class A []\n"
+                "  (deco builtins.property (def p [self] 1))\n"
+                "  (def f [self]\n"
+                "    self.|))",
+                {"p": "Property", "f": "Method"},
+            ),
+        ],
+        ids=["builtins.classmethod", "builtins.property"],
+    )
+    def test_a_builtins_decorator_reads_as_the_builtin(self, source, expected):
+        items = self.complete(source)[2]
+        assert {item.label: item.kind.name for item in items} == expected
+
+    def test_the_edit_range_is_in_utf16_units(self):
+        from pygls.workspace import TextDocument
+
+        source = '(class A []\n  (def f [self]\n    (print "\U0001f600" self.ab)))'
+        document = TextDocument(URI, source)
+        ls = SimpleNamespace(
+            workspace=SimpleNamespace(get_text_document=lambda uri: document)
+        )
+        # After "self.ab": 22 code points, 23 UTF-16 units (the emoji is two).
+        [item, *_] = server.completion(ls, position(2, 23)).items
+        start, end = item.text_edit.range.start, item.text_edit.range.end
+        assert (start.line, start.character, end.line, end.character) == (2, 21, 2, 23)
+
+    def test_a_classmethod_receiver_skips_instance_attributes(self):
+        source = (
+            "(class A []\n"
+            "  (def i [self] (= self.instance-attr 1))\n"
+            "  (deco classmethod (def c [cls]\n"
+            "    (= cls.class-attr 1)\n"
+            "    cls.|)))"
+        )
+        assert self.labels(source) == {"i", "c", "class-attr"}
+
+    def test_a_closure_sees_the_methods_receiver(self):
+        source = "(class A []\n  (def f [self]\n    (def g [] self.|)))"
+        assert self.labels(source) == {"f"}

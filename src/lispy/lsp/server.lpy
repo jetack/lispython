@@ -1059,6 +1059,415 @@ or an extra usage line names no usage key."
   (return None)))
 
 ;; ---------------------------------------------------------------------------
+;; Member completion
+;; ---------------------------------------------------------------------------
+
+;; After `recv.` or in the attribute slot of `(. recv ...)`, where recv is
+;; the first parameter of the enclosing method, completion offers only the
+;; enclosing class's members, as pyright and jedi do for `self.`.  Every walk
+;; here runs on an explicit stack, so nesting depth costs no Python frames.
+
+(= _FUNCTION-HEADS (, "def" "async-def"))
+(= _LAMBDA-HEADS (, "lambda" "fn"))
+;; Forms whose body is another scope: an assignment in it is not the method's.
+(= _SCOPE-HEADS (, "def" "async-def" "lambda" "fn" "class" "defmacro"))
+(= _CLOSERS {"(" ")" "[" "]" "{" "}"})
+
+(def head-of [node]
+  "The head symbol's text of a non-empty Paren, else None."
+  (if (and (isinstance node Paren) (> (len node) 0) (isinstance node.op Symbol))
+      (return node.op.value))
+  (return None))
+
+(def node-end [node]
+  (return (, node.end_lineno node.end_col_offset)))
+
+(def source-prefix [source line col]
+  "The text of source before the 1-based line and code-point column."
+  (= lines (.split source "\n"))
+  (= before (sub lines [: None (- line 1)]))
+  (.append before (sub (sub lines (- line 1)) [: None col]))
+  (return (.join "\n" before)))
+
+(def open-form-closers [prefix]
+  "The closers of the forms still open at the end of prefix, innermost
+   first, or None when the lexer cannot read it or it ends inside an
+   f/t-string, which no bracket can close.  Appended to prefix, they make
+   a mid-edit buffer parse up to the cursor."
+  (try
+    (= tokens (list (tokenize prefix)))
+    (except [Exception]
+      (return None)))
+  (= stack [])
+  (= literals 0)
+  (for [text tktype _ _] in tokens
+    (cond
+      (== tktype "error")
+      (return None)
+
+      (== tktype "interpolated-start")
+      (+= literals 1)
+
+      (== tktype "interpolated-end")
+      (-= literals 1)
+
+      (or (== tktype "opening")
+          (and (== tktype "bad-prefix") (in (sub text -1) "([{")))
+      (do (= closer (.get _CLOSERS (sub text -1)))
+          (if (is closer None)
+              (return None))
+          (.append stack closer))
+
+      (and (== tktype "closing") stack)
+      (.pop stack)))
+  (if literals
+      (return None))
+  (return (.join "" (reversed stack))))
+
+(def open-path [tree line col]
+  "The forms open at the cursor, outermost first, and the leaf touching it.
+   tree is the parse of the prefix with its closers right after the cursor,
+   so a form is open iff it ends past the cursor.  The leaf is the innermost
+   open form's last element when it ends exactly at the cursor, else None."
+  (= cursor (, line col))
+  (= path [])
+  (= node (ife tree (sub tree -1) None))
+  (while (is-not node None)
+    (while (and (isinstance node (, Wrapper MetaIndicator))
+                (is-not node.value None))
+      (= node node.value))
+    (if (and (isinstance node Expression) (> (node-end node) cursor))
+        (do (.append path node)
+            (= node (ife (len node) (sub node -1) None)))
+        (return (, path (ife (== (node-end node) cursor) node None)))))
+  (return (, path None)))
+
+(def member-access [path leaf]
+  "The receiver name and the attribute typed so far at the cursor, or None.
+   Either the leaf is recv.partial with one dot, or the cursor is in the
+   attribute slot of an open (. recv ...): past recv, or touching a plain
+   second operand."
+  (if (and (isinstance leaf Symbol) (== (.count leaf.value ".") 1))
+      (do (= [recv partial] (.split leaf.value "."))
+          (return (ife recv (, recv partial) None))))
+  (if (or (not path) (!= (head-of (sub path -1)) "."))
+      (return None))
+  (= form (sub path -1))
+  (if (or (not (isinstance (sub form 1) Symbol)) (in "." (. (sub form 1) value)))
+      (return None))
+  (= recv (. (sub form 1) value))
+  (cond (and (== (len form) 2) (is leaf None))
+        (return (, recv ""))
+        (and (== (len form) 3) (is leaf (sub form 2))
+             (isinstance leaf Symbol) (not (in "." leaf.value)))
+        (return (, recv leaf.value)))
+  (return None))
+
+(def py-name [text]
+  "The Python name lispython text stands for (Symbol.name, the compiler's
+   mangling): members, receivers and classes are compared by it, since
+   my-attr and my_attr are one Python attribute."
+  (return (. (Symbol text) name)))
+
+(def decorator-name [node]
+  "A plain-symbol decorator's Python name, builtins.X read as X, or None."
+  (if (not (isinstance node Symbol))
+      (return None))
+  (= [module _ name] (.rpartition node.name "."))
+  (return (ife (== module "builtins") name node.name)))
+
+(def decorator-names [node]
+  "Names of the plain-symbol decorators in a deco form's decorator slot."
+  (= decorators (ife (isinstance node Bracket) node.list [node]))
+  (return [name for name in (map decorator-name decorators)
+           if (is-not name None)]))
+
+(def undecorated [form]
+  "The definition a (deco ...) chain wraps, and its decorators' names."
+  (= decorators [])
+  (while (and (== (head-of form) "deco") (>= (len form) 3))
+    (.extend decorators (decorator-names (sub form 1)))
+    (= form (sub form -1)))
+  (return (, form decorators)))
+
+(def param-names [params]
+  "The Python names a parameter list binds (annotations and defaults skipped)."
+  (= names [])
+  (for param in params.list
+    (if (isinstance param (, Starred DoubleStarred Keyword))
+        (= param param.value))
+    (if (and (isinstance param Symbol) (not (in param.value (, "*" "/"))))
+        (.append names param.name)))
+  (return names))
+
+;; Methods Python makes classmethods implicitly; __new__ is a staticmethod
+;; whose first parameter is the class all the same, decorated or not.
+(= _CLASS-RECEIVER-METHODS (, "__init_subclass__" "__class_getitem__" "__new__"))
+
+(def method-name [method]
+  "A def form's Python name, or None."
+  (= name-node (ife (>= (len method) 2) (def-name-symbol (sub method 1)) None))
+  (return (ife (is-not name-node None) name-node.name None)))
+
+(def receiver-param [method decorators]
+  "The Python name of a method's first parameter, which receives the
+   instance (the class under classmethod), or None for a staticmethod
+   other than __new__ or a non-name first slot."
+  (if (or (and (in "staticmethod" decorators) (!= (method-name method) "__new__"))
+          (< (len method) 3)
+          (not (isinstance (sub method 2) Bracket)))
+      (return None))
+  (= params (sub method 2))
+  (if (and (len params) (isinstance (sub params 0) Symbol)
+           (not (in (. (sub params 0) value) (, "*" "/"))))
+      (return (. (sub params 0) name)))
+  (return None))
+
+(def class-receiver-p [method decorators]
+  "Whether a method's first parameter receives the class, not an instance."
+  (return (or (in "classmethod" decorators)
+              (in (method-name method) _CLASS-RECEIVER-METHODS))))
+
+(def receiver-class [path recv]
+  "The class recv refers to at the cursor and whether recv is the class
+   itself (a classmethod's receiver), or None.  The open functions are
+   walked outward: a method whose receiver is recv answers, another
+   function binding recv shadows it, and a closure that does not bind it
+   sees the enclosing scope's, as Python's scoping does."
+  (= recv (py-name recv))
+  (for i in (range (- (len path) 1) -1 -1)
+    (= node (sub path i))
+    (= head (head-of node))
+    (cond (in head _FUNCTION-HEADS) (= params-at 2)
+          (in head _LAMBDA-HEADS) (= params-at 1)
+          True (continue))
+    ;; Inside the parameter list (a default, say) is the enclosing scope.
+    (if (or (<= (len node) (+ params-at 1))
+            (not (isinstance (sub node params-at) Bracket)))
+        (continue))
+    (if (in head _FUNCTION-HEADS)
+        (do (= j (- i 1))
+            (= decorators [])
+            (while (and (>= j 0) (== (head-of (sub path j)) "deco"))
+              (.extend decorators (decorator-names (sub (sub path j) 1)))
+              (-= j 1))
+            (if (and (>= j 0) (== (head-of (sub path j)) "class")
+                     (== (receiver-param node decorators) recv))
+                (return (, (sub path j) (class-receiver-p node decorators))))))
+    (if (in recv (param-names (sub node params-at)))
+        (return None)))
+  (return None))
+
+(def find-class-at [tree cls]
+  "The class form in tree starting where cls starts, or None."
+  (= start (, cls.lineno cls.col_offset))
+  (= stack (list tree))
+  (while stack
+    (= node (.pop stack))
+    (if (isinstance node (, Wrapper MetaIndicator))
+        (do (if (is-not node.value None)
+                (.append stack node.value))
+            (continue)))
+    (if (or (not (isinstance node Expression))
+            (< start (, node.lineno node.col_offset))
+            (> start (node-end node)))
+        (continue))
+    (if (and (== (head-of node) "class")
+             (== (, node.lineno node.col_offset) start))
+        (return node))
+    (.extend stack node.list))
+  (return None))
+
+(def class-parts [cls]
+  "The bases bracket (or None) and the body forms of a class form."
+  (if (and (> (len cls) 2) (isinstance (sub cls 2) Bracket))
+      (return (, (sub cls 2) (sub cls.list [: 3 None]))))
+  (return (, None (sub cls.list [: 2 None]))))
+
+(def top-level-class [tree name]
+  "The last top-level class whose Python name is name in tree, or None."
+  (= found None)
+  (for form in tree
+    (= definition (sub (undecorated form) 0))
+    (if (and (== (head-of definition) "class") (>= (len definition) 2))
+        (do (= name-node (def-name-symbol (sub definition 1)))
+            (if (and (is-not name-node None) (== name-node.name name))
+                (= found definition)))))
+  (return found))
+
+(def with-targets [items]
+  "The targets of a with form's [context as target ...] items."
+  (= targets [])
+  (if (isinstance items Bracket)
+      (for i in (range 1 (- (len items) 1))
+        (if (and (isinstance (sub items i) Symbol) (== (. (sub items i) value) "as"))
+            (.append targets (sub items (+ i 1))))))
+  (return targets))
+
+(def assignment-targets [form]
+  "The targets an =, augmented assignment, for or with binds, bracket and
+   (, ...) tuple targets flattened."
+  (= head (head-of form))
+  (cond (and (== head "=") (>= (len form) 3) (isinstance (sub form 2) Annotation))
+        (= targets [(sub form 1)])
+        (== head "=")
+        (= targets (sub form.list [: 1 -1]))
+        (and (or (in head augassignop-dict) (in head (, "for" "async-for")))
+             (>= (len form) 2))
+        (= targets [(sub form 1)])
+        (and (in head (, "with" "async-with")) (>= (len form) 2))
+        (= targets (with-targets (sub form 1)))
+        True
+        (return []))
+  (= flat [])
+  (= stack (list (reversed targets)))
+  (while stack
+    (= target (.pop stack))
+    (cond (isinstance target Bracket)
+          (.extend stack (reversed target.list))
+          (== (head-of target) ",")
+          (.extend stack (reversed (sub target.list [: 1 None])))
+          (isinstance target Starred)
+          (.append stack target.value)
+          True
+          (.append flat target)))
+  (return flat))
+
+(def receiver-attribute [target receiver]
+  "The attribute, as written, a target assigns on the receiver whose
+   Python name is receiver (recv.attr or (. recv attr)), or None."
+  (if (and (isinstance target Symbol) (== (.count target.value ".") 1))
+      (do (= [owner attr] (.split target.value "."))
+          (return (ife (and (== (py-name owner) receiver) attr) attr None))))
+  (if (and (== (head-of target) ".") (== (len target) 3)
+           (isinstance (sub target 1) Symbol) (== (. (sub target 1) name) receiver)
+           (isinstance (sub target 2) Symbol) (not (in "." (. (sub target 2) value))))
+      (return (. (sub target 2) value)))
+  (return None))
+
+(def receiver-attributes [method receiver]
+  "Attribute names a method assigns through its receiver, in source order.
+   Nested functions and classes are other scopes and are not walked."
+  (= names [])
+  (= stack (list (reversed (sub method.list [: 3 None]))))
+  (while stack
+    (= node (.pop stack))
+    (if (isinstance node (, Wrapper MetaIndicator))
+        (do (if (is-not node.value None)
+                (.append stack node.value))
+            (continue)))
+    (if (not (isinstance node Expression))
+        (continue))
+    (= head (head-of node))
+    (if (in head _SCOPE-HEADS)
+        (continue))
+    (for target in (assignment-targets node)
+      (= attr (receiver-attribute target receiver))
+      (if (is-not attr None)
+          (.append names attr)))
+    (.extend stack (reversed node.list)))
+  (return names))
+
+(def add-member [members label kind]
+  "Record a member under its Python name; the first spelling seen wins."
+  (.setdefault members (py-name label) (, label kind)))
+
+(def class-members [cls tree class-receiver]
+  "Python name -> (label, CompletionItemKind) of the members of cls and its
+   same-buffer bases, subclass first.  Members are the class body's
+   definitions plus the attributes its methods assign through their
+   receiver; on the class itself (class-receiver) only class-receiver
+   methods' assignments count."
+  (= members {})
+  (= pending [cls])
+  (= visited (set))
+  (while pending
+    (= current (.pop pending 0))
+    (if (in (id current) visited)
+        (continue))
+    (.add visited (id current))
+    (= [bases body] (class-parts current))
+    (= methods [])
+    (for form in body
+      (= [definition decorators] (undecorated form))
+      (= head (head-of definition))
+      (cond
+        (and (in head (, "def" "async-def" "class")) (>= (len definition) 2)
+             (is-not (def-name-symbol (sub definition 1)) None))
+        (do (= name (. (def-name-symbol (sub definition 1)) value))
+            (cond (== head "class")
+                  (add-member members name lsp.CompletionItemKind.Class)
+                  (in "property" decorators)
+                  (add-member members name lsp.CompletionItemKind.Property)
+                  True
+                  (do (add-member members name lsp.CompletionItemKind.Method)
+                      (.append methods (, definition decorators)))))
+
+        (and (== head "type") (type-alias-p definition))
+        (add-member members (. (def-name-symbol (sub definition 1)) value)
+                    lsp.CompletionItemKind.Class)
+
+        (== head "=")
+        (for target in (assignment-targets definition)
+          (if (and (isinstance target Symbol) (not (in "." target.value)))
+              (add-member members target.value lsp.CompletionItemKind.Variable)))))
+    (for [method decorators] in methods
+      (= receiver (receiver-param method decorators))
+      (if (or (is receiver None)
+              (and class-receiver (not (class-receiver-p method decorators))))
+          (continue))
+      (for attr in (receiver-attributes method receiver)
+        (add-member members attr lsp.CompletionItemKind.Variable)))
+    (if (is-not bases None)
+        (for base in bases.list
+          (if (and (isinstance base Symbol) (not (in "." base.value)))
+              (do (= base-class (top-level-class tree base.name))
+                  (if (is-not base-class None)
+                      (.append pending base-class)))))))
+  (return members))
+
+(def member-edit-range [doc line col typed]
+  "The range of the typed attribute before the cursor, in client units."
+  (= start (lsp.Position :line (- line 1) :character (- col typed)))
+  (= end (lsp.Position :line (- line 1) :character col))
+  (= codec (getattr doc "position_codec" None))
+  (if (is-not codec None)
+      (do (= start (.position-to-client-units codec doc.lines start))
+          (= end (.position-to-client-units codec doc.lines end))))
+  (return (lsp.Range :start start :end end)))
+
+(def member-completion [doc line col]
+  "The member CompletionList at the 1-based line and code-point column,
+   or None when the cursor is not on an attribute of a method's receiver."
+  (= prefix (source-prefix doc.source line col))
+  (= closers (open-form-closers prefix))
+  (if (is closers None)
+      (return None))
+  (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))
+  (= access (member-access path leaf))
+  (if (is access None)
+      (return None))
+  (= [recv partial] access)
+  (= found (receiver-class path recv))
+  (if (is found None)
+      (return None))
+  (= [cls class-receiver] found)
+  ;; The whole buffer's class, when it parses, also has the members
+  ;; written after the cursor.
+  (= tree (parse doc.source :partial True))
+  (= whole (find-class-at tree cls))
+  (if (is-not whole None)
+      (= cls whole))
+  (= edit-range (member-edit-range doc line col (len partial)))
+  (return (lsp.CompletionList
+            :is-incomplete False
+            :items [(lsp.CompletionItem
+                      :label name
+                      :kind kind
+                      :text-edit (lsp.TextEdit :range edit-range :new-text name))
+                    for [name kind] in (.values (class-members cls tree class-receiver))])))
+
+;; ---------------------------------------------------------------------------
 ;; Completion
 ;; ---------------------------------------------------------------------------
 
@@ -1076,6 +1485,17 @@ or an extra usage line names no usage key."
 (def completion [ls params]
   (= doc (.get-text-document ls.workspace params.text_document.uri))
   (= pos params.position)
+
+  ;; On a method receiver's attribute, only the class's members.
+  (try
+    (= [line col] (cursor-of doc pos))
+    (= members (member-completion doc line col))
+    (except [Exception]
+      (.debug logger "member completion failed" :exc-info True)
+      (= members None)))
+  (if (is-not members None)
+      (return members))
+
   (= items [])
   (= seen (set))
 
