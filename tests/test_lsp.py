@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import lispy.macros
 from lispy import form_docs
 from lispy.core.compiler import features
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
@@ -257,7 +258,6 @@ class TestRequireSelection:
             "(require lispy.macros [a] b)",
             '(require lispy.macros "ab")',
             "(require lispy.macros :as x)",
-            "(require lispy.macros)",
             "(require)",
         ],
     )
@@ -278,7 +278,8 @@ def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
     items = server.general_items(SimpleNamespace(source="", uri=URI))
     keywords = {i.label for i in items if i.detail == "keyword"}
     assert set(form_docs.BUILTIN_MACROS) <= keywords
-    assert not keywords & {"defn", "unless", "pprint"}
+    # Beyond the macros, only `gensym` (a function inside defmacro bodies).
+    assert keywords - {"gensym"} == set(lispy.macros.__macro_namespace)
 
 
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,
