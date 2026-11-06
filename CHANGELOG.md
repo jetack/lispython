@@ -39,6 +39,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `(->> x f (g 1))` now compiles to `g(1, f(x))`: the steps after a bare-name
+  step keep threading last (they used to thread first).
+- `conde` with an even number of operands (no final else) is a compile error
+  at the call; it used to drop its last test.
 - Built-in macros now load with no `require` (see Added), so a call to a
   function named like one (`inc`, `dec`, `when`, `fn`, `comment`, `cond`,
   ...) that the module did not bind itself, such as a name from

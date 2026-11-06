@@ -116,6 +116,8 @@ Python version
 label = "neg" if x < 0 else "zero" if x == 0 else "pos"
 ```
 
+The final else is required: `(conde x 1 y 2)` is a compile error, as `1 if x else 2 if y` is in Python.
+
 ### `->`
 {{ macro_doc("->") }}
 
@@ -139,6 +141,8 @@ Python version
 ```python
 g(2, f(1, x))
 ```
+
+A bare name is called with the value and threading stays last: `(->> x f (g 1))` is `g(1, f(x))`.
 
 ### `as->`
 {{ macro_doc("as->") }}

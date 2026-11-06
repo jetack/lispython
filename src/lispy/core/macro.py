@@ -152,9 +152,17 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
             and not in_quasi
             and isinstance(sexp, Paren)
         ):
-            expansion = scope["__macro_namespace"][name](
-                *[_unwrap_literal(o) for o in operands]
-            )
+            try:
+                expansion = scope["__macro_namespace"][name](
+                    *[_unwrap_literal(o) for o in operands]
+                )
+            except LispyCompileError as error:
+                # A macro cannot see its own call form (literal operands
+                # arrive unwrapped), so an error it raises with no position
+                # is placed at the call.
+                if error.lineno is not None:
+                    raise
+                raise LispyCompileError(error.msg, sexp) from None
             # Python data anywhere in the expansion becomes nodes, and
             # template-built nodes take the call's position, so tracebacks and
             # compile errors point at the macro call, not line 0. The
