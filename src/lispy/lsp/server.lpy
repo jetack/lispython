@@ -1261,7 +1261,18 @@
       (= node node.value))
     (if (and (isinstance node Expression) (> (node-end node) cursor))
         (do (.append path node)
-            (= node (ife (len node) (sub node -1) None)))
+            ;; The last element that starts before the cursor: past an f/t-string
+            ;; field the form's last element is the literal text after it.
+            (= node None)
+            (for child in (reversed (sub path -1))
+              (if (< (, child.lineno child.col_offset) cursor)
+                  (do (= node child)
+                      (break))))
+            ;; A cursor in a field's format spec is in the spec's own fields.
+            (= spec (getattr node "format_spec" None))
+            (if (and (is-not spec None)
+                     (< (, spec.lineno spec.col_offset) cursor))
+                (= node spec)))
         (return (, path (ife (== (node-end node) cursor) node None)))))
   (return (, path None)))
 
@@ -1570,7 +1581,7 @@
   (if (and (> start 0) (== (sub text (- start 1)) "."))
       (return True))
   (= prefix (source-prefix source line col))
-  (= closers (open-form-closers prefix))
+  (= closers (open-form-closers prefix :literals True))
   (if (is closers None)
       (return False))
   (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))

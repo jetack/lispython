@@ -76,27 +76,38 @@
   (.append before (sub (sub lines (- line 1)) [: None col]))
   (return (.join "\n" before)))
 
-(def open-form-closers [prefix]
+(def open-form-closers [prefix :literals False]
   "The closers of the forms still open at the end of prefix, innermost
    first, or None when the lexer cannot read it or it ends inside an
    f/t-string, which no bracket can close.  Appended to prefix, they make
-   a mid-edit buffer parse up to the cursor."
+   a mid-edit buffer parse up to the cursor.  literals: close an open
+   f/t-string too (its fields' }, its quote), for a reader of the forms
+   inside a field; the cursor view never asks for it, its text must
+   compile to the Python the buffer means."
   (try
     (= tokens (list (tokenize prefix)))
     (except [Exception]
       (return None)))
   (= stack [])
-  (= literals 0)
+  (= open-literals 0)
   (for [text tktype _ _] in tokens
     (cond
       (== tktype "error")
       (return None)
 
       (== tktype "interpolated-start")
-      (+= literals 1)
+      (do (+= open-literals 1)
+          (.append stack (.lstrip text "fFtTrR")))
 
       (== tktype "interpolated-end")
-      (-= literals 1)
+      (do (-= open-literals 1)
+          (.pop stack))
+
+      (== tktype "field-start")
+      (.append stack "}")
+
+      (== tktype "field-end")
+      (.pop stack)
 
       (or (== tktype "opening")
           (and (== tktype "bad-prefix") (in (sub text -1) "([{")))
@@ -107,7 +118,7 @@
 
       (and (== tktype "closing") stack)
       (.pop stack)))
-  (if literals
+  (if (and open-literals (not literals))
       (return None))
   (return (.join "" (reversed stack))))
 
