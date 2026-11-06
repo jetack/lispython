@@ -369,8 +369,9 @@ class _Lexer:
     a plain string in a field.
     """
 
-    def __init__(self, src):
+    def __init__(self, src, comments=False):
         self.src = src
+        self.comments = comments  # emit top-level "comment" tokens
         self.locate = _source_locator(src)
         self.tokens = []
         self.stack = []  # _LiteralState / _FieldState, innermost last
@@ -451,7 +452,9 @@ class _Lexer:
                 field.brackets.pop()
         if tktype not in ("new-line", "spaces"):
             context.previous = [tk, tktype]
-        if tktype not in ("new-line", "spaces", "comment"):
+        if tktype == "comment" and self.comments and field is None:
+            self._emit(tk, tktype, start, end)
+        elif tktype not in ("new-line", "spaces", "comment"):
             self._emit(tk, tktype, start, end)
             if field is not None and not field.brackets:
                 tail = field.tail
@@ -865,8 +868,12 @@ class _Lexer:
         self.pos = at + 1
 
 
-def tokenize(src):
+def tokenize(src, comments=False):
     """Tokens as [text, type, position_info, extra], in one pass (_Lexer).
+
+    With ``comments``, each comment outside f/t-string fields is a "comment"
+    token too, its text from its ``;`` to the end of its line (for tools
+    that read comments, never for the parser).
 
     ``extra`` is the error of a malformed plain string, the data of an f/t
     string's own tokens, else None. A "deprecated" token (its text the
@@ -877,7 +884,7 @@ def tokenize(src):
     fields nest (the lexer has no limit of its own), in time and memory
     linear in its length.
     """
-    return deque(_Lexer(src).run())
+    return deque(_Lexer(src, comments).run())
 
 
 def position_info_into_list(position_info):

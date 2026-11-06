@@ -375,3 +375,84 @@ def test_real_basedpyright_reports_on_the_lpy_word(
     assert found.message == '"undefined-name" is not defined'
     assert (found.range.start.line, found.range.start.character) == (0, 7)
     assert (found.range.end.line, found.range.end.character) == (0, 21)
+
+
+# ---------------------------------------------------------------------------
+# ; pyright: ignore
+# ---------------------------------------------------------------------------
+
+SUPPRESSED = (
+    "(print undefined-a) ; pyright: ignore[reportUndefinedVariable, reportX]\n"
+    "(print undefined-b) ;pyright:ignore\n"
+    "(print undefined-c)\n"
+    '(print "; pyright: ignore it" undefined-d)\n'
+)
+
+
+class StubBackends:
+    """A backend that published diagnostics (code, generated text) for the
+    view's text."""
+
+    name = "basedpyright"
+
+    def __init__(self, published):
+        self.published = published
+
+    def backend_diagnostics(self, uri, text):
+        found = []
+        for code, word in self.published:
+            (line, col), (end_line, end_col) = span(text, word)
+            found.append(
+                lsp.Diagnostic(
+                    range=lsp.Range(
+                        start=lsp.Position(line=line - 1, character=col),
+                        end=lsp.Position(line=end_line - 1, character=end_col),
+                    ),
+                    message="m",
+                    code=code,
+                )
+            )
+        return None, found
+
+
+def survivors(monkeypatch, published):
+    """(code, .lpy line) of each backend diagnostic published on
+    SUPPRESSED's view that the server forwards."""
+    monkeypatch.setattr(server, "backends", StubBackends(published))
+    doc = TextDocument("file:///buffer.lpy", SUPPRESSED, version=1)
+    view = pv.compile_view(SUPPRESSED)
+    found = asyncio.run(server.mapped_backend_diagnostics(doc, view))
+    return [(d.code, d.range.start.line + 1) for d in found]
+
+
+def test_a_listed_ignore_drops_only_its_rules(monkeypatch):
+    # Defect: ignore[rule] drops every diagnostic on its line, so a call
+    # error there vanishes along with the undefined name it was asked for.
+    published = [
+        ("reportUndefinedVariable", "undefined_a"),
+        ("reportCallIssue", "print(undefined_a)"),
+    ]
+    assert survivors(monkeypatch, published) == [("reportCallIssue", 1)]
+
+
+def test_a_bare_ignore_drops_every_rule_on_its_line(monkeypatch):
+    # Defect: a bare ignore is read as an empty rule list and drops nothing,
+    # or its unspaced form ;pyright:ignore is not recognised.
+    published = [
+        ("reportUndefinedVariable", "undefined_b"),
+        ("reportCallIssue", "print(undefined_b)"),
+    ]
+    assert survivors(monkeypatch, published) == []
+
+
+def test_an_ignore_leaves_the_next_line_alone(monkeypatch):
+    # Defect: an ignore reaches past its own line (to the next form).
+    published = [("reportUndefinedVariable", "undefined_c")]
+    assert survivors(monkeypatch, published) == [("reportUndefinedVariable", 3)]
+
+
+def test_an_ignore_inside_a_string_is_no_comment(monkeypatch):
+    # Defect: the comment is found by searching the line for ";", so a
+    # string holding "; pyright: ignore" suppresses its line.
+    published = [("reportUndefinedVariable", "undefined_d")]
+    assert survivors(monkeypatch, published) == [("reportUndefinedVariable", 4)]

@@ -28,7 +28,7 @@
 (from lispy.lsp.python-view [COMPILE-STAGE PARSE-STAGE ViewCache compile-buffer
                              lpy-diagnostic-range lpy-range module-names name-key
                              name-spelling-p open-form-closers partial-span py-name
-                             source-prefix view-at-cursor])
+                             pyright-ignores source-prefix view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT])
 
 (= logger (logging.getLogger __name__))
@@ -2093,9 +2093,20 @@
             :tags diagnostic.tags
             :related-information (or related None))))
 
+(def suppressed-p [diagnostic ignores]
+  "Whether the editor's diagnostic is suppressed by a pyright comment on
+   the .lpy line its range starts on (ignores, pyright-ignores'): a bare
+   one suppresses every rule, a listed one the rules it names."
+  (= line (+ diagnostic.range.start.line 1))
+  (if (not-in line ignores)
+      (return False))
+  (= rules (sub ignores line))
+  (return (or (is rules None) (in diagnostic.code rules))))
+
 (async-def mapped-backend-diagnostics [doc view]
   "The backend's diagnostics published for view, the full view of doc's
-   source, as the editor's (editor-diagnostic), in the backend's order; []
+   source, as the editor's (editor-diagnostic), in the backend's order,
+   less those a ; pyright: ignore comment suppresses (suppressed-p); []
    when it has published none for that text.  DIAGNOSTICS-TIMEOUT bounds
    the mapping of their related locations."
   (= found (.backend-diagnostics backends doc.uri view.text))
@@ -2104,6 +2115,7 @@
   (= [client published] found)
   (= origin (, doc.source view))
   (= spellings (buffer-name-spellings doc.source))
+  (= ignores (pyright-ignores doc.source))
   (= deadline (+ (.time (asyncio.get-running-loop)) DIAGNOSTICS-TIMEOUT))
   (= origins {})
   (= result [])
@@ -2114,7 +2126,7 @@
       (except [Exception]
         (.debug logger "backend diagnostic dropped" :exc-info True)
         (= mapped None)))
-    (if (is-not mapped None)
+    (if (and (is-not mapped None) (not (suppressed-p mapped ignores)))
         (.append result mapped)))
   (return result))
 

@@ -20,6 +20,7 @@
 (import logging)
 (import os)
 (import os.path as osp)
+(import re)
 (import shutil)
 (import sys)
 (import tempfile)
@@ -107,6 +108,35 @@
   (if literals
       (return None))
   (return (.join "" (reversed stack))))
+
+;; A pyright suppression in a comment's text, spaced as pyright takes one
+;; after its comment marker (a ; here, # there): ;pyright:ignore,
+;; ;; pyright: ignore[ruleA, ruleB]; group 1 is the rule list.
+(= _PYRIGHT-IGNORE (re.compile "(?:^|;)\\s*pyright:\\s*ignore(?:\\s*\\[([\\s\\w\\-,]*)\\]|\\s|$)"))
+
+(def pyright-ignores [source]
+  "Line (1-based) -> what a pyright suppression comment on it ignores in
+   source: the frozenset of the rules ; pyright: ignore[ruleA, ruleB]
+   names, or None for a bare ; pyright: ignore, every rule.  Comments are
+   the reader's own (tokenize's comment tokens), so a ; in a string is
+   none; a source the lexer cannot read keeps those before the failure."
+  (try
+    (= tokens (tokenize source :comments True))
+    (except [Exception]
+      (return {})))
+  (= found {})
+  (for [text tktype position _] in tokens
+    (if (!= tktype "comment")
+        (continue))
+    (= m (.search _PYRIGHT-IGNORE text))
+    (if (is m None)
+        (continue))
+    (= rules (.group m 1))
+    (= (sub found (sub position "lineno"))
+       (ife (is rules None)
+            None
+            (frozenset (filter None (map str.strip (.split rules ",")))))))
+  (return found))
 
 ;; Characters that end a symbol token where a name is read back from the
 ;; source: whitespace, the attribute dot, brackets, quotes, `,` and `;`.
