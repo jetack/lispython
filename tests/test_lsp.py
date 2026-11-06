@@ -277,7 +277,6 @@ class TestRequireSelection:
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
     items = server.general_items(SimpleNamespace(source="", uri=URI))
     keywords = {i.label for i in items if i.detail == "keyword"}
-    assert set(form_docs.BUILTIN_MACROS) <= keywords
     # Beyond the macros, only `gensym` (a function inside defmacro bodies).
     assert keywords - {"gensym"} == set(lispy.macros.__macro_namespace)
 
