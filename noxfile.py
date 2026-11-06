@@ -14,7 +14,7 @@ def tests(session):
     session.run("pytest", *session.posargs)
 
 
-@nox.session(python=PYTHONS[-2])
+@nox.session
 def docs(session):
     """Build the docs site strictly into a throwaway directory; never deploys."""
     session.install(".[docs]")
