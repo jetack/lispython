@@ -19,8 +19,17 @@
   "(conde test then test then ... else)
 
   The expression form of `cond`: a chain of `ife` whose trailing odd operand is
-  the final else. Always give the else: with an even number of operands the
-  last test is never evaluated and its then is the else."
+  the final else. An expression needs a value on every path, so an even number
+  of operands (no else) is a compile error, like Python's `x if c`."
+  (if (== 0 (% (len body) 2))
+      (do (from lispy.core.errors [LispyCompileError])
+          (= at None)
+          (for x in body
+            (if (hasattr x "position_info")
+                (= at x)))
+          (raise (LispyCompileError
+                   "conde needs a final else value: expected an odd number of operands"
+                   at))))
   (if (<= (len body) 2)
       (return (sub body -1))
       (do (= [test then *orelse] body)
@@ -46,16 +55,15 @@
 
   Thread-last: insert `value` as the last argument of the first form, that
   result as the last argument of the next, and so on. A form that is not a
-  parenthesised call, such as a bare name, is called with the value, but the
-  steps after it then thread first instead of last: write every step as a
-  parenthesised call."
+  parenthesised call, such as a bare name, is called with the value:
+  `(->> x f (g 1))` is `g(1, f(x))`."
   (if (== 0 (len fs))
       (return x))
   (= [f *rest] fs)
   (if (isinstance f Paren)
       (do (f.list.append x)
           (return `(->> ~f ~@rest)))
-      (return `(-> (~f ~x) ~@rest))))
+      (return `(->> (~f ~x) ~@rest))))
 
 ;; A tuple of walrus assignments indexed with -1 is a single expression, so
 ;; as-> works in any expression position (return value, call argument, lambda
