@@ -21,7 +21,7 @@ def docs(session):
     """Build the docs site strictly into a throwaway directory; never deploys."""
     # Editable: a uv-cached wheel of the same version would hand mkdocs the old
     # form_docs and docstrings.
-    session.install("-e", ".[docs]")
+    session.install("-e", ".[docs]", "pytest")
     session.run(
         "python",
         "-c",
@@ -32,4 +32,6 @@ def docs(session):
         str(Path(__file__).parent),
     )
     site_dir = session.create_tmp() + "/site"
+    # The hook tests need mkdocs, which the tests session does not install.
+    session.run("pytest", "tests/test_docs_hooks.py")
     session.run("mkdocs", "build", "--strict", "--site-dir", site_dir)

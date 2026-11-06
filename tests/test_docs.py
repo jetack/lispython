@@ -77,9 +77,9 @@ def test_macros_page_takes_each_macro_description_from_its_docstring(docs_main):
 
 
 def test_macro_doc_renders_usage_then_the_docstring_description(docs_main):
-    text = docs_main.macro_doc_markdown("->>")
-    assert text.startswith("```python\n(->> value form ...)\n```\n\n")
-    assert "write every step as a parenthesised call" in " ".join(text.split())
+    doc = docs_main.form_docs.BUILTIN_MACROS["->>"]
+    expected = "\n".join(["```python", *doc.usage, "```", "", doc.prose])
+    assert docs_main.macro_doc_markdown("->>") == expected
 
 
 def test_page_headings_are_read_again_after_the_file_changes(docs_main, tmp_path):

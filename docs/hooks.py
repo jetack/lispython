@@ -8,6 +8,7 @@ on_page_markdown runs after the macros plugin's (the form reference is its
 generated tables, never ``{{ form_index() }}``).
 """
 
+import importlib.util
 import posixpath
 import re
 from pathlib import Path
@@ -15,6 +16,15 @@ from urllib.parse import urljoin, urlsplit
 
 import lispy  # noqa: F401  (the .lpy import hook, for lispy.form_docs)
 from lispy.form_docs import BUILTIN_MACROS_NOTE
+
+# mkdocs loads a hook by file path without putting docs/ on sys.path, so
+# ``import main`` would fail (or find another top-level ``main``): load the
+# sibling module by path, as the macros plugin does for ``docs/main``.
+_spec = importlib.util.spec_from_file_location(
+    "lispy_docs_main", Path(__file__).with_name("main.py")
+)
+docs_main = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(docs_main)
 
 _pages = {}  # src_uri -> rendered markdown, for the current build
 _nav = []
@@ -47,17 +57,19 @@ def _url(page, config):
 
 # [text](target) and [text](target "title"); the target has no space or paren.
 _LINK = re.compile(r"(?<=\]\()([^)\s]+)(?=[)\s])")
-_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
 def _site_links(markdown, page, config, files):
     """The page markdown with every internal link to a .md source (the
     links mkdocs rewrites to page URLs) pointing at that page's site URL,
     which is what llms-full.txt can resolve; mkdocs' own file map decides
-    where a source path lands. Links in fenced code are left as written."""
+    where a source path lands. An anchor-only link points into this page's
+    URL. Links in fenced blocks and inline code spans are left as written."""
 
     def rewrite(match):
         target = urlsplit(match.group(1))
+        if not (target.scheme or target.netloc or target.path) and target.fragment:
+            return _site_url(page.url, config) + f"#{target.fragment}"
         if target.scheme or target.netloc or not target.path.endswith(".md"):
             return match.group(1)
         if target.path.startswith("/"):
@@ -70,18 +82,19 @@ def _site_links(markdown, page, config, files):
         url = _site_url(file.url, config)
         return url + (f"#{target.fragment}" if target.fragment else "")
 
-    out = []
-    fence = None
-    for line in markdown.split("\n"):
-        opener = _FENCE.match(line)
-        if opener:
-            marker = opener.group(1)
-            if fence is None:
-                fence = marker
-            elif marker[0] == fence[0] and len(marker) >= len(fence):
-                fence = None
-        out.append(line if fence or opener else _LINK.sub(rewrite, line))
-    return "\n".join(out)
+    def rewrite_line(line):
+        parts, last = [], 0
+        for span in docs_main.CODE_SPAN.finditer(line):
+            parts.append(_LINK.sub(rewrite, line[last : span.start()]))
+            parts.append(span.group(0))
+            last = span.end()
+        parts.append(_LINK.sub(rewrite, line[last:]))
+        return "".join(parts)
+
+    return "\n".join(
+        line if in_code else rewrite_line(line)
+        for line, in_code in docs_main.markdown_lines(markdown)
+    )
 
 
 def _description(page, markdown):
@@ -89,13 +102,11 @@ def _description(page, markdown):
     headings: what an LLM can expect to find there."""
     if page.meta.get("description"):
         return page.meta["description"]
-    headings = []
-    fenced = False
-    for line in markdown.splitlines():
-        if re.match(r"^\s*(```|~~~)", line):
-            fenced = not fenced
-        elif not fenced and line.startswith("## "):
-            headings.append(line[3:].strip())
+    headings = [
+        line[3:].strip()
+        for line, in_code in docs_main.markdown_lines(markdown)
+        if not in_code and line.startswith("## ")
+    ]
     return ", ".join(headings)
 
 

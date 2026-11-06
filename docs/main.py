@@ -77,7 +77,27 @@ class Section(NamedTuple):
 
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 _ATX = re.compile(r"^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
-_CODE_SPAN = re.compile(r"(`+)(.+?)\1")
+CODE_SPAN = re.compile(r"(`+)(.+?)\1")
+
+
+def markdown_lines(text):
+    """``(line, in_code)`` for each line of a page: ``in_code`` is true for a
+    fenced block's lines, fences included. The one home of the fence rule
+    (CommonMark: a closer is the same character, at least as long)."""
+    fence = None
+    for line in text.split("\n"):
+        opener = _FENCE.match(line)
+        if opener:
+            marker = opener.group(1)
+            if fence is None:
+                fence = marker
+                yield line, True
+                continue
+            if marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+                yield line, True
+                continue
+        yield line, fence is not None
 
 
 def _stamp(page, docs_dir):
@@ -95,18 +115,9 @@ def page_headings(page, docs_dir=DOCS_DIR):
 @functools.cache
 def _headings(path, _mtime_ns):
     headings = []
-    fence = None
-    lines = path.read_text(encoding="utf-8").splitlines()
-    for number, line in enumerate(lines):
-        opener = _FENCE.match(line)
-        if opener:
-            marker = opener.group(1)
-            if fence is None:
-                fence = marker
-            elif marker[0] == fence[0] and len(marker) >= len(fence):
-                fence = None
-            continue
-        match = None if fence else _ATX.match(line)
+    text = path.read_text(encoding="utf-8")
+    for number, (line, in_code) in enumerate(markdown_lines(text)):
+        match = None if in_code else _ATX.match(line)
         if match:
             headings.append(Heading(len(match.group(1)), match.group(2), number))
     return tuple(headings)
@@ -114,7 +125,7 @@ def _headings(path, _mtime_ns):
 
 def code_spans(text):
     """The contents of a heading's code spans."""
-    return [match.group(2).strip() for match in _CODE_SPAN.finditer(text)]
+    return [match.group(2).strip() for match in CODE_SPAN.finditer(text)]
 
 
 def form_section(form, docs_dir=DOCS_DIR):
@@ -163,7 +174,7 @@ def _anchors(_path, _mtime_ns, page, docs_dir):
     used = set()
     anchors = {}
     for heading in page_headings(page, docs_dir):
-        rendered = _CODE_SPAN.sub(lambda m: m.group(2).strip(), heading.text)
+        rendered = CODE_SPAN.sub(lambda m: m.group(2).strip(), heading.text)
         anchors[heading.line] = unique(slugify(rendered, "-"), used)
     return anchors
 
