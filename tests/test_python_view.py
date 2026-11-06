@@ -150,6 +150,17 @@ class TestCursor:
         gen, lpy = locate(view.text, "fo"), locate(src, "fo")
         assert view.map.to_lpy(*plus(gen, 1)) == plus(lpy, 1)
 
+    def test_cursor_mid_word(self):
+        # Defect: the rest of the word glues onto the sentinel (one symbol,
+        # ___lpy_cursor___-top), so a cursor inside a word has no view.
+        src = "(= my-x 1)\n(print my-x.fo-o zz-top)"
+        view = pv.view_at_cursor(src, *plus(locate(src, "fo-o"), 2))
+        assert view.text == "my_x = 1\nprint(my_x.fo, zz_top)"
+        assert view.cursor == plus(locate(view.text, "fo"), 2)
+        assert (view.partial, view.attribute) == ("fo", True)
+        gen, lpy = locate(view.text, "zz_top"), locate(src, "zz-top")
+        assert view.map.to_lpy(*plus(gen, 3)) == plus(lpy, 3)
+
     def test_mangled_partial(self):
         src = "(= my-x 1)\n(print my-x.dd-e?)"
         view = pv.view_at_cursor(src, *plus(locate(src, "dd-e?"), 5))
@@ -192,7 +203,7 @@ class TestCursor:
     )
     def test_prefix_stays_in_the_source(self, src, partial, line):
         view = pv.view_at_cursor(src, *plus(locate(src, partial), len(partial)))
-        assert (view.text, view.partial) == (line, partial)
+        assert (view.text, view.partial, view.attribute) == (line, partial, False)
         gen = locate(line, pv.py_name(partial))
         assert view.cursor == plus(gen, len(pv.py_name(partial)))
         assert view.map.to_lpy(*plus(gen, 1)) == plus(locate(src, partial), 1)
@@ -265,6 +276,48 @@ class TestCache:
         assert cache.view_at_cursor("u", 1, "(print a.b)", 1, 10) is cursor
         cache.view_at_cursor("u", 1, "(print a.b)", 1, 9)
         assert len(calls) == 5
+
+    @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
+    def test_a_close_during_a_view_leaves_no_entry(self, monkeypatch, method):
+        # Defect: the document closes while its view is compiled in a
+        # thread, and the view stores its entry after forget dropped it.
+        cache = pv.ViewCache()
+        calls = []
+        real = pv.compile_view
+
+        def closing(source, **kw):
+            calls.append(source)
+            if len(calls) == 1:
+                cache.forget("u")
+            return real(source, **kw)
+
+        monkeypatch.setattr(pv, "compile_view", closing)
+        args = ("u", 1, "(print a.b)") + ((1, 10) if method == "view_at_cursor" else ())
+        getattr(cache, method)(*args)
+        getattr(cache, method)(*args)
+        assert len(calls) == 2  # nothing was cached for the closed document
+
+    @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
+    def test_a_close_before_the_worker_starts_leaves_no_entry(
+        self, monkeypatch, method
+    ):
+        # Defect: the generation is read when the worker starts, after a
+        # forget that came between the hand-off and the start.
+        cache = pv.ViewCache()
+        calls = []
+        real = pv.compile_view
+
+        def counting(source, **kw):
+            calls.append(source)
+            return real(source, **kw)
+
+        monkeypatch.setattr(pv, "compile_view", counting)
+        args = ("u", 1, "(print a.b)") + ((1, 10) if method == "view_at_cursor" else ())
+        generation = cache.generation  # read before the hand-off
+        cache.forget("u")
+        getattr(cache, method)(*args, generation=generation)
+        getattr(cache, method)(*args)
+        assert len(calls) == 2
 
 
 class TestShadows:

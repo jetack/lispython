@@ -1,5 +1,6 @@
 (require lispy.macros *)
 
+(import asyncio)
 (import builtins)
 (import glob)
 (import inspect)
@@ -11,15 +12,19 @@
 
 (from lsprotocol [types as lsp])
 (from pygls.lsp.server [LanguageServer])
+(from pygls.uris [to-fs-path])
+(from pygls.workspace [PositionCodec TextDocument])
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
+(from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
-(from lispy.lsp.python-view [open-form-closers py-name source-prefix])
+(from lispy.lsp.python-view [ViewCache module-names open-form-closers partial-span
+                             py-name source-prefix view-at-cursor])
 (from lispy.lsp.backend [Backends])
 
 (= logger (logging.getLogger __name__))
@@ -840,6 +845,7 @@ or an extra usage line names no usage key."
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_CLOSE)
 (def did-close [ls params]
+  (.forget view-cache params.text_document.uri)
   (.document-closed backends params.text_document.uri)))
 
 ;; pygls' own shutdown awaits this before it answers, so every backend has
@@ -1411,19 +1417,79 @@ or an extra usage line names no usage key."
                       (.append pending base-class)))))))
   (return members))
 
-(def member-edit-range [doc line col typed]
-  "The range of the typed attribute before the cursor, in client units."
-  (= start (lsp.Position :line (- line 1) :character (- col typed)))
-  (= end (lsp.Position :line (- line 1) :character col))
+(def client-position [doc line character]
+  "The 1-based line and code-point character as an LSP Position in client
+   units, through the document's position codec (a test double without one
+   is taken as code points)."
+  (= pos (lsp.Position :line (- line 1) :character character))
   (= codec (getattr doc "position_codec" None))
-  (if (is-not codec None)
-      (do (= start (.position-to-client-units codec doc.lines start))
-          (= end (.position-to-client-units codec doc.lines end))))
-  (return (lsp.Range :start start :end end)))
+  (if (is codec None)
+      (return pos))
+  (return (.position-to-client-units codec doc.lines pos)))
 
-(def member-completion [doc line col]
+(def completion-ranges [doc line col]
+  "The ranges a completion item edits at the 1-based line and code-point
+   col, and the word typed so far: (insert, replace, typed).  insert covers
+   the partial word before the cursor (partial-span, the word the Python
+   view restores), replace that and the rest of the name run after the
+   cursor; both in client units."
+  (= lines (.split doc.source "\n"))
+  (= text (ife (<= 1 line (len lines)) (sub lines (- line 1)) ""))
+  (= [start end] (partial-span text (min col (len text))))
+  (= start-pos (client-position doc line start))
+  (return (, (lsp.Range :start start-pos :end (client-position doc line col))
+             (lsp.Range :start start-pos :end (client-position doc line end))
+             (sub text [: start col]))))
+
+(def completion-edit [ranges new-text insert-replace]
+  "The edit of a completion item putting new-text over the word at the
+   cursor (ranges from completion-ranges): an InsertReplaceEdit when the
+   client supports one (insert-replace), else a TextEdit over the insert
+   range."
+  (= [insert replace _] ranges)
+  (if insert-replace
+      (return (lsp.InsertReplaceEdit :new-text new-text :insert insert :replace replace)))
+  (return (lsp.TextEdit :range insert :new-text new-text)))
+
+(def hyphen-spelling [name]
+  "name with each _ between two alphanumerics written -, or None when that
+   spelling does not stand for name again (py-name)."
+  (= spelled (re.sub "(?<=[^\\W_])_(?=[^\\W_])" "-" name))
+  (return (ife (== (py-name spelled) name) spelled None)))
+
+;; filterText decides whether the client keeps an item while the user types.
+;; `-` is a completion trigger character, so the client asks again right
+;; after one and filters that answer by the word typed so far, hyphen
+;; included; `_` is not, so after a `_` the client filters the answer it
+;; already holds.  So an item carries the spelling being typed: the hyphen
+;; spelling once the typed word holds a `-` (my-|), else the Python name,
+;; which also matches what a user typing `_` spells (my_|).
+(def filter-text [label name typed]
+  "The filterText of a completion item labelled label for Python name name,
+   when typed is the word typed so far."
+  (if (not-in "-" typed)
+      (return name))
+  (if (in "-" label)
+      (return label))
+  (= spelled (hyphen-spelling name))
+  (return (ife (is spelled None) label spelled)))
+
+(def insert-replace-support [ls]
+  "Whether the client takes an InsertReplaceEdit in a completion item
+   (textDocument.completion.completionItem.insertReplaceSupport); False
+   before initialize and for a test double without capabilities."
+  (try
+    (= value (getattr ls "client_capabilities" None))
+    (for attr in ["text_document" "completion" "completion_item" "insert_replace_support"]
+      (= value (getattr value attr None)))
+    (except [Exception]
+      (return False)))
+  (return (is value True)))
+
+(def member-completion [doc line col :insert-replace False]
   "The member CompletionList at the 1-based line and code-point column,
-   or None when the cursor is not on an attribute of a method's receiver."
+   or None when the cursor is not on an attribute of a method's receiver.
+   insert-replace is insert-replace-support's answer for the client."
   (= prefix (source-prefix doc.source line col))
   (= closers (open-form-closers prefix))
   (if (is closers None)
@@ -1443,14 +1509,16 @@ or an extra usage line names no usage key."
   (= whole (find-class-at tree cls))
   (if (is-not whole None)
       (= cls whole))
-  (= edit-range (member-edit-range doc line col (len partial)))
+  (= ranges (completion-ranges doc line col))
+  (= typed (sub ranges 2))
   (return (lsp.CompletionList
             :is-incomplete False
             :items [(lsp.CompletionItem
-                      :label name
+                      :label label
                       :kind kind
-                      :text-edit (lsp.TextEdit :range edit-range :new-text name))
-                    for [name kind] in (.values (class-members cls tree class-receiver))])))
+                      :filter-text (filter-text label name typed)
+                      :text-edit (completion-edit ranges label insert-replace))
+                    for [name [label kind]] in (.items (class-members cls tree class-receiver))])))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion
@@ -1464,23 +1532,23 @@ or an extra usage line names no usage key."
     "->" "->>" "as->"
     "gensym" "pprint"])
 
-(deco (server.feature
-        lsp.TEXT_DOCUMENT_COMPLETION
-        (lsp.CompletionOptions :trigger-characters ["." "-"]))
-(def completion [ls params]
-  (= doc (.get-text-document ls.workspace params.text_document.uri))
-  (= pos params.position)
-
-  ;; On a method receiver's attribute, only the class's members.
+(def local-completion [doc line col :insert-replace False]
+  "lispython's own completion at the 1-based line and code-point column:
+   on a method receiver's attribute only the class's members
+   (member-completion), else the general list.  The answer when no Python
+   backend does."
   (try
-    (= [line col] (cursor-of doc pos))
-    (= members (member-completion doc line col))
+    (= members (member-completion doc line col :insert-replace insert-replace))
     (except [Exception]
       (.debug logger "member completion failed" :exc-info True)
       (= members None)))
   (if (is-not members None)
       (return members))
+  (return (lsp.CompletionList :is-incomplete False :items (general-items doc))))
 
+(def general-items [doc]
+  "The completion items offered anywhere: special forms, lispython
+   keywords, Python builtins, the buffer's definitions, the workspace's."
   (= items [])
   (= seen (set))
 
@@ -1539,8 +1607,227 @@ or an extra usage line names no usage key."
                 :label name
                 :kind lsp.CompletionItemKind.Variable
                 :detail "workspace")))))
+  (return items))
 
-  (return (lsp.CompletionList :is-incomplete False :items items))))
+;; ---------------------------------------------------------------------------
+;; Completion through the Python backend
+;; ---------------------------------------------------------------------------
+
+;; The cursor views of the open documents, by version (python_view.ViewCache).
+(= view-cache (ViewCache))
+
+(def cursor-view [uri version source line col name package import-root generation]
+  "view-at-cursor of source, through view-cache when the document has a
+   version.  It runs the buffer's macros, so callers run it in a thread,
+   reading view-cache's generation before the hand-off."
+  (if (is version None)
+      (return (view-at-cursor source line col :package package :name name
+                              :import-root import-root)))
+  (return (.view-at-cursor view-cache uri version source line col
+                           :package package :name name :import-root import-root
+                           :generation generation)))
+
+(def generated-position [view]
+  "view.cursor as an LSP Position over view.text, in UTF-16 units: the
+   backend client negotiates no position encoding, so the backend counts
+   in the protocol's default."
+  (= [line col] view.cursor)
+  (return (.position-to-client-units (PositionCodec) (.split view.text "\n")
+                                     (lsp.Position :line (- line 1) :character col))))
+
+(def completion-items [answer]
+  "The items of a completion answer: a list, a CompletionList or None."
+  (cond (is answer None)
+        (return (list))
+        (isinstance answer lsp.CompletionList)
+        (return (list answer.items))
+        True
+        (return (list answer))))
+
+(def name-spelling-p [part]
+  "Whether part spells a Python name: its py-name is an identifier and it
+   holds a letter or digit, so an operator such as - (py-name _) is none."
+  (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
+
+(def buffer-spellings [source]
+  "Python name -> the buffer's first spelling of it in source order: every
+   Symbol counts, a dotted one (a.my-b) by each of its parts, each only
+   when it spells a name (name-spelling-p)."
+  (try
+    (= tree (parse source :partial True))
+    (except [Exception]
+      (return {})))
+  (= spellings {})
+  (= stack (list (reversed tree)))
+  (while stack
+    (= node (.pop stack))
+    (cond (isinstance node Symbol)
+          (for part in (.split node.value ".")
+            (if (name-spelling-p part)
+                (.setdefault spellings (py-name part) part)))
+          (isinstance node Expression)
+          (.extend stack (reversed node.list))
+          (isinstance node (, Wrapper MetaIndicator))
+          (if (is-not node.value None)
+              (.append stack node.value))
+          (isinstance node GluedHead)
+          (.extend stack [node.params node.head])))
+  (return spellings))
+
+(def backend-member-items [doc line col items insert-replace]
+  "The backend's attribute completion items as the buffer's: labelled by
+   the buffer's own spelling of each Python name (none: the backend's
+   name), with filterText and edit over the .lpy word at the cursor.  What
+   is positioned in or tied to the generated code (text_edit,
+   additional_text_edits such as an auto-import, insert_text, command,
+   data) is dropped: it would land on lines the user never wrote."
+  (= spellings (buffer-spellings doc.source))
+  (= ranges (completion-ranges doc line col))
+  (= typed (sub ranges 2))
+  (= result [])
+  (for item in items
+    (= name item.label)
+    (= label (.get spellings name name))
+    (.append result
+      (lsp.CompletionItem
+        :label label
+        :kind item.kind
+        :detail item.detail
+        :label-details item.label-details
+        :documentation item.documentation
+        :sort-text item.sort-text
+        :tags item.tags
+        :deprecated item.deprecated
+        :preselect item.preselect
+        :filter-text (filter-text label name typed)
+        :text-edit (completion-edit ranges label insert-replace))))
+  (return result))
+
+(def with-backend-kinds [result items]
+  "result's items, each whose label is one of the backend items' Python
+   names taking that item's kind (a special form or keyword keeps its own):
+   the backend knows that an imported defaultdict is a class.  An item with
+   additional_text_edits (an auto-import of a symbol the buffer never
+   binds) names some other object, so it gives no kind."
+  (= kinds {})
+  (for item in items
+    (if (and (is-not item.kind None) (not item.additional-text-edits))
+        (.setdefault kinds item.label item.kind)))
+  (for item in result.items
+    (if (!= item.kind lsp.CompletionItemKind.Keyword)
+        (do (= kind (.get kinds (py-name item.label)))
+            (if (is-not kind None)
+                (= item.kind kind)))))
+  (return result))
+
+;; Seconds the local list waits for the backend's kinds off an attribute:
+;; they only refine it, so a slow backend never holds up typing.
+(= KINDS-TIMEOUT 0.5)
+
+(def attribute-context-p [source line col]
+  "Whether the cursor may be on an attribute name: a dot right before the
+   word (x.a|, (.me| x)) or an operand past the receiver of an open
+   (. recv ...).  A cheap gate only, read before any view is compiled:
+   the Python view's attribute decides."
+  (= lines (.split source "\n"))
+  (= text (ife (<= 1 line (len lines)) (sub lines (- line 1)) ""))
+  (= col (min col (len text)))
+  (= start (sub (partial-span text col) 0))
+  (if (and (> start 0) (== (sub text (- start 1)) "."))
+      (return True))
+  (= prefix (source-prefix source line col))
+  (= closers (open-form-closers prefix))
+  (if (is closers None)
+      (return False))
+  (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))
+  (if (or (not path) (!= (head-of (sub path -1)) "."))
+      (return False))
+  (= form (sub path -1))
+  (return (or (> (len form) 2) (and (== (len form) 2) (is leaf None)))))
+
+(async-def backend-answer [client doc line col timeout]
+  "(view, items): the cursor view of doc and the backend's completion
+   items there, [] when either is missing.  timeout (None: the request's
+   default, start included) bounds the view and the request together."
+  (= loop (asyncio.get-running-loop))
+  (= deadline (ife (is timeout None) None (+ (.time loop) timeout)))
+  (= path (to-fs-path doc.uri))
+  (if (is path None)
+      (return (, None [])))
+  (= [name package import-root] (module-names path))
+  (= making (asyncio.to-thread cursor-view doc.uri doc.version doc.source line col
+                               name package import-root view-cache.generation))
+  (try
+    (= view (await (ife (is deadline None) making (asyncio.wait-for making timeout))))
+    (except [TimeoutError]
+      (return (, None []))))
+  (if (is view None)
+      (return (, None [])))
+  (= params (lsp.CompletionParams
+              :text-document (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
+              :position (generated-position view)))
+  (= answer (await (.request client lsp.TEXT_DOCUMENT_COMPLETION params
+                             :uri doc.uri :text view.text
+                             :timeout (ife (is deadline None) None
+                                           (max 0 (- deadline (.time loop)))))))
+  (return (, view (completion-items answer))))
+
+(async-def backend-completion [doc line col insert-replace]
+  "The completion answer with the Python backend's help, or None when it
+   gives none (no backend, a buffer with no Python view, no items), and
+   local-completion is the answer.  doc is a snapshot (document-snapshot).
+   On an attribute the backend's items alone answer, and the request may
+   start the backend; elsewhere the local list does, with the kinds of an
+   already running backend within KINDS-TIMEOUT, and a backend not yet
+   running is started without waiting for it (start-soon)."
+  (= client (.available-client backends doc.uri))
+  (if (is client None)
+      (return None))
+  (= attribute (attribute-context-p doc.source line col))
+  (if (and (not attribute) (not client.running))
+      ;; Kinds come from a running backend only: start one for the next
+      ;; keystroke, and answer this one now.
+      (do (.start-soon client)
+          (return None)))
+  (= [view items] (await (backend-answer client doc line col
+                                         (ife attribute None KINDS-TIMEOUT))))
+  (if (not items)
+      (return None))
+  (if view.attribute
+      (return (lsp.CompletionList
+                :is-incomplete False
+                :items (backend-member-items doc line col items insert-replace))))
+  (return (with-backend-kinds
+            (local-completion doc line col :insert-replace insert-replace)
+            items)))
+
+(def document-snapshot [doc]
+  "doc's text, version and position codec as they are now.  A handler that
+   awaits reads the buffer from the snapshot, never from the live document,
+   which an edit during the await changes under the cursor it computed."
+  (return (TextDocument doc.uri doc.source
+                        :version (getattr doc "version" None)
+                        :position-codec (getattr doc "position_codec" None))))
+
+(deco (server.feature
+        lsp.TEXT_DOCUMENT_COMPLETION
+        (lsp.CompletionOptions :trigger-characters ["." "-"]))
+(async-def completion [ls params]
+  (= doc (document-snapshot (.get-text-document ls.workspace params.text_document.uri)))
+  (try
+    (= [line col] (cursor-of doc params.position))
+    (except [Exception]
+      (.debug logger "completion position failed" :exc-info True)
+      (return (lsp.CompletionList :is-incomplete False :items (general-items doc)))))
+  (= insert-replace (insert-replace-support ls))
+  (try
+    (= result (await (backend-completion doc line col insert-replace)))
+    (except [Exception]
+      (.debug logger "backend completion failed" :exc-info True)
+      (= result None)))
+  (if (is-not result None)
+      (return result))
+  (return (local-completion doc line col :insert-replace insert-replace))))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
 (def references [ls params]

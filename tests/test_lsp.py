@@ -5,6 +5,7 @@ before the first error, no version gates.  Diagnostics still use the strict
 parse, so the error itself is reported.
 """
 
+import asyncio
 import importlib
 import re
 import sys
@@ -41,6 +42,11 @@ def ls_with(source):
     document = SimpleNamespace(source=source, uri=URI)
     workspace = SimpleNamespace(get_text_document=lambda uri: document, folders={})
     return SimpleNamespace(workspace=workspace)
+
+
+def run_completion(ls, params):
+    """The completion handler's answer (it is a coroutine)."""
+    return asyncio.run(server.completion(ls, params))
 
 
 def position(line, character):
@@ -87,7 +93,7 @@ def test_definition_hover_and_references(buffer):
 
 
 def test_completion(buffer):
-    items = server.completion(ls_with(buffer), position(2, 2))
+    items = run_completion(ls_with(buffer), position(2, 2))
     labels = {item.label for item in items.items}
     assert {"foo", "bar"} <= labels
 
@@ -385,7 +391,7 @@ class TestMemberCompletion:
         before, after = source.split("|")
         line = before.count("\n")
         character = len(before) - (before.rfind("\n") + 1)
-        result = server.completion(ls_with(before + after), position(line, character))
+        result = run_completion(ls_with(before + after), position(line, character))
         return line, character, result.items
 
     def labels(self, source):
@@ -527,9 +533,52 @@ class TestMemberCompletion:
             workspace=SimpleNamespace(get_text_document=lambda uri: document)
         )
         # After "self.ab": 22 code points, 23 UTF-16 units (the emoji is two).
-        [item, *_] = server.completion(ls, position(2, 23)).items
+        [item, *_] = run_completion(ls, position(2, 23)).items
         start, end = item.text_edit.range.start, item.text_edit.range.end
         assert (start.line, start.character, end.line, end.character) == (2, 21, 2, 23)
+
+    def test_members_replace_the_word_and_filter_by_the_typed_spelling(self):
+        # Defects: accepting mid-word leaves the rest of the word behind (no
+        # replace range); my-x is dropped once the user types my_ (no
+        # filterText), or once they type my- (filterText always my_x).
+        from lsprotocol import types as lsp
+
+        def complete(source):
+            before, after = source.split("|")
+            line = before.count("\n")
+            character = len(before) - (before.rfind("\n") + 1)
+            ls = ls_with(before + after)
+            ls.client_capabilities = lsp.ClientCapabilities(
+                text_document=lsp.TextDocumentClientCapabilities(
+                    completion=lsp.CompletionClientCapabilities(
+                        completion_item=lsp.ClientCompletionItemOptions(
+                            insert_replace_support=True
+                        )
+                    )
+                )
+            )
+            result = run_completion(ls, position(line, character))
+            return character, {item.label: item for item in result.items}
+
+        source = (
+            "(class A []\n"
+            "  (def __init__ [self] (= self.my-x 1))\n"
+            "  (def f [self]\n"
+            "    self.{}))"
+        )
+        character, items = complete(source.format("my|-x"))
+        edit = items["my-x"].text_edit
+        assert (edit.new_text, items["my-x"].filter_text) == ("my-x", "my_x")
+        assert (edit.insert.start.character, edit.insert.end.character) == (
+            character - 2,
+            character,
+        )
+        assert (edit.replace.start.character, edit.replace.end.character) == (
+            character - 2,
+            character + 2,
+        )
+        _, items = complete(source.format("my-|"))
+        assert items["my-x"].filter_text == "my-x"
 
     def test_a_classmethod_receiver_skips_instance_attributes(self):
         source = (
@@ -544,3 +593,70 @@ class TestMemberCompletion:
     def test_a_closure_sees_the_methods_receiver(self):
         source = "(class A []\n  (def f [self]\n    (def g [] self.|)))"
         assert self.labels(source) == {"f"}
+
+
+def test_an_operator_never_spells_a_name():
+    # Defect: (- a b) records - as the spelling of _ (py-name of -), so a
+    # backend member _ is relabelled "-"; ? (py-name _p) likewise.
+    spellings = server.buffer_spellings("(- a b)\n(? c)\n(= x._ x._p)")
+    assert (spellings.get("_", "_"), spellings["_p"]) == ("_", "_p")
+
+
+def test_an_auto_import_item_gives_no_kind():
+    # Defect: a symbol the buffer never binds (offered with an import edit)
+    # sets the kind of the buffer's own name.
+    from lsprotocol import types as lsp
+
+    local = lsp.CompletionList(
+        is_incomplete=False,
+        items=[lsp.CompletionItem(label="foo", kind=lsp.CompletionItemKind.Variable)],
+    )
+    edit = lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=0, character=0),
+            end=lsp.Position(line=0, character=0),
+        ),
+        new_text="from m import foo\n",
+    )
+    imported = lsp.CompletionItem(
+        label="foo", kind=lsp.CompletionItemKind.Class, additional_text_edits=[edit]
+    )
+    [item] = server.with_backend_kinds(local, [imported]).items
+    assert item.kind == lsp.CompletionItemKind.Variable
+
+
+def test_completion_reads_the_view_generation_before_the_hand_off(
+    monkeypatch, tmp_path
+):
+    # Defect: the cursor view's thread reads the cache generation itself,
+    # so a document closed after the hand-off but before the thread starts
+    # still gets its view stored.
+    from pygls.workspace import TextDocument
+
+    pv = importlib.import_module("lispy.lsp.python_view")
+    uri = (tmp_path / "main.lpy").as_uri()
+    monkeypatch.setattr(server, "view_cache", pv.ViewCache())
+    compiled = []
+    real_view_at_cursor = pv.view_at_cursor
+
+    def counting(*args, **kwargs):
+        compiled.append(args)
+        return real_view_at_cursor(*args, **kwargs)
+
+    monkeypatch.setattr(pv, "view_at_cursor", counting)
+    real_to_thread = asyncio.to_thread
+
+    async def close_first(fn, *args, **kwargs):
+        server.view_cache.forget(uri)  # the close lands before the worker
+        return await real_to_thread(fn, *args, **kwargs)
+
+    async def no_items(*args, **kwargs):
+        return []
+
+    client = SimpleNamespace(backend_uri=lambda u: u, request=no_items)
+    document = TextDocument(uri, "(import os)\nos.pa", version=1)
+    monkeypatch.setattr(asyncio, "to_thread", close_first)
+    asyncio.run(server.backend_answer(client, document, 2, 5, None))
+    monkeypatch.setattr(asyncio, "to_thread", real_to_thread)
+    asyncio.run(server.backend_answer(client, document, 2, 5, None))
+    assert len(compiled) == 2  # the closed document's view was not kept

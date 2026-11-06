@@ -129,6 +129,12 @@
     (+= end 1))
   (return end))
 
+(def partial-span [text col]
+  "The partial word at code-point column col of line text, as view-at-cursor
+   reads it: (start, end), where start..col is what was typed before the
+   cursor and col..end the rest of the name run after it."
+  (return (, (_partial-start text col) (_name-end text col))))
+
 ;; ---------------------------------------------------------------------------
 ;; Position map
 ;; ---------------------------------------------------------------------------
@@ -326,15 +332,18 @@
   "A buffer's generated Python (text), its PositionMap (map) and tree, the
    ast.parse of text.  A view at a cursor also has cursor, the generated
    (line, col) right after the partial word typed there, partial, that word
-   as typed, and fallback, True when only the text before the cursor
-   compiled; its tree is None, since its text was edited after the parse
-   (and may not parse: x.)."
+   as typed, attribute, True when that word is an attribute name in the
+   generated Python (a dot right before it: x.a, (. x a), a.b.c), and
+   fallback, True when only the text before the cursor compiled; its tree
+   is None, since its text was edited after the parse (and may not parse:
+   x.)."
   (def __init__ [self text position-map tree]
     (= self.text text)
     (= self.map position-map)
     (= self.tree tree)
     (= self.cursor None)
     (= self.partial None)
+    (= self.attribute False)
     (= self.fallback False)))
 
 ;; Who holds each import root on sys.path: directory -> [users, the entry
@@ -428,11 +437,14 @@
    or None.  The partial word before the cursor (name characters back to a
    dot, space, bracket, quote, comma or ;, less a leading prefix such as :
    or *) is replaced by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
-   (. obj ) ) still compiles; when the whole buffer does not, the text
+   (. obj ) ) still compiles, and so is the rest of its name run after the
+   cursor (my-|x), which would otherwise glue onto the sentinel and is what
+   a completion there replaces; when the whole buffer does not, the text
    before the cursor with its open forms closed is compiled instead.  The
    sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
-   partial's Python name and the map follows that edit.  import-root is
+   partial's Python name and the map follows that edit, the generated
+   partial standing for the whole .lpy word.  import-root is
    compile-view's."
   (= lines (.split source "\n"))
   (if (not (<= 1 line (len lines)))
@@ -440,9 +452,9 @@
   (= text (sub lines (- line 1)))
   (if (not (<= 0 col (len text)))
       (return None))
-  (= start (_partial-start text col))
+  (= [start end] (partial-span text col))
   (= partial (sub text [: start col]))
-  (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: col None])))
+  (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: end None])))
   (= marked (.join "\n" lines))
   (= sentinel-end (+ start (len CURSOR-SENTINEL)))
   (= fallback False)
@@ -474,44 +486,72 @@
   (.shift view.map
           gen-line gen-col (+ gen-col (len CURSOR-SENTINEL))
           (- (len restored) (len CURSOR-SENTINEL))
-          line start sentinel-end (- (len partial) (len CURSOR-SENTINEL)))
+          line start sentinel-end (- (- end start) (len CURSOR-SENTINEL)))
   (= view.tree None)
   (= view.cursor (, gen-line (+ gen-col (len restored))))
   (= view.partial partial)
+  (= view.attribute (and (> index 0) (== (sub view.text (- index 1)) ".")))
   (= view.fallback fallback)
   (return view))
 
 (class ViewCache []
   "The latest view of each document, by version (and cursor for
    view-at-cursor): one entry per uri, so the cache never outgrows the open
-   documents.  A None result is cached like any other."
+   documents.  A None result is cached like any other.  Views are made in
+   worker threads while forget runs on the LSP's loop, so a view stores
+   its result only when no forget came since it began (generation, one
+   counter for every uri: a close elsewhere only costs a cache miss),
+   checked and stored under lock with forget, so a closed document's
+   entry is never stored after it was dropped.  A caller that hands the
+   view to a thread reads generation on its own thread first and passes
+   it, since a forget can come before the worker starts."
   (def __init__ [self]
     (= self._views {})
-    (= self._cursor-views {}))
+    (= self._cursor-views {})
+    (= self._lock (threading.Lock))
+    (= self._generation 0))
 
-  (def view [self uri version source :package "" :name "__main__" :import-root None]
+  (def _store [self table uri key result generation]
+    (with [self._lock]
+      (if (== generation self._generation)
+          (= (sub table uri) (, key result)))))
+
+  (deco property
+    (def generation [self]
+      "The forget count a view made from now on stores under."
+      (return self._generation)))
+
+  (def view [self uri version source :package "" :name "__main__" :import-root None
+             :generation None]
+    (if (is generation None)
+        (= generation self._generation))
     (= hit (.get self._views uri))
     (if (and (is-not hit None) (== (sub hit 0) version))
         (return (sub hit 1)))
     (= result (compile-view source :package package :name name :import-root import-root))
-    (= (sub self._views uri) (, version result))
+    (._store self self._views uri version result generation)
     (return result))
 
   (def view-at-cursor [self uri version source line col
-                       :package "" :name "__main__" :import-root None]
+                       :package "" :name "__main__" :import-root None
+                       :generation None]
+    (if (is generation None)
+        (= generation self._generation))
     (= key (, version line col))
     (= hit (.get self._cursor-views uri))
     (if (and (is-not hit None) (== (sub hit 0) key))
         (return (sub hit 1)))
     (= result (view-at-cursor source line col :package package :name name
                               :import-root import-root))
-    (= (sub self._cursor-views uri) (, key result))
+    (._store self self._cursor-views uri key result generation)
     (return result))
 
   (def forget [self uri]
     "Drop uri's entries (its document closed)."
-    (.pop self._views uri None)
-    (.pop self._cursor-views uri None)))
+    (with [self._lock]
+      (+= self._generation 1)
+      (.pop self._views uri None)
+      (.pop self._cursor-views uri None))))
 
 ;; ---------------------------------------------------------------------------
 ;; View root: shadows of the workspace and the backend's config
