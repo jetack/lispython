@@ -174,7 +174,9 @@ def active_macro_kind(scope):
         namespace = scope.get("__macro_namespace") or {}
         prelude = scope.get(PRELUDE_KEY) or {}
         found = None
-        for key, macro in namespace.items():
+        # A snapshot: in the nREPL another connection's running code (a
+        # compiled defmacro or require) may add to the table meanwhile.
+        for key, macro in list(namespace.items()):
             if "." in key:
                 continue
             # Lookup is by spelling, so a binding hides a macro only when a
