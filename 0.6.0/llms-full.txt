@@ -1376,13 +1376,13 @@ The built-in macros (`cond`, `->`, `fn`, ...) load in every module with no `requ
 | Form | Usage | Description |
 | --- | --- | --- |
 | [`cond`](https://jetack.github.io/lispython/0.6.0/macros/#cond) | `(cond test then test then ... else)` | Nested `if` statements: each test/then pair is one branch (`elif` after the first) and a trailing odd operand is the final `else`. It is a statement and yields no value: use `conde` for a value, and `(do ...)` for a branch of several forms. |
-| [`conde`](https://jetack.github.io/lispython/0.6.0/macros/#conde) | `(conde test then test then ... else)` | The expression form of `cond`: a chain of `ife` whose trailing odd operand is the final else. Always give the else: with an even number of operands the last test is never evaluated and its then is the else. |
+| [`conde`](https://jetack.github.io/lispython/0.6.0/macros/#conde) | `(conde test then test then ... else)` | The expression form of `cond`: a chain of `ife` whose trailing odd operand is the final else. An expression needs a value on every path, so an even number of operands (no else) is a compile error, like Python's `x if c`. |
 | [`->`](https://jetack.github.io/lispython/0.6.0/macros/#-) | `(-> value form ...)` | Thread-first: insert `value` as the first argument of the first form, that result as the first argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value: `(-> x f (g 2))` is `g(f(x), 2)`. |
-| [`->>`](https://jetack.github.io/lispython/0.6.0/macros/#-_1) | `(->> value form ...)` | Thread-last: insert `value` as the last argument of the first form, that result as the last argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value, but the steps after it then thread first instead of last: write every step as a parenthesised call. |
+| [`->>`](https://jetack.github.io/lispython/0.6.0/macros/#-_1) | `(->> value form ...)` | Thread-last: insert `value` as the last argument of the first form, that result as the last argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value: `(->> x f (g 1))` is `g(1, f(x))`. |
 | [`as->`](https://jetack.github.io/lispython/0.6.0/macros/#as-) | `(as-> value name form ...)` | Bind `name` to `value`, then to each form's result in turn, and yield the last result, so `name` can stand anywhere in a form. An expression: each form is evaluated once, left to right, in the caller's scope. |
 | [`fn`](https://jetack.github.io/lispython/0.6.0/macros/#fn) | `(fn [args] body)` | Alias of `lambda`: an anonymous function whose body is one expression. |
 | [`comment`](https://jetack.github.io/lispython/0.6.0/macros/#comment) | `(comment body...)` | Ignore the body: nothing in it is compiled or evaluated, and the form expands to `None`. |
-| [`when`](https://jetack.github.io/lispython/0.6.0/macros/#when) | `(when test body...)` | An `if` statement with no else, whose branch runs every body form in order. A statement: it yields no value. |
+| [`when`](https://jetack.github.io/lispython/0.6.0/macros/#when) | `(when test body...)` | An `if` statement with no else, whose branch runs every body form in order. A statement: it yields no value. The body must hold a statement, as Python's `if` does: `(when test)` is a compile error. |
 | [`inc`](https://jetack.github.io/lispython/0.6.0/macros/#inc) | `(inc value)` | The expression `value + 1`; `value` itself is left unchanged. |
 | [`dec`](https://jetack.github.io/lispython/0.6.0/macros/#dec) | `(dec value)` | The expression `value - 1`; `value` itself is left unchanged. |
 | [`++`](https://jetack.github.io/lispython/0.6.0/macros/#_1) | `(++ target)` | The statement `target += 1`. |
@@ -1506,8 +1506,8 @@ else:
 ```
 
 The expression form of `cond`: a chain of `ife` whose trailing odd operand is
-the final else. Always give the else: with an even number of operands the
-last test is never evaluated and its then is the else.
+the final else. An expression needs a value on every path, so an even number
+of operands (no else) is a compile error, like Python's `x if c`.
 
 LisPy version
 ```lispython
@@ -1519,6 +1519,8 @@ Python version
 ```python
 label = "neg" if x < 0 else "zero" if x == 0 else "pos"
 ```
+
+The final else is required: `(conde x 1 y 2)` is a compile error, as `1 if x else 2 if y` is in Python.
 
 ### `->`
 ```lispython
@@ -1546,9 +1548,8 @@ g(f(x, 1), 2)
 
 Thread-last: insert `value` as the last argument of the first form, that
 result as the last argument of the next, and so on. A form that is not a
-parenthesised call, such as a bare name, is called with the value, but the
-steps after it then thread first instead of last: write every step as a
-parenthesised call.
+parenthesised call, such as a bare name, is called with the value:
+`(->> x f (g 1))` is `g(1, f(x))`.
 
 LisPy version
 ```lispython
@@ -1558,6 +1559,8 @@ Python version
 ```python
 g(2, f(1, x))
 ```
+
+A bare name is called with the value and threading stays last: `(->> x f (g 1))` is `g(1, f(x))`.
 
 ### `as->`
 ```lispython
@@ -1628,7 +1631,8 @@ print("done")
 ```
 
 An `if` statement with no else, whose branch runs every body form in order.
-A statement: it yields no value.
+A statement: it yields no value. The body must hold a statement, as Python's
+`if` does: `(when test)` is a compile error.
 
 LisPy version
 ```lispython

@@ -1457,8 +1457,8 @@ Python version
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="p">(</span><span class="kp">conde</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="n">then</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="n">then</span><span class="w"> </span><span class="kc">...</span><span class="w"> </span><span class="k">else</span><span class="p">)</span>
 </span></code></pre></div>
 <p>The expression form of <code>cond</code>: a chain of <code>ife</code> whose trailing odd operand is
-the final else. Always give the else: with an even number of operands the
-last test is never evaluated and its then is the else.</p>
+the final else. An expression needs a value on every path, so an even number
+of operands (no else) is a compile error, like Python's <code>x if c</code>.</p>
 <p>LisPy version
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-13-1"><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="p">(</span><span class="o">=</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="p">(</span><span class="kp">conde</span><span class="w"> </span><span class="p">(</span><span class="o">&lt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="s">&quot;neg&quot;</span>
 </span><span id="__span-13-2"><a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="w">                </span><span class="p">(</span><span class="o">==</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="s">&quot;zero&quot;</span>
@@ -1467,6 +1467,7 @@ last test is never evaluated and its then is the else.</p>
 Python version
 <div class="language-python highlight"><pre><span></span><code><span id="__span-14-1"><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">label</span> <span class="o">=</span> <span class="s2">&quot;neg&quot;</span> <span class="k">if</span> <span class="n">x</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="k">else</span> <span class="s2">&quot;zero&quot;</span> <span class="k">if</span> <span class="n">x</span> <span class="o">==</span> <span class="mi">0</span> <span class="k">else</span> <span class="s2">&quot;pos&quot;</span>
 </span></code></pre></div></p>
+<p>The final else is required: <code>(conde x 1 y 2)</code> is a compile error, as <code>1 if x else 2 if y</code> is in Python.</p>
 <h3 id="-"><code>-&gt;</code><a class="headerlink" href="#-" title="Permanent link">&para;</a></h3>
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-15-1"><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="p">(</span><span class="kp">-&gt;</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="n">form</span><span class="w"> </span><span class="kc">...</span><span class="p">)</span>
 </span></code></pre></div>
@@ -1485,15 +1486,15 @@ Python version
 </span></code></pre></div>
 <p>Thread-last: insert <code>value</code> as the last argument of the first form, that
 result as the last argument of the next, and so on. A form that is not a
-parenthesised call, such as a bare name, is called with the value, but the
-steps after it then thread first instead of last: write every step as a
-parenthesised call.</p>
+parenthesised call, such as a bare name, is called with the value:
+<code>(-&gt;&gt; x f (g 1))</code> is <code>g(1, f(x))</code>.</p>
 <p>LisPy version
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-19-1"><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="p">(</span><span class="kp">-&gt;&gt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">(</span><span class="nf">f</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nf">g</span><span class="w"> </span><span class="mi">2</span><span class="p">))</span>
 </span></code></pre></div>
 Python version
 <div class="language-python highlight"><pre><span></span><code><span id="__span-20-1"><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="n">g</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">f</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="n">x</span><span class="p">))</span>
 </span></code></pre></div></p>
+<p>A bare name is called with the value and threading stays last: <code>(-&gt;&gt; x f (g 1))</code> is <code>g(1, f(x))</code>.</p>
 <h3 id="as-"><code>as-&gt;</code><a class="headerlink" href="#as-" title="Permanent link">&para;</a></h3>
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-21-1"><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="p">(</span><span class="kp">as-&gt;</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="n">form</span><span class="w"> </span><span class="kc">...</span><span class="p">)</span>
 </span></code></pre></div>
@@ -1539,7 +1540,8 @@ Python version
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-30-1"><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="p">(</span><span class="kp">when</span><span class="w"> </span><span class="n">test</span><span class="w"> </span><span class="n">body...</span><span class="p">)</span>
 </span></code></pre></div>
 <p>An <code>if</code> statement with no else, whose branch runs every body form in order.
-A statement: it yields no value.</p>
+A statement: it yields no value. The body must hold a statement, as Python's
+<code>if</code> does: <code>(when test)</code> is a compile error.</p>
 <p>LisPy version
 <div class="language-lispython highlight"><pre><span></span><code><span id="__span-31-1"><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="p">(</span><span class="kp">when</span><span class="w"> </span><span class="p">(</span><span class="o">&gt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span>
 </span><span id="__span-31-2"><a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a><span class="w">  </span><span class="p">(</span><span class="nb">print</span><span class="w"> </span><span class="s">&quot;positive&quot;</span><span class="p">)</span>

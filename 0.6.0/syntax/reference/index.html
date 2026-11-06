@@ -1422,7 +1422,7 @@ Statements, Expressions and Macros pages.</p>
 <tr>
 <td><a href="../../macros/#conde"><code>conde</code></a></td>
 <td><code>(conde test then test then ... else)</code></td>
-<td>The expression form of <code>cond</code>: a chain of <code>ife</code> whose trailing odd operand is the final else. Always give the else: with an even number of operands the last test is never evaluated and its then is the else.</td>
+<td>The expression form of <code>cond</code>: a chain of <code>ife</code> whose trailing odd operand is the final else. An expression needs a value on every path, so an even number of operands (no else) is a compile error, like Python's <code>x if c</code>.</td>
 </tr>
 <tr>
 <td><a href="../../macros/#-"><code>-&gt;</code></a></td>
@@ -1432,7 +1432,7 @@ Statements, Expressions and Macros pages.</p>
 <tr>
 <td><a href="../../macros/#-_1"><code>-&gt;&gt;</code></a></td>
 <td><code>(-&gt;&gt; value form ...)</code></td>
-<td>Thread-last: insert <code>value</code> as the last argument of the first form, that result as the last argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value, but the steps after it then thread first instead of last: write every step as a parenthesised call.</td>
+<td>Thread-last: insert <code>value</code> as the last argument of the first form, that result as the last argument of the next, and so on. A form that is not a parenthesised call, such as a bare name, is called with the value: <code>(-&gt;&gt; x f (g 1))</code> is <code>g(1, f(x))</code>.</td>
 </tr>
 <tr>
 <td><a href="../../macros/#as-"><code>as-&gt;</code></a></td>
@@ -1452,7 +1452,7 @@ Statements, Expressions and Macros pages.</p>
 <tr>
 <td><a href="../../macros/#when"><code>when</code></a></td>
 <td><code>(when test body...)</code></td>
-<td>An <code>if</code> statement with no else, whose branch runs every body form in order. A statement: it yields no value.</td>
+<td>An <code>if</code> statement with no else, whose branch runs every body form in order. A statement: it yields no value. The body must hold a statement, as Python's <code>if</code> does: <code>(when test)</code> is a compile error.</td>
 </tr>
 <tr>
 <td><a href="../../macros/#inc"><code>inc</code></a></td>
