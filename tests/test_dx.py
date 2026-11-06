@@ -326,7 +326,7 @@ def test_definition_publishes_symbols_only_for_workspace_files(
             text_document=SimpleNamespace(uri=main.as_uri()),
             position=SimpleNamespace(line=1, character=2),
         )
-        [location] = server.definition(ls, params)
+        [location] = asyncio.run(server.definition(ls, params))
         return location.uri
 
     assert go_to("dx_ws_module", "ws-helper") == (ws / "dx_ws_module.lpy").as_uri()

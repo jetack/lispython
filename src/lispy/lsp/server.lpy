@@ -26,8 +26,8 @@
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
-(from lispy.lsp.python-view [ViewCache module-names open-form-closers partial-span
-                             py-name source-prefix view-at-cursor])
+(from lispy.lsp.python-view [ViewCache lpy-range module-names open-form-closers
+                             partial-span py-name source-prefix view-at-cursor])
 (from lispy.lsp.backend [Backends])
 
 (= logger (logging.getLogger __name__))
@@ -604,7 +604,8 @@
   (if (is-not symbols None)
       (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
 
-(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False
+                          :imports True]
   "Walk AST and collect all definition locations keyed by symbol name.
 
    defs feeds go-to-definition and completion, so it also holds the names
@@ -614,7 +615,8 @@
    with the kind definition-kind gives it.  Imports and loop variables bind
    names but declare nothing, so they get no symbol, and an = inside a def
    body (in-function) is a local, so it gets none either; module and
-   class-body assignments do."
+   class-body assignments do.  With imports False the names import forms
+   bind are left out (the buffer's own bindings only)."
   (if (is defs None)
       (= defs {}))
 
@@ -637,7 +639,7 @@
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
                                            :defs defs :symbols symbols
-                                           :in-function True)))))
+                                           :in-function True :imports imports)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -649,7 +651,8 @@
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs :symbols symbols))))
+                  (collect-definitions body uri :defs defs :symbols symbols
+                                       :imports imports))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
@@ -673,17 +676,19 @@
                   (.append (.setdefault defs name []) loc)))
           (collect-definitions (sub node.list [: 1 None]) uri
                                :defs defs :symbols symbols
-                               :in-function in-function))
+                               :in-function in-function :imports imports))
 
       (in form IMPORT-HEADS)
-      (for [name name-node] in (buffer-import-bindings node)
-        (= loc (lsp.Location :uri uri :range (node-range name-node)))
-        (.append (.setdefault defs name []) loc))
+      (if imports
+          (for [name name-node] in (buffer-import-bindings node)
+            (= loc (lsp.Location :uri uri :range (node-range name-node)))
+            (.append (.setdefault defs name []) loc)))
 
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs :symbols symbols :in-function in-function))))
+            uri :defs defs :symbols symbols :in-function in-function
+            :imports imports))))
 
   (return defs))
 
@@ -837,20 +842,35 @@
   (return (builtin-hover target))))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DEFINITION)
-(def definition [ls params]
-  (= doc (.get-text-document ls.workspace params.text_document.uri))
-  (try
-    (= tree (parse doc.source :partial True))
-    (except [Exception]
-      (return None)))
-  (= pos params.position)
-  (= target (node-at-position tree pos.line pos.character))
-  (if (or (is target None) (not (isinstance target Symbol)))
+(async-def definition [ls params]
+  (= found (cursor-symbol ls params))
+  (if (is found None)
       (return None))
+  (= [doc tree line col target] found)
   (= name target.value)
   (if (in name SPECIAL-FORM-DOCS)
       (return None))
+  ;; The buffer's own bindings answer here; what an import binds is the
+  ;; backend's to follow into its module.
+  (= own (.get (collect-definitions tree doc.uri :imports False) name))
+  (if own
+      (return own))
+  (try
+    (= result (await (backend-locations doc line col target lsp.TEXT_DOCUMENT_DEFINITION
+                                        (fn [document position]
+                                          (lsp.DefinitionParams :text-document document
+                                                                :position position)))))
+    (except [Exception]
+      (.debug logger "backend definition failed" :exc-info True)
+      (= result None)))
+  (if result
+      (return result))
+  (return (local-definition ls doc tree name))))
 
+(def local-definition [ls doc tree name]
+  "go-to-definition of name without the backend: the buffer's definitions
+   (imports included), the module an import names, the workspace index,
+   then a builtin's source."
   ;; 1. Local definitions in the file
   (= defs (collect-definitions tree doc.uri))
   (= local (.get defs name))
@@ -902,7 +922,7 @@
                   (return [(lsp.Location
                     :uri (.as-uri source-path)
                     :range (make-range lineno 0 lineno 0))])))))
-  (return None)))
+  (return None))
 
 ;; ---------------------------------------------------------------------------
 ;; Signature help
@@ -1369,15 +1389,16 @@
   (= lines (.split source "\n"))
   (return (ife (<= 1 line (len lines)) (sub lines (- line 1)) "")))
 
-(def client-position [doc line character]
+(def client-position [doc line character :lines None]
   "The 1-based line and code-point character as an LSP Position in client
    units, through the document's position codec (a test double without one
-   is taken as code points)."
+   is taken as code points), over lines (default the document's own: a
+   location in another file counts over that file's)."
   (= pos (lsp.Position :line (- line 1) :character character))
   (= codec (getattr doc "position_codec" None))
   (if (is codec None)
       (return pos))
-  (return (.position-to-client-units codec doc.lines pos)))
+  (return (.position-to-client-units codec (ife (is lines None) doc.lines lines) pos)))
 
 (def completion-ranges [doc line col]
   "The ranges a completion item edits at the 1-based line and code-point
@@ -1733,7 +1754,7 @@
   (if (is params None)
       (return (, view None)))
   (= answer (await (.request client method params
-                             :uri doc.uri :text view.text
+                             :uri doc.uri :text view.text :origin (, doc.source view)
                              :timeout (ife (is deadline None) None
                                            (max 0 (- deadline (.time loop)))))))
   (return (, view answer)))
@@ -1993,18 +2014,185 @@
       (return result))
   (return (local-completion doc line col :insert-replace insert-replace))))
 
-(deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
-(def references [ls params]
-  (= doc (.get-text-document ls.workspace params.text_document.uri))
+;; ---------------------------------------------------------------------------
+;; Definition and references through the Python backend
+;; ---------------------------------------------------------------------------
+
+(def cursor-symbol [ls params]
+  "(doc, tree, line, col, target) of a request at params' position: a
+   snapshot of the document (document-snapshot), its partial parse, the
+   cursor as (1-based line, code-point column) and the Symbol there; None
+   when there is no Symbol."
+  (= doc (document-snapshot (.get-text-document ls.workspace params.text_document.uri)))
   (try
     (= tree (parse doc.source :partial True))
+    (= [line col] (cursor-of doc params.position))
     (except [Exception]
       (return None)))
-  (= pos params.position)
-  (= target (node-at-position tree pos.line pos.character))
-  (if (or (is target None) (not (isinstance target Symbol)))
+  (= target (node-at-position tree (- line 1) col))
+  (if (not (isinstance target Symbol))
       (return None))
-  (return (collect-references tree target.value doc.uri))))
+  (return (, doc tree line col target)))
+
+;; The views of .lpy files the backend read as shadows on disk, keyed by uri
+;; and by the source text itself (python_view.ViewCache).
+(= disk-views (ViewCache))
+
+(def answer-locations [answer]
+  "(uri, range) of each location of a definition or references answer:
+   None, a Location, or a list of Location or LocationLink (its target and
+   target selection range)."
+  (if (is answer None)
+      (return (list)))
+  (if (not (isinstance answer (, list tuple)))
+      (= answer [answer]))
+  (= found [])
+  (for item in answer
+    (cond (isinstance item lsp.Location)
+          (.append found (, item.uri item.range))
+          (isinstance item lsp.LocationLink)
+          (.append found (, item.target-uri item.target-selection-range))))
+  (return found))
+
+(def disk-origin [lpy-uri shadow-path generation]
+  "(source, view) of the .lpy file at lpy-uri as it is on disk, or None: its
+   view must be exactly the text of shadow-path, the shadow the backend
+   read, since the backend's positions lie in that text.  It runs the
+   file's macros, so callers run it in a thread, reading disk-views'
+   generation before the hand-off."
+  (= lpy-path (to-fs-path lpy-uri))
+  (if (or (is lpy-path None) (is shadow-path None))
+      (return None))
+  (try
+    (with [(open lpy-path "r" :encoding "utf-8") as f]
+      (= source (.read f)))
+    (with [(open shadow-path "r" :encoding "utf-8") as f]
+      (= shadow (.read f)))
+    (except [(, OSError ValueError)]
+      (return None)))
+  (= [name package import-root] (module-names lpy-path))
+  (= view (.view disk-views lpy-uri source source :name name :package package
+                 :import-root import-root :generation generation))
+  (if (or (is view None) (!= view.text shadow))
+      (return None))
+  (return (, source view)))
+
+(def origin-range [doc origin rng]
+  "rng, a backend range over the text of origin's view in UTF-16 units (the
+   protocol's default, which the backend client keeps: generated-position),
+   as the range of origin's .lpy source in doc's client units, or None when
+   it maps nowhere (lpy-range)."
+  (= [source view] origin)
+  (= codec (PositionCodec))
+  (= gen-lines (.split view.text "\n"))
+  (= start (.position-from-client-units codec gen-lines rng.start))
+  (= end (.position-from-client-units codec gen-lines rng.end))
+  (= mapped (lpy-range view source (, (+ start.line 1) start.character)
+                       (, (+ end.line 1) end.character)))
+  (if (is mapped None)
+      (return None))
+  (= lines (.split source "\n"))
+  (= [[start-line start-col] [end-line end-col]] mapped)
+  (return (lsp.Range :start (client-position doc start-line start-col :lines lines)
+                     :end (client-position doc end-line end-col :lines lines))))
+
+(async-def editor-location [client doc uri rng origins]
+  "The backend's location uri, rng as the editor's Location, or None when it
+   lies nowhere the editor has (BackendClient.locate).  origins caches, for
+   one answer, the disk origin (disk-origin) of each .lpy uri."
+  (= place (.locate client uri))
+  (if (is place None)
+      (return None))
+  (if (== (sub place 0) "file")
+      ;; A real .py or stub: the backend's range, in UTF-16 units over that
+      ;; file, passes unchanged.
+      (return (lsp.Location :uri (sub place 1) :range rng)))
+  (= [_ lpy-uri origin] place)
+  (if (is origin None)
+      (do (if (not-in lpy-uri origins)
+              (= (sub origins lpy-uri)
+                 (await (asyncio.to-thread disk-origin lpy-uri (to-fs-path uri)
+                                           disk-views.generation))))
+          (= origin (sub origins lpy-uri))))
+  (if (is origin None)
+      (return None))
+  (= mapped (origin-range doc origin rng))
+  (if (is mapped None)
+      (return None))
+  (return (lsp.Location :uri lpy-uri :range mapped)))
+
+(def location-request [head offset make]
+  "make-params of a definition or references request at the generated start
+   of the restored word (offset code points from the view's cursor), built
+   by make from the document and that position, or of none when head, the
+   symbol's Python name, is a macro of the view."
+  (return (fn [document view]
+            (ife (in head view.macros)
+                 None
+                 (make document (generated-position view :offset offset))))))
+
+(async-def backend-locations [doc line col target method make]
+  "The backend's answer to definition or references request method (params
+   from make, location-request) on the word at the 1-based line and
+   code-point col (Symbol target there), as editor Locations in answer
+   order without repeats: a list, maybe empty, or None when there is no
+   backend, no word, no view or no answer.  doc is a snapshot.  The view
+   is made with the cursor at the word's end and the request asks at its
+   generated start, as backend-hover does.  A location in a compiled view
+   maps back to its .lpy (lpy-range), one in a real file passes, one that
+   maps nowhere is dropped (editor-location)."
+  (= client (.available-client backends doc.uri))
+  (if (is client None)
+      (return None))
+  (= text (line-text doc.source line))
+  (= [start end] (partial-span text (min col (len text))))
+  (if (== start end)
+      (return None))
+  (= offset (- (len (py-name (sub text [: start end])))))
+  (= [view answer] (await (backend-request client doc line end None method
+                                           (location-request (py-name target.value)
+                                                             offset make))))
+  (if (is answer None)
+      (return None))
+  (= origins {})
+  (= seen (set))
+  (= result [])
+  (for [uri rng] in (answer-locations answer)
+    (= location (await (editor-location client doc uri rng origins)))
+    (if (is location None)
+        (continue))
+    (= key (, location.uri location.range.start.line location.range.start.character
+              location.range.end.line location.range.end.character))
+    (if (not-in key seen)
+        (do (.add seen key)
+            (.append result location))))
+  (return result))
+
+(deco (server.feature lsp.TEXT_DOCUMENT_REFERENCES)
+(async-def references [ls params]
+  (= found (cursor-symbol ls params))
+  (if (is found None)
+      (return None))
+  (= [doc tree line col target] found)
+  (= local (collect-references tree target.value doc.uri))
+  (if (in target.value SPECIAL-FORM-DOCS)
+      (return local))
+  ;; A local binding goes to the backend too: its uses in other .lpy files
+  ;; are what references across files are for.
+  (= context (or (getattr params "context" None)
+                 (lsp.ReferenceContext :include-declaration True)))
+  (try
+    (= result (await (backend-locations doc line col target lsp.TEXT_DOCUMENT_REFERENCES
+                                        (fn [document position]
+                                          (lsp.ReferenceParams :text-document document
+                                                               :position position
+                                                               :context context)))))
+    (except [Exception]
+      (.debug logger "backend references failed" :exc-info True)
+      (= result None)))
+  (if result
+      (return result))
+  (return local)))
 
 (deco (server.feature lsp.WORKSPACE_SYMBOL)
 (def workspace-symbol [ls params]

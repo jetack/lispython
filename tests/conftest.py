@@ -71,12 +71,15 @@ def run_on_loop():
 @pytest.fixture(scope="session")
 def backend_project(tmp_path_factory):
     """The workspace folder of the backend tests; its main.lpy is the file
-    every buffer is opened as. helpers.py is a user .py module beside it,
-    written before any backend starts (the view root mirrors it then); no
-    buffer names it unless it imports it, so it changes no other answer."""
+    every buffer is opened as. helpers.py is a user .py module beside it and
+    other.lpy a .lpy module (its shadow is the backend's other.py), both
+    written before any backend starts (the view root mirrors and compiles
+    them then); no buffer names them unless it imports them, so they change
+    no other answer."""
     root = tmp_path_factory.mktemp("backend-project")
     (root / "main.lpy").write_text("(= y 1)\n")
     (root / "helpers.py").write_text("def my_helper(alpha, beta):\n    return alpha\n")
+    (root / "other.lpy").write_text("(def other-fn [a]\n  (return a))\n(other-fn 1)\n")
     return root
 
 
@@ -115,7 +118,8 @@ def lsp_buffer(backend_project, real_backends, monkeypatch):
     """lsp_buffer(marked, backends=real_backends, **ls_attrs) -> (ls, uri,
     position): the server pointed at backends, and a language server double
     whose workspace holds marked (``|`` is the cursor, removed) as
-    backend_project's main.lpy at a new version; position is the cursor in
+    backend_project's main.lpy at a new version (and no folders, which only
+    the local go-to-definition reads); position is the cursor in
     UTF-16 units, as a client sends it. lsp_buffer.document is the last
     buffer, a real pygls TextDocument, so lines and the position codec are
     the ones the server uses. Each test gets a fresh view cache."""
@@ -138,7 +142,7 @@ def lsp_buffer(backend_project, real_backends, monkeypatch):
         )
         document = TextDocument(uri, before + after, version=next(versions))
         open_buffer.document = document
-        workspace = SimpleNamespace(get_text_document=lambda uri: document)
+        workspace = SimpleNamespace(get_text_document=lambda uri: document, folders={})
         return SimpleNamespace(workspace=workspace, **ls_attrs), uri, position
 
     return open_buffer
@@ -147,8 +151,10 @@ def lsp_buffer(backend_project, real_backends, monkeypatch):
 @pytest.fixture
 def backend_requests(backend_project, real_backends, monkeypatch):
     """The methods of the requests sent to the session's backend (sent), and
-    a way to set its answer (answer["value"]) or act while it is asked
-    (answer["during"])."""
+    a way to set its answer (answer["value"], never asking the backend),
+    replace the answer it gives (answer["replace"]: the request is sent, so
+    the document is synced, and its answer dropped) or act while it is
+    asked (answer["during"])."""
     client = real_backends.available_client((backend_project / "main.lpy").as_uri())
     sent = []
     real_request = client.request
@@ -160,7 +166,8 @@ def backend_requests(backend_project, real_backends, monkeypatch):
             answer["during"]()
         if "value" in answer:
             return answer["value"]
-        return await real_request(method, params, **kwargs)
+        result = await real_request(method, params, **kwargs)
+        return answer.get("replace", result)
 
     monkeypatch.setattr(client, "request", request)
     return SimpleNamespace(sent=sent, answer=answer)

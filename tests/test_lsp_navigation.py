@@ -1,0 +1,185 @@
+"""Go-to-definition and references through the real Python backend
+(basedpyright).
+
+The backend answers over the compiled views; every location it gives is
+mapped back: one in a .lpy file's view to that .lpy (the open buffer's to
+its own uri, another file's through its shadow on disk), one in a real .py
+passes unchanged, one in code the compiler made up is dropped. The buffer's
+own bindings, lispython's forms and macros keep the local answer, as does a
+buffer with no backend or no Python view.
+
+The tests share the session's basedpyright over one tmp project
+(``real_backends``, ``lsp_buffer``, ``backend_project`` in conftest.py:
+main.lpy is the buffer, other.lpy and helpers.py its neighbours). ``|`` in a
+source marks the cursor; it is removed first.
+"""
+
+import importlib
+
+import pytest
+from lsprotocol import types as lsp
+
+import lispy  # noqa: F401  (registers the .lpy importer)
+
+server = importlib.import_module("lispy.lsp.server")
+backend = importlib.import_module("lispy.lsp.backend")
+python_view = importlib.import_module("lispy.lsp.python_view")
+
+pytestmark = pytest.mark.skipif(
+    backend.backend_argv("basedpyright") is None,
+    reason="basedpyright is not installed (the lsp extra)",
+)
+
+
+@pytest.fixture
+def navigate(lsp_buffer, run_on_loop, real_backends):
+    """navigate(handler, marked, backends=real_backends) -> the handler's
+    answer at the | of marked (definition or references)."""
+
+    def run(handler, marked, backends=real_backends):
+        ls, uri, position = lsp_buffer(marked, backends)
+        document = lsp.TextDocumentIdentifier(uri=uri)
+        if handler is server.references:
+            params = lsp.ReferenceParams(
+                text_document=document,
+                position=position,
+                context=lsp.ReferenceContext(include_declaration=True),
+            )
+        else:
+            params = lsp.DefinitionParams(text_document=document, position=position)
+        return run_on_loop(handler(ls, params))
+
+    return run
+
+
+def spans(locations):
+    """(file name, start line, start col, end line, end col) of each."""
+    return [
+        (
+            loc.uri.rsplit("/", 1)[-1],
+            loc.range.start.line,
+            loc.range.start.character,
+            loc.range.end.line,
+            loc.range.end.character,
+        )
+        for loc in locations or []
+    ]
+
+
+OTHER = "(from other [other-fn])\n"
+
+
+def test_definition_in_another_lpy_module(navigate, backend_project):
+    # Defects: the shadow's other.py is passed on (a file the user never
+    # wrote, in the cache), or its range stays in the generated text
+    # (def other_fn at columns 4-12 of line 0, not other-fn at 5-13).
+    [location] = navigate(server.definition, OTHER + "(other-f|n 2)")
+    assert location.uri == (backend_project / "other.lpy").as_uri()
+    assert spans([location]) == [("other.lpy", 0, 5, 0, 13)]
+
+
+def test_definition_in_a_user_py_module(navigate, backend_project):
+    # Defect: a real .py's location is dropped or remapped; it is the file
+    # itself, its range the backend's.
+    [location] = navigate(
+        server.definition, "(from helpers [my-helper])\n(my-hel|per 1 2)"
+    )
+    assert location.uri == (backend_project / "helpers.py").as_uri()
+    assert spans([location]) == [("helpers.py", 0, 4, 0, 13)]
+
+
+def test_references_across_lpy_files(navigate, backend_project):
+    # Defects: the other file's references stay in its shadow, the buffer's
+    # come back under the shadow's uri, or columns are generated ones.
+    found = set(spans(navigate(server.references, OTHER + "(other-f|n 2)")))
+    assert {
+        ("other.lpy", 0, 5, 0, 13),
+        ("other.lpy", 2, 1, 2, 9),
+        ("main.lpy", 0, 13, 0, 21),
+        ("main.lpy", 1, 1, 1, 9),
+    } <= found
+    assert all(name in ("other.lpy", "main.lpy") for name, *_ in found)
+
+
+MACRO_BUFFER = "(defmacro swap [a b] `(= [~a ~b] [~b ~a]))\n(= my-x 1)\n(print my-|x)\n"
+
+
+def generated_range(text, word, nth=0):
+    """The 0-based LSP range of the nth occurrence of word in text."""
+    index = -1
+    for _ in range(nth + 1):
+        index = text.index(word, index + 1)
+    line = text.count("\n", 0, index)
+    col = index - (text.rfind("\n", 0, index) + 1)
+    return lsp.Range(
+        start=lsp.Position(line=line, character=col),
+        end=lsp.Position(line=line, character=col + len(word)),
+    )
+
+
+def test_a_location_in_generated_code_is_dropped(
+    navigate, backend_requests, real_backends, backend_project
+):
+    # Defect: a location on code the compiler made up (the defmacro's
+    # temporary def) reaches the editor at whatever .lpy text its line
+    # number lands on; the location on my_x still maps to my-x.
+    uri = (backend_project / "main.lpy").as_uri()
+    shadow = real_backends.available_client(uri).backend_uri(uri)
+    text = python_view.compile_view(MACRO_BUFFER.replace("|", "")).text
+    backend_requests.answer["replace"] = [
+        lsp.Location(
+            uri=shadow, range=generated_range(text, "___defmacro_temp___swap")
+        ),
+        lsp.Location(uri=shadow, range=generated_range(text, "my_x", 1)),
+    ]
+    found = navigate(server.references, MACRO_BUFFER)
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_REFERENCES]
+    assert spans(found) == [("main.lpy", 2, 7, 2, 11)]
+
+
+def test_backend_off_gives_the_local_answers(navigate, off_backends):
+    # Defect: no backend leaves definition or references empty instead of
+    # the local answers: the name the import binds, the buffer's own
+    # occurrences.
+    found = navigate(server.definition, OTHER + "(other-f|n 2)", off_backends)
+    assert spans(found) == [("main.lpy", 0, 13, 0, 21)]
+    found = navigate(server.references, OTHER + "(other-f|n 2)", off_backends)
+    assert spans(found) == [("main.lpy", 0, 13, 0, 21), ("main.lpy", 1, 1, 1, 9)]
+
+
+def test_a_buffer_that_does_not_compile_gives_the_local_answers(
+    navigate, backend_requests
+):
+    # An earlier refused form: there is no Python view, so no request, and
+    # the local answers stand.
+    marked = "(def)\n" + OTHER + "(other-f|n 2)"
+    assert spans(navigate(server.definition, marked)) == [("main.lpy", 1, 13, 1, 21)]
+    assert spans(navigate(server.references, marked)) == [
+        ("main.lpy", 1, 13, 1, 21),
+        ("main.lpy", 2, 1, 2, 9),
+    ]
+    assert backend_requests.sent == []
+
+
+def test_a_buffer_binding_is_defined_locally(navigate, backend_requests):
+    # Defect: the buffer's own binding waits for the backend, which only
+    # finds the same place again through the view.
+    found = navigate(server.definition, "(= my-x 1)\n(print my-|x)")
+    assert spans(found) == [("main.lpy", 0, 3, 0, 7)]
+    assert backend_requests.sent == []
+
+
+@pytest.mark.parametrize("handler", [server.definition, server.references])
+@pytest.mark.parametrize(
+    "marked",
+    [
+        "(require lispy.macros *)\n(wh|en 1 2)",
+        "(defmacro twice [x] (return x))\n(twi|ce 1)",
+    ],
+    ids=["required macro", "defmacro"],
+)
+def test_a_macro_never_reaches_the_backend(navigate, backend_requests, handler, marked):
+    # Defect: a macro head is sent to the backend, which sees the code it
+    # expanded to (or the sentinel's call) and answers for some Python name.
+    navigate(handler, marked)
+    assert backend_requests.sent == []

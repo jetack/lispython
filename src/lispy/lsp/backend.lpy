@@ -265,7 +265,9 @@
     (= self._starting None)
     ;; _discard's cleanups still running (_reap).
     (= self._cleanups (set))
-    ;; lpy uri -> [backend uri, version, text last sent], for this spawn.
+    ;; lpy uri -> [backend uri, version, text last sent, origin], for this
+    ;; spawn: origin is (source, view), the .lpy source and the PythonView
+    ;; whose text was sent, or None when the sender did not say (locate).
     (= self._docs {})
     ;; lpy uri -> the number of its latest push-buffer, so an older compile
     ;; that finishes last never replaces a newer text.  The numbers come
@@ -428,11 +430,12 @@
     (.add-done-callback cleanup self._cleanups.discard)
     (await (asyncio.shield cleanup)))
 
-  (def _sync [self lpy-uri text]
+  (def _sync [self lpy-uri text :origin None]
     "Make the backend's copy of document lpy-uri text: didOpen when it is
      not open in this process, didChange with the whole text when it
-     changed, nothing otherwise.  False when the document has no backend
-     uri."
+     changed, nothing otherwise; origin (see _docs) is kept with it either
+     way, since one text can come from sources that place it differently.
+     False when the document has no backend uri."
     (= client self._client)
     (= doc (.get self._docs lpy-uri))
     (if (is doc None)
@@ -443,8 +446,9 @@
               (lsp.DidOpenTextDocumentParams
                 :text-document (lsp.TextDocumentItem :uri uri :language-id "python"
                                                      :version 1 :text text)))
-            (= (sub self._docs lpy-uri) [uri 1 text])
+            (= (sub self._docs lpy-uri) [uri 1 text origin])
             (return True)))
+    (= (sub doc 3) origin)
     (if (!= (sub doc 2) text)
         (do (+= (sub doc 1) 1)
             (= (sub doc 2) text)
@@ -455,15 +459,16 @@
                 :content-changes [(lsp.TextDocumentContentChangeWholeDocument :text text)]))))
     (return True))
 
-  (async-def request [self method params :uri None :text None :timeout None]
+  (async-def request [self method params :uri None :text None :timeout None
+                      :origin None]
     "Send request method with params (its lsprotocol params type) to the
      backend and return its result, or None: the backend is off, failed to
      start, died, or took REQUEST-TIMEOUT.  The first request spawns the
      backend.  With uri (the .lpy document's) and text, the backend's copy
      of that document is made text first: any text, a cursor view's as
-     well as the buffer's.  timeout (default REQUEST-TIMEOUT) bounds the
-     whole call, the
-     backend's start included; a start that takes longer goes on, for the
+     well as the buffer's; origin is where that text comes from (_docs),
+     for locate.  timeout (default REQUEST-TIMEOUT) bounds the whole call,
+     the backend's start included; a start that takes longer goes on, for the
      next request.  Never raises but for cancellation."
     (= deadline (+ (.time (asyncio.get-running-loop))
                    (ife (is timeout None) REQUEST-TIMEOUT timeout)))
@@ -472,7 +477,7 @@
           (return None))
       (= client self._client)
       (if (and (is-not uri None) (is-not text None))
-          (._sync self uri text))
+          (._sync self uri text :origin origin))
       (= msg-id (str (uuid.uuid4)))
       (= answer (.send-request-async client.protocol method params :msg-id msg-id))
       ;; shielded, so a timeout cancels only this wait: the late answer then
@@ -504,7 +509,54 @@
     (= view (await (asyncio.to-thread compile-view source :name name :package package
                                       :import-root import-root)))
     (if (and (is-not view None) self.running (== (.get self._pushes lpy-uri) number))
-        (._sync self lpy-uri view.text)))
+        (._sync self lpy-uri view.text :origin (, source view))))
+
+  (def locate [self uri]
+    "Where a location the backend answered with, at uri, lives for the
+     editor, or None when it lives nowhere the editor has (drop it):
+     (lpy, lpy-uri, origin) for a compiled view of a .lpy, to be mapped
+     through origin ((source, view), _docs) or, when origin is None, through
+     the shadow on disk of lpy-uri's file; (file, uri) for a real file,
+     whose range stands as it is.  A document this process synced is its
+     own .lpy uri, as the editor gave it, and is dropped when the text sent
+     has no origin, since its disk shadow is not what the backend read; any
+     other .py file under the view
+     root is a shadow when its .lpy is in the project (view-path's
+     inverse); a path that leaves the view root through a link (a mirrored
+     .py or .pyi, a linked directory) is the real file it reaches; anything
+     else under the view root (a temporary file, a shadow whose .lpy is
+     gone) is dropped; a path outside it is a real file.  Call on the loop
+     (it reads _docs).  Never raises."
+    (try
+      (= path (to-fs-path uri))
+      (if (is path None)
+          (return None))
+      (= path (osp.normpath path))
+      (for [lpy-uri doc] in (.items self._docs)
+        (= synced (to-fs-path (sub doc 0)))
+        (if (or (== (sub doc 0) uri) (and synced (== (osp.normpath synced) path)))
+            (return (ife (is (sub doc 3) None) None (, "lpy" lpy-uri (sub doc 3))))))
+      (= root (osp.abspath (os.fspath self.view-root)))
+      (= real-root (osp.realpath root))
+      (= rel None)
+      (for base in (, root real-root)
+        (= candidate (osp.relpath path base))
+        (if (not (or (== candidate os.pardir) (.startswith candidate (+ os.pardir os.sep))))
+            (do (= rel candidate)
+                (break))))
+      (if (is rel None)
+          (return (, "file" uri)))
+      (= real (osp.realpath path))
+      (if (!= real (osp.normpath (osp.join real-root rel)))
+          (return (, "file" (.as-uri (pathlib.Path real)))))
+      (if (and (.endswith path ".py") (osp.isfile path))
+          (do (= lpy-path (osp.join self.project-root (+ (sub (osp.splitext rel) 0) ".lpy")))
+              (if (osp.isfile lpy-path)
+                  (return (, "lpy" (.as-uri (pathlib.Path lpy-path)) None)))))
+      (return None)
+      (except [Exception]
+        (.debug logger "python backend: cannot locate %s" uri :exc-info True)
+        (return None))))
 
   (def close-document [self lpy-uri]
     "didClose for document lpy-uri if this backend process has it open."

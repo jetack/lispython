@@ -56,6 +56,16 @@ def run_hover(ls, params):
     return asyncio.run(server.hover(ls, params))
 
 
+def run_definition(ls, params):
+    """The definition handler's answer (it is a coroutine)."""
+    return asyncio.run(server.definition(ls, params))
+
+
+def run_references(ls, params):
+    """The references handler's answer (it is a coroutine)."""
+    return asyncio.run(server.references(ls, params))
+
+
 def position(line, character):
     return SimpleNamespace(
         text_document=SimpleNamespace(uri=URI),
@@ -92,9 +102,9 @@ def test_lazy_imports_are_outline_modules():
 
 def test_definition_hover_and_references(buffer):
     ls = ls_with(buffer)
-    [location] = server.definition(ls, position(1, 14))
+    [location] = run_definition(ls, position(1, 14))
     assert location.range.start.line == 0
-    refs = server.references(ls, position(0, 5))
+    refs = run_references(ls, position(0, 5))
     assert [r.range.start.line for r in refs][:2] == [0, 1]
     assert run_hover(ls, position(0, 1)) is not None
 
@@ -162,9 +172,9 @@ def test_type_alias_definition():
     ls = ls_with(
         "(type Alias int)\n(type Pair[T] (tuple T T))\n(= y Pair)\n(= z Alias)\n(fo"
     )
-    [pair] = server.definition(ls, position(2, 5))
+    [pair] = run_definition(ls, position(2, 5))
     assert (pair.range.start.line, pair.range.start.character) == (1, 6)
-    [alias] = server.definition(ls, position(3, 5))
+    [alias] = run_definition(ls, position(3, 5))
     assert alias.range.start.line == 0
 
 
@@ -210,7 +220,7 @@ class TestRequireSelection:
                 get_text_document=lambda uri: document, folders=workspace
             )
         )
-        return server.definition(ls, position(line, character))
+        return run_definition(ls, position(line, character))
 
     def test_absent_list_binds_only_the_qualified_names(self):
         source = "(require macmod)\n(macmod.twice 1)"
