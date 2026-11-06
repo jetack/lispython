@@ -29,6 +29,10 @@ this module only reads them."""
 ;; re-exports lispy.macros.sugar's namespace.
 (= BUILTIN-MACRO-MODULES (frozenset ["lispy.macros" "lispy.macros.sugar"]))
 
+;; How a file gets the built-in macros, for the docs site and llms.txt.
+(= BUILTIN-MACROS-NOTE
+   "A `.lpy` file needs `(require lispy.macros *)` before it can use the built-in macros (`cond`, `->`, `fn`, ...); the REPL and nREPL load them already.")
+
 (class FormDoc [NamedTuple]
   "One form's documentation: its reference section, its usage lines (none for
    an operator whose call is the usual one) and a description."

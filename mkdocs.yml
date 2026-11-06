@@ -1,12 +1,31 @@
 site_name: LisPython
+site_description: >-
+  LisPython is a Lisp-flavored syntax for Python: .lpy source compiles to
+  Python AST and runs on CPython, with Clojure-style macros.
+
+# The macros module and hooks live in docs/ but are no pages to publish.
+exclude_docs: |
+  *.py
+  __pycache__/
 
 copyright: Copyright &copy; 2023-2026 Jetack
 
 plugins:
   - macros:
-      module_name: docs/version_macro
+      module_name: docs/main
+      # lispython code is full of {{ and {%: only pages with render_macros: true
+      # in their front matter are templates.
+      render_by_default: false
   - search
   - mike
+
+# After the plugins: llms.txt / llms-full.txt from the rendered markdown.
+hooks:
+  - docs/hooks.py
+
+# Under --strict, a link to a missing heading fails the build.
+validation:
+  anchors: warn
 
 theme:
   name: material
@@ -39,6 +58,7 @@ nav:
       - Overview: syntax/overview.md
       - Statements: syntax/statements.md
       - Expressions: syntax/expressions.md
+      - Form Reference: syntax/reference.md
   - Macros: macros.md
 
 markdown_extensions:
