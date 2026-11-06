@@ -92,9 +92,9 @@ def _token_patterns(in_field, field_level=False):
     past every field, so each field would rescan the rest of the source.
 
     ``lispy/highlight.py`` builds its Pygments rules from these patterns and
-    their labels (and from ``_STRING_TYPES``, the string prefix tuples and the
-    body stops): a new token label needs a ``_LABEL_ACTIONS`` entry there, or
-    that module refuses to import.
+    their labels (and from ``_STRING_TYPES``, the string prefix tuples and
+    ``_FIELD_BRACES``): a new token label needs a ``_LABEL_ACTIONS`` entry
+    there, or that module refuses to import.
     """
     end = "$|:|!(?!=)" if field_level else "$"
     if in_field:
@@ -168,6 +168,9 @@ _PREFIX_LETTERS = frozenset(
 # Where a string body scan has to look: an escape, a quote, and (in an f/t
 # string) a brace. Everything between is copied as one slice.
 _INTERPOLATED_BODY_STOP = re.compile("[\\\\{}\"']")
+# The characters that open/close a replacement field, which a backslash never
+# escapes (scan_string_body; highlight.py reads it too).
+_FIELD_BRACES = "{}"
 _PLAIN_BODY_STOP = re.compile("[\\\\\"']")
 # A line break in a single-quoted literal's format-spec text (_Lexer._body),
 # its kind both times: "t-string: ... single quoted t-strings".
@@ -265,7 +268,7 @@ def scan_string_body(src, i, quote, raw, kind, doubled="{}"):
                 close = n - 1 if close < 0 else close
                 buf.append(src[i : close + 1])
                 i = close + 1
-            elif interpolated and src[i + 1] in "{}":
+            elif interpolated and src[i + 1] in _FIELD_BRACES:
                 # A backslash never escapes a brace: it is a literal backslash.
                 buf.append("\\" if raw else "\\\\")
                 i += 1

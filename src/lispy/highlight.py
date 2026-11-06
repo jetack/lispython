@@ -38,8 +38,7 @@ from lispy import form_docs
 from lispy.core.compiler.literal import PLAIN_STRING_PREFIXES
 from lispy.core.parser import (
     _F_STRING_PREFIXES,
-    _INTERPOLATED_BODY_STOP,
-    _PLAIN_BODY_STOP,
+    _FIELD_BRACES,
     _STRING_TYPES,
     _T_STRING_PREFIXES,
     _token_patterns,
@@ -141,10 +140,6 @@ _STRING_ESCAPE = (
     r"|[\\abfnrtv\"'\n])"
 )
 _BYTES_ESCAPE = r"\\(?:x[0-9a-fA-F]{2}|[0-7]{1,3}|[\\abfnrtv\"'\n])"
-# The braces an f/t-string body stops at and a plain one does not.
-_BRACES = "".join(
-    sorted(set(_INTERPOLATED_BODY_STOP.pattern) - set(_PLAIN_BODY_STOP.pattern))
-)
 
 
 def _prefix_kinds():
@@ -197,7 +192,7 @@ def _string_body(kind, quote):
     # never closes the string; but a backslash never escapes a brace
     # (scan_string_body), so before one it is a lone backslash.
     interpolated = kind.startswith("i")
-    braces = re.escape(_BRACES) if interpolated else ""
+    braces = re.escape(_FIELD_BRACES) if interpolated else ""
     rules.append((rf"\\[^{braces}]" if braces else r"\\[\s\S]", String))
     stops = re.escape("\\" + quote[0]) + braces
     if interpolated:
