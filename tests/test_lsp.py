@@ -452,17 +452,71 @@ class TestMemberCompletion:
         assert self.labels(source) == {"f", "p", "q"}
 
     @pytest.mark.parametrize(
-        "method", ["__init_subclass__", "__class_getitem__", "__new__"]
+        "method, opening, closing",
+        [
+            ("__init_subclass__", "(def __init_subclass__ [cls]", ")"),
+            ("__init-subclass__", "(def __init-subclass__ [cls]", ")"),
+            ("__class_getitem__", "(def __class_getitem__ [cls]", ")"),
+            ("__new__", "(def __new__ [cls]", ")"),
+            ("__new__", "(deco staticmethod (def __new__ [cls]", "))"),
+        ],
+        ids=[
+            "__init_subclass__",
+            "hyphenated __init_subclass__",
+            "__class_getitem__",
+            "__new__",
+            "staticmethod __new__",
+        ],
     )
-    def test_implicit_class_receivers_skip_instance_attributes(self, method):
+    def test_implicit_class_receivers_skip_instance_attributes(
+        self, method, opening, closing
+    ):
         source = (
             "(class A []\n"
             "  (def __init__ [self] (= self.instance-attr 1))\n"
-            f"  (def {method} [cls]\n"
+            f"  {opening}\n"
             "    (= cls.class-attr 1)\n"
-            "    cls.|))"
+            f"    cls.|){closing}"
         )
         assert self.labels(source) == {"__init__", method, "class-attr"}
+
+    def test_names_compare_as_python_names(self):
+        # my-self/my_self, my-attr/my_attr and my-base/my_base are one name
+        # each; the first spelling seen is the label.
+        source = (
+            "(class my-base []\n  (= inherited 1))\n"
+            "(class A [my_base]\n"
+            "  (def f [my-self]\n"
+            "    (= my_self.my-attr 1)\n"
+            "    (= (. my-self my_attr) 2)\n"
+            "    my_self.|))"
+        )
+        assert self.labels(source) == {"f", "my-attr", "inherited"}
+
+    @pytest.mark.parametrize(
+        "source, expected",
+        [
+            (
+                "(class A []\n"
+                "  (def i [self] (= self.instance-attr 1))\n"
+                "  (deco builtins.classmethod (def c [cls]\n"
+                "    (= cls.class-attr 1)\n"
+                "    cls.|)))",
+                {"i": "Method", "c": "Method", "class-attr": "Variable"},
+            ),
+            (
+                "(class A []\n"
+                "  (deco builtins.property (def p [self] 1))\n"
+                "  (def f [self]\n"
+                "    self.|))",
+                {"p": "Property", "f": "Method"},
+            ),
+        ],
+        ids=["builtins.classmethod", "builtins.property"],
+    )
+    def test_a_builtins_decorator_reads_as_the_builtin(self, source, expected):
+        items = self.complete(source)[2]
+        assert {item.label: item.kind.name for item in items} == expected
 
     def test_the_edit_range_is_in_utf16_units(self):
         from pygls.workspace import TextDocument

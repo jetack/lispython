@@ -1163,12 +1163,18 @@ or an extra usage line names no usage key."
         (return (, recv leaf.value)))
   (return None))
 
+(def py-name [text]
+  "The Python name lispython text stands for (Symbol.name, the compiler's
+   mangling): members, receivers and classes are compared by it, since
+   my-attr and my_attr are one Python attribute."
+  (return (. (Symbol text) name)))
+
 (def decorator-name [node]
-  "A plain-symbol decorator's name, builtins.X read as X, or None."
+  "A plain-symbol decorator's Python name, builtins.X read as X, or None."
   (if (not (isinstance node Symbol))
       (return None))
-  (= [module _ name] (.rpartition node.value "."))
-  (return (ife (== module "builtins") name node.value)))
+  (= [module _ name] (.rpartition node.name "."))
+  (return (ife (== module "builtins") name node.name)))
 
 (def decorator-names [node]
   "Names of the plain-symbol decorators in a deco form's decorator slot."
@@ -1185,38 +1191,42 @@ or an extra usage line names no usage key."
   (return (, form decorators)))
 
 (def param-names [params]
-  "The names a parameter list binds (annotations and defaults skipped)."
+  "The Python names a parameter list binds (annotations and defaults skipped)."
   (= names [])
   (for param in params.list
     (if (isinstance param (, Starred DoubleStarred Keyword))
         (= param param.value))
     (if (and (isinstance param Symbol) (not (in param.value (, "*" "/"))))
-        (.append names param.value)))
+        (.append names param.name)))
   (return names))
 
+;; Methods Python makes classmethods implicitly; __new__ is a staticmethod
+;; whose first parameter is the class all the same, decorated or not.
+(= _CLASS-RECEIVER-METHODS (, "__init_subclass__" "__class_getitem__" "__new__"))
+
+(def method-name [method]
+  "A def form's Python name, or None."
+  (= name-node (ife (>= (len method) 2) (def-name-symbol (sub method 1)) None))
+  (return (ife (is-not name-node None) name-node.name None)))
+
 (def receiver-param [method decorators]
-  "A method's first parameter, which receives the instance (the class
-   under classmethod), or None for a staticmethod or a non-name first slot."
-  (if (or (in "staticmethod" decorators) (< (len method) 3)
+  "The Python name of a method's first parameter, which receives the
+   instance (the class under classmethod), or None for a staticmethod
+   other than __new__ or a non-name first slot."
+  (if (or (and (in "staticmethod" decorators) (!= (method-name method) "__new__"))
+          (< (len method) 3)
           (not (isinstance (sub method 2) Bracket)))
       (return None))
   (= params (sub method 2))
   (if (and (len params) (isinstance (sub params 0) Symbol)
            (not (in (. (sub params 0) value) (, "*" "/"))))
-      (return (. (sub params 0) value)))
+      (return (. (sub params 0) name)))
   (return None))
-
-;; Methods Python makes classmethods implicitly; __new__ is a staticmethod
-;; whose first parameter is the class all the same.
-(= _CLASS-RECEIVER-METHODS (, "__init_subclass__" "__class_getitem__" "__new__"))
 
 (def class-receiver-p [method decorators]
   "Whether a method's first parameter receives the class, not an instance."
-  (if (in "classmethod" decorators)
-      (return True))
-  (= name-node (ife (>= (len method) 2) (def-name-symbol (sub method 1)) None))
-  (return (and (is-not name-node None)
-               (in name-node.value _CLASS-RECEIVER-METHODS))))
+  (return (or (in "classmethod" decorators)
+              (in (method-name method) _CLASS-RECEIVER-METHODS))))
 
 (def receiver-class [path recv]
   "The class recv refers to at the cursor and whether recv is the class
@@ -1224,6 +1234,7 @@ or an extra usage line names no usage key."
    walked outward: a method whose receiver is recv answers, another
    function binding recv shadows it, and a closure that does not bind it
    sees the enclosing scope's, as Python's scoping does."
+  (= recv (py-name recv))
   (for i in (range (- (len path) 1) -1 -1)
     (= node (sub path i))
     (= head (head-of node))
@@ -1274,13 +1285,13 @@ or an extra usage line names no usage key."
   (return (, None (sub cls.list [: 2 None]))))
 
 (def top-level-class [tree name]
-  "The last top-level class named name in tree, or None."
+  "The last top-level class whose Python name is name in tree, or None."
   (= found None)
   (for form in tree
     (= definition (sub (undecorated form) 0))
     (if (and (== (head-of definition) "class") (>= (len definition) 2))
         (do (= name-node (def-name-symbol (sub definition 1)))
-            (if (and (is-not name-node None) (== name-node.value name))
+            (if (and (is-not name-node None) (== name-node.name name))
                 (= found definition)))))
   (return found))
 
@@ -1323,13 +1334,13 @@ or an extra usage line names no usage key."
   (return flat))
 
 (def receiver-attribute [target receiver]
-  "The attribute name a target assigns on receiver (recv.attr or
-   (. recv attr)), or None."
+  "The attribute, as written, a target assigns on the receiver whose
+   Python name is receiver (recv.attr or (. recv attr)), or None."
   (if (and (isinstance target Symbol) (== (.count target.value ".") 1))
       (do (= [owner attr] (.split target.value "."))
-          (return (ife (and (== owner receiver) attr) attr None))))
+          (return (ife (and (== (py-name owner) receiver) attr) attr None))))
   (if (and (== (head-of target) ".") (== (len target) 3)
-           (isinstance (sub target 1) Symbol) (== (. (sub target 1) value) receiver)
+           (isinstance (sub target 1) Symbol) (== (. (sub target 1) name) receiver)
            (isinstance (sub target 2) Symbol) (not (in "." (. (sub target 2) value))))
       (return (. (sub target 2) value)))
   (return None))
@@ -1357,11 +1368,16 @@ or an extra usage line names no usage key."
     (.extend stack (reversed node.list)))
   (return names))
 
+(def add-member [members label kind]
+  "Record a member under its Python name; the first spelling seen wins."
+  (.setdefault members (py-name label) (, label kind)))
+
 (def class-members [cls tree class-receiver]
-  "Member name -> CompletionItemKind of cls and its same-buffer bases,
-   subclass first.  Members are the class body's definitions plus the
-   attributes its methods assign through their receiver; on the class
-   itself (class-receiver) only class-receiver methods' assignments count."
+  "Python name -> (label, CompletionItemKind) of the members of cls and its
+   same-buffer bases, subclass first.  Members are the class body's
+   definitions plus the attributes its methods assign through their
+   receiver; on the class itself (class-receiver) only class-receiver
+   methods' assignments count."
   (= members {})
   (= pending [cls])
   (= visited (set))
@@ -1380,32 +1396,32 @@ or an extra usage line names no usage key."
              (is-not (def-name-symbol (sub definition 1)) None))
         (do (= name (. (def-name-symbol (sub definition 1)) value))
             (cond (== head "class")
-                  (.setdefault members name lsp.CompletionItemKind.Class)
+                  (add-member members name lsp.CompletionItemKind.Class)
                   (in "property" decorators)
-                  (.setdefault members name lsp.CompletionItemKind.Property)
+                  (add-member members name lsp.CompletionItemKind.Property)
                   True
-                  (do (.setdefault members name lsp.CompletionItemKind.Method)
+                  (do (add-member members name lsp.CompletionItemKind.Method)
                       (.append methods (, definition decorators)))))
 
         (and (== head "type") (type-alias-p definition))
-        (.setdefault members (. (def-name-symbol (sub definition 1)) value)
-                     lsp.CompletionItemKind.Class)
+        (add-member members (. (def-name-symbol (sub definition 1)) value)
+                    lsp.CompletionItemKind.Class)
 
         (== head "=")
         (for target in (assignment-targets definition)
           (if (and (isinstance target Symbol) (not (in "." target.value)))
-              (.setdefault members target.value lsp.CompletionItemKind.Variable)))))
+              (add-member members target.value lsp.CompletionItemKind.Variable)))))
     (for [method decorators] in methods
       (= receiver (receiver-param method decorators))
       (if (or (is receiver None)
               (and class-receiver (not (class-receiver-p method decorators))))
           (continue))
       (for attr in (receiver-attributes method receiver)
-        (.setdefault members attr lsp.CompletionItemKind.Variable)))
+        (add-member members attr lsp.CompletionItemKind.Variable)))
     (if (is-not bases None)
         (for base in bases.list
           (if (and (isinstance base Symbol) (not (in "." base.value)))
-              (do (= base-class (top-level-class tree base.value))
+              (do (= base-class (top-level-class tree base.name))
                   (if (is-not base-class None)
                       (.append pending base-class)))))))
   (return members))
@@ -1449,7 +1465,7 @@ or an extra usage line names no usage key."
                       :label name
                       :kind kind
                       :text-edit (lsp.TextEdit :range edit-range :new-text name))
-                    for [name kind] in (.items (class-members cls tree class-receiver))])))
+                    for [name kind] in (.values (class-members cls tree class-receiver))])))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion
