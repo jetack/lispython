@@ -28,11 +28,12 @@ follows [Semantic Versioning](https://semver.org/).
   macro scope. A `load-file` starts the file again: its macros are every
   built-in and nothing an earlier load defined, its first form's opt-out
   applies, and so it compiles as under `lpy`. An `eval` with `file` that
-  sends `line` 1 (and `column` 1 or none) re-derives only the built-ins
-  from its first form: an opt-out there drops them (its selection comes
-  back), any other form restores them, and the file's own macros and other
-  requires stay, as re-evaluating a Clojure `ns` form keeps the
-  namespace's vars. Any other `eval` with `file`, one without `line`
+  sends `line` 1 (and `column` 1 or none) re-derives from its first form
+  only the built-ins the file got without asking: an opt-out there drops
+  them (its selection comes back), any other form brings back each one the
+  file lacks, and the file's own macros and everything a `require`
+  registered, built-ins included, stay, as re-evaluating a Clojure `ns`
+  form keeps the namespace's vars. Any other `eval` with `file`, one without `line`
   included, only adds. `macroexpand`, `complete`, `docs` and `annotate`
   accept an optional `file` to answer from that file's scope.
 

@@ -334,6 +334,24 @@ def test_nrepl_top_region_opt_out_drops_only_the_built_ins(session, tmp_path):
     assert expand_in(session, path, "(sq 3)") == "(* 3 3)"
 
 
+@pytest.mark.parametrize(
+    "src",
+    [
+        "(require lispy.macros [->])\n(require lispy.macros [cond])\n(= a 1)\n",
+        "(= a 1)\n(require lispy.macros [cond])\n",
+    ],
+)
+def test_nrepl_top_region_keeps_a_built_in_the_file_required(session, tmp_path, src):
+    # A built-in a later require registered is the require's, not the
+    # unit start's: an opt-out at the top drops only what a start seeded.
+    path = tmp_path / "f.lpy"
+    assert load(session, path, src)["error"] is None
+    assert eval_at(session, path, "(require lispy.macros [->])", 1)["error"] is None
+    assert expand_in(session, path, "(cond a 1)") == "(if a 1)"
+    assert expand_in(session, path, "(-> 1 (f))") == "(f 1)"
+    assert expand_in(session, path, "(inc 1)") == "(inc 1)"
+
+
 def test_nrepl_top_region_keeps_the_files_macro_of_a_built_in_name(session, tmp_path):
     path = tmp_path / "f.lpy"
     load(session, path, "(= a 1)\n(defmacro inc [x] (return `(+ ~x 1000)))\n")
