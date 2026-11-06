@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import warnings
+from types import SimpleNamespace
 
 import pytest
 
@@ -828,6 +829,40 @@ def test_concurrent_filter_swaps_leave_the_filters_as_they_were():
     b_go.set()
     second.join(5)
     assert warnings.filters == original
+
+
+SLOW_MACRO = """\
+(defmacro slow []
+  (= gate (__import__ "lpy_test_gate"))
+  (.set gate.entered)
+  (.wait gate.release 10)
+  (return 1))
+(= x (slow))
+"""
+
+
+def test_a_slow_macro_in_a_view_never_holds_up_another_compile(monkeypatch):
+    # Defect: compiling a view holds a process-wide lock across the user's
+    # macros, so the LSP loop's diagnostics wait at a backslash literal for
+    # as long as a worker's macro runs, and a hanging macro freezes the LSP.
+    gate = SimpleNamespace(entered=threading.Event(), release=threading.Event())
+    monkeypatch.setitem(sys.modules, "lpy_test_gate", gate)
+    worker = threading.Thread(target=pv.compile_view, args=(SLOW_MACRO,))
+    worker.start()
+    try:
+        assert gate.entered.wait(10)
+        done = threading.Event()
+
+        def diagnostics():
+            server.compute_diagnostics('(= s "a\\nb")', "file:///other.lpy")
+            done.set()
+
+        threading.Thread(target=diagnostics, daemon=True).start()
+        # Released only after: the other compile must finish meanwhile.
+        assert done.wait(5)
+    finally:
+        gate.release.set()
+        worker.join(10)
 
 
 def test_catch_warnings_has_one_home():

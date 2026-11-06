@@ -387,6 +387,27 @@ def test_shutdown_ends_the_backend(project, tmp_path, fake_argv, spawned):
     assert len(spawned) == 1
 
 
+def test_a_cancelled_discard_still_cleans_up(project, tmp_path, fake_argv):
+    # Defect: shutdown cancels a start while it is discarding a client, and
+    # that client's pygls tasks and stderr drain are left running, with
+    # nobody to stop them, after shutdown has returned.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+
+    async def scenario():
+        try:
+            assert await hover() is not None
+            discard = asyncio.create_task(client._discard())
+            await asyncio.sleep(0)
+            discard.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await discard
+        finally:
+            await client.shutdown()
+        return asyncio.all_tasks() - {asyncio.current_task()}
+
+    assert run_bounded(scenario()) == set()
+
+
 def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
     # Defect: the backend's workspace/configuration request for "python"
     # does not get python.pythonPath, so it resolves imports with whatever
@@ -584,8 +605,10 @@ def test_lsp_server_drives_its_backend(tmp_path, fake_script, project):
 
 @pytestmark_lsp
 def test_lsp_exit_without_shutdown_kills_the_backend(tmp_path, fake_script, project):
-    # Defect: a client that sends exit without shutdown leaves the backend
-    # running after the server is gone.
+    # Pins the outcome, not the exit hook: after an exit with no shutdown,
+    # no backend outlives the server.  Deleting on-exit alone does not fail
+    # it, since asyncio's subprocess transport also kills the child when the
+    # server's interpreter exits; on-exit is the explicit guarantee.
     session = LspSession(tmp_path, fake_script, project)
 
     async def scenario():

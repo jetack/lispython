@@ -38,7 +38,6 @@
 (from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.compiler.utils [python-interpolations])
 (from lispy.core.importer [package-root])
-(from lispy.core.errors [filtered-warnings])
 
 (= logger (logging.getLogger __name__))
 
@@ -379,16 +378,18 @@
    parse is strict, as diagnostics' is.  Macros run as compute-diagnostics
    already runs them, with import-root (module-names' third item) on
    sys.path, so a relative require imports its package; the generated
-   module is never compiled or executed."
+   module is never compiled or executed.  Warnings go where the process's
+   filters send them, as diagnostics' do (stderr, never the LSP's stdout); a
+   filter that makes one an error makes the view None, as it makes the
+   compile an error.  The filters are never swapped here: a swap is process
+   wide, so it would need a lock held across the user's macros, which every
+   other compile on the loop would then wait for."
   (= scope {"__builtins__" builtins
             "__name__" name
             "__package__" package
             "__macro_namespace" {}})
   (try
-    ;; The LSP compiles views in worker threads: the filter swap goes through
-    ;; filtered-warnings, whose lock keeps concurrent swaps from undoing
-    ;; each other.
-    (with [(filtered-warnings "ignore") (_on-sys-path import-root)]
+    (with [(_on-sys-path import-root)]
       (= module (ast.Module :body (list (macroexpand-then-compile (parse source) scope))
                             :type-ignores (list)))
       (= module (python-interpolations module))

@@ -22,10 +22,11 @@ _COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default
 # catch_warnings swaps the process-wide filter list and puts back, on exit,
 # the one it found on entry, so two threads inside it at once (the LSP
 # compiles views and shadows in worker threads while its event loop compiles
-# diagnostics) restore out of order and can leave one's "ignore" in force for
-# good.  Re-entrant, since a compile holding it evaluates literals that take
-# it again.  A thread that waits on it waits for at most one other compile.
-_WARNINGS_LOCK = threading.RLock()
+# diagnostics) restore out of order and can leave one's filter in force for
+# good.  Never hold it across user code (a macro, a require): every
+# compile on any thread would wait for that code, however long it runs.  The
+# one site, literal.py's literal_eval, holds it for microseconds.
+_WARNINGS_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -33,7 +34,7 @@ def filtered_warnings(action, record=False):
     """``warnings.catch_warnings(record=record)`` with ``simplefilter(action)``,
     under the one lock every such swap of the filters takes; yields the
     recorded list (None without ``record``). The one home of catch_warnings
-    in lispython."""
+    in lispython; the body must not run user code (_WARNINGS_LOCK)."""
     with _WARNINGS_LOCK, warnings.catch_warnings(record=record) as caught:
         warnings.simplefilter(action)
         yield caught

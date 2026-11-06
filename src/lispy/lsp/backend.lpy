@@ -231,6 +231,8 @@
     ;; The one start in progress (_start), shared by every request that
     ;; waits for it.
     (= self._starting None)
+    ;; _discard's cleanups still running (_reap).
+    (= self._cleanups (set))
     ;; lpy uri -> [backend uri, version, text last sent], for this spawn.
     (= self._docs {})
     ;; lpy uri -> the number of its latest push-buffer, so an older compile
@@ -372,20 +374,21 @@
     "Kill the current process if it still runs and drop its client."
     (= client self._client)
     (= process self.process)
+    (= drain self._stderr-task)
     (= self._client None)
     (= self.process None)
+    (= self._stderr-task None)
     (= self._docs {})
     (_kill process)
-    (if (is-not process None)
-        (try
-          (await (asyncio.wait-for (.wait process) KILL-TIMEOUT))
-          (except [Exception]
-            (pass))))
-    (if (is-not client None)
-        (try
-          (await (asyncio.wait-for (.stop client) KILL-TIMEOUT))
-          (except [Exception]
-            (pass)))))
+    ;; A task of its own, awaited shielded: shutdown may cancel a _start
+    ;; that is discarding, and the client this call took off self would then
+    ;; keep its pygls tasks with nobody left to stop them.  shutdown waits
+    ;; for every one left (_cleanups, which also keeps them referenced: the
+    ;; loop holds tasks only weakly).
+    (= cleanup (asyncio.create-task (_reap client process drain)))
+    (.add self._cleanups cleanup)
+    (.add-done-callback cleanup self._cleanups.discard)
+    (await (asyncio.shield cleanup)))
 
   (def _sync [self lpy-uri text]
     "Make the backend's copy of document lpy-uri text: didOpen when it is
@@ -493,6 +496,9 @@
     (= deadline (+ (.time (asyncio.get-running-loop)) SHUTDOWN-TIMEOUT))
     (= starting self._starting)
     (if (and (is-not starting None) (not (.done starting)))
+        ;; A start inside its to_thread view-root write stops waiting for
+        ;; it; the thread itself finishes that write (under the view root's
+        ;; lock) after shutdown, which only touches the cache directory.
         (do (.cancel starting)
             (await (asyncio.gather starting :return-exceptions True))))
     (= client self._client)
@@ -504,7 +510,9 @@
           (await (asyncio.wait-for (.wait process) (_remaining deadline)))
           (except [Exception as e]
             (.debug logger "python backend: no clean exit: %s" e))))
-    (await (._discard self)))
+    (await (._discard self))
+    ;; a cleanup a cancelled start left running (each bounded by _reap)
+    (await (asyncio.gather *self._cleanups :return-exceptions True)))
 
   (def kill [self]
     "Kill the process now, without the protocol (the LSP is exiting)."
@@ -512,6 +520,25 @@
     (if (is-not self._starting None)
         (.cancel self._starting))
     (_kill self.process)))
+
+(async-def _reap [client process drain]
+  "Wait (bounded) for a killed process to end, for its stderr drain and for
+   its client's tasks."
+  (if (is-not process None)
+      (try
+        (await (asyncio.wait-for (.wait process) KILL-TIMEOUT))
+        (except [Exception]
+          (pass))))
+  (if (is-not drain None)
+      (try
+        (await (asyncio.wait-for drain KILL-TIMEOUT))
+        (except [Exception]
+          (pass))))
+  (if (is-not client None)
+      (try
+        (await (asyncio.wait-for (.stop client) KILL-TIMEOUT))
+        (except [Exception]
+          (pass)))))
 
 (def _remaining [deadline]
   "Seconds left until deadline on the running loop's clock, never below 0."
