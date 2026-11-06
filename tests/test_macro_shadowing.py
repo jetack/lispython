@@ -16,7 +16,7 @@ import pytest
 
 from lispy import tools
 from lispy.core.errors import LispyCompileError
-from lispy.core.macro import compile_unit
+from lispy.core.macro import UnitStart, compile_unit
 from lispy.core.parser import parse
 
 COMPILER = (
@@ -231,9 +231,11 @@ def test_position_on_a_later_line():
 
 def test_repl_and_nrepl_scopes():
     scope = {}
-    tools.eval_and_print("(= a 1)", scope, filename="<repl>", opt_out=False)
+    tools.eval_and_print("(= a 1)", scope, filename="<repl>", start=UnitStart.CONTINUE)
     with pytest.raises(LispyCompileError, match="cannot bind 'inc'"):
-        tools.eval_and_print("(= inc 1)", scope, filename="<repl>", opt_out=False)
+        tools.eval_and_print(
+            "(= inc 1)", scope, filename="<repl>", start=UnitStart.CONTINUE
+        )
     error = tools.nrepl_eval("(def dec [x] x)", {})["error"]
     assert "cannot bind 'dec': it is a built-in macro here" in error
 

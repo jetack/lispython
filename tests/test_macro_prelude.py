@@ -19,7 +19,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy import tools
-from lispy.core.macro import compile_unit
+from lispy.core.macro import UnitStart, compile_unit
 from lispy.core.parser import parse
 
 BIN = Path(sys.executable).parent
@@ -75,7 +75,9 @@ def test_prelude_in_lpy_c_and_l2py_cli(tmp_path):
 
 
 def test_prelude_in_repl_and_nrepl_evals(capsys):
-    tools.eval_and_print("(print (inc 1))", {}, filename="<repl>", opt_out=False)
+    tools.eval_and_print(
+        "(print (inc 1))", {}, filename="<repl>", start=UnitStart.CONTINUE
+    )
     assert capsys.readouterr().out == "2\n"
     assert tools.nrepl_eval("(inc 1)", {})["value"] == "2"
 
@@ -192,7 +194,7 @@ def test_a_unit_start_forgets_an_earlier_units_macros():
 
 def test_repl_input_require_only_adds():
     scope = {}
-    compile_unit(parse("(require lispy.macros [])"), scope, opt_out=False)
+    compile_unit(parse("(require lispy.macros [])"), scope, start=UnitStart.CONTINUE)
     assert translate("(dec 1)", scope) == "1 - 1"
 
 
@@ -282,6 +284,49 @@ def test_nrepl_region_eval_opts_out_only_at_the_file_start(session, tmp_path):
     assert file_expansion()["expansion"] == "(inc 1)"
     error = request(session, op="eval", code="(inc 1)", file=path, line=3)["error"]
     assert "NameError: name 'inc' is not defined" in error
+
+
+def expand_in(session, path, code):
+    """code's expansion in path's file scope as it stands (no unit compiles)."""
+    return request(session, op="macroexpand", code=code, file=str(path))["expansion"]
+
+
+def eval_at(session, path, code, line):
+    return request(session, op="eval", code=code, file=str(path), line=line, column=1)
+
+
+def test_nrepl_top_region_keeps_the_files_macros(session, tmp_path):
+    # Re-sending a file's top form (an import, its ns form) is not a reload:
+    # the macros the file defined further down stay, as Clojure keeps a
+    # namespace's vars when its ns form is evaluated again.
+    path = tmp_path / "f.lpy"
+    src = "(import math)\n(defmacro sq [x] (return `(* ~x ~x)))\n(print (sq 3))\n"
+    assert load(session, path, src)["stdout"] == "9\n"
+    assert eval_at(session, path, "(import math)", 1)["error"] is None
+    assert eval_at(session, path, "(sq 4)", 3)["value"] == "16"
+
+
+def test_nrepl_top_region_opt_out_drops_only_the_built_ins(session, tmp_path):
+    path = tmp_path / "f.lpy"
+    load(session, path, "(= a 1)\n(defmacro sq [x] (return `(* ~x ~x)))\n")
+    assert eval_at(session, path, "(require lispy.macros [->])", 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(inc 1)"
+    assert expand_in(session, path, "(-> 1 (f))") == "(f 1)"
+    assert expand_in(session, path, "(sq 3)") == "(* 3 3)"
+    # A region with no form beyond a docstring re-derives nothing.
+    assert eval_at(session, path, '"Doc."', 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(inc 1)"
+    # Editing the opt-out away and re-sending the top restores the built-ins.
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(+ 1 1)"
+    assert expand_in(session, path, "(sq 3)") == "(* 3 3)"
+
+
+def test_nrepl_top_region_keeps_the_files_macro_of_a_built_in_name(session, tmp_path):
+    path = tmp_path / "f.lpy"
+    load(session, path, "(= a 1)\n(defmacro inc [x] (return `(+ ~x 1000)))\n")
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    assert expand_in(session, path, "(inc 1)") == "(+ 1 1000)"
 
 
 @pytest.mark.parametrize("opted_out_first", [True, False])

@@ -29,7 +29,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
-(from lispy.core.macro [compile-unit macroexpand seed-prelude])
+(from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
 (from lispy.core.compiler.utils [compile-nesting-errors python-interpolations])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
@@ -359,14 +359,15 @@
                          :multiline True
                          :prompt-continuation "...   ")))
 
-(def eval-and-print [src :scope SCOPE :translate False :filename "<string>" :opt-out True]
+(def eval-and-print [src :scope SCOPE :translate False :filename "<string>" :start UnitStart.MODULE]
   ;; Compile every statement before running any, so compile-errors covers
   ;; compiling only; compile-nesting-errors wraps compile() alone, one
   ;; statement at a time, so a too-deep error is at the first statement
-  ;; compile() fails on, not the deepest of all.  opt-out: src is a whole
-  ;; unit (lpy -c), not one input of a REPL session (compile-unit).
+  ;; compile() fails on, not the deepest of all.  start: src is a whole
+  ;; unit (lpy -c) by default, CONTINUE for one input of a REPL session
+  ;; (UnitStart).
   (with [(compile-errors filename src)]
-    (= stl (compile-unit (parse src) scope :opt-out opt-out))
+    (= stl (compile-unit (parse src) scope :start start))
     (= codes [])
     (for st stl
       (with [(compile-nesting-errors [st])]
@@ -392,12 +393,12 @@
 
   (= session (make-repl-session))
   (= scope SCOPE)
-  (eval-and-print "(from pprint [pprint])" scope :opt-out False)
+  (eval-and-print "(from pprint [pprint])" scope :start UnitStart.CONTINUE)
   (while True
     (try
       (do
         (= src (session.prompt "repl> "))
-        (eval-and-print src scope translate :filename "<repl>" :opt-out False))
+        (eval-and-print src scope translate :filename "<repl>" :start UnitStart.CONTINUE))
       (except [SystemExit]
         (print "SystemExit caught. Exiting REPL.")
         (break))
@@ -505,18 +506,22 @@
   the source gets a fresh <nrepl-N> name.  The source is padded to that
   position before parsing, so compile errors, tracebacks and linecache all
   use buffer lines and columns.  whole-file marks src as the entire file
-  (load-file), so it starts at line 1, column 1.  A load-file, or source
-  naming a file at a line given as 1 (column 1 or not given), starts the
-  file's unit: its macros are the built-in ones alone again, and its first
-  form may narrow them (compile-unit).  Any other eval only adds, since
-  editor clients send file, line and column with every region.
+  (load-file), so it starts at line 1, column 1.  A load-file starts the
+  file's unit again (UnitStart.MODULE): its macros are the built-in ones
+  alone, and its first form may narrow them.  Source naming a file at a
+  line given as 1 (column 1 or not given) is the file's top region
+  (UnitStart.TOP): its first form re-derives only the built-in macros, so
+  the file's own macros stay.  Any other eval only adds, since editor
+  clients send file, line and column with every region.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
-  ;; Only a line the request sent as 1 is the file's start: a file eval with
-  ;; no line has no known position, and restarting the unit there would
-  ;; undo the file's opt-out mid-file.
-  (= file-start (and (is-not filename None)
-                     (or whole-file (and (== line 1) (in column (, None 1))))))
+  ;; Only a line the request sent as 1 is the file's top: a file eval with
+  ;; no line has no known position, and re-deriving the built-ins there
+  ;; would undo the file's opt-out mid-file.
+  (= start (conde whole-file UnitStart.MODULE
+                  (and (is-not filename None) (== line 1) (in column (, None 1)))
+                  UnitStart.TOP
+                  UnitStart.CONTINUE))
   (if (is line None)
       (= line 1))
   (if (is column None)
@@ -541,7 +546,7 @@
     (_nrepl-register-source filename src line column whole-file)
     ;; Compile every statement before running any (see eval-and-print).
     (with [(compile-errors filename padded)]
-      (= stl (compile-unit (parse padded) scope :opt-out file-start))
+      (= stl (compile-unit (parse padded) scope :start start))
       (= codes [])
       (for st stl
         (with [(compile-nesting-errors [st])]
