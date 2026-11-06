@@ -12,13 +12,16 @@
 
 (import asyncio)
 (import attrs)
+(import functools)
 (import importlib.util)
 (import logging)
 (import os)
 (import os.path as osp)
 (import pathlib)
 (import shutil)
+(import subprocess)
 (import sysconfig)
+(import tempfile)
 (import uuid)
 
 (from lsprotocol [types as lsp])
@@ -106,10 +109,48 @@
 (= BACKENDS {"basedpyright" _basedpyright-argv
              "pyrefly" _pyrefly-argv})
 
+;; Seconds pyrefly dump-config gets to read a candidate pyrefly.toml (it
+;; takes about 0.1 s, its interpreter query included).
+(= CONFIG-CHECK-TIMEOUT 20)
+
+(def pyrefly-config-problem [binary text]
+  "Why the pyrefly at binary refuses pyrefly.toml text, or None when it
+   reads it or cannot say (not runnable, timed out).  dump-config reads the
+   text from a file of its own in a temporary directory: pyrefly reports a
+   value it cannot read as a config that failed to parse, then falls back
+   to auto configuration, and exits 1 whether or not it did (it also does
+   when no file matches).  The answer is pyrefly's error lines, the list of
+   values it expected cut off."
+  (try
+    (with [(tempfile.TemporaryDirectory :prefix "lispython-pyrefly-") as directory]
+      (= path (osp.join directory "pyrefly.toml"))
+      (with [(open path "w" :encoding "utf-8") as f]
+        (.write f text))
+      (= result (subprocess.run [binary "dump-config" "--color" "never" "-c" path]
+                                :cwd directory :stdin subprocess.DEVNULL
+                                :capture-output True :text True :errors "replace"
+                                :timeout CONFIG-CHECK-TIMEOUT)))
+    (except [(, OSError subprocess.SubprocessError)]
+      (.debug logger "python backend: cannot check a pyrefly config" :exc-info True)
+      (return None)))
+  (= output (.replace (+ result.stdout result.stderr) path "pyrefly.toml"))
+  (if (not (in "failed to parse" output))
+      (return None))
+  (= lines [(sub (.strip line) [: None 200]) for line in (.splitlines output)
+            if (and (.strip line) (not-in "|" line) (not (.startswith (.strip line) "WARN")))])
+  (return (.join " " [(sub (.split line ", expected one of" 1) 0) for line in lines])))
+
+(def _write-pyrefly-config [project-root view-root **settings]
+  "write-pyrefly-config, checked by the installed pyrefly
+   (pyrefly-config-problem) when there is one."
+  (= argv (backend-argv "pyrefly"))
+  (= check (ife (is argv None) None (functools.partial pyrefly-config-problem (sub argv 0))))
+  (return (write-pyrefly-config project-root view-root :check check **settings)))
+
 ;; Backend name -> the writer of its config file in the view root; any other
 ;; name (a test's fake) takes pyrightconfig.json.
 (= CONFIG-WRITERS {"basedpyright" write-pyright-config
-                   "pyrefly" write-pyrefly-config})
+                   "pyrefly" _write-pyrefly-config})
 
 (def config-writer [name]
   "The function writing backend name's config file into a view root."
@@ -162,10 +203,11 @@
 
 (def _converter []
   "pygls' converter, able to read a notebook filter with no notebook.
-   lsprotocol's own hook for a filter's notebook does not cover the
-   optional one of a filter with cells, so the initialize result of a
-   backend whose notebookDocumentSync selects cells (pyrefly) fails to
-   structure and the backend never starts."
+   lsprotocol (2025.0.0) hooks the notebook union of
+   NotebookCellTextDocumentFilter and NotebookDocumentFilterWithNotebook,
+   but not the Optional one of NotebookDocumentFilterWithCells.notebook, so
+   the initialize result of a backend whose notebookDocumentSync selects
+   cells alone (pyrefly) fails to structure and the backend never starts."
   (= converter (default-converter))
   (= notebook (. (attrs.fields lsp.NotebookCellTextDocumentFilter) notebook type))
   (.register-structure-hook converter
@@ -215,7 +257,7 @@
   (deco (client.feature lsp.WORKSPACE_CONFIGURATION)
     (def configuration [params]
       ;; pyright asks python, python.analysis, basedpyright and
-      ;; basedpyright.analysis; the rest is pyrightconfig.json's.
+      ;; basedpyright.analysis; the rest is the view root's config file's.
       (= settings (backend-settings view-root))
       (return [(settings-section settings item.section) for item in params.items])))
   (deco (client.feature lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)

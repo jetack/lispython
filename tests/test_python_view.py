@@ -1021,7 +1021,7 @@ class TestShadows:
             "ignore-missing-imports": ["vendored.*"],
             "check-unannotated-defs": False,
             "errors": {"bad-assignment": "warn", "unknown-name": False},
-            "search-path": [str(project)],
+            "search-path": [str(root), str(project)],
             "python-interpreter-path": sys.executable,
         }
         # pyrefly.toml wins over pyproject.toml, as for pyrefly.
@@ -1072,7 +1072,8 @@ class TestShadows:
     def test_pyrefly_search_path_is_pyrights(self, tmp_path):
         # Defect: the two backends' search paths drift apart, so a module
         # one resolves (a shadowed src package, a .venv package) the other
-        # does not.
+        # does not.  pyrefly's leads with the view root, which pyright
+        # searches first as its execution root.
         project, root = tmp_path / "project", tmp_path / "view"
         (project / "src" / "pkg").mkdir(parents=True)
         site = project / ".venv" / "lib" / "python3.99" / "site-packages"
@@ -1091,7 +1092,7 @@ class TestShadows:
         ]
         assert self.pyrefly_config(project, root, import_roots=roots)[
             "search-path"
-        ] == (extra)
+        ] == [str(root), *extra]
 
     def test_pyrefly_config_is_toml_for_any_path_and_value(self, tmp_path):
         # Defects: the hand-written TOML breaks on a path TOML must escape
@@ -1116,9 +1117,74 @@ class TestShadows:
         assert config == {
             "python-platform": "linux",
             "errors": {"bad-assignment": "warn", 'code with " quote': True},
-            "search-path": [str(project)],
+            "search-path": [str(root), str(project)],
             "python-interpreter-path": '/py "x"\\ 😀',
         }
+
+    def test_a_refused_pyrefly_config_keeps_the_views_own_settings(
+        self, tmp_path, caplog
+    ):
+        # Defects: a project value the installed pyrefly refuses is written
+        # anyway, so pyrefly drops the whole file and the view loses its
+        # search paths, interpreter and preset off; the warning does not say
+        # which project file to fix; or pyrefly is run again on every
+        # unchanged write (one process per save).
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        (project / "pyrefly.toml").write_text(
+            'preset = "strict"\nuntyped-def-behavior = "nope"\n'
+            '[errors]\nnot-a-code = "warn"\n'
+        )
+        checked = []
+
+        def check(text):
+            checked.append(text)
+            for value in ["nope", "not-a-code"]:
+                if value in text:
+                    return f"unknown variant `{value}`"
+            return None
+
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            config = self.pyrefly_config(project, root, check_types=False, check=check)
+        assert config == {
+            "preset": "off",
+            "search-path": [str(root), str(project)],
+            "python-interpreter-path": sys.executable,
+        }
+        assert str(project / "pyrefly.toml") in caplog.text
+        assert "`nope`" in caplog.text
+        # With checking, the errors table is refused too.
+        (project / "pyrefly.toml").write_text(
+            'preset = "strict"\n[errors]\nnot-a-code = "warn"\n'
+        )
+        config = self.pyrefly_config(project, root, check=check)
+        assert (config["preset"], "errors" in config) == ("basic", False)
+        (project / "pyrefly.toml").write_text('preset = "strict"\n')
+        assert self.pyrefly_config(project, root, check=check)["preset"] == "strict"
+        calls = len(checked)
+        self.pyrefly_config(project, root, check=check)
+        assert len(checked) == calls
+
+    def test_a_project_config_in_a_package_never_replaces_the_views(self, tmp_path):
+        # Defect: a project inside a package has its own pyrefly.toml or
+        # pyrightconfig.json linked over the view root's on every shadow
+        # write, so the backend reads the project's paths, and each save
+        # flips the file between the two.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "__init__.py", "")
+        self.write(project / "m.lpy", "(= m 1)")
+        self.write(project / "pyrefly.toml", 'search-path = ["/elsewhere"]\n')
+        self.write(project / "pyrightconfig.json", '{"extraPaths": ["/elsewhere"]}')
+        writers = [pv.write_pyrefly_config, pv.write_pyright_config]
+        for _ in range(2):
+            pv.write_shadows(str(project), str(root))
+            for write in writers:
+                path = write(str(project), str(root))
+                assert not os.path.islink(path)
+                assert "/elsewhere" not in open(path).read()
+        pv.write_shadows(str(project), str(root))
+        for name in [pv.PYREFLY_CONFIG, pv.PYRIGHT_CONFIG]:
+            assert not os.path.islink(root / name)
 
 
 def next_tick():

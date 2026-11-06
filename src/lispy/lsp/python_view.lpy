@@ -854,9 +854,14 @@
                     (osp.abspath project-root)
                     sys.executable)))
 
-;; The view root's lock file: neither .py, link nor temporary, so the orphan
-;; sweep leaves it, and never linked over by a package overlay.
+;; The view root's own files, beside the shadows: its lock file and every
+;; backend's config file.  None is a .py, link or temporary file, so the
+;; orphan sweep leaves them, and a package overlay never links over one (a
+;; project inside a package may hold a file of that name).
 (= _LOCK-NAME ".lock")
+(= PYRIGHT-CONFIG "pyrightconfig.json")
+(= PYREFLY-CONFIG "pyrefly.toml")
+(= _ROOT-FILES (frozenset [_LOCK-NAME PYRIGHT-CONFIG PYREFLY-CONFIG]))
 
 (def _lock-fd [fd]
   "Take an exclusive lock on the open file fd, waiting for it."
@@ -1068,7 +1073,7 @@
    module-names, whether its shadow is written, the macro environment it
    compiled in (macro_modules.epoch)), so a file unchanged since, under the
    same macro environment, is not compiled again; and import-roots, the
-   sorted import roots of the written shadows' sources (write-pyright-config)."
+   sorted import roots of the written shadows' sources (_search-paths)."
   (def __init__ [self]
     (= self.sources {})
     (= self.import-roots [])))
@@ -1129,9 +1134,9 @@
    file link, a subdirectory with no .lpy at any depth as one directory
    link, never walked.  Left out: .lpy files, a .py that a shadow replaces
    (its .lpy wins on import), _pruned-p directories, and the view root's
-   pyrightconfig.json and lock file.  Each link made or kept is added to
-   links; a failure is logged and skipped."
-  (= reserved (, (osp.join root PYRIGHT-CONFIG) (osp.join root _LOCK-NAME)))
+   own files (_ROOT-FILES).  Each link made or kept is added to links; a
+   failure is logged and skipped."
+  (= reserved (frozenset [(osp.join root name) for name in _ROOT-FILES]))
   (= stack [package])
   (while stack
     (= directory (.pop stack))
@@ -1167,8 +1172,8 @@
   "Remove what under root no current source accounts for: every symlink and
    .py file that is neither a shadow nor a link of this sweep, every
    temporary file older than _TEMP-MAX-AGE, then every directory left empty
-   (bottom up, never root).  Other files, pyrightconfig.json and the lock
-   file among them, are never touched.  A directory link is unlinked, never
+   (bottom up, never root).  Other files, the view root's own files
+   (_ROOT-FILES) among them, are never touched.  A directory link is unlinked, never
    followed, and nothing is removed in a directory that leaves root
    (_check-in-root): that one is logged and skipped."
   (= stale-before (- (time.time) _TEMP-MAX-AGE))
@@ -1296,8 +1301,6 @@
     (_mirror-py-files project-root root directory shadows links))
   (_sweep-orphans root shadows links)
   (return (sorted shadows)))
-
-(= PYRIGHT-CONFIG "pyrightconfig.json")
 
 ;; The project's rule settings the view root's config takes over: these,
 ;; typeCheckingMode and every report* rule.  Never a path setting (include,
@@ -1451,8 +1454,6 @@
     (_write-if-changed root path (+ (json.dumps config :indent 2 :sort-keys True) "\n")))
   (return path))
 
-(= PYREFLY-CONFIG "pyrefly.toml")
-
 ;; The project's pyrefly settings the view root's pyrefly.toml takes over:
 ;; these, and errors (its per-code severities) while checking.  Never a path
 ;; or tooling setting (project-includes/-excludes, search-path,
@@ -1478,26 +1479,27 @@
 (= DEFAULT-PYREFLY-PRESET "basic")
 
 (def _project-pyrefly-config [project-root]
-  "The project's own pyrefly settings, as a dict: its pyrefly.toml, else
-   [tool.pyrefly] of its pyproject.toml, as pyrefly finds them; None when it
-   has none or the file that holds them is malformed."
+  "The project's own pyrefly settings, as (path of the file that holds
+   them, dict): its pyrefly.toml, else [tool.pyrefly] of its
+   pyproject.toml, as pyrefly finds them; the dict is None when it has none
+   or that file is malformed."
   (= path (osp.join project-root PYREFLY-CONFIG))
   (try
     (if (osp.isfile path)
         (with [(open path "rb") as f]
-          (return (tomllib.load f))))
+          (return (, path (tomllib.load f)))))
     (= path (osp.join project-root "pyproject.toml"))
     (if (not (osp.isfile path))
-        (return None))
+        (return (, path None)))
     (with [(open path "rb") as f]
       (= config (.get (.get (tomllib.load f) "tool" {}) "pyrefly")))
-    (return (ife (isinstance config dict) config None))
+    (return (, path (ife (isinstance config dict) config None)))
     (except [(, OSError ValueError AttributeError)]
       (.debug logger "lispython view: no pyrefly settings read from %s" path
               :exc-info True)
-      (return None))))
+      (return (, path None)))))
 
-(def _pyrefly-rule-settings [project-root check-types]
+(def _pyrefly-rule-settings [project check-types]
   "The rule settings of the view root's pyrefly.toml: the project's rule
    keys (_PYREFLY-RULE-KEYS) and, with check-types, its errors table; preset
    DEFAULT-PYREFLY-PRESET when the project has no pyrefly config, none
@@ -1506,8 +1508,8 @@
    project's errors are left out, since they would turn codes back on for
    nobody; its other settings (python-version, ...) stay, since hover and
    completion follow them.  pyrefly flags no invalid string escape, so
-   nothing is forced here as the pyright config forces one."
-  (= project (_project-pyrefly-config project-root))
+   nothing is forced here as the pyright config forces one.  project is
+   the project's settings dict, or None."
   (= rules (ife (is project None) {"preset" DEFAULT-PYREFLY-PRESET} {}))
   (for [key value] in (.items (or project {}))
     (if (or (in key _PYREFLY-RULE-KEYS) (and check-types (== key "errors")))
@@ -1565,27 +1567,55 @@
                 (.append lines f"{key} = {text}")))))
   (return (+ (.join "\n" lines) "\n")))
 
+(def _read-quietly [path]
+  "The text of the regular file path, or None (absent, a link, unreadable)."
+  (if (osp.islink path)
+      (return None))
+  (try
+    (with [(open path "r" :encoding "utf-8") as f]
+      (return (.read f)))
+    (except [(, OSError ValueError)]
+      (return None))))
+
 (def write-pyrefly-config [project-root view-root :import-roots None :check-types True
-                          :python None]
+                          :python None :check None]
   "Write view-root's pyrefly.toml when it changed: the project's rule
    settings (_pyrefly-rule-settings; check-types false turns checking off),
-   the search paths (_search-paths, the list pyright's extraPaths is, as
-   search-path), and python as python-interpreter-path (default
+   the search paths, and python as python-interpreter-path (default
    view-root's ViewRoot.python, else this process's interpreter), since
-   pyrefly otherwise queries the python3 on PATH for its site-packages.  A pyrefly.toml wins
-   over a pyrightconfig.json in the same directory.  A view root that
-   overlaps the project is a ValueError; the write holds the view root's
-   lock.  Returns the path."
+   pyrefly otherwise queries the python3 on PATH for its site-packages.  A
+   pyrefly.toml wins over a pyrightconfig.json in the same directory.
+   check, when given, is called with new TOML text and answers why pyrefly
+   refuses it, or None: a value the installed pyrefly rejects (an error
+   code or variant of another release) makes it drop the whole file and fall
+   back to auto configuration, losing the search paths, the interpreter and
+   preset off with it, so a refused text is replaced by one without any of
+   the project's settings, with a warning naming the project's config.  A
+   view root that overlaps the project is a ValueError; the write holds the
+   view root's lock.  Returns the path."
   (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
+  (= [source project] (_project-pyrefly-config project-root))
+  (= paths {;; pyrefly looks in search-path before the directory of its
+            ;; config (the view root), where pyright looks in its execution
+            ;; root first: the root leads, so a module the view links (a
+            ;; project .py) resolves to the link and is analysed under this
+            ;; config, never as the real file under the project's own.
+            "search-path" (+ [root] (_search-paths project-root root import-roots))
+            "python-interpreter-path"
+            (ife (is python None) (getattr view-root "python" sys.executable) python)})
+  (= path (osp.join root PYREFLY-CONFIG))
   ;; Every server of the project shares the view root: two run with
   ;; different pythonDiagnostics, the last to write decides its checking.
-  (= config (_pyrefly-rule-settings project-root check-types))
-  (= (sub config "search-path") (_search-paths project-root root import-roots))
-  (= (sub config "python-interpreter-path")
-     (ife (is python None) (getattr view-root "python" sys.executable) python))
-  (= path (osp.join root PYREFLY-CONFIG))
   (with [(_view-root-lock root)]
-    (_write-if-changed root path (_pyrefly-toml config)))
+    (= text (_pyrefly-toml (| (_pyrefly-rule-settings project check-types) paths)))
+    (if (and (is-not check None) (is-not project None) (!= text (_read-quietly path)))
+        (do (= problem (check text))
+            (if (is-not problem None)
+                (do (.warning logger "lispython LSP: pyrefly refuses the settings of %s, so the view uses none of them: %s"
+                              source problem)
+                    (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types)
+                                              paths)))))))
+    (_write-if-changed root path text))
   (return path))
