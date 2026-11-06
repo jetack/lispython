@@ -412,6 +412,22 @@ def test_nrepl_file_eval_without_a_line_is_not_the_file_start(session, tmp_path)
     assert "NameError: name 'inc' is not defined" in reply["error"]
 
 
+# --- docs ---------------------------------------------------------------------
+
+
+def test_the_built_in_macros_note_matches_behaviour():
+    # The note feeds llms.txt and the docs: the built-ins need no require,
+    # and every require of lispy.macros it shows, made a module's first
+    # form, narrows them.
+    from lispy.form_docs import BUILTIN_MACROS_NOTE
+
+    assert translate("(inc 1)") == "1 + 1"
+    spans = re.findall(r"`(\(require lispy\.macros[^`]*\))`", BUILTIN_MACROS_NOTE)
+    assert spans
+    for span in spans:
+        assert translate(f"{span}\n(inc 1)").splitlines()[-1] == "inc(1)", span
+
+
 # --- one home ----------------------------------------------------------------
 
 

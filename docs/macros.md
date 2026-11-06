@@ -79,7 +79,7 @@ To load only some of them, make `(require lispy.macros <selection>)` the module'
 ```
 A bare `(require lispy.macros)` leaves only the qualified `(lispy.macros.inc ...)` names. A later `require` of `lispy.macros` only adds macros.
 
-Binding a name that is an active macro (`def`, `class`, `=`, parameters, a `defmacro`'s parameters and locals, loop and `with` targets, imports, match captures, ...) is a compile error, because `(inc ...)` would still expand the macro. Rename the binding, or opt out of that macro with a selection that omits it. A hyphenated macro name is compared as a Python name, so a binding `my_x` clashes with a macro `my-x`; a macro spelled otherwise (`->`, `--`, `ok?`) clashes only with a binding of that same spelling, not with the name it mangles to (`_to_`, `__`, `ok_p`).
+Binding a name that is an active macro (`def`, `class`, `=`, parameters, a `defmacro`'s parameters and locals, loop and `with` targets, imports, match captures, ...) is a compile error, because `(inc ...)` would still expand the macro. Rename the binding, or opt out of that macro with a selection that omits it. A hyphenated name is one name with its Python name, so a binding `my_x` clashes with a macro `my-x` and a binding `my-x` with a macro `my_x`; any other spelling (`->`, `--`, `ok?`) clashes only with that same spelling, not with the name it mangles to (`_to_`, `__`, `ok_p`).
 
 The Python version in each example is what `l2py` prints.
 
