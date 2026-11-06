@@ -1030,6 +1030,8 @@ def test_real_pyrefly_starts_and_follows_the_projects_config(project, tmp_path):
                 uri=uri,
                 text=view.text,
             )
+            if hover is None:
+                return None, None
             client.push_buffer(uri, source, view)
             await asyncio.wait_for(heard.wait(), 20)
             return hover, client.diagnostics_for(uri, view.text)
