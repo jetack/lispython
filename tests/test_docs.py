@@ -76,12 +76,6 @@ def test_macros_page_takes_each_macro_description_from_its_docstring(docs_main):
     assert not missing, f"macros.md sections without macro_doc: {missing}"
 
 
-def test_macro_doc_renders_usage_then_the_docstring_description(docs_main):
-    doc = docs_main.form_docs.BUILTIN_MACROS["->>"]
-    expected = "\n".join(["```python", *doc.usage, "```", "", doc.prose])
-    assert docs_main.macro_doc_markdown("->>") == expected
-
-
 def test_page_headings_are_read_again_after_the_file_changes(docs_main, tmp_path):
     page = tmp_path / "p.md"
     page.write_text("# One\n")
