@@ -354,7 +354,9 @@
    ast.parse of text.  A view at a cursor also has cursor, the generated
    (line, col) right after the partial word typed there, partial, that word
    as typed, attribute, True when that word is an attribute name in the
-   generated Python (a dot right before it: x.a, (. x a), a.b.c), and
+   generated Python (a dot right before it: x.a, (. x a), a.b.c),
+   in-import, True when the word is a name inside an import statement
+   (a module, a dotted part of one, an imported name or its alias), and
    fallback, True when only the text before the cursor compiled; its tree
    is None, since its text was edited after the parse (and may not parse:
    x.).  macros is the name (name-key) of every macro the buffer's
@@ -368,6 +370,7 @@
     (= self.cursor None)
     (= self.partial None)
     (= self.attribute False)
+    (= self.in-import False)
     (= self.fallback False)))
 
 (def _spelled-in [lines start end name]
@@ -551,6 +554,9 @@
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
       (return None))
+  (= in-import (any ((> (_identifier-count node CURSOR-SENTINEL) 0)
+                     for node in (ast.walk view.tree)
+                     if (isinstance node (, ast.Import ast.ImportFrom)))))
   (= index (.index view.text CURSOR-SENTINEL))
   (= gen-line (+ (.count view.text "\n" 0 index) 1))
   (= gen-col (- index (+ (.rfind view.text "\n" 0 index) 1)))
@@ -572,6 +578,7 @@
   (= view.cursor (, gen-line (+ gen-col (len restored))))
   (= view.partial partial)
   (= view.attribute (and (> index 0) (== (sub view.text (- index 1)) ".")))
+  (= view.in-import in-import)
   (= view.fallback fallback)
   (return view))
 

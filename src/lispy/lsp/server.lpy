@@ -1,6 +1,5 @@
 (require lispy.macros *)
 
-(import ast)
 (import asyncio)
 (import builtins)
 (import functools)
@@ -1913,21 +1912,6 @@
 ;; to the editor.
 (= UNMAPPED (object))
 
-(def import-word-p [view offset]
-  "True when the word offset code points from view's cursor lies in an
-   import statement of view.text; False also when the text does not parse."
-  (= [line col] view.cursor)
-  (= text (sub (.split view.text "\n") (- line 1)))
-  (= at (, line (len (.encode (sub text [: (+ col offset)]) "utf-8"))))
-  (try
-    (= tree (ast.parse view.text))
-    (except [(, SyntaxError ValueError)]
-      (return False)))
-  (return (any ((and (isinstance node (, ast.Import ast.ImportFrom))
-                     (<= (, node.lineno node.col-offset) at)
-                     (< at (, node.end-lineno node.end-col-offset)))
-                for node in (ast.walk tree)))))
-
 ;; view-request's failed value in definition-answer: the check gave no answer.
 (= UNCHECKED (object))
 
@@ -1939,13 +1923,16 @@
   ;; no declarations (an undefined name or attribute) for the enclosing
   ;; call or operator: print in (print (+ nosuch 1)).  Its typeDefinition
   ;; never walks up: it gives the class of the name's type, else the name's
-  ;; own declarations, so it is empty exactly when the name has neither,
-  ;; and then the name has no definition of its own.  A word in an import
-  ;; statement is exempt: typeDefinition misses module and source names
-  ;; there (path in import os.path), and the walk-up never leaves an
-  ;; import, which holds no expression to walk up to.
+  ;; own declarations, so it is empty when the name has neither, and then
+  ;; the name has no definition of its own.  The hole: a name with no
+  ;; declarations but a class type (an attribute resolved through
+  ;; __getattr__) gets that class from typeDefinition and keeps the
+  ;; walked-up answer.  A word in an import statement is exempt
+  ;; (view.in-import): typeDefinition misses module and source names there
+  ;; (path in import os.path), and the walk-up never leaves an import,
+  ;; which holds no expression to walk up to.
   (if (or (not client.definition-walks-up) (not (answer-locations answer))
-          (import-word-p view offset))
+          view.in-import)
       (return answer))
   (= types (await (view-request client doc view lsp.TEXT_DOCUMENT_TYPE_DEFINITION
                                 (lsp.TypeDefinitionParams
