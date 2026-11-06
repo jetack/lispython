@@ -4,9 +4,11 @@
 The backend answers over the compiled views; every location it gives is
 mapped back: one in a .lpy file's view to that .lpy (the open buffer's to
 its own uri, another file's through its shadow on disk), one in a real .py
-passes unchanged, one in code the compiler made up is dropped. The buffer's
-own bindings, lispython's forms and macros keep the local answer, as does a
-buffer with no backend or no Python view.
+passes (in the editor's units), one in code the compiler made up is dropped.
+Every Python name goes to the backend, the buffer's own bindings too, since
+it knows scopes; lispython's forms and macros keep the local answer, as do
+a buffer with no backend or no Python view, and references over a view of
+only the text before the cursor.
 
 The tests share the session's basedpyright over one tmp project
 (``real_backends``, ``lsp_buffer``, ``backend_project`` in conftest.py:
@@ -215,4 +217,15 @@ def test_a_macro_never_reaches_the_backend(navigate, backend_requests, handler, 
     # Defect: a macro head is sent to the backend, which sees the code it
     # expanded to (or the sentinel's call) and answers for some Python name.
     navigate(handler, marked)
+    assert backend_requests.sent == []
+
+
+def test_references_never_come_from_a_view_of_the_prefix(navigate, backend_requests):
+    # The buffer ends mid-form, so only the text before the cursor compiles.
+    # Defect: the backend's references over that prefix (lines 0 and 1)
+    # replace the local answer, and the use on line 2 is lost.
+    found = navigate(
+        server.references, "(= my-x 1)\n(print my-|x)\n(print my-x)\n(print (+ 1"
+    )
+    assert [span[1] for span in spans(found)] == [0, 1, 2]
     assert backend_requests.sent == []
