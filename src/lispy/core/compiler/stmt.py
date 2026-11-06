@@ -24,6 +24,8 @@ from lispy.core.compiler.expr import (
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     SPECIAL_CONSTANTS,
+    binding_name,
+    check_binding,
     constant_compile,
     malformed_number_p,
     module_path,
@@ -155,7 +157,11 @@ def import_aliases(names, form, from_p=False):
         if aliased:
             q.popleft()
             asname = import_name(q.popleft(), form, dotted=False)
-            alias.asname = symbol_name(asname)
+            alias.asname = binding_name(asname)
+        else:
+            # Unaliased, the import binds the name, or a module path's first
+            # part (import_bindings).
+            check_binding(name.split(".")[0], n, atom_text(n).split(".")[0])
         rst.append((alias, n, asname))
     return rst
 
@@ -377,7 +383,7 @@ def except_types_parse(bracket, form):
             raise form_error(x, "has as without a name after it", form)
         if i != len(lst) - 2 or not plain_name_p(lst[-1]):
             raise form_error(x, "expects one name after as", form)
-        return [lst[:i], symbol_name(lst[-1])]
+        return [lst[:i], binding_name(lst[-1])]
     if not len(lst):
         raise form_error(bracket, "has an empty [types] bracket", form)
     return [lst, None]
@@ -593,7 +599,7 @@ def match_sequence_parse(sexp):
             )
         patterns.append(
             ast.MatchStar(
-                **{} if atom_text(name) == "_" else {"name": symbol_name(name)},
+                **{} if atom_text(name) == "_" else {"name": binding_name(name)},
                 **elt.position_info,
             )
         )
@@ -620,7 +626,7 @@ def match_mapping_parse(sexp):
                     f"expects a name after **, got {item.value}",
                     "mapping pattern",
                 )
-            rst["rest"] = symbol_name(item.value)
+            rst["rest"] = binding_name(item.value)
             break
         # A key with nothing but the trailing **rest after it lacks a pattern;
         # a **item in the middle is reported at itself once the key compiles.
@@ -697,7 +703,7 @@ def pattern_parse(sexp):
     if type(sexp) is Symbol and atom_text(sexp) == "_":
         return ast.MatchAs(**position_info)
     if type(sexp) is Symbol and not dotted_name_p(sexp):
-        return ast.MatchAs(name=symbol_name(sexp), **position_info)
+        return ast.MatchAs(name=binding_name(sexp), **position_info)
     if atom_text(sexp) in ("True", "False", "None") and constant_p(sexp):
         return ast.MatchSingleton(value=eval(str(sexp)), **position_info)
     if bracket_p(sexp):
@@ -730,7 +736,7 @@ def case_parse(case):
             raise form_error(case, "has as without a name after it")
         if not plain_name_p(body[1]):
             raise form_error(body[1], f"expects a name after as, got {body[1]}", "case")
-        name = symbol_name(body[1])
+        name = binding_name(body[1])
         if name == "_":
             # A wildcard captures nothing: CPython refuses `case 1 as _`.
             raise LispyCompileError("cannot use '_' as a target", body[1])
@@ -799,7 +805,7 @@ def type_params_parse(glued):
         )
         if type(symbol) is not Symbol or "." in symbol.value:
             raise LispyCompileError(f"invalid type parameter {param}", param)
-        fields = {"name": symbol_name(symbol)}
+        fields = {"name": binding_name(symbol)}
         if q and isinstance(q[0], Annotation):
             bound = q.popleft()
             if kind != "TypeVar":
@@ -835,12 +841,12 @@ def def_name_parse(name, form):
                 f"{name.head} is not a valid name for a generic definition", name
             )
         return [
-            symbol_name(name.head),
+            binding_name(name.head),
             {"type_params": (yield type_params_parse(name))},
         ]
     if not plain_name_p(name):
         raise form_error(name, f"expects a name, got {name}", form)
-    return [symbol_name(name), {}]
+    return [binding_name(name), {}]
 
 
 def type_alias_p(sexp):

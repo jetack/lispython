@@ -433,7 +433,7 @@ def param_name(arg):
     ``:name`` (default), ``*args`` or ``**kwargs`` wrapper."""
     if isinstance(arg, (Keyword, Starred, DoubleStarred)):
         arg = arg.value
-    return symbol_name(arg)
+    return binding_name(arg)
 
 
 def def_args_parse(sexp, annotated=True):

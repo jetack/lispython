@@ -46,6 +46,9 @@
   (= import-call (ife is-relative
                       `(importlib.import-module ~module-name-str :package __package__)
                       `(importlib.import-module ~module-name-str)))
+  ;; The emitted code compiles in the requiring module, where binding a name
+  ;; that is a macro there is an error: its own names are ___-prefixed so a
+  ;; user macro named k or v cannot break the require.
   (return
     `(do (import importlib)
          (= ___imported-macros
@@ -53,18 +56,18 @@
                      "__macro_namespace"
                      {}))
          ~(conde (== kind REQUIRE-QUALIFIED)
-                 `(for [k v] in (.items (.copy ___imported-macros))
+                 `(for [___k ___v] in (.items (.copy ___imported-macros))
                     (= (sub (.setdefault (globals) "__macro_namespace" {})
-                            (+ ~(str module-name) "." k))
-                       v))
+                            (+ ~(str module-name) "." ___k))
+                       ___v))
                  (== kind REQUIRE-ALL)
                  `(.update (.setdefault (globals) "__macro_namespace" {}) ___imported-macros)
 
                  ;; else: an empty list loops over nothing
-                 `(for mac-name in ~names
+                 `(for ___mac-name in ~names
                     (= (sub (.setdefault (globals) "__macro_namespace" {})
-                            mac-name)
-                       (sub ___imported-macros mac-name)))
+                            ___mac-name)
+                       (sub ___imported-macros ___mac-name)))
                  )
          ;; (del importlib)
          (del ___imported-macros))))

@@ -77,7 +77,7 @@ def require_transform(sexp):
         ),
         Paren(
             Symbol("for"),
-            Bracket(Symbol("k"), Symbol("v")),
+            Bracket(Symbol("___k"), Symbol("___v")),
             Symbol("in"),
             Paren(
                 Symbol(".items"), Paren(Symbol(".copy"), Symbol("___imported-macros"))
@@ -92,9 +92,9 @@ def require_transform(sexp):
                         String('"__macro_namespace"'),
                         Brace(),
                     ),
-                    Paren(Symbol("+"), str(module_name), String('"."'), Symbol("k")),
+                    Paren(Symbol("+"), str(module_name), String('"."'), Symbol("___k")),
                 ),
-                Symbol("v"),
+                Symbol("___v"),
             ),
         )
         if kind == REQUIRE_QUALIFIED
@@ -111,7 +111,7 @@ def require_transform(sexp):
         if kind == REQUIRE_ALL
         else Paren(
             Symbol("for"),
-            Symbol("mac-name"),
+            Symbol("___mac-name"),
             Symbol("in"),
             names,
             Paren(
@@ -124,9 +124,11 @@ def require_transform(sexp):
                         String('"__macro_namespace"'),
                         Brace(),
                     ),
-                    Symbol("mac-name"),
+                    Symbol("___mac-name"),
                 ),
-                Paren(Symbol("sub"), Symbol("___imported-macros"), Symbol("mac-name")),
+                Paren(
+                    Symbol("sub"), Symbol("___imported-macros"), Symbol("___mac-name")
+                ),
             ),
         ),
         Paren(Symbol("del"), Symbol("___imported-macros")),

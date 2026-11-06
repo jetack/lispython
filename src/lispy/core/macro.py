@@ -2,7 +2,11 @@ import ast
 from collections.abc import Callable
 
 from lispy.core.compiler import stmt_list_compile
-from lispy.core.compiler.literal import constant_compile, string_node_value
+from lispy.core.compiler.literal import (
+    ACTIVE_MACROS,
+    constant_compile,
+    string_node_value,
+)
 from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import LispyCompileError
 from lispy.core.meta_functions import defmacro_transform, require_transform
@@ -45,7 +49,9 @@ def define_macro(sexp, scope, include_meta=True):
     transformed = defmacro_transform(sexp)
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
-    body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
+    body = macroexpand_then_compile(
+        [transformed], scope, include_meta=include_meta, check_bindings=False
+    )
     with compile_nesting_errors(body):
         code = compile(ast.Interactive(body=body), "macro-defining", "single")
     eval(code, scope)
@@ -55,7 +61,9 @@ def define_macro(sexp, scope, include_meta=True):
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
     try:
-        body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
+        body = macroexpand_then_compile(
+            [transformed], scope, include_meta=include_meta, check_bindings=False
+        )
         with compile_nesting_errors(body):
             code = compile(ast.Interactive(body=body), "macro-requiring", "single")
         eval(code, scope)
@@ -150,10 +158,40 @@ def sexp_list_expand(sexp_list, scope, include_meta=True):
     )
 
 
-def macroexpand_then_compile(sexp_list, scope, include_meta=True):
-    return stmt_list_compile(
-        sexp_list_expand(sexp_list, scope, include_meta=include_meta)
-    )
+def active_macro_kind(scope):
+    """The check_binding lookup (compiler/literal.py) over scope's macros as
+    they stand when a binding compiles: a Python name's "built-in" (its
+    macro is the prelude's own), "macro" or None. Compared by Python name,
+    since my-x and my_x are one Python name; a dotted key (lispy.macros.inc,
+    from (require mod)) is never a bare name."""
+
+    def kind(name):
+        namespace = scope.get("__macro_namespace") or {}
+        prelude = scope.get(PRELUDE_KEY) or {}
+        found = None
+        for key, macro in namespace.items():
+            if "." in key or Symbol(key).name != name:
+                continue
+            if prelude.get(key) is macro:
+                return "built-in"
+            found = "macro"
+        return found
+
+    return kind
+
+
+def macroexpand_then_compile(sexp_list, scope, include_meta=True, check_bindings=True):
+    """Expand and compile each form in turn. With check_bindings, binding a
+    name that is a macro in scope at that point is a compile error
+    (check_binding); defmacro and require turn it off for the code they
+    generate and run at compile time."""
+    token = ACTIVE_MACROS.set(active_macro_kind(scope) if check_bindings else None)
+    try:
+        return stmt_list_compile(
+            sexp_list_expand(sexp_list, scope, include_meta=include_meta)
+        )
+    finally:
+        ACTIVE_MACROS.reset(token)
 
 
 # The built-in macros every compilation unit starts with (Clojure's
