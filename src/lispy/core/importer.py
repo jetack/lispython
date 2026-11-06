@@ -16,6 +16,31 @@ def _is_lpy_file(filename):
     return osp.isfile(filename) and osp.splitext(filename)[1] == ".lpy"
 
 
+def has_init_file(dir_path):
+    """Whether dir_path is a package directory: it holds __init__.py or
+    __init__.lpy."""
+    return osp.exists(osp.join(dir_path, "__init__.py")) or osp.exists(
+        osp.join(dir_path, "__init__.lpy")
+    )
+
+
+def package_root(dir_path):
+    """(import root, package parts) of a module in dir_path: walking up while
+    each directory is a package, the directory the walk stops at and the
+    package names from the top one down.  A dir_path that is no package is
+    its own import root, with no parts.  Pure (the CLI and the LSP both read
+    it; the CLI adds the root to sys.path itself)."""
+    parts = []
+    current = dir_path
+    while has_init_file(current):
+        parts.insert(0, osp.basename(current))
+        parent = osp.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return current, parts
+
+
 def _lpy_code(source, path, compile_module):
     """Compile .lpy source to code through ``compile_module(ast.Module)``.
 

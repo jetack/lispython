@@ -19,6 +19,7 @@
 (from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS])
 (from lispy.core.utils [augassignop-dict])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
+(from lispy.lsp.python-view [open-form-closers py-name source-prefix])
 
 (= logger (logging.getLogger __name__))
 
@@ -1071,7 +1072,6 @@ or an extra usage line names no usage key."
 (= _LAMBDA-HEADS (, "lambda" "fn"))
 ;; Forms whose body is another scope: an assignment in it is not the method's.
 (= _SCOPE-HEADS (, "def" "async-def" "lambda" "fn" "class" "defmacro"))
-(= _CLOSERS {"(" ")" "[" "]" "{" "}"})
 
 (def head-of [node]
   "The head symbol's text of a non-empty Paren, else None."
@@ -1081,48 +1081,6 @@ or an extra usage line names no usage key."
 
 (def node-end [node]
   (return (, node.end_lineno node.end_col_offset)))
-
-(def source-prefix [source line col]
-  "The text of source before the 1-based line and code-point column."
-  (= lines (.split source "\n"))
-  (= before (sub lines [: None (- line 1)]))
-  (.append before (sub (sub lines (- line 1)) [: None col]))
-  (return (.join "\n" before)))
-
-(def open-form-closers [prefix]
-  "The closers of the forms still open at the end of prefix, innermost
-   first, or None when the lexer cannot read it or it ends inside an
-   f/t-string, which no bracket can close.  Appended to prefix, they make
-   a mid-edit buffer parse up to the cursor."
-  (try
-    (= tokens (list (tokenize prefix)))
-    (except [Exception]
-      (return None)))
-  (= stack [])
-  (= literals 0)
-  (for [text tktype _ _] in tokens
-    (cond
-      (== tktype "error")
-      (return None)
-
-      (== tktype "interpolated-start")
-      (+= literals 1)
-
-      (== tktype "interpolated-end")
-      (-= literals 1)
-
-      (or (== tktype "opening")
-          (and (== tktype "bad-prefix") (in (sub text -1) "([{")))
-      (do (= closer (.get _CLOSERS (sub text -1)))
-          (if (is closer None)
-              (return None))
-          (.append stack closer))
-
-      (and (== tktype "closing") stack)
-      (.pop stack)))
-  (if literals
-      (return None))
-  (return (.join "" (reversed stack))))
 
 (def open-path [tree line col]
   "The forms open at the cursor, outermost first, and the leaf touching it.
@@ -1162,12 +1120,6 @@ or an extra usage line names no usage key."
              (isinstance leaf Symbol) (not (in "." leaf.value)))
         (return (, recv leaf.value)))
   (return None))
-
-(def py-name [text]
-  "The Python name lispython text stands for (Symbol.name, the compiler's
-   mangling): members, receivers and classes are compared by it, since
-   my-attr and my_attr are one Python attribute."
-  (return (. (Symbol text) name)))
 
 (def decorator-name [node]
   "A plain-symbol decorator's Python name, builtins.X read as X, or None."

@@ -363,3 +363,20 @@ class TestNotCallableHead:
 def test_attribute_with_a_non_name_attr_is_refused_at_the_attr():
     # Paren has no .name: this once escaped as an AttributeError.
     assert_refused_at("(. a (b))", "expected a name, got (b)", "(b)")
+
+
+class TestDottedSymbolPositions:
+    """A dotted symbol's nodes end at their .lpy spelling, not at the length
+    of the mangled Python name."""
+
+    @pytest.mark.parametrize("src", ["my-x.cc.dd-ee?", "a.x->y", "a-b.c?.d->e"])
+    def test_ends_follow_spelling(self, src):
+        module = macroexpand_then_compile(parse(src))
+        node = module[0].value
+        parts = src.split(".")
+        end = len(src)
+        while isinstance(node, ast.Attribute):
+            assert node.end_col_offset == end
+            end -= 1 + len(parts.pop())
+            node = node.value
+        assert (node.end_col_offset, node.col_offset) == (len(parts[0]), 0)

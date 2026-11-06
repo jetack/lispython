@@ -1,5 +1,6 @@
 import ast
 import contextlib
+import copy
 from collections import deque
 
 from lispy.core.compiler import features
@@ -268,3 +269,24 @@ def compile_nesting_errors(stmts):
             deepest[1],
             recursion_limit=features.compile_depth_follows_recursion_limit(),
         ) from None
+
+
+def python_interpolations(st):
+    """Copy of st whose t-string interpolations unparse from their values.
+
+    The compiler sets Interpolation.str to the lispython text, which is what a
+    Template reports at runtime; ast.unparse writes str verbatim unless it is
+    None, and Python source needs the Python text. Every caller that turns
+    lispython's AST into Python source (l2py, the LSP's Python view) goes
+    through here.
+    """
+    interpolation = getattr(ast, "Interpolation", None)
+    if interpolation is None or not any(
+        isinstance(n, interpolation) for n in ast.walk(st)
+    ):
+        return st
+    st = copy.deepcopy(st)
+    for n in ast.walk(st):
+        if isinstance(n, interpolation):
+            n.str = None
+    return st

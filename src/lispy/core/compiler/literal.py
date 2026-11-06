@@ -392,10 +392,13 @@ def name_compile(symbol, ctx):
     for attr in attrs:
         python_name(attr, symbol)
     position_info = {**symbol.position_info}
-    position_info["end_col_offset"] = position_info["col_offset"] + len(name)
+    # Positions are .lpy columns: measure the spelling's components (``a.x->y``),
+    # never the mangled Python names, which differ in length.
+    [spelled, *spelled_attrs] = symbol.value.split(".")
+    position_info["end_col_offset"] = position_info["col_offset"] + len(spelled)
     rst = ast.Name(id=name, ctx=ast.Load(), **position_info)
-    for attr in attrs:
-        position_info["end_col_offset"] += 1 + len(attr)
+    for attr, spelled_attr in zip(attrs, spelled_attrs, strict=True):
+        position_info["end_col_offset"] += 1 + len(spelled_attr)
         rst = ast.Attribute(value=rst, attr=attr, ctx=ast.Load(), **position_info)
     rst.ctx = ctx()
     return rst
