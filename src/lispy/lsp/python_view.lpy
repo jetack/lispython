@@ -1,0 +1,572 @@
+;; The Python view of a lispython buffer: the Python the compiler makes of it,
+;; with a map between generated and .lpy positions, so a Python language
+;; server can answer for the buffer (design: the vault page "LSP Python
+;; Delegation").  Backend-agnostic: nothing here talks to a server.
+;;
+;; Positions are (1-based line, code-point column) on both sides.  The
+;; compiler stamps .lpy positions in code points; ast.parse gives UTF-8 byte
+;; columns, converted here.  Every walk runs on an explicit stack, so nesting
+;; depth costs no Python frames.
+
+(require lispy.macros *)
+
+(import ast)
+(import builtins)
+(import glob)
+(import hashlib)
+(import json)
+(import os)
+(import os.path as osp)
+(import sys)
+(import warnings)
+
+(from lispy.core.nodes [Symbol])
+(from lispy.core.parser [parse tokenize])
+(from lispy.core.macro [macroexpand-then-compile])
+(from lispy.core.compiler.utils [python-interpolations])
+
+;; ---------------------------------------------------------------------------
+;; Source text helpers
+;; ---------------------------------------------------------------------------
+
+(= _CLOSERS {"(" ")" "[" "]" "{" "}"})
+
+(def py-name [text]
+  "The Python name lispython text stands for (Symbol.name, the compiler's
+   mangling): members, receivers and classes are compared by it, since
+   my-attr and my_attr are one Python attribute."
+  (return (. (Symbol text) name)))
+
+(def source-prefix [source line col]
+  "The text of source before the 1-based line and code-point column."
+  (= lines (.split source "\n"))
+  (= before (sub lines [: None (- line 1)]))
+  (.append before (sub (sub lines (- line 1)) [: None col]))
+  (return (.join "\n" before)))
+
+(def open-form-closers [prefix]
+  "The closers of the forms still open at the end of prefix, innermost
+   first, or None when the lexer cannot read it or it ends inside an
+   f/t-string, which no bracket can close.  Appended to prefix, they make
+   a mid-edit buffer parse up to the cursor."
+  (try
+    (= tokens (list (tokenize prefix)))
+    (except [Exception]
+      (return None)))
+  (= stack [])
+  (= literals 0)
+  (for [text tktype _ _] in tokens
+    (cond
+      (== tktype "error")
+      (return None)
+
+      (== tktype "interpolated-start")
+      (+= literals 1)
+
+      (== tktype "interpolated-end")
+      (-= literals 1)
+
+      (or (== tktype "opening")
+          (and (== tktype "bad-prefix") (in (sub text -1) "([{")))
+      (do (= closer (.get _CLOSERS (sub text -1)))
+          (if (is closer None)
+              (return None))
+          (.append stack closer))
+
+      (and (== tktype "closing") stack)
+      (.pop stack)))
+  (if literals
+      (return None))
+  (return (.join "" (reversed stack))))
+
+;; Characters that end a symbol token where a name is read back from the
+;; source: whitespace, the attribute dot, brackets, quotes and `;`.
+(= _NAME-STOPS ".()[]{}\"'`;")
+
+(def _name-char-p [ch]
+  (return (not (or (.isspace ch) (in ch _NAME-STOPS)))))
+
+(def _name-start [text end]
+  "Where the run of name characters ending at code-point column end starts."
+  (= start end)
+  (while (and (> start 0) (_name-char-p (sub text (- start 1))))
+    (-= start 1))
+  (return start))
+
+(def _name-end [text start]
+  "Where the run of name characters starting at code-point column start ends."
+  (= end start)
+  (while (and (< end (len text)) (_name-char-p (sub text end)))
+    (+= end 1))
+  (return end))
+
+;; ---------------------------------------------------------------------------
+;; Position map
+;; ---------------------------------------------------------------------------
+
+(def _contains [start end pos]
+  (return (and (<= start pos) (<= pos end))))
+
+(def _narrower-p [start end name-p best-start best-end best-name-p]
+  "Whether span start..end lies inside the best span so far: it starts later,
+   or starts there and ends sooner, or is the same span read as a name."
+  (cond (!= start best-start)
+        (return (> start best-start))
+        (!= end best-end)
+        (return (< end best-end)))
+  (return (and name-p (not best-name-p))))
+
+(def _shift-pos [pos line start end delta]
+  "pos after the text start..end of line became delta characters longer:
+   a point at or past end moves by delta, one inside clamps to the new end."
+  (if (!= (sub pos 0) line)
+      (return pos))
+  (= col (sub pos 1))
+  (cond (>= col end)
+        (return (, line (+ col delta)))
+        (> col start)
+        (return (, line (min col (+ end delta)))))
+  (return pos))
+
+(class PositionMap []
+  "Spans between the generated Python and the .lpy source.  Each entry is
+   (gen-start gen-end lpy-start lpy-end name-p): a whole node, or with name-p
+   just its identifier (Name, arg, keyword, alias, the attribute of an
+   Attribute), whose columns correspond character for character."
+
+  (def __init__ [self entries]
+    (= self.entries entries))
+
+  (def _lookup [self pos from-index to-index]
+    (= best None)
+    (for entry in self.entries
+      (= start (sub entry from-index))
+      (= end (sub entry (+ from-index 1)))
+      (if (and (_contains start end pos)
+               (or (is best None)
+                   (_narrower-p start end (sub entry 4)
+                                (sub best from-index)
+                                (sub best (+ from-index 1))
+                                (sub best 4))))
+          (= best entry)))
+    (if (is best None)
+        (return None))
+    (= target (sub best to-index))
+    (if (not (sub best 4))
+        (return target))
+    (= offset (- (sub pos 1) (sub (sub best from-index) 1)))
+    (= length (- (sub (sub best (+ to-index 1)) 1) (sub target 1)))
+    (return (, (sub target 0) (+ (sub target 1) (min offset length)))))
+
+  (def to-lpy [self line col]
+    "The .lpy position of generated (line, col), or None: the innermost
+     generated span holding it (end inclusive).  Inside a name the offset
+     into it is kept, clamped to the .lpy spelling; elsewhere the .lpy start
+     of the node."
+    (return (._lookup self (, line col) 0 2)))
+
+  (def to-generated [self line col]
+    "The generated position of .lpy (line, col), or None: the innermost .lpy
+     span holding it, the first in generated order among equal spans."
+    (return (._lookup self (, line col) 2 0)))
+
+  (def shift [self gen-line gen-start gen-end gen-delta
+              lpy-line lpy-start lpy-end lpy-delta]
+    "Follow a text edit on one generated and one .lpy line (_shift-pos)."
+    (= self.entries
+       [(, (_shift-pos gs gen-line gen-start gen-end gen-delta)
+           (_shift-pos ge gen-line gen-start gen-end gen-delta)
+           (_shift-pos ls lpy-line lpy-start lpy-end lpy-delta)
+           (_shift-pos le lpy-line lpy-start lpy-end lpy-delta)
+           name-p)
+        for [gs ge ls le name-p] in self.entries])))
+
+(def _lpy-span [node]
+  "node's .lpy (start, end), or None for a node the compiler left
+   unpositioned: lineno 0 or missing (what a macro or require synthesised)."
+  (= line (getattr node "lineno" None))
+  (if (not line)
+      (return None))
+  (= col (or (getattr node "col_offset" None) 0))
+  (= end-line (or (getattr node "end_lineno" None) line))
+  (= end-col (getattr node "end_col_offset" None))
+  (if (is end-col None)
+      (= end-col col))
+  (return (, (, line col) (, end-line end-col))))
+
+(def _lpy-name-span [lines span name]
+  "The .lpy span spelling Python name name within node span span, or None.
+   The spelling sits at no fixed place: a dotted symbol or (. x a) ends the
+   node with it, a method call (.ff x) starts it right after the dot, a
+   keyword parameter after its colon, and a macro may put anything there;
+   so each place is tried and the one whose py-name matches wins."
+  (= [[line col] [end-line end-col]] span)
+  (if (> end-line (len lines))
+      (return None))
+  (= text (sub lines (- line 1)))
+  (if (and (== line end-line) (== (py-name (sub text [: col end-col])) name))
+      (return (, (, line col) (, line end-col))))
+  (= end-text (sub lines (- end-line 1)))
+  (= start (_name-start end-text end-col))
+  (if (and (< start end-col) (== (py-name (sub end-text [: start end-col])) name))
+      (return (, (, end-line start) (, end-line end-col))))
+  (= start (ife (and (< col (len text)) (in (sub text col) ".:")) (+ col 1) col))
+  (= end (_name-end text start))
+  (if (and (< start end) (== (py-name (sub text [: start end])) name))
+      (return (, (, line start) (, line end))))
+  (return (_dotted-component-span text line col end-col name)))
+
+(def _dotted-component-span [text line col end-col name]
+  "The span of the component of the dotted symbol at col that an Attribute
+   ending at end-col names, or None.  The compiler measures such an
+   Attribute's end in Python name lengths (a.x->y ends 8 past a, not 6), so
+   the component is the one where the Python lengths so far reach end-col."
+  (= reach col)
+  (= start col)
+  (while (< start (len text))
+    (= end (_name-end text start))
+    (if (== end start)
+        (return None))
+    (= component (py-name (sub text [: start end])))
+    (+= reach (len component))
+    (if (and (== reach end-col) (== component name))
+        (return (, (, line start) (, line end))))
+    (if (or (>= reach end-col) (>= end (len text)) (!= (sub text end) "."))
+        (return None))
+    (+= reach 1)
+    (= start (+ end 1)))
+  (return None))
+
+(class _GeneratedColumns []
+  "Code-point columns of the generated text from ast.parse's byte offsets."
+  (def __init__ [self text]
+    (= self.lines (.split text "\n")))
+
+  (def pos [self line byte-col]
+    (if (> line (len self.lines))
+        (return (, line byte-col)))
+    (= text (sub self.lines (- line 1)))
+    (if (.isascii text)
+        (return (, line byte-col)))
+    (return (, line (len (.decode (sub (.encode text "utf-8") [: None byte-col])
+                                  "utf-8" "replace"))))))
+
+(def _gen-span [node columns]
+  (= line (getattr node "lineno" None))
+  (if (not line)
+      (return None))
+  (return (, (.pos columns line node.col_offset)
+             (.pos columns node.end_lineno node.end_col_offset))))
+
+(def _gen-name-span [node span]
+  "The generated span of node's identifier and the identifier, or None."
+  (= [[line col] [end-line end-col]] span)
+  (cond (isinstance node ast.Name)
+        (return (, span node.id))
+        (isinstance node ast.Attribute)
+        (return (, (, (, end-line (- end-col (len node.attr))) (, end-line end-col))
+                   node.attr))
+        (and (isinstance node (, ast.arg ast.keyword)) node.arg)
+        (return (, (, (, line col) (, line (+ col (len node.arg)))) node.arg))
+        (isinstance node ast.alias)
+        (return (, (, (, line col) (, line (+ col (len node.name)))) node.name)))
+  (return None))
+
+(def build-position-map [compiled generated source text]
+  "The PositionMap from a structural walk of the compiled tree and its
+   re-parse in step.  A pair whose types differ (a round trip that changed
+   shape) and a list field whose lengths differ are skipped with everything
+   under them, never the whole map."
+  (= lines (.split source "\n"))
+  (= columns (_GeneratedColumns text))
+  (= entries [])
+  (= stack [(, compiled generated)])
+  (while stack
+    (= [a b] (.pop stack))
+    (if (is-not (type a) (type b))
+        (continue))
+    (= lpy (_lpy-span a))
+    (= gen (ife (is lpy None) None (_gen-span b columns)))
+    (if (is-not gen None)
+        (do (.append entries (, (sub gen 0) (sub gen 1) (sub lpy 0) (sub lpy 1) False))
+            (= named (_gen-name-span b gen))
+            (if (is-not named None)
+                (do (= lpy-name (_lpy-name-span lines lpy (sub named 1)))
+                    (if (is-not lpy-name None)
+                        (.append entries
+                          (, (sub (sub named 0) 0) (sub (sub named 0) 1)
+                             (sub lpy-name 0) (sub lpy-name 1) True)))))))
+    (= children [])
+    (for [field va] in (ast.iter-fields a)
+      (= vb (getattr b field None))
+      (cond (and (isinstance va ast.AST) (isinstance vb ast.AST))
+            (.append children (, va vb))
+            (and (isinstance va list) (isinstance vb list) (== (len va) (len vb)))
+            (for [x y] in (zip va vb)
+              (if (and (isinstance x ast.AST) (isinstance y ast.AST))
+                  (.append children (, x y))))))
+    (.extend stack (reversed children)))
+  ;; Generated order, which breaks ties between equal .lpy spans.
+  (.sort entries :key (fn [e] (sub e 0)))
+  (return (PositionMap entries)))
+
+;; ---------------------------------------------------------------------------
+;; Views
+;; ---------------------------------------------------------------------------
+
+(class PythonView []
+  "A buffer's generated Python (text) and its PositionMap (map).  A view at a
+   cursor also has cursor, the generated (line, col) right after the partial
+   word typed there, partial, that word as typed, and fallback, True when
+   only the text before the cursor compiled."
+  (def __init__ [self text position-map]
+    (= self.text text)
+    (= self.map position-map)
+    (= self.cursor None)
+    (= self.partial None)
+    (= self.fallback False)))
+
+(def compile-view [source :package "" :name "__main__"]
+  "The PythonView of source, or None when it does not become Python: a parse
+   or compile error, a failing macro, a nesting too deep to unparse.  The
+   parse is strict, as diagnostics' is.  Macros run as compute-diagnostics
+   already runs them; the generated module is never compiled or executed."
+  (= scope {"__builtins__" builtins
+            "__name__" name
+            "__package__" package
+            "__macro_namespace" {}})
+  (try
+    (with [(warnings.catch-warnings)]
+      (warnings.simplefilter "ignore")
+      (= module (ast.Module :body (list (macroexpand-then-compile (parse source) scope))
+                            :type-ignores (list)))
+      (= module (python-interpolations module))
+      (= text (ast.unparse module))
+      (= position-map (build-position-map module (ast.parse text) source text)))
+    (except [Exception]
+      (return None)))
+  (return (PythonView text position-map)))
+
+;; Stands in for the word at the cursor: a plain name, unchanged by mangling,
+;; that compiles wherever a symbol does.
+(= CURSOR-SENTINEL "___lpy_cursor___")
+
+(def view-at-cursor [source line col :package "" :name "__main__"]
+  "The PythonView of source for a request at 1-based line, code-point col,
+   or None.  The partial word before the cursor (name characters back to a
+   dot, space, bracket, quote or ;) is replaced by CURSOR-SENTINEL so a
+   buffer mid-edit (my-x.  or (. obj ) ) still compiles; when the whole
+   buffer does not, the text before the cursor with its open forms closed is
+   compiled instead.  In the generated text the sentinel is replaced by the
+   partial's Python name and the map follows that edit."
+  (= lines (.split source "\n"))
+  (if (not (<= 1 line (len lines)))
+      (return None))
+  (= text (sub lines (- line 1)))
+  (if (not (<= 0 col (len text)))
+      (return None))
+  (= start (_name-start text col))
+  (= partial (sub text [: start col]))
+  (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: col None])))
+  (= marked (.join "\n" lines))
+  (= sentinel-end (+ start (len CURSOR-SENTINEL)))
+  (= fallback False)
+  (= view (compile-view marked :package package :name name))
+  (if (is view None)
+      (do (= prefix (source-prefix marked line sentinel-end))
+          (= closers (open-form-closers prefix))
+          (if (is closers None)
+              (return None))
+          (= view (compile-view (+ prefix closers) :package package :name name))
+          (= fallback True)))
+  (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1))
+      (return None))
+  (= index (.index view.text CURSOR-SENTINEL))
+  (= gen-line (+ (.count view.text "\n" 0 index) 1))
+  (= gen-col (- index (+ (.rfind view.text "\n" 0 index) 1)))
+  (= restored (ife partial (py-name partial) ""))
+  (= view.text (+ (sub view.text [: None index]) restored
+                  (sub view.text [: (+ index (len CURSOR-SENTINEL)) None])))
+  (.shift view.map
+          gen-line gen-col (+ gen-col (len CURSOR-SENTINEL))
+          (- (len restored) (len CURSOR-SENTINEL))
+          line start sentinel-end (- (len partial) (len CURSOR-SENTINEL)))
+  (= view.cursor (, gen-line (+ gen-col (len restored))))
+  (= view.partial partial)
+  (= view.fallback fallback)
+  (return view))
+
+(class ViewCache []
+  "The latest view of each document, by version (and cursor for
+   view-at-cursor): one entry per uri, so the cache never outgrows the open
+   documents.  A None result is cached like any other."
+  (def __init__ [self]
+    (= self._views {})
+    (= self._cursor-views {}))
+
+  (def view [self uri version source :package "" :name "__main__"]
+    (= hit (.get self._views uri))
+    (if (and (is-not hit None) (== (sub hit 0) version))
+        (return (sub hit 1)))
+    (= result (compile-view source :package package :name name))
+    (= (sub self._views uri) (, version result))
+    (return result))
+
+  (def view-at-cursor [self uri version source line col :package "" :name "__main__"]
+    (= key (, version line col))
+    (= hit (.get self._cursor-views uri))
+    (if (and (is-not hit None) (== (sub hit 0) key))
+        (return (sub hit 1)))
+    (= result (view-at-cursor source line col :package package :name name))
+    (= (sub self._cursor-views uri) (, key result))
+    (return result))
+
+  (def forget [self uri]
+    "Drop uri's entries (its document closed)."
+    (.pop self._views uri None)
+    (.pop self._cursor-views uri None)))
+
+;; ---------------------------------------------------------------------------
+;; View root: shadows of the workspace and the backend's config
+;; ---------------------------------------------------------------------------
+
+(class ViewRoot []
+  "The cache directory a Python backend analyses for one project (path,
+   also its os.fspath), and python, the interpreter the backend should
+   resolve imports with: this process's own."
+  (def __init__ [self path project-root python]
+    (= self.path path)
+    (= self.project-root project-root)
+    (= self.python python))
+
+  (def __fspath__ [self]
+    (return self.path))
+
+  (def __repr__ [self]
+    (return f"ViewRoot({self.path!r})")))
+
+(def view-root-for [project-root :cache-home None]
+  "The ViewRoot of project-root under $XDG_CACHE_HOME (default ~/.cache),
+   keyed by a hash of the project's real path so two projects never share
+   one and a symlinked checkout finds its own."
+  (if (is cache-home None)
+      (= cache-home (or (.get os.environ "XDG_CACHE_HOME")
+                        (osp.join (osp.expanduser "~") ".cache"))))
+  (= digest (sub (.hexdigest (hashlib.sha256 (.encode (osp.realpath project-root) "utf-8")))
+                 [: None 16]))
+  (return (ViewRoot (osp.join cache-home "lispython" "lsp-view" digest)
+                    (osp.abspath project-root)
+                    sys.executable)))
+
+(def _write-if-changed [path content]
+  "Write content to path unless it already holds it; True when written.
+   Through a temporary file and os.replace, so a backend reading the file
+   never sees half of it."
+  (try
+    (with [(open path "r" :encoding "utf-8") as f]
+      (if (== (.read f) content)
+          (return False)))
+    (except [OSError]
+      (pass)))
+  (os.makedirs (osp.dirname path) :exist-ok True)
+  (= tmp f"{path}.tmp")
+  (with [(open tmp "w" :encoding "utf-8") as f]
+    (.write f content))
+  (os.replace tmp path)
+  (return True))
+
+(def view-path [project-root view-root lpy-path]
+  "The shadow .py of lpy-path in view-root, mirroring its place under
+   project-root, or None for a file outside the project."
+  (= rel (osp.relpath (osp.abspath lpy-path) (osp.abspath project-root)))
+  (if (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))
+      (return None))
+  (return (osp.join (os.fspath view-root) (+ (sub (osp.splitext rel) 0) ".py"))))
+
+(def module-names [project-root lpy-path]
+  "The (__name__, __package__) lpy-path imports as from project-root."
+  (= rel (sub (osp.splitext (osp.relpath lpy-path project-root)) 0))
+  (= parts (.split rel os.sep))
+  (if (== (sub parts -1) "__init__")
+      (do (= parts (sub parts [: None -1]))
+          (= dotted (.join "." parts))
+          (return (, dotted dotted))))
+  (return (, (.join "." parts) (.join "." (sub parts [: None -1])))))
+
+(class ShadowManifest []
+  "What write-shadows last saw of each source: path -> ((mtime_ns, size),
+   whether it compiled), so an unchanged file is not compiled again."
+  (def __init__ [self]
+    (= self.sources {})))
+
+(def write-shadows [project-root view-root :manifest None]
+  "Write a compiled shadow .py into view-root for every .lpy under
+   project-root, so imports between .lpy modules resolve for the backend.
+   A shadow is written only when its text changed; a file that does not
+   compile has none, and every .py under view-root no current source
+   accounts for is removed (other files, pyrightconfig.json among them,
+   are never touched).  Returns the sorted shadow paths."
+  (if (is manifest None)
+      (= manifest (ShadowManifest)))
+  (= project-root (osp.abspath project-root))
+  (= root (os.fspath view-root))
+  (= seen {})
+  (= shadows (set))
+  (for lpy-path in (glob.glob (osp.join project-root "**" "*.lpy") :recursive True)
+    (= shadow (view-path project-root root lpy-path))
+    (if (is shadow None)
+        (continue))
+    (try
+      (= st (os.stat lpy-path))
+      (except [OSError]
+        (continue)))
+    (= stamp (, st.st_mtime_ns st.st_size))
+    (= known (.get manifest.sources lpy-path))
+    (if (and (is-not known None) (== (sub known 0) stamp)
+             (or (not (sub known 1)) (osp.exists shadow)))
+        (do (= (sub seen lpy-path) known)
+            (if (sub known 1)
+                (.add shadows shadow))
+            (continue)))
+    (= view None)
+    (try
+      (with [(open lpy-path "r" :encoding "utf-8") as f]
+        (= source (.read f)))
+      (= [name package] (module-names project-root lpy-path))
+      (= view (compile-view source :package package :name name))
+      (except [(, OSError UnicodeDecodeError)]
+        (pass)))
+    (= (sub seen lpy-path) (, stamp (is-not view None)))
+    (if (is-not view None)
+        (do (_write-if-changed shadow view.text)
+            (.add shadows shadow))))
+  (= manifest.sources seen)
+  (for path in (glob.glob (osp.join root "**" "*.py") :recursive True)
+    (if (not (in path shadows))
+        (try
+          (os.remove path)
+          (except [OSError]
+            (pass)))))
+  (return (sorted shadows)))
+
+(= PYRIGHT-CONFIG "pyrightconfig.json")
+
+(def write-pyright-config [project-root view-root]
+  "Write view-root's pyrightconfig.json when it changed: type checking off
+   (only completion and navigation are asked for), the project and its
+   .venv site-packages as search paths, and the environment of this
+   process's interpreter.  pyright's config has no interpreter path; it
+   takes a virtualenv as venvPath (its parent) and venv (its name), so a
+   base interpreter is left to the backend's own discovery and to
+   ViewRoot.python, sent as python.pythonPath.  Returns the path."
+  (= project-root (osp.abspath project-root))
+  (= extra [project-root])
+  (.extend extra (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
+                                              "site-packages"))))
+  (= config {"typeCheckingMode" "off" "extraPaths" extra})
+  (if (!= sys.prefix sys.base-prefix)
+      (do (= (sub config "venvPath") (osp.dirname sys.prefix))
+          (= (sub config "venv") (osp.basename sys.prefix))))
+  (= path (osp.join (os.fspath view-root) PYRIGHT-CONFIG))
+  (_write-if-changed path (+ (json.dumps config :indent 2 :sort-keys True) "\n"))
+  (return path))

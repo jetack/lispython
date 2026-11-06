@@ -3,7 +3,6 @@
 (import argparse)
 (import ast)
 (import collections.abc)
-(import copy)
 (import functools)
 (import importlib)
 (import inspect)
@@ -30,7 +29,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.parser [parse])
 (from lispy.core.macro [macroexpand macroexpand-then-compile])
-(from lispy.core.compiler.utils [compile-nesting-errors])
+(from lispy.core.compiler.utils [compile-nesting-errors python-interpolations])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
 
@@ -69,27 +68,12 @@
           "__package__" (detect-package-name)
           "__macro_namespace" {}})
 
-(def _python-interpolations [st]
-  "Copy of st whose t-string interpolations unparse from their values.
-   The compiler sets Interpolation.str to the lispython text, which is what a
-   Template reports at runtime; ast.unparse writes str verbatim unless it is
-   None, and Python source needs the Python text."
-  (= interpolation (getattr ast "Interpolation" None))
-  (if (or (is interpolation None)
-          (not (any ((isinstance n interpolation) for n in (ast.walk st)))))
-      (return st))
-  (= st (copy.deepcopy st))
-  (for n in (ast.walk st)
-    (if (isinstance n interpolation)
-        (= n.str None)))
-  (return st))
-
 (def ast-to-python [st]
   ;; ast.unparse recurses and gives up on a shallower AST than compile()
   ;; takes, on every version at the recursion limit, so a statement it
   ;; cannot write is the nesting error, at st.
   (try
-    (return (str (ast.unparse (_python-interpolations st))))
+    (return (str (ast.unparse (python-interpolations st))))
     (except [RecursionError]
       (raise (nesting-error st :recursion-limit True :what "translate")
              from None))))
