@@ -258,3 +258,22 @@ def test_a_macro_gets_the_local_answers(navigate, backend_requests):
         ("main.lpy", 1, 1, 1, 6),
     ]
     assert backend_requests.sent == []
+
+
+def test_an_answer_that_maps_nowhere_gives_the_local_answer(
+    navigate, backend_requests, real_backends, backend_project
+):
+    # Defect: the backend found the name, but only in code the compiler
+    # made up, and the empty mapped list counts as its final answer: the
+    # local definition is lost.
+    uri = (backend_project / "main.lpy").as_uri()
+    shadow = real_backends.available_client(uri).backend_uri(uri)
+    backend_requests.answer["replace"] = lambda request: [
+        lsp.Location(
+            uri=shadow,
+            range=generated_range(request["text"], "___defmacro_temp___swap"),
+        )
+    ]
+    found = navigate(server.definition, MACRO_BUFFER)
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_DEFINITION]
+    assert spans(found) == [("main.lpy", 1, 3, 1, 7)]

@@ -340,3 +340,65 @@ def test_a_backend_member_edit_counts_in_utf16_units(complete):
         line,
         character - 2,
     )
+
+
+def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
+    # Defect: the view's macros are Python names (_to_ for ->, __ for --),
+    # matched against lispython's items by spelling, so each operator macro
+    # comes back as a second, junk item.
+    labels = set(by_label(merged("(require lispy.macros *)\n(= x 1)\n(print x|)")[2]))
+    assert {"->", "->>", "--"} <= labels
+    assert not {"_to_", "_to_>", "__"} & labels
+
+
+def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
+    # Defects: a defmacro of the buffer is not offered, is offered by its
+    # Python name (my_mac), or beside the backend's item of that name.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="my_mac", kind=lsp.CompletionItemKind.Function),
+        lsp.CompletionItem(label="my_var", kind=lsp.CompletionItemKind.Variable),
+    ]
+    items = merged("(defmacro my-mac [x] x)\n(= my-var 1)\n(print my|)")[2]
+    same = [item for item in items if server.py_name(item.label) == "my_mac"]
+    assert [(item.label, item.kind, item.detail) for item in same] == [
+        ("my-mac", lsp.CompletionItemKind.Keyword, "macro")
+    ]
+    assert "my-var" in by_label(items)  # the backend's other item stays
+
+
+def test_a_fallback_view_keeps_the_definitions_after_the_cursor(merged):
+    # Only the text before the cursor compiles, so the backend never sees
+    # helper. Defect: the merged list offers only what the backend saw.
+    labels = set(by_label(merged("(def main []\n  (hel|\n(def helper [] 1)")[2]))
+    assert "help" in labels  # the backend did answer
+    assert "helper" in labels
+
+
+AUTO_IMPORT = lsp.CompletionItem(
+    label="imported_name",
+    kind=lsp.CompletionItemKind.Class,
+    additional_text_edits=[
+        lsp.TextEdit(
+            range=lsp.Range(
+                start=lsp.Position(line=0, character=0),
+                end=lsp.Position(line=0, character=0),
+            ),
+            new_text="from m import imported_name\n",
+        )
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    "marked", ["(= my-x [])\n(print my-|)", "(= my-x [])\nmy-x.co|"]
+)
+def test_an_auto_import_item_never_appears(merged, backend_requests, marked):
+    # Defect: a symbol the buffer never binds is offered with an import
+    # edit positioned in generated code (merged and attribute paths).
+    backend_requests.answer["value"] = [
+        AUTO_IMPORT,
+        lsp.CompletionItem(label="my_x", kind=lsp.CompletionItemKind.Variable),
+    ]
+    labels = set(by_label(merged(marked)[2]))
+    assert "my-x" in labels
+    assert "imported_name" not in labels

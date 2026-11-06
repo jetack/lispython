@@ -433,22 +433,33 @@ class TestImportBindings:
         assert server.find_import_for_name(tree, "sep") is not None
 
 
+def local_references(source, line, character):
+    """(line, character) of each local reference at the position (no backend
+    serves URI)."""
+    from lsprotocol import types as lsp
+
+    params = lsp.ReferenceParams(
+        text_document=lsp.TextDocumentIdentifier(uri=URI),
+        position=lsp.Position(line=line, character=character),
+        context=lsp.ReferenceContext(include_declaration=True),
+    )
+    found = asyncio.run(server.references(ls_with(source), params))
+    return [(loc.range.start.line, loc.range.start.character) for loc in found]
+
+
 def test_local_references_compare_python_names():
     # Defect: references compare spellings, so my_x misses the my-x it
     # stands for (one Python name).
-    from lsprotocol import types as lsp
+    source = "(= my-x 1)\n(print my_x)\n(print my-y)"
+    assert local_references(source, 1, 8) == [(0, 3), (1, 7)]
 
-    ls = ls_with("(= my-x 1)\n(print my_x)\n(print my-y)")
-    params = lsp.ReferenceParams(
-        text_document=lsp.TextDocumentIdentifier(uri=URI),
-        position=lsp.Position(line=1, character=8),
-        context=lsp.ReferenceContext(include_declaration=True),
-    )
-    found = asyncio.run(server.references(ls, params))
-    assert [(loc.range.start.line, loc.range.start.character) for loc in found] == [
-        (0, 3),
-        (1, 7),
-    ]
+
+def test_an_operator_is_never_the_name_its_mangling_gives():
+    # Defect: references compare Python names, and - mangles to _, so
+    # references on - list every _ and those on _ list the -.
+    source = "(= _ 1)\n(print (- 3 _))"
+    assert local_references(source, 1, 8) == [(1, 8)]
+    assert local_references(source, 0, 3) == [(0, 3), (1, 12)]
 
 
 def test_an_operator_never_spells_a_name():
@@ -515,3 +526,17 @@ def test_a_real_file_range_counts_in_the_editors_units(tmp_path, encoding, start
     )
     got = server.file_range(doc, path.as_uri(), utf16)
     assert (got.start.line, got.start.character, got.end.character) == (1, start, end)
+
+
+def test_a_hover_on_a_non_builtin_name_caches_nothing():
+    # Defect: the builtin lookup's cache keeps an entry (None) for every
+    # name hovered, so it grows with every name a session hovers.
+    caches = [f for f in vars(server).values() if hasattr(f, "cache_info")]
+
+    def cached():
+        return sum(f.cache_info().currsize for f in caches)
+
+    run_hover(ls_with("(print 1)"), position(0, 2))  # a builtin may be cached
+    before = cached()
+    assert run_hover(ls_with("(no-such-name 1)"), position(0, 3)) is None
+    assert cached() == before
