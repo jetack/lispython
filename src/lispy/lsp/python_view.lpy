@@ -1577,6 +1577,10 @@
     (except [(, OSError ValueError)]
       (return None))))
 
+;; View root -> the last pyrefly.toml text its check refused (one per root),
+;; read and written under the view root's lock.
+(= _REFUSED-PYREFLY {})
+
 (def write-pyrefly-config [project-root view-root :import-roots None :check-types True
                           :python None :check None]
   "Write view-root's pyrefly.toml when it changed: the project's rule
@@ -1610,12 +1614,23 @@
   ;; different pythonDiagnostics, the last to write decides its checking.
   (with [(_view-root-lock root)]
     (= text (_pyrefly-toml (| (_pyrefly-rule-settings project check-types) paths)))
-    (if (and (is-not check None) (is-not project None) (!= text (_read-quietly path)))
-        (do (= problem (check text))
-            (if (is-not problem None)
-                (do (.warning logger "lispython LSP: pyrefly refuses the settings of %s, so the view uses none of them: %s"
-                              source problem)
-                    (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types)
-                                              paths)))))))
+    (cond
+      (or (is check None) (is project None) (== text (_read-quietly path)))
+      (pass)
+
+      ;; Refused before: the file holds the fallback, so the text differs
+      ;; from it on every save; checked and warned about once.
+      (== text (.get _REFUSED-PYREFLY root))
+      (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types) paths)))
+
+      True
+      (do (= problem (check text))
+          (if (is None problem)
+              (.pop _REFUSED-PYREFLY root None)
+              (do (.warning logger "lispython LSP: pyrefly refuses the settings of %s, so the view uses none of them: %s"
+                            source problem)
+                  (= (sub _REFUSED-PYREFLY root) text)
+                  (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types)
+                                            paths)))))))
     (_write-if-changed root path text))
   (return path))

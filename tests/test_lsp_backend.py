@@ -1198,6 +1198,14 @@ def test_real_pyrefly_refusal_keeps_the_views_settings(project, tmp_path, caplog
         path = write(str(project), root, check_types=False)
     assert str(project / "pyrefly.toml") in caplog.text
     assert "`nope`" in caplog.text
+    # The position pyrefly gives is in the generated text, never the
+    # project's file the warning names: left out.
+    assert "line " not in caplog.text
+    problem = backend.pyrefly_config_problem(
+        binary, '[errors]\nno-such-code = "warn"\n'
+    )
+    assert "unknown variant `no-such-code`" in problem
+    assert "line 1, column" not in problem
     text = open(path).read()
     assert backend.pyrefly_config_problem(binary, text) is None
     written = tomllib.loads(text)

@@ -119,8 +119,10 @@
    text from a file of its own in a temporary directory: pyrefly reports a
    value it cannot read as a config that failed to parse, then falls back
    to auto configuration, and exits 1 whether or not it did (it also does
-   when no file matches).  The answer is pyrefly's error lines, the list of
-   values it expected cut off."
+   when no file matches).  The answer is pyrefly's description of what it
+   refused (unknown variant `x`), the list of values it expected cut off;
+   never its ERROR line's position, which is in the generated text, not
+   the project's file the caller names."
   (try
     (with [(tempfile.TemporaryDirectory :prefix "lispython-pyrefly-") as directory]
       (= path (osp.join directory "pyrefly.toml"))
@@ -133,12 +135,16 @@
     (except [(, OSError subprocess.SubprocessError)]
       (.debug logger "python backend: cannot check a pyrefly config" :exc-info True)
       (return None)))
-  (= output (.replace (+ result.stdout result.stderr) path "pyrefly.toml"))
+  (= output (+ result.stdout result.stderr))
   (if (not (in "failed to parse" output))
       (return None))
+  ;; Left out: the WARN and ERROR lines (the file and the position) and the
+  ;; excerpt of the text, whose lines hold a |.
   (= lines [(sub (.strip line) [: None 200]) for line in (.splitlines output)
-            if (and (.strip line) (not-in "|" line) (not (.startswith (.strip line) "WARN")))])
-  (return (.join " " [(sub (.split line ", expected one of" 1) 0) for line in lines])))
+            if (and (.strip line) (not-in "|" line)
+                    (not (.startswith (.strip line) (, "WARN" "ERROR" "Fatal configuration error"))))])
+  (return (or (.join " " [(sub (.split line ", expected one of" 1) 0) for line in lines])
+              "pyrefly cannot read it")))
 
 (def _write-pyrefly-config [project-root view-root **settings]
   "write-pyrefly-config, checked by the installed pyrefly

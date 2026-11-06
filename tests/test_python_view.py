@@ -1159,6 +1159,14 @@ class TestShadows:
         )
         config = self.pyrefly_config(project, root, check=check)
         assert (config["preset"], "errors" in config) == ("basic", False)
+        # Saved again with the same refused config: the file holds the
+        # fallback, which differs from the candidate, yet pyrefly is not run
+        # again and the warning is not repeated on every save.
+        calls, warnings = len(checked), caplog.text.count("refuses")
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            config = self.pyrefly_config(project, root, check=check)
+        assert (config["preset"], "errors" in config) == ("basic", False)
+        assert (len(checked), caplog.text.count("refuses")) == (calls, warnings)
         (project / "pyrefly.toml").write_text('preset = "strict"\n')
         assert self.pyrefly_config(project, root, check=check)["preset"] == "strict"
         calls = len(checked)
