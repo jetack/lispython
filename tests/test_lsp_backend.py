@@ -3,8 +3,9 @@
 The real-backend tests share one basedpyright process on one event loop in a
 background thread (a basedpyright start costs about a second and 400 MB). The
 others run a fake backend, a tiny pygls server whose hover answers with its
-pid, its copy of the document and the configuration the client gave it, each
-on its own loop; none needs basedpyright installed.
+pid, its copy of the document and the configuration the client gave it, and
+which publishes an Error on each undefined_name of a synced text, each on its
+own loop; none needs basedpyright installed.
 """
 
 import asyncio
@@ -72,6 +73,43 @@ FAKE_SERVER = textwrap.dedent(
         text = doc.source
         answer = {"pid": os.getpid(), "text": text, "config": config.get("answer")}
         return types.Hover(contents=json.dumps(answer))
+
+
+    def publish(ls, document):
+        # As pyright: an Error on each undefined_name, at the synced version.
+        text = ls.workspace.get_text_document(document.uri).source
+        found = []
+        for row, line in enumerate(text.split("\\n")):
+            col = line.find("undefined_name")
+            while col != -1:
+                start = types.Position(line=row, character=col)
+                end = types.Position(line=row, character=col + len("undefined_name"))
+                found.append(
+                    types.Diagnostic(
+                        range=types.Range(start=start, end=end),
+                        message='"undefined_name" is not defined',
+                        severity=types.DiagnosticSeverity.Error,
+                        code="reportUndefinedVariable",
+                        source="fake",
+                        data={"generated": True},
+                    )
+                )
+                col = line.find("undefined_name", col + 1)
+        ls.text_document_publish_diagnostics(
+            types.PublishDiagnosticsParams(
+                uri=document.uri, version=document.version, diagnostics=found
+            )
+        )
+
+
+    @server.feature(types.TEXT_DOCUMENT_DID_OPEN)
+    def did_open(ls, params):
+        publish(ls, params.text_document)
+
+
+    @server.feature(types.TEXT_DOCUMENT_DID_CHANGE)
+    def did_change(ls, params):
+        publish(ls, params.text_document)
 
 
     @server.feature(types.EXIT)
@@ -244,29 +282,37 @@ def test_a_document_belongs_to_its_innermost_folder(tmp_path):
     assert inside is not None and inside.project_root == os.path.realpath(project)
 
 
-def test_buffer_hooks_never_start_a_backend(project, tmp_path, fake_default, spawned):
-    # Defect: opening, editing or saving a buffer spawns the backend (a
-    # process per project on a plain edit) or compiles a view for nobody.
+@pytest.mark.parametrize("python_diagnostics", [True, False])
+def test_only_an_open_with_diagnostics_starts_a_backend(
+    python_diagnostics, project, tmp_path, fake_default, spawned
+):
+    # Defects: editing, saving or closing a buffer spawns the backend (a
+    # process per project on a plain edit); opening one with
+    # pythonDiagnostics false spawns it all the same; or opening one with
+    # them on never starts it, so no diagnostics come until some request.
     folder = SimpleNamespace(uri=project.as_uri())
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    backends.configure({"pythonDiagnostics": python_diagnostics})
     uri = (project / "main.lpy").as_uri()
-    assert backends.client_for(uri).state == "idle"
-    read = []
-
-    def source():
-        read.append(True)
-        return "(= y 2)\n"
+    client = backends.client_for(uri)
+    view = pv.compile_view("(= y 2)\n")
 
     async def scenario():
-        backends.document_changed(uri, source)
-        backends.document_saved(uri)
-        backends.document_closed(uri)
-        others = asyncio.all_tasks() - {asyncio.current_task()}
-        await asyncio.gather(*others)
+        try:
+            backends.document_changed(uri, "(= y 2)\n", view)
+            backends.document_saved(uri)
+            backends.document_closed(uri)
+            others = asyncio.all_tasks() - {asyncio.current_task()}
+            await asyncio.gather(*others)
+            assert spawned == []
+            backends.document_opened(uri)
+            if client._starting is not None:
+                assert await client._starting
+        finally:
+            await backends.shutdown_all()
 
     run_bounded(scenario())
-    assert spawned == []
-    assert read == []
+    assert len(spawned) == (1 if python_diagnostics else 0)
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +485,7 @@ def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):
     async def scenario():
         try:
             await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params, text="old")
-            backends.document_changed(uri, lambda: "(= my-y 2)")
+            backends.document_changed(uri, "(= my-y 2)", pv.compile_view("(= my-y 2)"))
             while (text := await backend_text()) == "old":
                 await asyncio.sleep(0.01)
             assert text == "my_y = 2"
