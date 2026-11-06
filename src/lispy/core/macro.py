@@ -56,7 +56,16 @@ def define_macro(sexp, scope, include_meta=True):
     # importer refuse it when they compile this same form as the module's
     # code (include_meta). The generated ___defmacro_temp___ name never
     # clashes.
-    body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
+    try:
+        body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
+    except LispyCompileError as err:
+        if err.lineno is not None:
+            raise
+        # A refusal of the generated def (an empty body, a parameter, an
+        # annotation) has no position of its own. The generated nodes stay
+        # positionless, because the LSP position map must see them as no
+        # user code; only the error is placed at the defmacro.
+        raise LispyCompileError(err.msg, sexp) from None
     with compile_nesting_errors(body):
         code = compile(ast.Interactive(body=body), "macro-defining", "single")
     eval(code, scope)

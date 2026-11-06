@@ -100,7 +100,8 @@
   "(when test body...)
 
   An `if` statement with no else, whose branch runs every body form in order.
-  A statement: it yields no value."
+  A statement: it yields no value. The body must hold a statement, as Python's
+  `if` does: `(when test)` is a compile error."
   (return `(if ~condition (do ~@body))))
 
 (defmacro inc [elt]

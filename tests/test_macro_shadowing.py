@@ -122,7 +122,7 @@ NOT_BINDINGS = [
     ["attribute form target", "(= (. self inc) 1)"],
     ["subscript target", "(= (sub d inc) 1)"],
     ["keyword argument", "(f :inc 1)"],
-    ["class base keyword", "(class C [:inc 1])"],
+    ["class base keyword", "(class C [:inc 1] 1)"],
     ["global", "(def f [] (global inc))"],
     ["nonlocal", "(def f [] (= x 1) (def g [] (nonlocal inc)))"],
     ["del", "(del inc)"],

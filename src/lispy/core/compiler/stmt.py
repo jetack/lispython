@@ -281,7 +281,7 @@ def if_stmt_compile(sexp):
     [[test, then], orelse] = form_parts(sexp, ("test", "then"))
     return ast.If(
         test=(yield expr_steps(test)),
-        body=(yield stmt_list_steps([then])),
+        body=(yield required_body_steps(sexp, [then])),
         orelse=(yield stmt_list_steps(orelse)),
         **sexp.position_info,
     )
@@ -297,16 +297,25 @@ def loop_parse(sexp, header):
 
     ``header`` names the operands before the body, in order: ``("test",)``
     for while, ``("target", ("in", "iterable"))`` for for, whose optional
-    ``in`` before the iterable is skipped. A trailing ``(else ...)`` holds the
-    else body. Python has no bodiless loop, so an empty body is refused.
+    ``in`` before the iterable is skipped. A trailing ``(else ...)`` is the
+    third part (its clause, or None); it is compiled by ``loop_else_steps``.
+    Python has no bodiless loop, so an empty body is refused.
     """
     [parts, body] = form_parts(sexp, header)
-    orelse = []
+    orelse = None
     if len(body) and clause_p(body[-1], ("else",)):
-        orelse = body.pop().operands
+        orelse = body.pop()
     if not body:
         raise form_error(sexp, "needs a body")
     return parts, body, orelse
+
+
+def loop_else_steps(clause):
+    """The statements of a loop's ``(else ...)`` clause (None: no clause); a
+    clause with no statement is refused, as try's is."""
+    if clause is None:
+        return []
+    return (yield required_body_steps(clause, clause.operands))
 
 
 def while_p(sexp):
@@ -317,8 +326,8 @@ def while_compile(sexp):
     [[test], then, orelse] = loop_parse(sexp, ("test",))
     return ast.While(
         test=(yield expr_steps(test)),
-        body=(yield stmt_list_steps(then)),
-        orelse=(yield stmt_list_steps(orelse)),
+        body=(yield required_body_steps(sexp, then)),
+        orelse=(yield loop_else_steps(orelse)),
         **sexp.position_info,
     )
 
@@ -334,8 +343,8 @@ def for_compile(sexp, async_p=False):
     return (ast.AsyncFor if async_p else ast.For)(
         target=(yield target_compile(target, "assign")),
         iter=(yield expr_steps(iterable)),
-        body=(yield stmt_list_steps(then)),
-        orelse=(yield stmt_list_steps(orelse)),
+        body=(yield required_body_steps(sexp, then)),
+        orelse=(yield loop_else_steps(orelse)),
         **sexp.position_info,
     )
 
@@ -413,7 +422,9 @@ def parse_except(handler):
     if not body:
         raise form_error(handler, "needs a body")
     return ast.ExceptHandler(
-        body=(yield stmt_list_steps(body)), **kwargs, **handler.position_info
+        body=(yield required_body_steps(handler, body)),
+        **kwargs,
+        **handler.position_info,
     )
 
 
@@ -437,7 +448,7 @@ def try_parse(sexp):
     body = operands[:n]
     if not body:
         raise form_error(sexp, "needs a body")
-    [handlers, orelse, finalbody] = [[], [], None]
+    [handlers, orelse, finalbody] = [[], None, None]
     [previous, star, bare] = [None, False, False]
     for clause in operands[n:]:
         if not clause_p(clause, TRY_CLAUSES):
@@ -463,22 +474,28 @@ def try_parse(sexp):
             if not len(clause.operands):
                 raise form_error(clause, "needs a body")
             if kind == "else":
-                orelse = clause.operands
+                orelse = clause
             else:
-                finalbody = clause.operands
+                finalbody = clause
         previous = kind
     if not handlers and finalbody is None:
         raise form_error(sexp, "needs an except or a finally clause")
-    return [body, handlers, orelse, finalbody or [], star]
+    return [body, handlers, orelse, finalbody, star]
 
 
 def try_compile(sexp):
     [body, handlers, orelse, finalbody, star] = yield try_parse(sexp)
     return (ast.TryStar if star else ast.Try)(
-        body=(yield stmt_list_steps(body)),
+        body=(yield required_body_steps(sexp, body)),
         handlers=handlers,
-        orelse=(yield stmt_list_steps(orelse)),
-        finalbody=(yield stmt_list_steps(finalbody)),
+        orelse=(yield required_body_steps(orelse, orelse.operands))
+        if orelse is not None
+        else [],
+        finalbody=(
+            (yield required_body_steps(finalbody, finalbody.operands))
+            if finalbody is not None
+            else []
+        ),
         **sexp.position_info,
     )
 
@@ -512,7 +529,7 @@ def with_compile(sexp, async_p=False):
         raise form_error(sexp, "needs a body")
     return (ast.AsyncWith if async_p else ast.With)(
         items=(yield with_items_parse(items, form)),
-        body=(yield stmt_list_steps(body)),
+        body=(yield required_body_steps(sexp, body)),
         **sexp.position_info,
     )
 
@@ -759,7 +776,9 @@ def case_parse(case):
     if not body:
         raise form_error(case, "needs a body")
     return ast.match_case(
-        pattern=pattern, **guard_dict, body=(yield stmt_list_steps(body))
+        pattern=pattern,
+        **guard_dict,
+        body=(yield required_body_steps(case, body)),
     )
 
 
@@ -906,7 +925,7 @@ def functiondef_p(sexp):
 
 def definition_parts(sexp, header):
     """``[name, bracket, body]`` of a def/async-def/class: the bracket (args
-    or bases) is required, an empty body compiles to pass."""
+    or bases) and a body are required."""
     [[name, bracket], body] = form_parts(sexp, ("name", header))
     if not isinstance(bracket, Bracket):
         raise form_error(
@@ -926,9 +945,7 @@ def functiondef_compile(sexp, decorator_list, async_p=False):
         name=name,
         **type_params,
         args=(yield def_args_parse(args)),
-        body=(
-            (yield stmt_list_steps(body)) if body else [ast.Pass(**sexp.position_info)]
-        ),
+        body=(yield required_body_steps(sexp, body)),
         decorator_list=(
             (yield expr_list_steps(decorator_list)) if decorator_list else []
         ),
@@ -984,9 +1001,7 @@ def classdef_compile(sexp, decorator_list):
         **type_params,
         bases=bases,
         keywords=keywords,
-        body=(
-            (yield stmt_list_steps(body)) if body else [ast.Pass(**sexp.position_info)]
-        ),
+        body=(yield required_body_steps(sexp, body)),
         decorator_list=(
             (yield expr_list_steps(decorator_list)) if decorator_list else []
         ),
@@ -1061,6 +1076,19 @@ def stmt_steps(sexp, decorator_list=None):
         if type_alias_p(sexp)
         else expr_wrapper(sexp)
     )
+
+
+def required_body_steps(sexp, body):
+    """The statements of a body Python cannot leave empty.
+
+    Emptiness is judged on the compiled statements, not the operands: a body
+    of only ``(do)`` forms compiles to none, and an ``if x:`` with nothing under
+    it is not Python. ``sexp`` is the form or clause the error is placed at.
+    """
+    stmts = yield stmt_list_steps(body)
+    if not stmts:
+        raise form_error(sexp, "needs a body")
+    return stmts
 
 
 # The end of an operand iterator in stmt_list_steps.
