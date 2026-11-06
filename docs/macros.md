@@ -69,9 +69,19 @@ LisPy version
 A module that cannot be found is a warning (`could not load macros from 'mod' (module not found)`), not an error; a macro that was never registered then fails where it is used.
 
 ## Built-in macros
-In a `.lpy` file the built-in macros need `(require lispy.macros *)` (or a selection such as `(require lispy.macros [-> when])`); the REPL and nREPL load them for you.
+The built-in macros are loaded in every module and in the REPL with no `require`. A module's own `defmacro`s and explicit `require`s add to them, and `(require mod *)` never re-exports the built-ins.
 
-Every example below has `(require lispy.macros *)` at the top of the file; the Python version is what `l2py` prints.
+To load only some of them, make `(require lispy.macros <selection>)` the module's first form (after an optional docstring); the selection replaces the built-ins:
+```lispython
+(require lispy.macros [-> when])   ; only -> and when
+(require lispy.macros [])          ; none
+(require lispy.macros *)           ; all (the default)
+```
+A bare `(require lispy.macros)` leaves only the qualified `(lispy.macros.inc ...)` names. A later `require` of `lispy.macros` only adds macros.
+
+Binding a name that is an active macro (`def`, `class`, `=`, parameters, loop and `with` targets, imports, match captures, ...) is a compile error, because `(inc ...)` would still expand the macro. Rename the binding, or opt out of that macro with a selection that omits it. Names are compared as Python names, so `my-x` and `my_x` are the same.
+
+The Python version in each example is what `l2py` prints.
 
 ### `cond`
 {{ macro_doc("cond") }}
