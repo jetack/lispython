@@ -215,10 +215,26 @@ this module only reads them."""
 (= BUILTIN-MACROS (builtin-macro-docs BUILTIN-MACRO-NAMESPACE))
 
 ;; The one home of which of lispython's own names are what, read by LSP and
-;; nREPL completion (each maps a tag to its own kind vocabulary).
+;; nREPL completion: the tag is the item's labelDetails.description.
 (= SPECIAL-FORM-TAG "special form")
 (= MACRO-TAG "macro")
 (= FUNCTION-TAG "function")
+
+;; LSP CompletionItemKind numbers, kept as ints so importing lispy never loads
+;; lsprotocol (a test pins each to lsprotocol's enum).
+(= FUNCTION-KIND 3)
+(= VARIABLE-KIND 6)
+(= CLASS-KIND 7)
+(= KEYWORD-KIND 14)
+
+;; The one home of each own tag's LSP CompletionItemKind, read by the LSP's
+;; own items and by nREPL `complete` items.  LSP has no Macro kind: Function
+;; is the nearest for anything callable, and Keyword reads as syntax, which a
+;; special form is.
+(= OWN-TAG-KINDS
+   {SPECIAL-FORM-TAG KEYWORD-KIND
+    MACRO-TAG FUNCTION-KIND
+    FUNCTION-TAG FUNCTION-KIND})
 
 ;; lispython's own names as (names, tag) rows, the first row naming a name
 ;; winning: the special forms usable at a head (HEAD-FORMS, never the reader

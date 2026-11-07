@@ -34,7 +34,9 @@
 (from lispy.core.unparse [unparse])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
-(from lispy.form-docs [FUNCTION-TAG MACRO-TAG OWN-NAME-TAGS SPECIAL-FORM-TAG])
+(from lispy.form-docs [CLASS-KIND FUNCTION-KIND FUNCTION-TAG KEYWORD-KIND
+                       MACRO-TAG OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-TAG
+                       VARIABLE-KIND])
 
 (def report-compile-error [err :filename None :source None]
   "Print a LispyCompileError compiler-style (path:line:col, source, caret) to stderr."
@@ -706,23 +708,63 @@
     (except [Exception]
       (return None))))
 
-;; The nREPL completion kind of each of lispython's own tags (OWN-NAME-TAGS):
-;; a special form is "keyword", since the nREPL kinds have no special form.
+;; The deprecated `kinds` word of each of lispython's own tags
+;; (OWN-NAME-TAGS), kept for older clients: a special form is "keyword", since
+;; those words have no special form.  An item's kind is OWN-TAG-KINDS'.
 (= _TAG-KINDS
    {SPECIAL-FORM-TAG "keyword"
     MACRO-TAG "macro"
     FUNCTION-TAG "function"})
 
-(def _own-name-kinds []
-  "{name: nREPL kind} of lispython's own names, the first row naming a name
-   winning."
-  (= kinds {})
+;; The runtime-kind home: the LSP CompletionItemKind of a name with no own tag,
+;; by its `kinds` word (a Python keyword, or what _completion-kind or
+;; _attribute-kind found its value to be).
+(= _RUNTIME-KINDS
+   {"keyword" KEYWORD-KIND
+    "class" CLASS-KIND
+    "function" FUNCTION-KIND
+    "variable" VARIABLE-KIND})
+
+(def _own-name-tags []
+  "{name: tag} of lispython's own names, the first row naming a name winning."
+  (= tags {})
   (for [names tag] in OWN-NAME-TAGS
     (for name in names
-      (.setdefault kinds name (sub _TAG-KINDS tag))))
-  (return kinds))
+      (.setdefault tags name tag)))
+  (return tags))
 
-(= _OWN-NAME-KINDS (_own-name-kinds))
+(= _OWN-NAME-TAGS (_own-name-tags))
+
+(def _tagged [tag]
+  "The (tag, kinds word) class of a name lispython tags (own or macro)."
+  (return (, tag (sub _TAG-KINDS tag))))
+
+(def _untagged [word]
+  "The (tag, kinds word) class of a name with no tag: a keyword or a value."
+  (return (, None word)))
+
+(def _complete-result [classes]
+  "The complete reply over {name: (tag, kinds word)}, every name once in
+   sorted order.  `items` is the contract, LSP-shaped: {label, kind} with
+   the LSP CompletionItemKind number, plus labelDetails.description only for
+   a tagged name (OWN-TAG-KINDS gives its kind, _RUNTIME-KINDS any other's).
+   `completions` and `kinds` are the deprecated shape, kept for older
+   clients."
+  (= names (sorted classes))
+  (= items [])
+  (= kinds {})
+  (for name in names
+    (= [tag word] (sub classes name))
+    (= (sub kinds name) word)
+    (if (is tag None)
+        (.append items {"label" name "kind" (sub _RUNTIME-KINDS word)})
+        (.append items {"label" name
+                        "kind" (sub OWN-TAG-KINDS tag)
+                        "labelDetails" {"description" tag}})))
+  (return {"op" "complete-result"
+           "completions" names
+           "kinds" kinds
+           "items" items}))
 
 (def _completion-kind [obj]
   "The nREPL completion kind of a value: class, function or variable."
@@ -775,18 +817,16 @@
         (= obj-part (.join "." (sub parts [: -1])))
         (= attr-prefix (sub parts -1))
         (= obj (_resolve-obj obj-part scope))
-        (= kinds {})
+        (= classes {})
         (if (is-not obj None)
             (do (= py-attr (.replace attr-prefix "-" "_"))
                 (for attr in (dir obj)
                   (if (.startswith attr py-attr)
-                      (= (sub kinds (+ obj-part "." (_unmangle attr)))
-                         (_attribute-kind obj attr))))))
+                      (= (sub classes (+ obj-part "." (_unmangle attr)))
+                         (_untagged (_attribute-kind obj attr)))))))
         (for name in macro-matches
-          (= (sub kinds name) "macro"))
-        (return {"op" "complete-result"
-                 "completions" (sorted kinds)
-                 "kinds" kinds}))
+          (= (sub classes name) (_tagged MACRO-TAG)))
+        (return (_complete-result classes)))
       (do
         ;; Prefix completion from macros, scope, builtins, keywords and
         ;; lispython's own names
@@ -803,29 +843,24 @@
         (for k in builtins
           (if (or (.startswith k prefix) (.startswith k py-prefix))
               (matches.add k)))
-        (for k in [*keyword.kwlist *_OWN-NAME-KINDS]
+        (for k in [*keyword.kwlist *_OWN-NAME-TAGS]
           (if (.startswith k prefix)
               (matches.add k)))
-        ;; Build kinds dict
-        (= kinds {})
+        ;; Classify each name once
+        (= classes {})
         (for name in matches
           (= mangled (_mangle name))
-          (cond (in name macro-matches)
-                (= (sub kinds name) "macro")
-                (in name _OWN-NAME-KINDS)
-                (= (sub kinds name) (sub _OWN-NAME-KINDS name))
-                (in name keyword.kwlist)
-                (= (sub kinds name) "keyword")
-                ;; A scope binding shadows the builtin of the same name.
-                (in mangled scope)
-                (= (sub kinds name) (_completion-kind (sub scope mangled)))
-                (in mangled builtins)
-                (= (sub kinds name) (_completion-kind (sub builtins mangled)))
-                True
-                (= (sub kinds name) "variable")))
-        (return {"op" "complete-result"
-                 "completions" (sorted matches)
-                 "kinds" kinds}))))
+          (= (sub classes name)
+             (conde (in name macro-matches) (_tagged MACRO-TAG)
+                    (in name _OWN-NAME-TAGS) (_tagged (sub _OWN-NAME-TAGS name))
+                    (in name keyword.kwlist) (_untagged "keyword")
+                    ;; A scope binding shadows the builtin of the same name.
+                    (in mangled scope)
+                    (_untagged (_completion-kind (sub scope mangled)))
+                    (in mangled builtins)
+                    (_untagged (_completion-kind (sub builtins mangled)))
+                    (_untagged "variable"))))
+        (return (_complete-result classes)))))
 
 (def nrepl-docs [symbol scope]
   "Return documentation for a symbol."

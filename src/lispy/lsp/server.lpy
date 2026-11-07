@@ -26,8 +26,8 @@
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
-(from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES FUNCTION-TAG MACRO-TAG
-                       OWN-NAME-TAGS SPECIAL-FORM-DOCS SPECIAL-FORM-TAG
+(from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES MACRO-TAG
+                       OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
                              ViewCache compile-buffer glued-base
@@ -1722,26 +1722,20 @@
 ;; Completion
 ;; ---------------------------------------------------------------------------
 
-;; The LSP CompletionItemKind of each of lispython's own tags (OWN-NAME-TAGS).
-(= _TAG-KINDS
-   {SPECIAL-FORM-TAG lsp.CompletionItemKind.Keyword
-    MACRO-TAG lsp.CompletionItemKind.Function
-    FUNCTION-TAG lsp.CompletionItemKind.Function})
-
 ;; The (tag, kind) of a macro, the one home for built-in and view macros alike.
-(= _MACRO-STYLE (, MACRO-TAG (sub _TAG-KINDS MACRO-TAG)))
+(= _MACRO-STYLE
+   (, MACRO-TAG (lsp.CompletionItemKind (sub OWN-TAG-KINDS MACRO-TAG))))
 
-;; lispython's own names as (names, tag, kind) rows, from OWN-NAME-TAGS.
+;; lispython's own names as (names, tag, kind) rows, from OWN-NAME-TAGS and
+;; OWN-TAG-KINDS.
 (= _LPY-OWN-TAGS
-   [(, names tag (sub _TAG-KINDS tag)) for [names tag] in OWN-NAME-TAGS])
+   [(, names tag (lsp.CompletionItemKind (sub OWN-TAG-KINDS tag))) for [names tag] in OWN-NAME-TAGS])
 
 (def own-item [label tag kind]
   "One of lispython's own completion items (the one home of their shape):
    its short tag (\"macro\", ...) is labelDetails.description, drawn inline,
    not detail, which lpy-mode shows as the focused item's signature.  The kind
-   is Keyword for a special form and Function for everything callable (a
-   caller's choice): LSP has no Macro kind, and Function is the nearest
-   (Keyword would read as syntax).
+   is the caller's, from OWN-TAG-KINDS (form_docs) for every own tag.
    Sent whatever the client advertises: eglot never sets labelDetailsSupport
    and clients ignore a field they do not know."
   (return (lsp.CompletionItem

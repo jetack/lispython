@@ -8,6 +8,12 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- nREPL: the `complete` reply carries `items`, LSP-shaped completion items in
+  `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
+  number, plus `"labelDetails": {"description": <tag>}` for a name lispython
+  tags (`special form`, `macro`, `function`), exactly as the LSP server sends
+  its own items. Editor clients can read nREPL completion through their LSP
+  path. The `kinds` map is deprecated and kept for older clients.
 - nREPL: `eval`, `complete` and `macroexpand` take an optional `ns` (an
   absolute file path) that picks that file's scope only. Tracebacks and
   linecache keep the eval's `<nrepl-N>` name. `file` wins when both are sent,
