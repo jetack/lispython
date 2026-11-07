@@ -79,8 +79,18 @@ FAKE_SERVER = textwrap.dedent(
         await asyncio.sleep(params.position.character / 10)
         doc = ls.workspace.get_text_document(params.text_document.uri)
         text = doc.source
-        answer = {"pid": os.getpid(), "text": text, "config": config.get("answer")}
+        answer = {
+            "pid": os.getpid(),
+            "text": text,
+            "config": config.get("answer"),
+            "watched": config.get("watched", []),
+        }
         return types.Hover(contents=json.dumps(answer))
+
+
+    @server.feature(types.WORKSPACE_DID_CHANGE_WATCHED_FILES)
+    def did_change_watched_files(ls, params):
+        config.setdefault("watched", []).extend(c.uri for c in params.changes)
 
 
     def publish(ls, document):
@@ -520,6 +530,48 @@ def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
             await client.shutdown()
 
     assert run_bounded(scenario()) == [{"pythonPath": client.view_root.python}, {}]
+
+
+def test_a_save_that_changes_the_config_tells_the_backend(
+    project, tmp_path, fake_default
+):
+    # Defects: a save that rewrote the view root's config file neither tells
+    # the running backend the file changed (it keeps the config it read at
+    # its start) nor on-view-prepared (a preset fallback that began with
+    # the save is never told); or every save does, config unchanged.
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    uri = (project / "main.lpy").as_uri()
+    client = backends.client_for(uri)
+    params = hover_params(client.backend_uri(uri))
+    config_uri = (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).as_uri()
+    told = []
+    backends.on_view_prepared = told.append
+
+    async def save():
+        # As the server's didSave: the hook schedules the work.
+        backends.document_saved(uri)
+        await asyncio.gather(*backends._tasks)
+
+    async def scenario():
+        try:
+            await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
+            started = len(told)
+            await save()
+            unchanged = len(told)
+            (project / "pyrightconfig.json").write_text(
+                '{"typeCheckingMode": "strict"}'
+            )
+            await save()
+            changed = len(told)
+            answer = await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params)
+            return started, unchanged, changed, fake_hover(answer)["watched"]
+        finally:
+            await backends.shutdown_all()
+
+    started, unchanged, changed, watched = run_bounded(scenario())
+    assert (started, unchanged, changed) == (1, 1, 2)
+    assert watched.count(config_uri) == 1
 
 
 def test_a_push_waits_for_the_requests_in_flight(project, tmp_path, fake_argv):
@@ -1139,6 +1191,76 @@ def test_real_pyrefly_starts_and_follows_the_projects_config(project, tmp_path):
     assert found.severity == lsp.DiagnosticSeverity.Warning
 
 
+# Per real backend: the project's config file and its text setting the
+# severity of the undefined-name rule, and the code of that rule.
+SEVERITY_CONFIGS = {
+    "pyrefly": (
+        "pyrefly.toml",
+        lambda severity: f'[errors]\nunknown-name = "{severity}"\n',
+        "unknown-name",
+    ),
+    "basedpyright": (
+        "pyrightconfig.json",
+        lambda severity: json.dumps(
+            {"reportUndefinedVariable": "warning" if severity == "warn" else severity}
+        ),
+        "reportUndefinedVariable",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(SEVERITY_CONFIGS))
+def test_real_backend_follows_a_config_a_save_changed(project, tmp_path, name):
+    # Defect: a save rewrites the view root's config file, but the running
+    # backend read it at its start and is never told it changed, so the
+    # buffer keeps the old severities until the backend restarts.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    config_name, config_text, code = SEVERITY_CONFIGS[name]
+    (project / config_name).write_text(config_text("warn"))
+    source = "(print undefined-name)\n"
+    client = backend.BackendClient(view_root(project, tmp_path), argv, name=name)
+    uri = (project / "main.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def severity():
+        found = client.diagnostics_for(uri, view.text) or []
+        return [d.severity for d, _ in found if d.code == code]
+
+    async def published(wanted, timeout):
+        # Each publish of the buffer's diagnostics, until one has wanted.
+        deadline = asyncio.get_running_loop().time() + timeout
+        while severity() != [wanted]:
+            heard.clear()
+            left = deadline - asyncio.get_running_loop().time()
+            if left <= 0:
+                return severity()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(heard.wait(), left)
+        return severity()
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            before = await published(lsp.DiagnosticSeverity.Warning, 20)
+            (project / config_name).write_text(config_text("error"))
+            # Saved, never pushed again: the backend republishes by itself.
+            await client.saved(uri)
+            return before, await published(lsp.DiagnosticSeverity.Error, 15)
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    before, after = run_bounded(scenario(), timeout=90)
+    assert before == [lsp.DiagnosticSeverity.Warning]
+    assert after == [lsp.DiagnosticSeverity.Error]
+
+
 # Runs lispython's LSP with its real backends, and one extra request,
 # lispy-test/backendPid, the pid of a document's running backend, or None.
 REAL_LAUNCHER = textwrap.dedent(
@@ -1187,6 +1309,44 @@ def running_binary(pid):
         return os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
     except OSError:
         return None
+
+
+@needs_pyrefly
+def test_real_pyrefly_sees_shadows_from_a_pure_py_package(project, tmp_path):
+    # Defect: a pure-.py package beside the shadowed packages is not in the
+    # view, so pyrefly analyses the real file, which cannot see the shadows:
+    # a name it imports from a .lpy module is Unknown.
+    for name, text in [
+        ("lpkg/__init__.lpy", ""),
+        ("lpkg/core.lpy", "(def ffff [a] (return (+ a 1)))\n"),
+        ("purepkg/__init__.py", ""),
+        ("purepkg/helper.py", "from lpkg.core import ffff\nX = ffff\n"),
+    ]:
+        (project / name).parent.mkdir(parents=True, exist_ok=True)
+        (project / name).write_text(text)
+    source = "(from purepkg.helper [X])\n(= z X)\n"
+    (project / "main.lpy").write_text(source)
+    client = backend.BackendClient(
+        view_root(project, tmp_path), backend.backend_argv("pyrefly"), name="pyrefly"
+    )
+    uri = (project / "main.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    async def scenario():
+        try:
+            line, character = locate(view.text, "z =")
+            answer = await client.request(
+                lsp.TEXT_DOCUMENT_HOVER,
+                hover_params(client.backend_uri(uri), line, character),
+                uri=uri,
+                text=view.text,
+            )
+            return None if answer is None else answer.contents.value
+        finally:
+            await client.shutdown()
+
+    hover = run_bounded(scenario(), timeout=60)
+    assert hover is not None and "ffff" in hover
 
 
 @needs_pyrefly
@@ -1267,6 +1427,16 @@ def test_real_pyrefly_refusal_keeps_the_views_settings(project, tmp_path, caplog
     assert "errors" not in written
     assert written["search-path"][1:] == [str(project)]
     assert written["python-interpreter-path"] == sys.executable
+
+
+@needs_pyrefly
+def test_real_pyrefly_config_problem_keeps_a_description_holding_a_bar():
+    # Defect: every output line holding a | is taken for the text excerpt,
+    # so a description quoting a value with a | in it (unknown variant
+    # `a|b`) is dropped and the generic answer given instead.
+    binary = backend.backend_argv("pyrefly")[0]
+    problem = backend.pyrefly_config_problem(binary, 'untyped-def-behavior = "a|b"\n')
+    assert "unknown variant `a|b`" in problem
 
 
 # pyrefly 1.4.1's initialize result, captured from `pyrefly lsp` answering an

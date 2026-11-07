@@ -519,6 +519,52 @@ class TestShadows:
         assert not init.is_symlink() and init.read_text() == "i = 1"
         assert (pkg / "__init__.py").read_text() == "from .helper import h"
 
+    def test_an_import_roots_modules_are_linked_beside_its_packages(self, tmp_path):
+        # Defect: an import root holding only shadowed packages has none of
+        # its other modules in the view, so a pure-.py package beside them
+        # resolves to the real directory, where pyrefly analyses it under
+        # the project's own config (or none) and it cannot see the shadows.
+        # A namespace package or a hidden directory is never linked.
+        project, root = tmp_path / "project", tmp_path / "view"
+        src = project / "src"
+        for name, text in [
+            ("lpkg/__init__.lpy", ""),
+            ("lpkg/core.lpy", "(def ffff [a] (return (+ a 1)))"),
+            ("purepkg/__init__.py", ""),
+            ("purepkg/helper.py", "from lpkg.core import ffff\nX = ffff\n"),
+            ("top.py", "t = 1"),
+            ("top.pyi", "t: int"),
+            ("nsdir/x.py", "x = 1"),
+            (".hidden/__init__.py", ""),
+        ]:
+            self.write(src / name, text)
+        view_src = root / "src"
+        for _ in range(2):  # the second sweep keeps every link
+            pv.write_shadows(str(project), str(root))
+            for name in ["purepkg", "top.py", "top.pyi"]:
+                assert os.readlink(view_src / name) == str(src / name)
+            assert not os.path.lexists(view_src / "nsdir")
+            assert not os.path.lexists(view_src / ".hidden")
+            lpkg = view_src / "lpkg"
+            assert lpkg.is_dir() and not lpkg.is_symlink()
+            assert (lpkg / "core.py").is_file() and not (lpkg / "core.py").is_symlink()
+
+    def test_a_package_that_lost_its_last_lpy_is_linked_at_once(self, tmp_path):
+        # Defect: the package's view directory from the sweep before, still
+        # real, is taken for one this sweep needs, so it is not linked, and
+        # the orphan sweep then removes it: the package is missing from the
+        # view until a third sweep.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= t 1)")
+        self.write(project / "pkg" / "__init__.py", "")
+        self.write(project / "pkg" / "a.py", "a = 1")
+        self.write(project / "pkg" / "m.lpy", "(= m 1)")
+        pv.write_shadows(str(project), str(root))
+        assert (root / "pkg").is_dir() and not (root / "pkg").is_symlink()
+        (project / "pkg" / "m.lpy").unlink()
+        pv.write_shadows(str(project), str(root))
+        assert os.readlink(root / "pkg") == str(project / "pkg")
+
     def test_sweep_follows_no_directory_link_and_skips_environments(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
         self.write(project / "top.lpy", "(= a 1)")
@@ -631,10 +677,11 @@ class TestShadows:
 
     @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
     def test_src_layout_modules_outside_the_view_resolve(self, tmp_path):
-        # Only pkg is in the view: a pure-.py package, a top-level .py and a
-        # stub-only module beside it resolve from the real src, while pkg.m2,
-        # which exists only as .lpy, resolves from the view's shadow, and so
-        # does pkg.both, whose stale .py beside it in the real src lacks new.
+        # pkg is overlaid in the view and a pure-.py package, a top-level .py
+        # and a stub-only module beside it are linked in, so they resolve,
+        # while pkg.m2, which exists only as .lpy, resolves from the view's
+        # shadow, and so does pkg.both, whose stale .py beside it in the real
+        # src lacks new.
         project, root = tmp_path / "project", tmp_path / "view"
         src = project / "src"
         imports = (
@@ -1240,6 +1287,77 @@ class TestShadows:
         calls = len(checked)
         self.pyrefly_config(project, root, check=check)
         assert len(checked) == calls
+
+    def refusing_project(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+
+        def check(text):
+            return "unknown variant `nope`" if "nope" in text else None
+
+        return project, root, check
+
+    def test_a_refused_pyrefly_config_restored_after_removal_warns_again(
+        self, tmp_path, caplog
+    ):
+        # Defect: the refusal stays remembered while the project has no
+        # pyrefly config, so the same refused config put back later is taken
+        # for the one already told about: never checked, never warned.
+        project, root, check = self.refusing_project(tmp_path)
+        refused = 'untyped-def-behavior = "nope"\n'
+        (project / "pyrefly.toml").write_text(refused)
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            self.pyrefly_config(project, root, check=check)
+            assert caplog.text.count("refuses") == 1
+            (project / "pyrefly.toml").unlink()
+            self.pyrefly_config(project, root, check=check)
+            (project / "pyrefly.toml").write_text(refused)
+            self.pyrefly_config(project, root, check=check)
+        assert caplog.text.count("refuses") == 2
+        assert pv.pyrefly_fallback(str(root)).reason == "refused"
+
+    def test_a_refusal_is_remembered_for_its_text_only(self, tmp_path, caplog):
+        # Defect: a refusal is remembered per view root whatever the text,
+        # so another refused config, or the first one back after an accepted
+        # one, is never checked and never warned about.
+        project, root, check = self.refusing_project(tmp_path)
+        first = 'untyped-def-behavior = "nope"\n'
+        texts = [
+            first,
+            'untyped-def-behavior = "nope"\npython-version = "3.12"\n',
+            first,
+            'python-version = "3.12"\n',
+            first,
+        ]
+        counts = []
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            for text in texts:
+                (project / "pyrefly.toml").write_text(text)
+                config = self.pyrefly_config(project, root, check=check)
+                counts.append(caplog.text.count("refuses"))
+        assert counts == [1, 2, 3, 3, 4]
+        assert config["preset"] == "default"
+
+    def test_a_malformed_pyrefly_config_is_told_once_per_problem(
+        self, tmp_path, caplog
+    ):
+        # Defects: the warning about a malformed project config repeats on
+        # every write (every backend start and every save); or it is told
+        # once for good, so another malformation, or the same one after the
+        # config was fixed, is never told.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        config = project / "pyrefly.toml"
+        broken, other = 'preset = "strict"\npreset = "basic"\n', "[errors\n"
+        fixed = 'preset = "strict"\n'
+        counts = []
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            # The last malformation comes back after the fix: told again.
+            for text in [broken, broken, other, fixed, other]:
+                config.write_text(text)
+                self.pyrefly_config(project, root, check_types=False)
+                counts.append(caplog.text.count("cannot read the pyrefly settings"))
+        assert counts == [1, 1, 2, 2, 3]
 
     def test_a_project_config_in_a_package_never_replaces_the_views(self, tmp_path):
         # Defect: a project inside a package has its own pyrefly.toml or

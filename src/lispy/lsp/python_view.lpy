@@ -1094,16 +1094,38 @@
     (= self.sources {})
     (= self.import-roots [])))
 
+(def _regular-package-p [directory]
+  "Whether directory is a regular package (it holds an __init__.py or
+   __init__.pyi file)."
+  (return (any ((osp.isfile (osp.join directory name))
+                for name in (, "__init__.py" "__init__.pyi")))))
+
 (def _mirror-py-files [project-root root directory shadows links]
-  "Link the real .py files of directory, the import root of a top-level
-   module with a shadow, into the view beside that shadow; a .py that a
-   shadow replaces (its .lpy wins on import) is left out.  The directory is
-   no package, so a module missing from it is still found on the real
-   path.  Each link made or kept is added to links; a failure is logged and
-   skipped."
+  "Link the modules of directory, an import root with a shadow, into the
+   view beside its shadows: each real .py and .pyi file as a file link, each
+   regular package (_regular-package-p) as one directory link, so the
+   backend analyses them as view modules, under the view's config, and they
+   see the shadows.  Left out: a view directory this sweep needs real, one
+   holding a shadow or a link of it (a package overlaid around a shadow,
+   _overlay-package, which runs first; a stale view directory of a package
+   that lost its last .lpy is replaced by the link), a .py that a shadow
+   replaces (its .lpy wins on import), _pruned-p directories and the view
+   root's own files (_ROOT-FILES).  A namespace package (no __init__) or an
+   extension module is not linked, nor is a regular package holding a
+   nested import root's shadow (pkg/sub/x.lpy with no pkg/sub/__init__),
+   whose view directory is real but holds no __init__: the import root is
+   no package, so each still resolves on the real path.  Each link made or
+   kept is added to links; a failure is logged and skipped."
   (= view-dir (_view-dir project-root root directory))
   (if (is view-dir None)
       (return))
+  (= reserved (frozenset [(osp.join root name) for name in _ROOT-FILES]))
+  ;; The entries of view-dir that hold a shadow or link of this sweep.
+  (= needed (set))
+  (for kept in (+ (list shadows) (list links))
+    (= rel (osp.relpath kept view-dir))
+    (if (and (in os.sep rel) (not (.startswith rel (+ os.pardir os.sep))))
+        (.add needed (osp.join view-dir (sub (.split rel os.sep) 0)))))
   (try
     (= entries (sorted (os.listdir directory)))
     (except [OSError]
@@ -1111,9 +1133,13 @@
   (for name in entries
     (= target (osp.join directory name))
     (= path (osp.join view-dir name))
-    (if (or (not (.endswith name ".py")) (in path shadows) (in path links)
-            (not (osp.isfile target)))
+    (if (or (in path shadows) (in path links) (in path reserved) (in path needed))
         (continue))
+    (if (osp.isdir target)
+        (if (or (_pruned-p directory name) (not (_regular-package-p target)))
+            (continue))
+        (if (not (and (.endswith name (, ".py" ".pyi")) (osp.isfile target)))
+            (continue)))
     (try
       (_link-if-changed root path target)
       (.add links path)
@@ -1227,13 +1253,15 @@
    written only when its text changed; a file that is gone or does not
    compile has none, and one that cannot be read keeps the shadow it has.
    Every package holding a shadow is overlaid whole beside the shadows
-   (_overlay-package), and the real .py files beside a top-level module's
-   shadow are linked in (_mirror-py-files).  One file that cannot be read
-   or written is logged and left out of the manifest, so the next sweep
-   tries it again; the rest go on.  Then _sweep-orphans clears what no
-   current source accounts for.  Each source compiles with its import root
-   on sys.path (a relative require imports its package), which is left as
-   it was.  A view root that overlaps the project is a ValueError before
+   (_overlay-package), and the other modules of every import root with a
+   shadow are linked in (_mirror-py-files), so the backend analyses them
+   under the view's config; only namespace packages, extension modules
+   and a whole package holding a nested import root stay on the real
+   paths.  One file that cannot be read or written is logged and left
+   out of the manifest, so the next sweep tries it again; the rest go on.
+   Then _sweep-orphans clears what no current source accounts for.  Each
+   source compiles with its import root on sys.path (a relative require
+   imports its package), which is left as it was.  A view root that overlaps the project is a ValueError before
    anything is touched; the whole sweep holds the view root's lock, and
    nothing is written or removed through a link out of it.  Returns the
    sorted shadow paths."
@@ -1304,9 +1332,11 @@
   (for lpy-path in (.values shadows)
     (= import-root (sub (sub names-of lpy-path) 2))
     (.add import-roots import-root)
+    ;; module-dirs: every import root with a shadow, whose other modules
+    ;; are linked in (_mirror-py-files).
+    (.add module-dirs import-root)
     (= directory (osp.dirname (osp.abspath lpy-path)))
-    (if (== directory import-root)
-        (.add module-dirs directory)
+    (if (!= directory import-root)
         (.add packages (_top-package project-root import-root directory))))
   (= manifest.import-roots (sorted import-roots))
   (= source-dirs (_source-dirs project-root sources))
@@ -1429,9 +1459,11 @@
    a src layout; one above the project, which lies inside a package, is
    left out), so import pkg finds the shadows before any real directory of
    uncompiled .lpy; then those import roots themselves, so what the view
-   lacks of one (a pure-.py package, a top-level .py or .pyi, an extension
-   module beside the shadowed packages) still resolves; then the project
-   and its .venv site-packages.  The one list of every backend's config."
+   lacks of one still resolves: its namespace packages, its extension
+   modules and, whole, a package of it that holds a nested import root
+   (_mirror-py-files links every other module of it into the view);
+   then the project and its .venv site-packages.  The one list of every
+   backend's config."
   (= roots [])
   (for import-root in (or import-roots [])
     (= import-root (osp.abspath import-root))
@@ -1506,31 +1538,31 @@
 
 (def _project-pyrefly-config [project-root]
   "The project's own pyrefly settings, as (path of the file that holds
-   them, dict, fallback reason): its pyrefly.toml, else [tool.pyrefly] of
-   its pyproject.toml, as pyrefly finds them.  The dict is None and the
-   reason \"missing\" when it has none, \"malformed\" when that file cannot
-   be read or its table is no table, which is logged as a warning naming
-   the file (the user's to fix); the reason is None with a dict."
+   them, dict, fallback reason, problem): its pyrefly.toml, else
+   [tool.pyrefly] of its pyproject.toml, as pyrefly finds them.  The dict is
+   None and the reason \"missing\" when it has none, \"malformed\" when that
+   file cannot be read or its table is no table, problem then saying why
+   (the caller warns, naming the file: the user's to fix); the reason and
+   problem are None with a dict.  Logs nothing, since it runs on every
+   backend start and every save."
   (= path (osp.join project-root PYREFLY-CONFIG))
   (try
     (if (osp.isfile path)
         (with [(open path "rb") as f]
-          (return (, path (tomllib.load f) None))))
+          (return (, path (tomllib.load f) None None))))
     (= path (osp.join project-root "pyproject.toml"))
     (if (not (osp.isfile path))
-        (return (, path None "missing")))
+        (return (, path None "missing" None)))
     (with [(open path "rb") as f]
       (= config (.get (.get (tomllib.load f) "tool" {}) "pyrefly")))
     (cond (is config None)
-          (return (, path None "missing"))
+          (return (, path None "missing" None))
           (isinstance config dict)
-          (return (, path config None)))
+          (return (, path config None None)))
     (= problem "[tool.pyrefly] is not a table")
     (except [(, OSError ValueError AttributeError) as e]
       (= problem e)))
-  (.warning logger "lispython LSP: cannot read the pyrefly settings of %s, so the view uses none of them: %s"
-            path problem)
-  (return (, path None "malformed")))
+  (return (, path None "malformed" problem)))
 
 ;; View root -> its PyreflyFallback, or None when its pyrefly.toml holds the
 ;; project's settings or checks nothing: decided by write-pyrefly-config,
@@ -1612,7 +1644,7 @@
                 (.append lines f"{key} = {text}")))))
   (return (+ (.join "\n" lines) "\n")))
 
-(def _read-quietly [path]
+(def read-quietly [path]
   "The text of the regular file path, or None (absent, a link, unreadable)."
   (if (osp.islink path)
       (return None))
@@ -1623,8 +1655,15 @@
       (return None))))
 
 ;; View root -> the last pyrefly.toml text its check refused (one per root),
-;; read and written under the view root's lock.
+;; read and written under the view root's lock; dropped once the project has
+;; no usable pyrefly config or a text is accepted.
 (= _REFUSED-PYREFLY {})
+
+;; View root -> the (source, problem) of the malformed project pyrefly config
+;; last warned about (one per root), read and written under the view root's
+;; lock; dropped once the project's config is not malformed, so a config
+;; fixed and broken again is told again.
+(= _MALFORMED-PYREFLY {})
 
 (def write-pyrefly-config [project-root view-root :import-roots None :check-types True
                           :python None :check None]
@@ -1639,19 +1678,22 @@
    code or variant of another release) makes it drop the whole file and fall
    back to auto configuration, losing the search paths, the interpreter and
    preset off with it, so a refused text is replaced by one without any of
-   the project's settings, with a warning naming the project's config.
-   Why the written file runs DEFAULT-PYREFLY-PRESET, if it does, is recorded
-   for pyrefly-fallback.  A view root that overlaps the project is a
+   the project's settings, with a warning naming the project's config.  A
+   project config that cannot be read is warned about once per view root
+   until its problem changes (_MALFORMED-PYREFLY).  Why the written file
+   runs DEFAULT-PYREFLY-PRESET, if it does, is recorded for
+   pyrefly-fallback.  A view root that overlaps the project is a
    ValueError; the write holds the view root's lock.  Returns the path."
   (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
-  (= [source project reason] (_project-pyrefly-config project-root))
+  (= [source project reason unreadable] (_project-pyrefly-config project-root))
   (= paths {;; pyrefly looks in search-path before the directory of its
             ;; config (the view root), where pyright looks in its execution
-            ;; root first: the root leads, so a module the view links (a
-            ;; project .py) resolves to the link and is analysed under this
-            ;; config, never as the real file under the project's own.
+            ;; root first: the root leads, so a module the view links (most
+            ;; modules of an import root with a shadow, _mirror-py-files)
+            ;; resolves to the link and is analysed under this config, never
+            ;; as the real file under the project's own.
             "search-path" (+ [root] (_search-paths project-root root import-roots))
             "python-interpreter-path"
             (ife (is python None) (getattr view-root "python" sys.executable) python)})
@@ -1660,8 +1702,21 @@
   ;; different pythonDiagnostics, the last to write decides its checking.
   (with [(_view-root-lock root)]
     (= text (_pyrefly-toml (| (_pyrefly-rule-settings project check-types) paths)))
+    ;; No usable project config: a refusal remembered from before no longer
+    ;; holds, so the same config restored later is checked and told again.
+    (if (is project None)
+        (.pop _REFUSED-PYREFLY root None))
+    ;; A malformed config is told once until its problem changes, whatever
+    ;; check-types is: the view still drops its python-version and the rest.
+    (if (== reason "malformed")
+        (do (= told (, source (str unreadable)))
+            (if (!= told (.get _MALFORMED-PYREFLY root))
+                (do (.warning logger "lispython LSP: cannot read the pyrefly settings of %s, so the view uses none of them: %s"
+                              source unreadable)
+                    (= (sub _MALFORMED-PYREFLY root) told))))
+        (.pop _MALFORMED-PYREFLY root None))
     (cond
-      (or (is check None) (is project None) (== text (_read-quietly path)))
+      (or (is check None) (is project None) (== text (read-quietly path)))
       (pass)
 
       ;; Refused before: the file holds the fallback, so the text differs
