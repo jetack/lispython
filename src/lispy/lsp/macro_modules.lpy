@@ -30,18 +30,18 @@
 ;; its compiles and drops wait for one another's.  local holds each thread's
 ;; open windows; condition guards the rest.  files maps each tracked file's
 ;; path to (st_mtime_ns, st_size), the first stamp it had when read in this
-;; epoch (an earlier stamp can only make it stale, never missed); names is the
-;; modules to drop from sys.modules.  Both are by path, never by name: one
-;; name may be read from two source roots in one epoch.  dep-files maps each
-;; trackable file (_trackable-path-p) in the cache record of a tracked .lpy
-;; (lpy-record) to its recorded stamp: a module
-;; loaded from its cache reads none of the files its compile read (a module a
-;; macro imported as it expanded), so no window sees them.  dirs maps a
-;; directory searched for a module no finder found to its st_mtime_ns when
-;; searched.  running holds a token per compile in progress (one object per
-;; fresh-modules entry), hung the running ones a drop's wait timed out on: a
-;; token leaves both when its compile ends.  epoch is the macro environment's
-;; version.
+;; epoch (an earlier stamp can only make it stale, never missed); it is keyed
+;; by path, never by module name, because one name may be read from two
+;; source roots in one epoch.  names holds the modules a drop pops from
+;; sys.modules.  dep-files maps each trackable file in the cache record of a
+;; tracked .lpy (lpy-record) to its recorded stamp: a module loaded from its
+;; cache reads none of the files its compile read (a module a macro imported
+;; as it expanded), so no window sees them.  dirs maps a directory searched
+;; for a module no finder found, or holding a namespace package, to its
+;; st_mtime_ns then.  running holds a token per compile in progress (one
+;; object per fresh-modules entry), hung the running ones a drop's wait timed
+;; out on: a token leaves both when its compile ends.  epoch is the macro
+;; environment's version.
 (class _Shared []
   (def __init__ [self original-path-stats original-namespace-exec]
     (= self.local (threading.local))
