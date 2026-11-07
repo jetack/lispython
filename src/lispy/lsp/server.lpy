@@ -334,14 +334,21 @@
    test to make before parsing the buffer for builtin-macro-doc."
   (return (in (sub (.rpartition name ".") 2) BUILTIN-MACROS)))
 
-(def builtin-macro-doc [tree name]
+(def builtin-macro-doc [tree name :view None]
   "The hover markdown of the built-in macro `name` refers to in the buffer
-   tree, or None. The buffer's built-in macros are the compiler's: the
-   prelude, unless the buffer opts out of it (prelude-opted-out), plus
-   whatever its requires of the built-in macro modules register. The
-   opt-out is itself such a require, so the scan gives exactly its
-   selection; a name the buffer has no macro for (`fn` after the opt-out
-   (require lispy.macros [when])) is then just a name."
+   tree, or None.  With view, the buffer's full PythonView, its compile
+   decides (view.builtin-macros): a name the buffer's defmacro or another
+   module's require took is not the built-in.  Without one the syntax
+   scan decides: the prelude, unless the buffer opts out of it
+   (prelude-opted-out), plus whatever its requires of the built-in macro
+   modules register.  The opt-out is itself such a require, so the scan
+   gives exactly its selection; a name the buffer has no macro for (`fn`
+   after the opt-out (require lispy.macros [when])) is then just a name."
+  (if (is-not view None)
+      (do (= macro (.get view.builtin-macros (name-key name)))
+          (return (ife (in macro BUILTIN-MACROS)
+                       (hover-markdown (sub BUILTIN-MACROS macro))
+                       None))))
   (if (and (in name BUILTIN-MACROS) (not (prelude-opted-out tree)))
       (return (hover-markdown (sub BUILTIN-MACROS name))))
   (for node in tree
@@ -1283,18 +1290,26 @@
             :contents (lsp.MarkupContent :kind lsp.MarkupKind.Markdown :value value)
             :range (node-range target))))
 
-(def form-hover [tree target]
+(def form-hover [tree target :view None]
   "lispython's own hover of Symbol target, or None: the alias doc on the
    type of a type alias, else a special form's doc, else the docstring of
-   one of the buffer's built-in macros (builtin-macro-doc).  It answers
-   before any backend, which knows no lispython form."
+   one of the buffer's built-in macros (builtin-macro-doc, over view, the
+   buffer's full view, when there is one).  It answers before any backend,
+   which knows no lispython form."
   (if (and (== target.value "type") (alias-keyword-p tree target))
       (return (markdown-hover TYPE-ALIAS-DOC target)))
   (= doc-text (or (.get SPECIAL-FORM-DOCS target.value)
-                  (builtin-macro-doc tree target.value)))
+                  (builtin-macro-doc tree target.value :view view)))
   (if doc-text
       (return (markdown-hover doc-text target)))
   (return None))
+
+(def compiled-view [doc]
+  "The full view of snapshot doc's version, compiled under the macro
+   environment of now (ViewCache.cached-view), or None: none compiled
+   yet, or the compile failed.  Hover and signature help read it, never
+   compile: they answer locally before any backend."
+  (return (.cached-view view-cache doc.uri doc.version)))
 
 (def builtin-hover [target]
   "The builtin-info hover of Symbol target, or None: the answer when no
@@ -1319,7 +1334,7 @@
   (= target (node-at-position tree (- line 1) col))
   (if (not (isinstance target Symbol))
       (return None))
-  (= local (form-hover tree target))
+  (= local (form-hover tree target :view (compiled-view doc)))
   (if (is-not local None)
       (return local))
   (try
@@ -1481,17 +1496,21 @@
                   (lsp.Position :line pos.line :character pos.character)))
   (return (, (+ server-pos.line 1) server-pos.character)))
 
-(def form-signature-help [source func-name]
+(def form-signature-help [source func-name :view None]
   "lispython's own SignatureHelp for a form headed func-name (None: no head),
    or None: a special form's documented usage, else the docstring usage of
-   one of the buffer's built-in macros (builtin-macro-doc).  The buffer is
-   parsed only when func-name could name a built-in macro
+   one of the buffer's built-in macros (builtin-macro-doc, over view, the
+   buffer's full view, when there is one).  The buffer is parsed only when
+   there is no view and func-name could name a built-in macro
    (builtin-macro-name-p)."
   (if (is func-name None)
       (return None))
   (= doc-text (or (.get SPECIAL-FORM-DOCS func-name)
                   (and (builtin-macro-name-p func-name)
-                       (builtin-macro-doc (parse source :partial True) func-name))))
+                       (builtin-macro-doc (ife (is view None)
+                                               (parse source :partial True)
+                                               None)
+                                          func-name :view view))))
   (if (not doc-text)
       (return None))
   (= m (re.search "```\\n(.+?)\\n```" doc-text re.DOTALL))
@@ -1538,7 +1557,8 @@
   (if (not heads)
       (return None))
   (= head (sub heads -1))
-  (= local (form-signature-help doc.source head))
+  (= view (compiled-view doc))
+  (= local (form-signature-help doc.source head :view view))
   (if (is-not local None)
       (return local))
   (try
@@ -1552,7 +1572,7 @@
       (return result))
   (= name (innermost-named heads))
   (if (is-not name head)
-      (do (= local (form-signature-help doc.source name))
+      (do (= local (form-signature-help doc.source name :view view))
           (if (is-not local None)
               (return local))))
   (return (builtin-signature-help name))))

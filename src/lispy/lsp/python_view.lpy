@@ -43,6 +43,7 @@
 (from lispy.core.compiler.literal [identifier-p name-key])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
+(from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
 (from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
 
 (= logger (logging.getLogger __name__))
@@ -459,13 +460,18 @@
    is None, since its text was edited after the parse (and may not parse:
    x.).  macros is the name (name-key) of every macro the buffer's
    compile had registered once expanded: a name there is a lispython form at
-   a call's head, which no Python backend knows."
-  (def __init__ [self text position-map tree :macros (frozenset)]
+   a call's head, which no Python backend knows.  builtin-macros maps the
+   name (name-key) of each of those that is a built-in macro (the very
+   macro of lispy.macros, so never one a defmacro or another module's
+   require registered under that name) to the built-in's own name."
+  (def __init__ [self text position-map tree :macros (frozenset)
+                 :builtin-macros {}]
     (= self._lines None)
     (= self.text text)
     (= self.map position-map)
     (= self.tree tree)
     (= self.macros macros)
+    (= self.builtin-macros builtin-macros)
     (= self.cursor None)
     (= self.partial None)
     (= self.attribute False)
@@ -612,6 +618,12 @@
                         (do (del (sub sys.path i))
                             (break)))))))))))
 
+;; id of each built-in macro -> its name: compile-buffer tells a built-in
+;; macro in a buffer's macro table by identity, as the seeding and a require
+;; of lispy.macros register the macro object itself, whatever the key.
+(= _BUILTIN-MACRO-NAMES {(id macro) name
+                         for [name macro] in (.items BUILTIN-MACRO-NAMESPACE)})
+
 ;; compile-buffer's stages: where a buffer that made no view failed.
 (= PARSE-STAGE "parse")
 (= COMPILE-STAGE "compile")
@@ -667,10 +679,15 @@
     (= tree (ast.parse text))
     (= position-map (build-position-map module tree source text))
     ;; Keys are the spellings a defmacro or require registered.
-    (= macros (frozenset (map name-key (.get scope "__macro_namespace" {}))))
+    (= table (list (.items (.get scope "__macro_namespace" {}))))
+    (= macros (frozenset [(name-key key) for [key _] in table]))
+    (= builtin-macros {(name-key key) (sub _BUILTIN-MACRO-NAMES (id macro))
+                       for [key macro] in table
+                       if (in (id macro) _BUILTIN-MACRO-NAMES)})
     (except [Exception as e]
       (return (CompiledBuffer None :stage VIEW-STAGE :error e :epoch macro-epoch))))
-  (return (CompiledBuffer (PythonView text position-map tree :macros macros)
+  (return (CompiledBuffer (PythonView text position-map tree :macros macros
+                                      :builtin-macros builtin-macros)
                           :epoch macro-epoch)))
 
 (def compile-view [source :package "" :name "__main__" :import-root None]
@@ -846,6 +863,17 @@
     (if (is-not result.epoch None)
         (._store self self._views uri (, version result.epoch) result generation))
     (return result))
+
+  (def cached-view [self uri version]
+    "uri's full view at version as compiled under the macro environment of
+     now (epoch), or None: none compiled yet, or it failed.  It never
+     compiles, so a request on the loop may read it."
+    (if (is version None)
+        (return None))
+    (= hit (._hit self self._views uri (, version (epoch))))
+    (if (is hit None)
+        (return None))
+    (return (. (sub hit 1) view)))
 
   (def view [self uri version source :package "" :name "__main__" :import-root None
              :generation None]
