@@ -575,7 +575,7 @@ class TestShadows:
         for skipped in ["venv", "node_modules", "__pycache__", "site-packages"]:
             self.write(project / skipped / "dep.lpy", "(= d 1)")
         # Each path to a file is its own module, so the link gets a shadow too.
-        assert pv.write_shadows(str(project), str(root)) == [
+        assert pv.write_shadows(str(project), str(root)).shadows == [
             str(root / "alias.py"),
             str(root / "top.py"),
         ]
@@ -772,7 +772,7 @@ class TestShadows:
                 try:
                     assert not wait or paused.wait(5)
                     name = threading.current_thread().name
-                    shadows[name] = pv.write_shadows(str(project), str(root))
+                    shadows[name] = pv.write_shadows(str(project), str(root)).shadows
                 except BaseException as e:
                     errors.append(e)
 
@@ -835,7 +835,7 @@ class TestShadows:
         shadow = root / "pkg" / "m.py"
         assert shadow.is_symlink()
         self.write(pkg / "m.lpy", "(= m 1)")  # compiles to m.py's very text
-        assert str(shadow) in pv.write_shadows(str(project), str(root))
+        assert str(shadow) in pv.write_shadows(str(project), str(root)).shadows
         assert not shadow.is_symlink() and shadow.read_text() == "m = 1"
         assert (pkg / "m.py").read_text() == "m = 1"
 
@@ -860,10 +860,10 @@ class TestShadows:
         project, root = tmp_path / "project", tmp_path / "view"
         self.write(project / "top.lpy", "(= a 1)")
         shadows = [str(root / "top.py")]
-        assert pv.write_shadows(str(project), str(root)) == shadows
+        assert pv.write_shadows(str(project), str(root)).shadows == shadows
         (project / "top.lpy").chmod(0)
         try:
-            assert pv.write_shadows(str(project), str(root)) == shadows
+            assert pv.write_shadows(str(project), str(root)).shadows == shadows
         finally:
             (project / "top.lpy").chmod(0o600)
         assert (root / "top.py").read_text() == "a = 1"
@@ -881,7 +881,9 @@ class TestShadows:
         self.write(root / "top.py.tmp", "theirs")
         manifest = pv.ShadowManifest()
         try:
-            shadows = pv.write_shadows(str(project), str(root), manifest=manifest)
+            shadows = pv.write_shadows(
+                str(project), str(root), manifest=manifest
+            ).shadows
         finally:
             (root / "locked").chmod(0o700)
         assert shadows == [str(root / "top.py")]
@@ -900,7 +902,7 @@ class TestShadows:
         self.write(project / ".hidden" / "h.lpy", "(= h 1)")
         self.write(root / "pyrightconfig.json", "{}")
         manifest = pv.ShadowManifest()
-        shadows = pv.write_shadows(str(project), str(root), manifest=manifest)
+        shadows = pv.write_shadows(str(project), str(root), manifest=manifest).shadows
         mod, top = root / "pkg" / "mod.py", root / "top.py"
         assert shadows == sorted([str(mod), str(top)])
         assert mod.read_text() == "my_x = 1"
@@ -922,7 +924,9 @@ class TestShadows:
         (project / "top.lpy").unlink()
         self.write(project / "pkg" / "mod.lpy", "(= 1 1)")  # stops compiling
         os.utime(project / "pkg" / "mod.lpy", ns=(stamp + 2 * 10**9,) * 2)
-        assert pv.write_shadows(str(project), str(root), manifest=manifest) == []
+        assert (
+            pv.write_shadows(str(project), str(root), manifest=manifest).shadows == []
+        )
         assert not mod.exists() and not top.exists()
         assert (root / "pyrightconfig.json").read_text() == "{}"
 

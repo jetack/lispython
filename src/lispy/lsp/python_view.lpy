@@ -859,6 +859,15 @@
                  generation))
     (return result))
 
+  (def outdated [self]
+    "The uris whose cached compile ran under another macro environment than
+     the current one (all of them while a drop is due).  It stats the
+     tracked files, so callers on the loop run it in a thread."
+    (= now (epoch))
+    (with [self._lock]
+      (return [uri for [uri [key _]] in (.items self._views)
+               if (or (is now None) (!= (sub key 1) now))])))
+
   (def forget [self uri]
     "Drop uri's entries (its document closed)."
     (with [self._lock]
@@ -1248,8 +1257,10 @@
    (bottom up, never root).  Other files, the view root's own files
    (_ROOT-FILES) among them, are never touched.  A directory link is unlinked, never
    followed, and nothing is removed in a directory that leaves root
-   (_check-in-root): that one is logged and skipped."
+   (_check-in-root): that one is logged and skipped.  Returns the links and
+   .py files removed."
   (= stale-before (- (time.time) _TEMP-MAX-AGE))
+  (= removed [])
   (for [dirpath dirnames filenames] in (os.walk root :topdown False :followlinks False)
     (for name in (+ dirnames filenames)
       (= path (osp.join dirpath name))
@@ -1265,7 +1276,8 @@
 
           (or (osp.islink path) (and (.endswith name ".py") (osp.isfile path)))
           (do (_check-in-root root dirpath)
-              (os.remove path)))
+              (os.remove path)
+              (.append removed path)))
         (except [FileNotFoundError]
           (pass))
         (except [OSError as e]
@@ -1275,7 +1287,8 @@
           (_check-in-root root dirpath)
           (os.rmdir dirpath)
           (except [OSError]
-            (pass))))))
+            (pass)))))
+  (return removed))
 
 (def write-shadows [project-root view-root :manifest None]
   "Write a compiled shadow .py into view-root for every .lpy under
@@ -1294,8 +1307,8 @@
    source compiles with its import root on sys.path (a relative require
    imports its package), which is left as it was.  A view root that overlaps the project is a ValueError before
    anything is touched; the whole sweep holds the view root's lock, and
-   nothing is written or removed through a link out of it.  Returns the
-   sorted shadow paths."
+   nothing is written or removed through a link out of it.  Returns its
+   ShadowSweep."
   (_refuse-overlap project-root view-root)
   (if (is manifest None)
       (= manifest (ShadowManifest)))
@@ -1303,6 +1316,16 @@
   (= root (osp.abspath (os.fspath view-root)))
   (with [(_view-root-lock root)]
     (return (_write-shadows project-root root manifest))))
+
+(class ShadowSweep []
+  "What one write-shadows sweep did: shadows, the sorted shadow paths;
+   written, the sorted shadows whose text it wrote; removed, the sorted
+   links and .py files it removed (_sweep-orphans), so a backend can be
+   told of every file that changed."
+  (def __init__ [self shadows written removed]
+    (= self.shadows shadows)
+    (= self.written written)
+    (= self.removed removed)))
 
 (def _write-shadows [project-root root manifest]
   "write-shadows' sweep, under the view root's lock."
@@ -1315,6 +1338,7 @@
         (del (sub manifest.sources path))))
   (= names-of {})
   (= shadows {})
+  (= written [])
   (for lpy-path in sources
     (= shadow (view-path project-root root lpy-path))
     (= names (module-names lpy-path))
@@ -1354,7 +1378,8 @@
                                   :import-root (sub names 2)))
       (= view compiled.view)
       (if (is-not view None)
-          (do (_write-if-changed root shadow view.text)
+          (do (if (_write-if-changed root shadow view.text)
+                  (.append written shadow))
               (= (sub shadows shadow) lpy-path)))
       (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
       (except [OSError as e]
@@ -1378,8 +1403,8 @@
     (_overlay-package project-root root package source-dirs shadows links))
   (for directory in (sorted module-dirs)
     (_mirror-py-files project-root root directory shadows links))
-  (_sweep-orphans root shadows links)
-  (return (sorted shadows)))
+  (= removed (_sweep-orphans root shadows links))
+  (return (ShadowSweep (sorted shadows) (sorted written) (sorted removed))))
 
 ;; The project's rule settings the view root's config takes over: these,
 ;; typeCheckingMode and every report* rule.  Never a path setting (include,

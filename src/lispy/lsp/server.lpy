@@ -607,7 +607,13 @@
   (if (and (is-not run.view None)
            (.document-changed backends doc.uri doc.source run.view))
       (await (wait-backend-diagnostics run)))
-  (await (publish-run run)))
+  (await (publish-run run))
+  ;; A save may have changed a macro module other open documents require:
+  ;; each compiled under an older macro environment compiles again.
+  (if run.recompile
+      (for uri in (await (asyncio.to-thread view-cache.outdated))
+        (if (!= uri doc.uri)
+            (publish-diagnostics run.ls uri)))))
 
 (async-def wait-backend-diagnostics [run]
   "Wait until the backend's diagnostics for run's view are known, at most

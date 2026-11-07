@@ -447,6 +447,74 @@ def test_a_save_compiles_again(fake_served, monkeypatch):
     sys.modules.pop("diag_flag_mac", None)
 
 
+class Documents:
+    """A language server double for several open documents."""
+
+    def __init__(self):
+        self.workspace = self
+        self.documents = {}
+        self.published = {}
+
+    def get_text_document(self, uri):
+        return self.documents[uri]
+
+    def text_document_publish_diagnostics(self, params):
+        self.published.setdefault(params.uri, []).append(params.diagnostics)
+
+    def open(self, path):
+        uri = path.as_uri()
+        self.documents[uri] = TextDocument(uri, path.read_text(), version=1)
+        doc = SimpleNamespace(uri=uri, version=1)
+        server.did_open(self, SimpleNamespace(text_document=doc))
+        return uri
+
+    def save(self, path):
+        uri = path.as_uri()
+        version = self.documents[uri].version + 1
+        self.documents[uri] = TextDocument(uri, path.read_text(), version=version)
+        server.did_save(self, SimpleNamespace(text_document=SimpleNamespace(uri=uri)))
+
+
+def test_a_saved_macro_module_refreshes_the_documents_requiring_it(
+    fake_served, monkeypatch
+):
+    # Defect: only the saved document is compiled again, so another open
+    # document requiring the saved macro module keeps the diagnostics (and
+    # backend view) of the old macros until its own next edit.
+    _, backends = fake_served
+    backends.configure({"backend": "off"})
+    project = pathlib.Path(backends.folders()[0].uri[len("file://") :])
+    name = "diagmmsave"
+    pkg = project / name
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    mac, mod = pkg / "mac.lpy", pkg / "mod.lpy"
+    mac.write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+    mod.write_text("(require .mac *)\n(= yy (twice 2))\n")
+    for key in [name, name + ".mac"]:
+        monkeypatch.delitem(sys.modules, key, raising=False)
+    editor = Documents()
+
+    async def scenario():
+        mod_uri = editor.open(mod)
+        mac_uri = editor.open(mac)
+        await until(lambda: mod_uri in editor.published and mac_uri in editor.published)
+        assert editor.published[mod_uri][-1] == []
+        count = len(editor.published[mod_uri])
+        mac.write_text('(defmacro twice [x] (raise (ValueError "diag-boom")))\n')
+        editor.save(mac)
+        await until(lambda: len(editor.published[mod_uri]) > count, timeout=5)
+        [warning] = editor.published[mod_uri][-1]
+        assert "diag-boom" in warning.message
+
+    try:
+        run_bounded(scenario())
+    finally:
+        for key in list(sys.modules):
+            if key == name or key.startswith(name + "."):
+                del sys.modules[key]
+
+
 class ScriptedBackends:
     """A running backend whose published sets the test decides: known maps
     a view text to its (diagnostic, places) pairs."""

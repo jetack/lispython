@@ -464,15 +464,16 @@
     (return (.as-uri (pathlib.Path shadow))))
 
   (def _prepare-view-root [self]
-    "Write the view root's shadows and the backend's config file.  They
-     compile every .lpy of the project (its macros run), so callers run
-     this in a thread, off the event loop."
+    "Write the view root's shadows and the backend's config file, and return
+     the shadows' ShadowSweep.  They compile every .lpy of the project (its
+     macros run), so callers run this in a thread, off the event loop."
     (= root (os.fspath self.view-root))
     (os.makedirs root :exist-ok True)
-    (write-shadows self.project-root root :manifest self.manifest)
+    (= sweep (write-shadows self.project-root root :manifest self.manifest))
     ((config-writer self.name) self.project-root self.view-root
                                :import-roots self.manifest.import-roots
-                               :check-types self.check-types))
+                               :check-types self.check-types)
+    (return sweep))
 
   (def _start-task [self]
     "The task starting the backend: the one in progress, else a new one when
@@ -844,16 +845,25 @@
             :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))))
 
   (async-def file-saved [self lpy-uri]
-    "Rewrite a running backend's shadows and config, then tell it the saved
-     file's shadow changed."
+    "Rewrite a running backend's shadows and config, then tell it every file
+     the sweep changed: the saved file's shadow and each shadow the sweep
+     wrote (a macro module's dependents recompile with it) as Changed, each
+     file it removed as Deleted."
     (if (not self.running)
         (return))
-    (await (asyncio.to-thread self._prepare-view-root))
+    (= sweep (await (asyncio.to-thread self._prepare-view-root)))
+    (= changed [(.as-uri (pathlib.Path path)) for path in sweep.written])
     (= uri (.backend-uri self lpy-uri))
-    (if (and (is-not uri None) self.running)
+    (if (and (is-not uri None) (not-in uri changed))
+        (.append changed uri))
+    (= changes (+ [(lsp.FileEvent :uri uri :type lsp.FileChangeType.Changed)
+                   for uri in changed]
+                  [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
+                                  :type lsp.FileChangeType.Deleted)
+                   for path in sweep.removed]))
+    (if (and changes self.running)
         (.workspace-did-change-watched-files self._client
-          (lsp.DidChangeWatchedFilesParams
-            :changes [(lsp.FileEvent :uri uri :type lsp.FileChangeType.Changed)]))))
+          (lsp.DidChangeWatchedFilesParams :changes changes))))
 
   (async-def saved [self lpy-uri]
     "Document lpy-uri was saved: file-saved, then, when that changed the
