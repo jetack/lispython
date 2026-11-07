@@ -1709,12 +1709,6 @@
   (return (client-capability-p
             ls ["text_document" "completion" "completion_item" "insert_replace_support"])))
 
-(def label-details-support [ls]
-  "Whether the client draws a completion item's labelDetails
-   (textDocument.completion.completionItem.labelDetailsSupport)."
-  (return (client-capability-p
-            ls ["text_document" "completion" "completion_item" "label_details_support"])))
-
 (def label-offset-support [ls]
   "Whether the client takes a signature parameter label as offsets into the
    signature's label (textDocument.signatureHelp.signatureInformation
@@ -1732,36 +1726,34 @@
 ;; only inside defmacro bodies.
 (= _LPY-KEYWORDS [*BUILTIN-MACROS "gensym"])
 
-(def own-item [label detail label-details]
+(def own-item [label tag]
   "One of lispython's own completion items (the one home of their shape): a
-   Keyword whose detail names what it is, repeated as labelDetails.description
-   when label-details (the client draws labelDetails) so editors that show
-   it inline do."
+   Keyword whose short tag (\"macro\", ...) is labelDetails.description, drawn
+   inline, not detail, which lpy-mode shows as the focused item's signature.
+   Sent whatever the client advertises: eglot never sets labelDetailsSupport
+   and clients ignore a field they do not know."
   (return (lsp.CompletionItem
             :label label
             :kind lsp.CompletionItemKind.Keyword
-            :detail detail
-            :label-details (ife label-details
-                                (lsp.CompletionItemLabelDetails :description detail)
-                                None))))
+            :label-details (lsp.CompletionItemLabelDetails :description tag))))
 
-(def lispython-items [label-details]
+(def lispython-items []
   "lispython's own completion items: the special forms, then the built-in
    macros and gensym (_LPY-KEYWORDS), each once (own-item)."
   (= items [])
   (= seen (set))
-  (for [names detail] in [(, SPECIAL-FORM-DOCS "special form") (, _LPY-KEYWORDS "keyword")]
+  (for [names tag] in [(, SPECIAL-FORM-DOCS "special form") (, _LPY-KEYWORDS "keyword")]
     (for name in names
       (if (not-in name seen)
           (do (.add seen name)
-              (.append items (own-item name detail label-details))))))
+              (.append items (own-item name tag))))))
   (return items))
 
-(def general-items [doc :line None :label-details False]
+(def general-items [doc :line None]
   "The completion items offered with no Python backend's answer:
-   lispython's own (lispython-items, labelDetails when label-details), the Python builtins (builtin-names),
+   lispython's own (lispython-items), the Python builtins (builtin-names),
    then the buffer's definitions (collect-definitions), each name once."
-  (= items (lispython-items label-details))
+  (= items (lispython-items))
   (= seen (set [item.label for item in items]))
   (for [name kind] in (builtin-names)
     (if (not-in name seen)
@@ -1774,12 +1766,11 @@
                                                :kind lsp.CompletionItemKind.Variable)))))
   (return items))
 
-(def local-completion [doc :line None :label-details False]
+(def local-completion [doc :line None]
   "The completion answer when no Python backend gives one: the general
    list, with no guess at what an attribute's object holds."
   (return (lsp.CompletionList :is-incomplete False
-                              :items (general-items doc :line line
-                                                    :label-details label-details))))
+                              :items (general-items doc :line line))))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion through the Python backend
@@ -2025,7 +2016,7 @@
         (pass))))
   (return (list names)))
 
-(def merged-items [doc line view items spellings label-details]
+(def merged-items [doc line view items spellings]
   "lispython's own items (lispython-items, then each macro of the view as
    the buffer spells it) followed by items, the backend's (backend-items),
    whose name (name-key) none of them has: a special form or macro wins
@@ -2033,7 +2024,7 @@
    (only the text before the cursor compiled) the buffer's definitions the
    backend could not see (buffer-definition-names at the 1-based line)
    follow."
-  (= merged (lispython-items label-details))
+  (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
   ;; view.macros holds name-keys, as taken does.
   (for name in (sorted view.macros)
@@ -2041,7 +2032,7 @@
     (if (and (not-in "." name) (not-in name taken))
         (do (= label (.get spellings name name))
             (.add taken name)
-            (.append merged (own-item label "macro" label-details)))))
+            (.append merged (own-item label "macro")))))
   (= rest (list items))
   (if view.fallback
       (.extend rest [(lsp.CompletionItem :label name
@@ -2134,7 +2125,7 @@
   (return (, view (completion-items answer)
              (and (isinstance answer lsp.CompletionList) (is answer.is-incomplete True)))))
 
-(async-def backend-completion [doc line col insert-replace label-details]
+(async-def backend-completion [doc line col insert-replace]
   "The completion answer with the Python backend's help, or None when it
    gives none (no backend, a buffer with no Python view, no items), and
    local-completion is the answer.  doc is a snapshot (document-snapshot).
@@ -2160,7 +2151,7 @@
   (if (not found)
       (return None))
   (if (not view.attribute)
-      (= found (merged-items doc line view found spellings label-details)))
+      (= found (merged-items doc line view found spellings)))
   (return (lsp.CompletionList :is-incomplete incomplete :items found)))
 
 (def document-snapshot [doc]
@@ -2386,17 +2377,16 @@
     (= [line col] (cursor-of doc params.position))
     (except [Exception]
       (.debug logger "completion position failed" :exc-info True)
-      (return (local-completion doc :label-details (label-details-support ls)))))
+      (return (local-completion doc))))
   (= insert-replace (insert-replace-support ls))
-  (= label-details (label-details-support ls))
   (try
-    (= result (await (backend-completion doc line col insert-replace label-details)))
+    (= result (await (backend-completion doc line col insert-replace)))
     (except [Exception]
       (.debug logger "backend completion failed" :exc-info True)
       (= result None)))
   (if (is-not result None)
       (return result))
-  (return (local-completion doc :line line :label-details label-details))))
+  (return (local-completion doc :line line))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend
