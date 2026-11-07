@@ -34,13 +34,16 @@
   ;; The runtime table is a MacroTable too, so the module's code registers by
   ;; name as the compiler does (why: core/macro_table.py).  The module is
   ;; reached by attribute, never bound in the module: a binding deleted after
-  ;; use is missing meanwhile for code running in the same scope.
-  (return `(do (from lispy.core.nodes *)
-               (from lispy.core.builtins *)
-               (def ~newname ~@body)
-               (= (sub (.scope-table ~(macro-table) (~(builtin "globals"))) ~macroname)
-                  ~newname)
-               (del ~newname))))
+  ;; use is missing meanwhile for code running in the same scope.  Only the
+  ;; parameter list and body forms are the user's; they still expand.
+  (return (mark-compiler-forms
+            `(do (from lispy.core.nodes *)
+                 (from lispy.core.builtins *)
+                 (def ~newname ~@body)
+                 (= (sub (.scope-table ~(macro-table) (~(builtin "globals"))) ~macroname)
+                    ~newname)
+                 (del ~newname))
+            body)))
 
 (= REQUIRE-QUALIFIED "qualified")
 (= REQUIRE-ALL "all")
@@ -75,7 +78,8 @@
   (= prefix (ife (== kind REQUIRE-QUALIFIED) (+ (str module-name) ".") ""))
   (= selected (ife (== kind REQUIRE-NAMED) names `None))
   (return
-    `(.register-required ~(macro-table) (~(builtin "globals")) ~import-call ~prefix ~selected)))
+    (mark-compiler-forms
+      `(.register-required ~(macro-table) (~(builtin "globals")) ~import-call ~prefix ~selected))))
 
 (when (== __name__ "__main__")
   (import os.path as osp)

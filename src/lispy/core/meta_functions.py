@@ -35,21 +35,26 @@ def defmacro_transform(sexp):
     newname = Symbol("___defmacro_temp___" + macroname)
     if not identifier_p(newname.name):
         newname = Symbol("___defmacro_temp___")
-    return Paren(
-        Symbol("do"),
-        Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
-        Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
-        Paren(Symbol("def"), newname, *body),
+    return mark_compiler_forms(
         Paren(
-            Symbol("="),
+            Symbol("do"),
+            Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
+            Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
+            Paren(Symbol("def"), newname, *body),
             Paren(
-                Symbol("sub"),
-                Paren(Symbol(".scope-table"), macro_table(), Paren(builtin("globals"))),
-                macroname,
+                Symbol("="),
+                Paren(
+                    Symbol("sub"),
+                    Paren(
+                        Symbol(".scope-table"), macro_table(), Paren(builtin("globals"))
+                    ),
+                    macroname,
+                ),
+                newname,
             ),
-            newname,
+            Paren(Symbol("del"), newname),
         ),
-        Paren(Symbol("del"), newname),
+        body,
     )
 
 
@@ -93,13 +98,15 @@ def require_transform(sexp):
     )
     prefix = str(module_name) + "." if kind == REQUIRE_QUALIFIED else ""
     selected = names if kind == REQUIRE_NAMED else Constant("None")
-    return Paren(
-        Symbol(".register-required"),
-        macro_table(),
-        Paren(builtin("globals")),
-        import_call,
-        prefix,
-        selected,
+    return mark_compiler_forms(
+        Paren(
+            Symbol(".register-required"),
+            macro_table(),
+            Paren(builtin("globals")),
+            import_call,
+            prefix,
+            selected,
+        )
     )
 
 

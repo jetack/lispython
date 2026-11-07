@@ -607,7 +607,8 @@ def data_to_generator_expression(data):
 
 class Expression(Node):
     # True on a form the compiler generated around user code (the code a
-    # defmacro or require becomes, marked by mark_compiler_forms): its head is
+    # defmacro or require becomes, which defmacro-transform and
+    # require-transform mark through mark_compiler_forms): its head is
     # never a macro call or meta form, because a user macro named after one of
     # its heads (do, def, sub, lambda, ...) must not rewrite the compiler's
     # code. Its children still expand, so the user's forms inside it do.
@@ -1139,7 +1140,8 @@ class UnquoteSplice(Unquote):
 def mark_compiler_forms(root, user_forms=()):
     """Mark every Paren of the generated tree ``root`` as the compiler's own
     form (``Expression.compiler_form``), except inside ``user_forms``, the
-    user's own subtrees placed in it (compared by identity). Iterative."""
+    user's own subtrees placed in it (compared by identity), and return
+    ``root``. Iterative."""
     user = {id(form) for form in user_forms}
     stack = [root]
     while stack:
@@ -1152,3 +1154,4 @@ def mark_compiler_forms(root, user_forms=()):
             stack.extend(node.list)
         elif isinstance(node, (Wrapper, MetaIndicator)):
             stack.append(node.value)
+    return root

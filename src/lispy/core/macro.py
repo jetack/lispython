@@ -13,7 +13,7 @@ from lispy.core.errors import LispyCompileError
 from lispy.core.macro_table import MacroTable, find_entry, find_macro
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
-from lispy.core.nodes import atom_text, macro_expansion_nodes, mark_compiler_forms
+from lispy.core.nodes import atom_text, macro_expansion_nodes
 from lispy.core.utils import trampoline
 
 __macro_namespace: dict[str, Callable[[Node], ast.AST]] = {}
@@ -53,8 +53,6 @@ def define_macro(sexp, scope, include_meta=True):
             f"(defmacro ...) expects an undotted name, got {name}", name
         )
     transformed = defmacro_transform(sexp)
-    # Only the parameter list and body forms are the user's; they still expand.
-    mark_compiler_forms(transformed, sexp.list[2:])
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
     # Binding checks stay on: a parameter or local named like an active macro
@@ -84,7 +82,6 @@ def define_macro(sexp, scope, include_meta=True):
 
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
-    mark_compiler_forms(transformed)
     try:
         body = macroexpand_then_compile(
             [transformed], scope, include_meta=include_meta, check_bindings=False
