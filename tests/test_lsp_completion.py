@@ -17,6 +17,7 @@ from tests.lsp_backends import basedpyright_only, once
 
 server = importlib.import_module("lispy.lsp.server")
 backend = importlib.import_module("lispy.lsp.backend")
+python_view = importlib.import_module("lispy.lsp.python_view")
 
 
 CLASS = (
@@ -229,6 +230,63 @@ def test_an_unresolved_base_offers_no_names(complete):
     labels = set(by_label(complete("(import heapq)\n(heapq.nl|")[2]))
     assert {"nlargest", "nsmallest"} <= labels
     assert not labels & {"print", "def"}
+
+
+def macro_style(items):
+    return [(item.label, item.kind, item.label_details.description) for item in items]
+
+
+LPY_MACS = [
+    ("thrice", lsp.CompletionItemKind.Function, "macro"),
+    ("twice", lsp.CompletionItemKind.Function, "macro"),
+]
+
+
+@once
+def test_a_required_modules_macros_follow_its_name(complete, backend_requests):
+    # Defect: the mod.name macros a (require mod) registers are offered
+    # nowhere after mod., since no backend knows them (mod is never bound),
+    # so the attribute answer is empty.
+    backend_requests.answer["value"] = []
+    assert macro_style(complete("(require lpy-macs)\n(lpy-macs.|)")[2]) == LPY_MACS
+
+
+@once
+def test_a_required_macro_wins_over_the_backends_name(complete, backend_requests):
+    # Defects: the backend's items replace the macros, or a backend item of
+    # a macro's name is offered beside it.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="twice", kind=lsp.CompletionItemKind.Variable),
+        lsp.CompletionItem(label="my_attr", kind=lsp.CompletionItemKind.Variable),
+    ]
+    items = complete("(require lpy-macs)\n(lpy-macs.|)")[2]
+    assert macro_style([i for i in items if i.label != "my_attr"]) == LPY_MACS
+    assert "my_attr" in by_label(items)
+
+
+@once
+def test_named_required_macros_are_not_qualified(
+    complete, backend_requests, backend_project
+):
+    # Defect: every macro of the view is offered after the module's name,
+    # though (require mod [a]) registers a alone, unqualified.
+    view = python_view.compile_view(
+        "(require lpy-macs [twice])", import_root=str(backend_project)
+    )
+    assert "twice" in view.macros and "lpy_macs.twice" not in view.macros
+    backend_requests.answer["value"] = []
+    assert complete("(require lpy-macs [twice])\n(lpy-macs.|)")[2] == []
+
+
+@once
+@pytest.mark.parametrize("access", ["(nope.|)", "(. lpy-macs |)"])
+def test_required_macros_follow_only_their_modules_name(
+    complete, backend_requests, access
+):
+    # Defects: the qualified macros are offered after any base, or in the
+    # (. mod |) form, where mod.name is no macro call.
+    backend_requests.answer["value"] = []
+    assert complete(f"(require lpy-macs)\n{access}")[2] == []
 
 
 @once

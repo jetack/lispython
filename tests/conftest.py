@@ -79,14 +79,18 @@ def run_on_loop():
 def backend_project(tmp_path_factory):
     """The workspace folder of the backend tests; its main.lpy is the file
     every buffer is opened as. helpers.py is a user .py module beside it and
-    other.lpy a .lpy module (its shadow is the backend's other.py), both
-    written before any backend starts (the view root mirrors and compiles
-    them then); no buffer names them unless it imports them, so they change
-    no other answer."""
+    other.lpy a .lpy module (its shadow is the backend's other.py) and
+    lpy_macs.lpy a macro module (required as lpy-macs), all written before
+    any backend starts (the view root mirrors and compiles them then); no
+    buffer names them unless it imports them, so they change no other
+    answer."""
     root = tmp_path_factory.mktemp("backend-project")
     (root / "main.lpy").write_text("(= y 1)\n")
     (root / "helpers.py").write_text("def my_helper(alpha, beta):\n    return alpha\n")
     (root / "other.lpy").write_text("(def other-fn [a]\n  (return a))\n(other-fn 1)\n")
+    (root / "lpy_macs.lpy").write_text(
+        "(defmacro twice [x] `(do ~x ~x))\n(defmacro thrice [x] `(do ~x ~x ~x))\n"
+    )
     return root
 
 

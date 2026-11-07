@@ -210,6 +210,24 @@
    cursor and col..end the rest of the name run after it."
   (return (, (_partial-start text col) (_name-end text col))))
 
+(def glued-base [text start]
+  "The dotted name written glued to the dot right before code-point column
+   start of line text (a.b for a.b.c|, start at c), or None when no dot is
+   there or no name runs into it (x .c, (.c x), a..c)."
+  (if (or (<= start 0) (!= (sub text (- start 1)) "."))
+      (return None))
+  (= end (- start 1))
+  (= begin end)
+  (while (and (> begin 0) (or (_name-char-p (sub text (- begin 1)))
+                              (== (sub text (- begin 1)) ".")))
+    (-= begin 1))
+  (while (and (< begin end) (in (sub text begin) _SYMBOL-PREFIXES))
+    (+= begin 1))
+  (= base (sub text [: begin end]))
+  (if (or (not base) (in "" (.split base ".")))
+      (return None))
+  (return base))
+
 ;; ---------------------------------------------------------------------------
 ;; Position map
 ;; ---------------------------------------------------------------------------
