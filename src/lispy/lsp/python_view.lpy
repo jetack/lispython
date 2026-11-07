@@ -335,9 +335,14 @@
    keyword parameter after its colon, and a macro may put anything there;
    so each place is tried and the one whose py-name matches wins."
   (= [[line col] [end-line end-col]] span)
-  (if (> end-line (len lines))
+  ;; A macro may give a node any explicit position, so the span is trusted
+  ;; only inside the buffer text.
+  (if (or (< line 1) (> end-line (len lines)) (< end-line line) (< col 0))
       (return None))
   (= text (sub lines (- line 1)))
+  (if (or (> col (len text)) (< end-col 0)
+          (> end-col (len (sub lines (- end-line 1)))))
+      (return None))
   (if (and (== line end-line) (== (py-name (sub text [: col end-col])) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))

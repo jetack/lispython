@@ -381,3 +381,15 @@ class TestDottedSymbolPositions:
             end -= 1 + len(parts.pop())
             node = node.value
         assert (node.end_col_offset, node.col_offset) == (len(parts[0]), 0)
+
+
+def test_method_call_across_lines_ends_at_its_last_operand():
+    # Defect: the span's end paired the instance's line with the method's
+    # (larger) column, a column past the end of line 2.
+    from lispy.core.macro import macroexpand_then_compile
+
+    [stmt] = macroexpand_then_compile(parse("(.meth\n  x)"), {})
+    func = stmt.value.func
+    assert isinstance(func, ast.Attribute)
+    assert (func.lineno, func.col_offset) == (1, 1)
+    assert (func.end_lineno, func.end_col_offset) == (2, 3)

@@ -579,3 +579,13 @@ def test_data_in_every_child_form_slot_is_converted():
     assert type(copied_keyword.value) is Bracket
     assert copied_keyword.value.list[0].position_info == position
     assert quote.value == 5 and glued.params == ["T"]
+
+
+def test_a_template_name_stays_inside_the_macro_call(scope):
+    # Defect: a template symbol placed at the call measured its end from its
+    # own spelling, so `print` at the 4-character `(qp)` ended at column 5,
+    # past the end of the line.
+    define("(defmacro qp [] (return '(print 1)))", scope)
+    [call] = calls_to(compile_at_line(2, "(qp)", scope), "print")
+    assert (call.func.lineno, call.func.col_offset) == (2, 0)
+    assert (call.func.end_lineno, call.func.end_col_offset) == (2, 4)

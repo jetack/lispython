@@ -474,12 +474,23 @@ def name_compile(symbol, ctx):
         check_binding(symbol)
     position_info = {**symbol.position_info}
     # Positions are .lpy columns: measure the spelling's components (``a.x->y``),
-    # never the mangled Python names, which differ in length.
+    # never the mangled Python names, which differ in length. Measure only when
+    # the spelling fits the symbol's own one-line span: a symbol that borrowed
+    # another node's position (a macro template placed at its call, quote
+    # expansion's classname symbol) keeps that whole span on every part, since
+    # a measured end would leave it.
     [spelled, *spelled_attrs] = symbol.value.split(".")
-    position_info["end_col_offset"] = position_info["col_offset"] + len(spelled)
+    measured = (
+        position_info["lineno"] == position_info["end_lineno"]
+        and position_info["col_offset"] + len(symbol.value)
+        <= position_info["end_col_offset"]
+    )
+    if measured:
+        position_info["end_col_offset"] = position_info["col_offset"] + len(spelled)
     rst = ast.Name(id=name, ctx=ast.Load(), **position_info)
     for attr, spelled_attr in zip(attrs, spelled_attrs, strict=True):
-        position_info["end_col_offset"] += 1 + len(spelled_attr)
+        if measured:
+            position_info["end_col_offset"] += 1 + len(spelled_attr)
         rst = ast.Attribute(value=rst, attr=attr, ctx=ast.Load(), **position_info)
     rst.ctx = ctx()
     return rst
