@@ -402,10 +402,23 @@ def scope():
     return scope
 
 
+# The word each completion item's LSP kind (and tag) reads as in the tests
+# below; the reply has no other kind channel.
+_KIND_WORDS = {7: "class", 3: "function", 6: "variable", 14: "keyword"}
+
+
 def complete(prefix, scope):
     result = tools.nrepl_complete(prefix, scope)
-    assert set(result["kinds"]) == set(result["completions"])
-    return result["kinds"]
+    assert "kinds" not in result
+    assert [item["label"] for item in result["items"]] == result["completions"]
+    return {
+        item["label"]: (
+            "macro"
+            if item.get("labelDetails", {}).get("description") == "macro"
+            else _KIND_WORDS[item["kind"]]
+        )
+        for item in result["items"]
+    }
 
 
 @pytest.mark.parametrize(

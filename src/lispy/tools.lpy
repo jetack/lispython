@@ -34,9 +34,8 @@
 (from lispy.core.unparse [unparse])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
-(from lispy.form-docs [CLASS-KIND FUNCTION-KIND FUNCTION-TAG KEYWORD-KIND
-                       MACRO-TAG OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-TAG
-                       VARIABLE-KIND])
+(from lispy.form-docs [CLASS-KIND FUNCTION-KIND KEYWORD-KIND MACRO-TAG
+                       OWN-NAME-TAGS OWN-TAG-KINDS VARIABLE-KIND])
 
 (def report-compile-error [err :filename None :source None]
   "Print a LispyCompileError compiler-style (path:line:col, source, caret) to stderr."
@@ -708,17 +707,9 @@
     (except [Exception]
       (return None))))
 
-;; The deprecated `kinds` word of each of lispython's own tags
-;; (OWN-NAME-TAGS), kept for older clients: a special form is "keyword", since
-;; those words have no special form.  An item's kind is OWN-TAG-KINDS'.
-(= _TAG-KINDS
-   {SPECIAL-FORM-TAG "keyword"
-    MACRO-TAG "macro"
-    FUNCTION-TAG "function"})
-
 ;; The runtime-kind home: the LSP CompletionItemKind of a name with no own tag,
-;; by its `kinds` word (a Python keyword, or what _completion-kind or
-;; _attribute-kind found its value to be).
+;; by its word (a Python keyword, or what _completion-kind or _attribute-kind
+;; found its value to be).  An own tag's kind is OWN-TAG-KINDS'.
 (= _RUNTIME-KINDS
    {"keyword" KEYWORD-KIND
     "class" CLASS-KIND
@@ -736,26 +727,24 @@
 (= _OWN-NAME-TAGS (_own-name-tags))
 
 (def _tagged [tag]
-  "The (tag, kinds word) class of a name lispython tags (own or macro)."
-  (return (, tag (sub _TAG-KINDS tag))))
+  "The (tag, runtime word) class of a name lispython tags (own or macro)."
+  (return (, tag None)))
 
 (def _untagged [word]
-  "The (tag, kinds word) class of a name with no tag: a keyword or a value."
+  "The (tag, runtime word) class of a name with no tag: a keyword or a value."
   (return (, None word)))
 
 (def _complete-result [classes]
-  "The complete reply over {name: (tag, kinds word)}, every name once in
+  "The complete reply over {name: (tag, runtime word)}, every name once in
    sorted order.  `items` is the contract, LSP-shaped: {label, kind} with
    the LSP CompletionItemKind number, plus labelDetails.description only for
    a tagged name (OWN-TAG-KINDS gives its kind, _RUNTIME-KINDS any other's).
-   `completions` and `kinds` are the deprecated shape, kept for older
-   clients."
+   `completions` is the bare name list, read only by clients older than
+   `items`."
   (= names (sorted classes))
   (= items [])
-  (= kinds {})
   (for name in names
     (= [tag word] (sub classes name))
-    (= (sub kinds name) word)
     (if (is tag None)
         (.append items {"label" name "kind" (sub _RUNTIME-KINDS word)})
         (.append items {"label" name
@@ -763,7 +752,6 @@
                         "labelDetails" {"description" tag}})))
   (return {"op" "complete-result"
            "completions" names
-           "kinds" kinds
            "items" items}))
 
 (def _completion-kind [obj]
