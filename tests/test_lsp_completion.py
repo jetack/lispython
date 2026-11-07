@@ -246,6 +246,26 @@ def test_a_backend_with_no_items_at_an_attribute_gives_no_items(
 
 
 @once
+@pytest.mark.parametrize(
+    "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
+)
+def test_a_backend_with_no_items_off_an_attribute_gives_the_fallback_list(
+    complete, backend_requests, real_backends, backend_project, empty
+):
+    # Defect: an empty backend answer off an attribute becomes an empty list
+    # instead of lispython's own. The backend must be running, or the
+    # completion returns before any request.
+    client = real_backends.available_client((backend_project / "main.lpy").as_uri())
+    complete(CLASS.format("self.|"))  # starts the backend
+    assert wait_running(client)
+    backend_requests.sent.clear()
+    backend_requests.answer["value"] = empty
+    labels = set(by_label(complete(CLASS.format("(pri|)"))[2]))
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
+    assert_fallback_list(labels)
+
+
+@once
 def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch):
     # Defect: an off backend still has a view compiled (the buffer's macros
     # run) for a request that cannot be answered.
