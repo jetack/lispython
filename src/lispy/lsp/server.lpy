@@ -2,6 +2,7 @@
 
 (import asyncio)
 (import builtins)
+(import contextvars)
 (import functools)
 (import glob)
 (import inspect)
@@ -10,6 +11,7 @@
 (import os.path as osp)
 (import re)
 (import pathlib)
+(import threading)
 
 (from lsprotocol [types as lsp])
 (from pygls.lsp.server [LanguageServer])
@@ -33,6 +35,8 @@
                              pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT suppression-tool])
+;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
+(import lispy.lsp.macro-modules as macro-modules)
 
 (= logger (logging.getLogger __name__))
 
@@ -392,6 +396,76 @@
   (return None))
 
 ;; ---------------------------------------------------------------------------
+;; Compiles that may never return
+;; ---------------------------------------------------------------------------
+
+;; A compile runs the user's macros, which may never return (a macro looping
+;; forever).  Run in the loop's default executor, a few such compiles would
+;; park every worker, stalling each later asyncio.to-thread of the server;
+;; a thread of its own parks only itself.
+(def in-own-thread [func *args]
+  "An asyncio future of func(*args), run in a new daemon thread of its own
+   in a copy of the caller's context.  The future is settled from the
+   thread only while it is not done (its waiter may have cancelled it), so
+   a late result or exception is dropped; func's exception, BaseException
+   included, becomes the future's; a loop closed meanwhile is ignored."
+  (= loop (asyncio.get-running-loop))
+  (= future (.create-future loop))
+  (= context (contextvars.copy-context))
+  (def settle [result error]
+    (cond (.done future)
+          (return)
+          (is error None)
+          (.set-result future result)
+          True
+          (.set-exception future error)))
+  (def run []
+    (= outcome (, None None))
+    (try
+      (= outcome (, (.run context func *args) None))
+      (except [BaseException as e]
+        (= outcome (, None e))))
+    (try
+      (.call-soon-threadsafe loop settle *outcome)
+      (except [RuntimeError]
+        (pass))))
+  (.start (threading.Thread :target run :daemon True :name "lpy-compile"))
+  (return future))
+
+;; What compile-or-give-up returns for a compile it stopped waiting for.
+(= GAVE-UP (object))
+
+(async-def compile-or-give-up [future superseded started]
+  "The result of future, a compile's (in-own-thread), raising its
+   exception; or GAVE-UP once superseded (an asyncio.Event: a newer version
+   of the document, or its close, came) is set and the compile has run
+   macro_modules.WAIT-LIMIT seconds since started (the loop's clock).
+   Giving up, or being cancelled, cancels future, so the compile's late
+   outcome is dropped."
+  ;; A given-up compile's thread keeps running (one parked thread per hung
+  ;; macro); its fresh-modules token is marked hung by the next drop's wait
+  ;; (macro_modules), so it holds up no later drop either.  The same
+  ;; WAIT-LIMIT: past it a compile counts as hung for both.
+  (= loop (asyncio.get-running-loop))
+  (= waiter (asyncio.ensure-future (.wait superseded)))
+  (try
+    (await (asyncio.wait [future waiter] :return-when asyncio.FIRST-COMPLETED))
+    (if (not (.done future))
+        (await (asyncio.wait [future]
+                             :timeout (max 0 (- (+ started macro-modules.WAIT-LIMIT)
+                                                (.time loop))))))
+    (if (.done future)
+        (return (.result future)))
+    (.cancel future)
+    (return GAVE-UP)
+    (except [asyncio.CancelledError]
+      (if (and (not (.cancel future)) (not (.cancelled future)))
+          (.exception future))
+      (raise))
+    (finally
+      (.cancel waiter))))
+
+;; ---------------------------------------------------------------------------
 ;; Diagnostics
 ;; ---------------------------------------------------------------------------
 
@@ -450,18 +524,24 @@
    through; doc, a snapshot of the document (document-snapshot); recompile,
    whether its compile bypasses the view cache (a save); then, once
    compiled (compiled), lispy, lispython's own diagnostics, and view, the
-   buffer's full PythonView or None.  arrived is set while the run waits
-   for the backend's diagnostics; published counts its publishes, so an
-   older one finishing last never replaces a newer; ignores memoises the
-   buffer's suppression-comments of the backend's tool for every publish
-   of the run.  refresh: the run was started by refresh-outdated, so it
-   starts no refresh itself."
+   buffer's full PythonView or None; epoch, the macro environment its
+   compile ran under (CompiledBuffer.epoch), None until its compile
+   returned, and for good when the compile raised or was given up on.
+   superseded is set once a newer change or a close replaced the run
+   (_supersede), so its compile may be given up on (compile-or-give-up).
+   arrived is set while the run waits for the backend's diagnostics;
+   published counts its publishes, so an older one finishing last never
+   replaces a newer; ignores memoises the buffer's suppression-comments of
+   the backend's tool for every publish of the run.  refresh: the run was
+   started by refresh-outdated, so it starts no refresh itself."
   (def __init__ [self ls doc :recompile False :refresh False]
     (= self.ls ls)
     (= self.doc doc)
     (= self.recompile recompile)
     (= self.refresh refresh)
     (= self.compiled False)
+    (= self.epoch None)
+    (= self.superseded (asyncio.Event))
     (= self.lispy None)
     (= self.view None)
     (= self.arrived None)
@@ -477,8 +557,13 @@
 ;; weakly).
 (= _DIAGNOSTIC-TASKS (set))
 
-(def _wake [run]
-  (if (and (is-not run None) (is-not run.arrived None))
+(def _supersede [run]
+  "Run (or None) is replaced by a newer change or a close: its compile may
+   be given up on, and its wait for the backend's diagnostics ends."
+  (if (is run None)
+      (return))
+  (.set run.superseded)
+  (if (is-not run.arrived None)
       (.set run.arrived)))
 
 (def _current-p [run]
@@ -502,10 +587,17 @@
    which starts its backend now (Backends.document-opened, never waiting),
    so a change before the open's compile cannot skip the start.
    recompile: compile again even at a cached version (a save: the macros
-   may read what changed on disk).  refresh: DiagnosticRun's."
+   may read what changed on disk).  refresh: DiagnosticRun's.  A run
+   replaced before its compile began hands on its own: the new run
+   recompiles if either does, and is a refresh run only if both are, so a
+   refresh never drops a pending change's refresh or a save's recompile."
   (= doc (document-snapshot (.get-text-document ls.workspace uri)))
+  (= prev (.get DIAGNOSTIC-RUNS uri))
+  (if (and (is-not prev None) (not prev.compiled))
+      (do (= recompile (or recompile prev.recompile))
+          (= refresh (and refresh prev.refresh))))
   (= run (DiagnosticRun ls doc :recompile recompile :refresh refresh))
-  (_wake (.get DIAGNOSTIC-RUNS uri))
+  (_supersede prev)
   (= (sub DIAGNOSTIC-RUNS uri) run)
   (if opened
       (.document-opened backends uri))
@@ -565,14 +657,28 @@
 
 (= backends.on-view-prepared notify-preset-fallback)
 
+(def internal-error-diagnostics [exc]
+  "lispython's diagnostics of a document whose compile-document raised exc:
+   one Error at its start, so the editor drops the set of an older text."
+  (return [(lsp.Diagnostic :range (make-range 0 0 0 0)
+                           :severity lsp.DiagnosticSeverity.Error :source "lpy-lsp"
+                           :message (+ f"Internal error: cannot compile this document: {exc}"
+                                       " (the LSP log has the traceback)"))]))
+
 (async-def compile-latest [uri]
-  "Compile document uri's latest run (compile-document, in a thread), and
-   again while a newer change came during that compile: one compile in
-   flight per document, and none for a change superseded before its
-   compile began, since every compile runs the buffer's macros.  Each
-   compiled run that is still the latest goes on in a task of its own
-   (finish-run).  A compile that raises is logged and its run dropped, and
-   the loop goes on, so a change recorded meanwhile is still compiled."
+  "Compile document uri's latest run (compile-document, in a thread of its
+   own), and again while a newer change came during that compile: one
+   compile in flight per document, and none for a change superseded before
+   its compile began, since every compile runs the buffer's macros.  Each
+   compiled run that is still the latest records its epoch and goes on in a
+   task of its own (finish-run).  A compile superseded and running past
+   macro_modules.WAIT-LIMIT is given up on (compile-or-give-up), so a macro
+   that never returns stops holding up the document's later changes.  A
+   compile that raises (an error outside compile-buffer's stages) is
+   logged, and its run, while still the latest, publishes one internal
+   error.  Either way the loop goes on, so a change recorded meanwhile is
+   still compiled."
+  (= loop (asyncio.get-running-loop))
   (try
     (while True
       (= run (.get DIAGNOSTIC-RUNS uri))
@@ -581,15 +687,26 @@
       (= run.compiled True)
       (= doc run.doc)
       (try
-        (= compiled (await (asyncio.to-thread compile-document doc.uri doc.version
-                                              doc.source
-                                              :generation view-cache.generation
-                                              :fresh run.recompile)))
-        (except [Exception]
+        ;; The generation is read here, on the loop, before the hand-off.
+        (= work (functools.partial compile-document doc.uri doc.version doc.source
+                                   :generation view-cache.generation
+                                   :fresh run.recompile))
+        (= compiled (await (compile-or-give-up (in-own-thread work) run.superseded
+                                               (.time loop))))
+        (except [Exception as e]
           (.exception logger "lispython LSP: cannot compile %s" uri)
+          (if (_current-p run)
+              (do (= run.lispy (internal-error-diagnostics e))
+                  (= run.view None)
+                  (_schedule-run (publish-run run))))
           (continue)))
+      (if (is compiled GAVE-UP)
+          (do (.warning logger "lispython LSP: gave up on the compile of %s version %s"
+                        uri doc.version)
+              (continue)))
       (if (_current-p run)
-          (_schedule-run (finish-run run compiled))))
+          (do (= run.epoch compiled.epoch)
+              (_schedule-run (finish-run run compiled)))))
     (finally
       (.discard _COMPILING uri))))
 
@@ -600,7 +717,10 @@
    published at once otherwise.  Nothing is pushed or published once a
    newer change or a close superseded run, which may come between the
    compile and this task: a push then would reopen a closed document in
-   the backend, or send it a stale view."
+   the backend, or send it a stale view.  A run that is not a refresh then
+   refreshes the other documents (refresh-outdated); a run still the latest
+   whose compile ran under an older macro environment than the documents
+   were last refreshed for publishes again, as a refresh run."
   (if (not (_current-p run))
       (return))
   (= doc run.doc)
@@ -611,32 +731,52 @@
       (await (wait-backend-diagnostics run)))
   (await (publish-run run))
   (if (not run.refresh)
-      (await (refresh-outdated run.ls doc.uri compiled))))
+      (await (refresh-outdated run.ls doc.uri compiled)))
+  ;; A refresh skips a document whose run is compiling (it has no epoch
+  ;; yet), so that run may have published a compile from before the
+  ;; refreshed macro environment and would stay stale.  Its rerun enters
+  ;; fresh-modules after the drop, so its epoch is no older than
+  ;; _REFRESHED-EPOCH and this ends there.
+  (if (and (_current-p run) (is-not compiled.epoch None)
+           (is-not _REFRESHED-EPOCH None) (< compiled.epoch _REFRESHED-EPOCH))
+      (publish-diagnostics run.ls doc.uri :refresh True)))
 
 ;; The macro environment (macro_modules.epoch) the open documents were last
 ;; refreshed for (refresh-outdated).
 (= _REFRESHED-EPOCH None)
 
+(def macro-epoch []
+  "The macro environment's version now (macro_modules.epoch).  It stats
+   the tracked files, so callers on the loop run it in a thread."
+  (return (macro-modules.epoch)))
+
 (async-def refresh-outdated [ls uri compiled]
   "Run when a diagnostic run of document uri published a compile under a
    newer macro environment than the open documents were refreshed for:
-   publish again every other open document whose cached compile ran under
-   another one (ViewCache.outdated), so an edit to a macro module reaches
-   the documents requiring it.  Any run can see the new epoch first, not
-   only a save's, because a newer change can supersede the save's run.
-   The runs it starts are refresh runs, which never refresh: a macro that
-   rewrites a file it imports moves the epoch on every compile, so a
-   refreshed run refreshing again would never end.  A document closed
-   while the cache is read is skipped, since publishing it would reopen it."
+   publish again every other open document whose latest run published a
+   compile under another one than now (macro-epoch; every run with an
+   epoch while a drop is due), so an edit to a macro module reaches the
+   documents requiring it.  A run with no epoch (not compiled yet,
+   compiling, or its compile raised or was given up on) is left alone: a
+   compiling one republishes itself if it ran under an older environment
+   (finish-run), and one whose compile always raises is not compiled again
+   every round.  Any run can see the new epoch first, not only a save's,
+   because a newer change can supersede the save's run.  The runs it
+   starts are refresh runs, which never refresh: a macro that rewrites a
+   file it imports moves the epoch on every compile, so a refreshed run
+   refreshing again would never end.  The runs are read after the epoch,
+   so a document closed meanwhile is skipped: publishing it would reopen
+   it."
   (global _REFRESHED-EPOCH)
   ;; The maximum: a slow run finishing under an older epoch moves nothing.
   (if (or (is compiled.epoch None)
           (and (is-not _REFRESHED-EPOCH None) (<= compiled.epoch _REFRESHED-EPOCH)))
       (return))
   (= _REFRESHED-EPOCH compiled.epoch)
-  (= candidates [other for other in DIAGNOSTIC-RUNS if (!= other uri)])
-  (for other in (await (asyncio.to-thread view-cache.outdated candidates))
-    (if (in other DIAGNOSTIC-RUNS)
+  (= now (await (asyncio.to-thread macro-epoch)))
+  (for [other run] in (list (.items DIAGNOSTIC-RUNS))
+    (if (and (!= other uri) (is-not run.epoch None)
+             (or (is now None) (!= run.epoch now)))
         (try
           (publish-diagnostics ls other :refresh True)
           (except [Exception]
@@ -688,7 +828,7 @@
 (def forget-diagnostics [ls uri]
   "Document uri closed: no run of it publishes any more, and its
    diagnostics are cleared, so the backend's do not linger in the editor."
-  (_wake (.pop DIAGNOSTIC-RUNS uri None))
+  (_supersede (.pop DIAGNOSTIC-RUNS uri None))
   (.text-document-publish-diagnostics ls
     (lsp.PublishDiagnosticsParams :uri uri :diagnostics (list))))
 
@@ -1533,10 +1673,13 @@
 (class CursorCompile []
   "One cursor-view compile of a document: args, cursor-view's arguments
    (generation, read on the loop, included); waiters, the futures of the
-   callers awaiting its view."
+   callers awaiting its view; superseded, set once a request at another
+   version came while it runs, so it may be given up on
+   (compile-or-give-up)."
   (def __init__ [self args]
     (= self.args args)
-    (= self.waiters [])))
+    (= self.waiters [])
+    (= self.superseded (asyncio.Event))))
 
 (def _live-waiters-p [entry]
   (return (any ((not (.done waiter)) for waiter in entry.waiters))))
@@ -1544,7 +1687,8 @@
 (class CursorCompiles []
   "A document's cursor-view compiles: version, the latest version asked;
    pending, args -> the CursorCompile not yet started, all of that version;
-   running, the one in flight (its thread cannot be stopped), or None;
+   running, the one in flight (its thread cannot be stopped, only given up
+   on), or None;
    task, the task running them one after another, or None."
   (def __init__ [self]
     (= self.version None)
@@ -1563,8 +1707,10 @@
    wait for.  Per document one compile runs at a time (run-cursor-compiles);
    a request with the same arguments as one pending or running shares its
    view, and one at another version gives every waiter of a pending older
-   compile None.  A pending compile whose callers all gave up is never
-   started, so abandoned keystrokes queue no compiles behind a slow one."
+   compile None and supersedes the running one, which is given up on once
+   it ran macro_modules.WAIT-LIMIT (run-cursor-compiles).  A pending
+   compile whose callers all gave up is never started, so abandoned
+   keystrokes queue no compiles behind a slow one."
   (= future (.create-future (asyncio.get-running-loop)))
   (= args (, uri version source line col name package import-root
              view-cache.generation))
@@ -1575,6 +1721,8 @@
   (if (and (is-not state.running None) (== state.running.args args))
       (do (.append state.running.waiters future)
           (return future)))
+  (if (and (is-not state.running None) (!= (sub state.running.args 1) version))
+      (.set state.running.superseded))
   (if (!= version state.version)
       (do (for entry in (.values state.pending)
             (for waiter in entry.waiters
@@ -1592,9 +1740,14 @@
   (return future))
 
 (async-def run-cursor-compiles [uri state]
-  "Run state's pending cursor-view compiles in order, each in a thread,
-   skipping one with no live waiter, and hand each live waiter its view or
-   its exception; then forget the document's state."
+  "Run state's pending cursor-view compiles in order, each in a thread of
+   its own, skipping one with no live waiter, and hand each live waiter its
+   view or its exception; then forget the document's state.  A compile
+   superseded by a newer version and running past macro_modules.WAIT-LIMIT
+   is given up on (compile-or-give-up): its waiters get None and the
+   pending compiles go on, so a macro that never returns stops holding up
+   the document's later requests."
+  (= loop (asyncio.get-running-loop))
   (try
     (while state.pending
       (= args (next (iter state.pending)))
@@ -1603,10 +1756,17 @@
           (continue))
       (= state.running entry)
       (= error None)
+      (= view None)
       (try
-        (= view (await (asyncio.to-thread cursor-view *args)))
+        (= view (await (compile-or-give-up (in-own-thread cursor-view *args)
+                                           entry.superseded (.time loop))))
         (except [Exception as e]
           (= error e)))
+      (if (is view GAVE-UP)
+          (do (.warning logger
+                        "lispython LSP: gave up on a cursor view of %s version %s"
+                        uri (sub args 1))
+              (= view None)))
       ;; Left set when the task is cancelled, so its waiters are cancelled.
       (= state.running None)
       (for waiter in entry.waiters
@@ -1792,10 +1952,11 @@
    code-point col, and the backend's answer to request method there, or
    None for either that is missing.  make-params builds the request's
    params from the backend's TextDocumentIdentifier and the view; None
-   sends no request.  timeout (None: the request's default, start
-   included) bounds the view and the request together."
+   sends no request.  timeout (None: REQUEST-TIMEOUT, read at each call)
+   bounds the view and the request together, the backend's start
+   included."
   (= loop (asyncio.get-running-loop))
-  (= deadline (ife (is timeout None) None (+ (.time loop) timeout)))
+  (= deadline (+ (.time loop) (ife (is timeout None) REQUEST-TIMEOUT timeout)))
   (= path (to-fs-path doc.uri))
   (if (is path None)
       (return (, None None)))
@@ -1803,7 +1964,7 @@
   (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
                                    name package import-root))
   (try
-    (= view (await (ife (is deadline None) making (asyncio.wait-for making timeout))))
+    (= view (await (asyncio.wait-for making (max 0 (- deadline (.time loop))))))
     (except [TimeoutError]
       (return (, None None))))
   (if (is view None)

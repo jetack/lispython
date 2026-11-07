@@ -570,15 +570,20 @@ def test_a_macro_rewriting_what_it_imports_refreshes_a_bounded_number_of_times(
     other = mod.parent / "other.lpy"
     other.write_text(mod.read_text())
 
+    def drained():
+        return not server._COMPILING and not server._DIAGNOSTIC_TASKS
+
     async def scenario():
         uris = [editor.open(mod), editor.open(other)]
         await until(lambda: all(uri in editor.published for uri in uris))
-        await asyncio.sleep(0.5)
-        before = sum(len(editor.published[uri]) for uri in uris)
+        await until(drained, timeout=5)
+        before = {uri: len(editor.published[uri]) for uri in uris}
         editor.change(mod)
-        await asyncio.sleep(1.5)  # a refresh loop compiles dozens of times
-        after = sum(len(editor.published[uri]) for uri in uris)
-        assert 1 <= after - before < 4
+        # A refresh loop compiles forever, so it never drains.
+        await until(drained, timeout=5)
+        after = {uri: len(editor.published[uri]) for uri in uris}
+        assert after[uris[1]] > before[uris[1]]  # the change refreshed other
+        assert sum(after.values()) - sum(before.values()) < 4
 
     run_bounded(scenario())
 
@@ -590,17 +595,17 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
     # close, which reads the closed file back from disk, publishes its
     # diagnostics and keeps a cache entry for it that nobody forgets.
     editor, mac, mod = macro_documents
-    real = server.view_cache.outdated
+    real = server.macro_epoch
     armed, entered, go = threading.Event(), threading.Event(), threading.Event()
 
-    def held(uris):
-        found = real(uris)
+    def held():
+        now = real()
         if armed.is_set():
             entered.set()
             assert go.wait(10)
-        return found
+        return now
 
-    monkeypatch.setattr(server.view_cache, "outdated", held)
+    monkeypatch.setattr(server, "macro_epoch", held)
 
     async def scenario():
         mod_uri = await opened(editor, mac, mod)
@@ -611,7 +616,7 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
         editor.close(mod)
         count = len(editor.published[mod_uri])
         go.set()
-        await asyncio.sleep(0.5)  # a refresh of mod would have compiled by now
+        await until(lambda: not server._COMPILING and not server._DIAGNOSTIC_TASKS)
         assert len(editor.published[mod_uri]) == count
         assert editor.published[mod_uri][-1] == []
         assert mod_uri not in server.DIAGNOSTIC_RUNS

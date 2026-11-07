@@ -519,20 +519,20 @@ def test_completion_reads_the_view_generation_before_the_hand_off(
         return real_view_at_cursor(*args, **kwargs)
 
     monkeypatch.setattr(pv, "_view_at_cursor", counting)
-    real_to_thread = asyncio.to_thread
+    real_in_own_thread = server.in_own_thread
 
-    async def close_first(fn, *args, **kwargs):
+    def close_first(fn, *args):
         server.view_cache.forget(uri)  # the close lands before the worker
-        return await real_to_thread(fn, *args, **kwargs)
+        return real_in_own_thread(fn, *args)
 
     async def no_items(*args, **kwargs):
         return []
 
     client = SimpleNamespace(backend_uri=lambda u: u, request=no_items)
     document = TextDocument(uri, "(import os)\nos.pa", version=1)
-    monkeypatch.setattr(asyncio, "to_thread", close_first)
+    monkeypatch.setattr(server, "in_own_thread", close_first)
     asyncio.run(server.backend_answer(client, document, 2, 5, None))
-    monkeypatch.setattr(asyncio, "to_thread", real_to_thread)
+    monkeypatch.setattr(server, "in_own_thread", real_in_own_thread)
     asyncio.run(server.backend_answer(client, document, 2, 5, None))
     assert len(compiled) == 2  # the closed document's view was not kept
 
@@ -726,7 +726,7 @@ def cursor_view_references(path):
 
 
 def test_cursor_view_is_compiled_only_through_the_scheduler():
-    # Defect: a handler calling asyncio.to-thread cursor-view directly brings
+    # Defect: a handler running cursor-view in a thread directly brings
     # back one abandoned compile per keystroke, unbounded.
     lsp = pathlib.Path(server.__file__).parent
     sites = sorted(
