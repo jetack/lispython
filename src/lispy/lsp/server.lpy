@@ -1206,8 +1206,8 @@
 ;; The innermost open form decides, not the innermost named one: in
 ;; (print ((. x sort) |)) the call being typed is the method's, which only
 ;; the backend knows, while (print (when x |)) is inside a form no backend
-;; knows, so the local answer (when's usage where the buffer requires it,
-;; else none) stands rather than print's.  lispython's own forms answer
+;; knows, so the local answer (when's usage where the buffer has it by the
+;; prelude rule, else none) stands rather than print's.  lispython's own forms answer
 ;; first (form-signature-help); a macro the buffer defines has no usage to
 ;; show, and the backend is not asked about it (signature-request).
 (deco (server.feature
