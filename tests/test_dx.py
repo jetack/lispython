@@ -4,6 +4,7 @@ signatureHelp, workspace/symbol, nREPL completion kinds and .nrepl-port."""
 import asyncio
 import functools
 import importlib
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from pygls.workspace import TextDocument
 
 import lispy.tools as tools
 from lispy.core.compiler.utils import FORM_USAGE
+from lispy.form_docs import OWN_NAME_TAGS
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
@@ -452,14 +454,72 @@ def test_lispythons_own_names_keep_their_kind_without_loaded_macros(prefix, name
     assert complete(prefix, {"__macro_namespace": {}})[name] == kind
 
 
+def wire_items(prefix, scope):
+    """The complete reply's ``items`` as a client decodes them (through the
+    nREPL encoder and JSON), by label; their labels are ``completions``, in
+    order."""
+    reply = json.loads(
+        tools._nrepl_encode({"id": 7}, tools.nrepl_complete(prefix, scope))
+    )
+    assert [item["label"] for item in reply["items"]] == reply["completions"]
+    return {item["label"]: item for item in reply["items"]}
+
+
+# The items wire shape is a contract with lpy-mode and vsc-lispy, which read
+# it through their LSP completion path: LSP CompletionItemKind numbers, and
+# labelDetails only on a name lispython tags.
+@pytest.mark.parametrize(
+    ["prefix", "item"],
+    [
+        [
+            "whi",
+            {
+                "label": "while",
+                "kind": 14,
+                "labelDetails": {"description": "special form"},
+            },
+        ],
+        ["con", {"label": "cond", "kind": 3, "labelDetails": {"description": "macro"}}],
+        [
+            "gen",
+            {"label": "gensym", "kind": 3, "labelDetails": {"description": "function"}},
+        ],
+        ["eli", {"label": "elif", "kind": 14}],
+        ["in", {"label": "int", "kind": 7}],
+        ["le", {"label": "len", "kind": 3}],
+        ["my", {"label": "my-var", "kind": 6}],
+        ["my", {"label": "my-fn", "kind": 3}],
+        ["My", {"label": "MyClass", "kind": 7}],
+        ["os.ge", {"label": "os.getcwd", "kind": 3}],
+        ["os.pa", {"label": "os.pathsep", "kind": 6}],
+        [
+            "twice",
+            {"label": "twice-of", "kind": 3, "labelDetails": {"description": "macro"}},
+        ],
+    ],
+)
+def test_complete_items_wire_shape(scope, prefix, item):
+    assert tools.nrepl_eval("(defmacro twice-of [x] `(* 2 ~x))", scope)["error"] is None
+    assert wire_items(prefix, scope)[item["label"]] == item
+
+
 def test_nrepl_and_lsp_classify_lispythons_own_names_alike():
-    # The LSP's own item tag is the word lpy-mode shows; nREPL's kind must
-    # name the same thing for every built-in macro and gensym.
-    tags = {
-        item.label: item.label_details.description for item in server.lispython_items()
+    # Every own name (each row of OWN_NAME_TAGS, the first row naming a name
+    # winning) is the same item over nREPL as from the LSP: kind and tag.
+    lsp_items = server.lispython_items()
+    assert {item.label for item in lsp_items} == {
+        name for [names, _tag] in OWN_NAME_TAGS for name in names
     }
-    for name in [*server.BUILTIN_MACROS, "gensym"]:
-        assert complete(name, {"__macro_namespace": {}})[name] == tags[name], name
+    # The empty prefix offers every own name ("." itself would be a dotted
+    # prefix).
+    items = wire_items("", {"__macro_namespace": {}})
+    for lsp_item in lsp_items:
+        name = lsp_item.label
+        item = items[name]
+        assert item["kind"] == lsp_item.kind, name
+        assert item["labelDetails"] == {
+            "description": lsp_item.label_details.description
+        }, name
 
 
 def test_a_session_defmacro_is_a_macro(scope):
@@ -488,6 +548,15 @@ def required_scope(require):
 def test_a_qualified_required_macro_is_a_macro(macro_module, prefix):
     scope = required_scope(f"(require {macro_module})")
     assert complete(prefix, scope)[f"{macro_module}.dx-mac"] == "macro"
+
+
+def test_a_qualified_macro_item_under_a_dotted_prefix(macro_module):
+    scope = required_scope(f"(require {macro_module})")
+    assert wire_items(f"{macro_module}.dx", scope)[f"{macro_module}.dx-mac"] == {
+        "label": f"{macro_module}.dx-mac",
+        "kind": 3,
+        "labelDetails": {"description": "macro"},
+    }
 
 
 @pytest.mark.parametrize("selection", ["*", "[dx-mac]"])
