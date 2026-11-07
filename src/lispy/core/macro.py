@@ -160,16 +160,19 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     elif isinstance(sexp, Expression) and len(sexp) > 0:
         [op, *operands] = sexp.list
         name = atom_text(op)
-        if name == "defmacro" and not in_quasi:
+        # A meta form, like a macro call, is one only at a ( head: a [...] or
+        # {...} with that head is a plain collection, and never in the
+        # compiler's own forms (Expression.compiler_form).
+        is_call = isinstance(sexp, Paren) and not in_quasi and not sexp.compiler_form
+        if name == "defmacro" and is_call:
             sexp = define_macro(sexp, scope, include_meta=include_meta)
-        elif name == "require" and not in_quasi:
+        elif name == "require" and is_call:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif (
             # A lookup never creates the table: a scope without one has no
             # macros, and one created here would pass for seeded.
-            (macro := find_macro(scope.get("__macro_namespace"), name)) is not None
-            and not in_quasi
-            and isinstance(sexp, Paren)
+            is_call
+            and (macro := find_macro(scope.get("__macro_namespace"), name)) is not None
         ):
             try:
                 expansion = macro(*[_unwrap_literal(o) for o in operands])

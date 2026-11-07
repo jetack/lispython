@@ -11,9 +11,17 @@
 ;; user's own importlib stays theirs, and a macro named importlib does not
 ;; clash with the next defmacro.  Fresh nodes per use, since compiling may
 ;; change a node in place.
+(def builtin [name]
+  "The generated code's form for the builtin NAME, read from a function's
+   __builtins__, never by a global lookup: the user module can rebind a global
+   name (or make it a macro), while a function's __builtins__ is the dict an
+   import statement reads."
+  (return `(sub (. (lambda [] 0) __builtins__) ~name)))
+
 (def macro-table []
   "The generated code's form for the module lispy.core.macro_table."
-  (return `(__import__ "lispy.core.macro_table" :fromlist ["MacroTable"])))
+  (return `(~(builtin "__import__") "lispy.core.macro_table"
+                                     :fromlist ["MacroTable"])))
 
 (def defmacro-transform [sexp]
   (= [op macroname *body] sexp.list)
@@ -26,13 +34,16 @@
   ;; The runtime table is a MacroTable too, so the module's code registers by
   ;; name as the compiler does (why: core/macro_table.py).  The module is
   ;; reached by attribute, never bound in the module: a binding deleted after
-  ;; use is missing meanwhile for code running in the same scope.
-  (return `(do (from lispy.core.nodes *)
-               (from lispy.core.builtins *)
-               (def ~newname ~@body)
-               (= (sub (.scope-table ~(macro-table) (globals)) ~macroname)
-                  ~newname)
-               (del ~newname))))
+  ;; use is missing meanwhile for code running in the same scope.  Only the
+  ;; parameter list and body forms are the user's; they still expand.
+  (return (mark-compiler-forms
+            `(do (from lispy.core.nodes *)
+                 (from lispy.core.builtins *)
+                 (def ~newname ~@body)
+                 (= (sub (.scope-table ~(macro-table) (~(builtin "globals"))) ~macroname)
+                    ~newname)
+                 (del ~newname))
+            body)))
 
 (= REQUIRE-QUALIFIED "qualified")
 (= REQUIRE-ALL "all")
@@ -58,16 +69,17 @@
   ;; The import runs in the emitted code itself, whose filename
   ;; (REQUIRE_FILENAME) tells the LSP a require asked for it.
   (= import-call (ife is-relative
-                      `(.import-module (__import__ "importlib") ~module-name-str
+                      `(.import-module (~(builtin "__import__") "importlib") ~module-name-str
                                        :package __package__)
-                      `(.import-module (__import__ "importlib") ~module-name-str)))
+                      `(.import-module (~(builtin "__import__") "importlib") ~module-name-str)))
   ;; One call registers the selection (register-required in
   ;; core/macro_table.py), so the emitted code binds no name in the requiring
   ;; module, where binding a name that is a macro there would be an error.
   (= prefix (ife (== kind REQUIRE-QUALIFIED) (+ (str module-name) ".") ""))
   (= selected (ife (== kind REQUIRE-NAMED) names `None))
   (return
-    `(.register-required ~(macro-table) (globals) ~import-call ~prefix ~selected)))
+    (mark-compiler-forms
+      `(.register-required ~(macro-table) (~(builtin "globals")) ~import-call ~prefix ~selected))))
 
 (when (== __name__ "__main__")
   (import os.path as osp)

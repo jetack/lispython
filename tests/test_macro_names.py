@@ -141,3 +141,69 @@ def test_every_way_of_writing_to_a_table_compares_by_name():
     table.setdefault("my-x", third)
     assert list(table.items()) == [("my_x", second)]
     assert "my-x" in table and table.pop("my-x") is second and not table
+
+
+# A builtin the generated code calls, then a head of the code itself.
+OWN_PART_NAMES = [
+    "(= __import__ 5)",
+    "(= globals 5)",
+    "(defmacro __import__ [] (return 5))",
+    "(defmacro globals [] (return 5))",
+    *[
+        f"(defmacro {head} [*xs] (return 5))"
+        for head in ["lambda", "sub", "do", "def", "=", "del", "from"]
+    ],
+    # A defmacro'd from imports the node classes before it is a macro; a
+    # required one leaves a scope that never imported them.
+    "(require nm-heads [from])",
+]
+
+
+@pytest.mark.parametrize("rebinding", OWN_PART_NAMES)
+def test_defmacro_and_require_survive_user_names_of_their_own_parts(
+    import_dir, rebinding
+):
+    # The generated registration reaches __import__ and globals as builtins,
+    # since a global lookup would find the module's own value (at run time)
+    # or expand its macro (at compile time); and its own forms are never
+    # macro calls (Expression.compiler_form), while the user's body is
+    # expanded (uses-foo), sees the node classes (six) and leaves no temp def
+    # behind. The defmacro inside the if is walked again by the pass that
+    # (foo) beside it makes, and the module's code avoids every head a case
+    # redefines.
+    (import_dir / "nm_mod.lpy").write_text("(defmacro my_mac [] (return 1))\n")
+    (import_dir / "nm_heads.lpy").write_text("(defmacro from [*xs] (return 5))\n")
+    body = (
+        "(defmacro foo [] (return 2))\n(defmacro uses-foo [] (return (foo)))\n"
+        '(defmacro six [] (return (Constant "6")))\n'
+        "(require nm-mod [my-mac])\n(require nm-mod)\n"
+        "(if True (defmacro bar [] (return 3)) (foo))\n"
+        "(.update (vars) :v [(foo) (uses-foo) (six) (my-mac) (nm-mod.my-mac) (bar)])\n"
+    )
+    (import_dir / "nm_rebound.lpy").write_text(f"{rebinding}\n{body}")
+    module = importlib.import_module("nm_rebound")
+    assert module.v == [2, 2, 6, 1, 1, 3]
+    assert not [name for name in vars(module) if name.startswith("___defmacro")]
+    table = getattr(module, "__macro_namespace")
+    keys = ["foo", "uses_foo", "six", "bar", "my_mac", "nm_mod.my_mac"]
+    assert all(key in table for key in keys)
+
+
+@pytest.mark.parametrize("collection", ["[defmacro foo [x] x]", "{defmacro foo [x] x}"])
+def test_a_defmacro_head_in_brackets_or_braces_defines_nothing(collection):
+    # A meta form is one only at a ( head, as a macro call is.
+    scope = {}
+    out = tools.src_to_python_org(f"(print {collection})\n(foo 1)", scope=scope)
+    assert "foo" not in scope["__macro_namespace"]
+    assert out.endswith("foo(1)")
+
+
+@pytest.mark.parametrize(
+    "collection", ["[require nm-mod [my-mac]]", "{require nm-mod}"]
+)
+def test_a_require_head_in_brackets_or_braces_registers_nothing(import_dir, collection):
+    (import_dir / "nm_mod.lpy").write_text("(defmacro my_mac [] (return 1))\n")
+    scope = {}
+    tools.src_to_python_org(f"(print {collection})", scope=scope)
+    table = scope["__macro_namespace"]
+    assert not any(key in table for key in ["my_mac", "nm_mod.my_mac"])
