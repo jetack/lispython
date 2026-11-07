@@ -1256,8 +1256,8 @@
    (_overlay-package), and the other modules of every import root with a
    shadow are linked in (_mirror-py-files), so the backend analyses them
    under the view's config; only namespace packages, extension modules
-   and the .py files of a package holding a nested import root stay on the
-   real paths.  One file that cannot be read or written is logged and left
+   and a whole package holding a nested import root stay on the real
+   paths.  One file that cannot be read or written is logged and left
    out of the manifest, so the next sweep tries it again; the rest go on.
    Then _sweep-orphans clears what no current source accounts for.  Each
    source compiles with its import root on sys.path (a relative require
@@ -1460,8 +1460,8 @@
    left out), so import pkg finds the shadows before any real directory of
    uncompiled .lpy; then those import roots themselves, so what the view
    lacks of one still resolves: its namespace packages, its extension
-   modules and the .py files of a package of it that holds a nested import
-   root (_mirror-py-files links every other module of it into the view);
+   modules and, whole, a package of it that holds a nested import root
+   (_mirror-py-files links every other module of it into the view);
    then the project and its .venv site-packages.  The one list of every
    backend's config."
   (= roots [])
