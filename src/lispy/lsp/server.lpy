@@ -535,9 +535,10 @@
   "Tell the user once per project root, when backend client started
    (Backends' on-view-prepared), that its pyrefly diagnostics run
    DEFAULT-PYREFLY-PRESET, and why, as the config writer recorded it
-   (pyrefly-fallback).  A start with no fallback marks nothing, so a
-   config that later breaks is still told at the next start.  Never
-   raises."
+   (pyrefly-fallback); also called when a save changed the view's config
+   file.  A start with no fallback marks nothing, so a config that later
+   breaks is told at the save that rewrites the view's config, or the next
+   start.  Never raises."
   ;; A showMessage, once: the view's preset may differ from what pyrefly
   ;; check runs over the same project, and the user must learn which one is
   ;; in effect and how to choose; a logMessage alone sits unread in an

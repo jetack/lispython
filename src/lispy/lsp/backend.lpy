@@ -30,7 +30,8 @@
 (from pygls.protocol [default-converter])
 (from pygls.uris [to-fs-path])
 
-(from lispy.lsp.python-view [ShadowManifest view-path view-root-for write-pyrefly-config
+(from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest read-quietly
+                             view-path view-root-for write-pyrefly-config
                              write-pyright-config write-shadows])
 
 (= logger (logging.getLogger __name__))
@@ -184,6 +185,16 @@
 (def config-writer [name]
   "The function writing backend name's config file into a view root."
   (return (.get CONFIG-WRITERS name write-pyright-config)))
+
+;; Backend name -> the name of the config file its writer writes in the view
+;; root; any other name (a test's fake) takes pyrightconfig.json, as in
+;; CONFIG-WRITERS.
+(= CONFIG-FILES {"basedpyright" PYRIGHT-CONFIG
+                 "pyrefly" PYREFLY-CONFIG})
+
+(def config-file [name]
+  "The name of backend name's config file in a view root."
+  (return (.get CONFIG-FILES name PYRIGHT-CONFIG)))
 
 ;; Backends whose definition answer for a name with no declarations walks up
 ;; the parse tree to the enclosing call or operator and answers for it
@@ -419,9 +430,13 @@
     ;; Backends.
     (= self.on-diagnostics None)
     ;; Called with this client on the loop once a start succeeded, so the
-    ;; process runs over the view root that start wrote (_prepare-view-root);
-    ;; set by Backends.  Never raises (_start catches).
+    ;; process runs over the view root that start wrote (_prepare-view-root),
+    ;; or a save changed its config file (saved); set by Backends.  Never
+    ;; raises (_tell-view-prepared catches).
     (= self.on-view-prepared None)
+    ;; The view root's config file text the running process last read: at
+    ;; its start (_spawn) or when told it changed (saved).
+    (= self._config-text None)
     ;; lpy uri -> its requests in flight (request), which a full view's
     ;; sync waits for.
     (= self._in-flight {}))
@@ -530,16 +545,25 @@
       (._sync-full self lpy-uri))
     ;; Only now: a start that failed or was shut down tells nobody of the
     ;; view it wrote, since no backend ever used it.
+    (._tell-view-prepared self)
+    (return True))
+
+  (def _tell-view-prepared [self]
+    "Call on-view-prepared with this client, if set.  Never raises."
     (if (is-not self.on-view-prepared None)
         (try
           (self.on-view-prepared self)
           (except [Exception]
-            (.exception logger "lispython LSP: reacting to the start of %s failed"
-                        self.project-root))))
-    (return True))
+            (.exception logger "lispython LSP: reacting to the view of %s failed"
+                        self.project-root)))))
+
+  (def _config-path [self]
+    "The backend's config file in the view root."
+    (return (osp.join (os.fspath self.view-root) (config-file self.name))))
 
   (async-def _spawn [self]
     (await (asyncio.to-thread self._prepare-view-root))
+    (= self._config-text (await (asyncio.to-thread read-quietly (._config-path self))))
     (= self._docs {})
     (= root (os.fspath self.view-root))
     (= root-uri (.as-uri (pathlib.Path root)))
@@ -831,6 +855,26 @@
           (lsp.DidChangeWatchedFilesParams
             :changes [(lsp.FileEvent :uri uri :type lsp.FileChangeType.Changed)]))))
 
+  (async-def saved [self lpy-uri]
+    "Document lpy-uri was saved: file-saved, then, when that changed the
+     view root's config file, tell the running backend the file changed and
+     call on-view-prepared.  A running backend reads its config at start
+     and when told the file changed, then republishes its open documents;
+     it never re-reads it on its own."
+    (await (.file-saved self lpy-uri))
+    (if (not self.running)
+        (return))
+    (= path (._config-path self))
+    (= text (await (asyncio.to-thread read-quietly path)))
+    (if (or (not self.running) (== text self._config-text))
+        (return))
+    (= self._config-text text)
+    (.workspace-did-change-watched-files self._client
+      (lsp.DidChangeWatchedFilesParams
+        :changes [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
+                                 :type lsp.FileChangeType.Changed)]))
+    (._tell-view-prepared self))
+
   (async-def shutdown [self]
     "Stop the backend for good: cancel a start in progress, send shutdown
      and exit and wait for the process to end, all within SHUTDOWN-TIMEOUT,
@@ -937,7 +981,8 @@
    (a start sends the pushed buffers itself).  on-diagnostics, set by the
    server, is called with an lpy uri when the backend published that
    buffer's diagnostics; on-view-prepared with a BackendClient once its
-   start succeeded, over the view root's shadows and config file it wrote."
+   start succeeded, over the view root's shadows and config file it wrote,
+   or a save changed its config file."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
@@ -974,7 +1019,7 @@
                         lpy-uri)))))
 
   (def _view-prepared [self client]
-    ;; BackendClient._start catches what this raises.
+    ;; BackendClient._tell-view-prepared catches what this raises.
     (if (is-not self.on-view-prepared None)
         (self.on-view-prepared client)))
 
@@ -1108,7 +1153,7 @@
     (try
       (= client (._existing self lpy-uri))
       (if (and (is-not client None) client.running)
-          (._schedule self (.file-saved client lpy-uri)))
+          (._schedule self (.saved client lpy-uri)))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
 

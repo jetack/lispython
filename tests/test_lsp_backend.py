@@ -79,8 +79,18 @@ FAKE_SERVER = textwrap.dedent(
         await asyncio.sleep(params.position.character / 10)
         doc = ls.workspace.get_text_document(params.text_document.uri)
         text = doc.source
-        answer = {"pid": os.getpid(), "text": text, "config": config.get("answer")}
+        answer = {
+            "pid": os.getpid(),
+            "text": text,
+            "config": config.get("answer"),
+            "watched": config.get("watched", []),
+        }
         return types.Hover(contents=json.dumps(answer))
+
+
+    @server.feature(types.WORKSPACE_DID_CHANGE_WATCHED_FILES)
+    def did_change_watched_files(ls, params):
+        config.setdefault("watched", []).extend(c.uri for c in params.changes)
 
 
     def publish(ls, document):
@@ -520,6 +530,38 @@ def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
             await client.shutdown()
 
     assert run_bounded(scenario()) == [{"pythonPath": client.view_root.python}, {}]
+
+
+def test_a_save_that_changes_the_config_tells_the_backend(project, tmp_path, fake_argv):
+    # Defects: a save that rewrote the view root's config file neither tells
+    # the running backend the file changed (it keeps the config it read at
+    # its start) nor on-view-prepared (a preset fallback that began with
+    # the save is never told); or every save does, config unchanged.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+    uri = (project / "main.lpy").as_uri()
+    config_uri = (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).as_uri()
+    told = []
+    client.on_view_prepared = lambda c: told.append(c)
+
+    async def scenario():
+        try:
+            await hover()
+            started = len(told)
+            await client.saved(uri)
+            unchanged = len(told)
+            (project / "pyrightconfig.json").write_text(
+                '{"typeCheckingMode": "strict"}'
+            )
+            await client.saved(uri)
+            changed = len(told)
+            watched = (await hover())["watched"]
+            return started, unchanged, changed, watched
+        finally:
+            await client.shutdown()
+
+    started, unchanged, changed, watched = run_bounded(scenario())
+    assert (started, unchanged, changed) == (1, 1, 2)
+    assert watched.count(config_uri) == 1
 
 
 def test_a_push_waits_for_the_requests_in_flight(project, tmp_path, fake_argv):
@@ -1137,6 +1179,76 @@ def test_real_pyrefly_starts_and_follows_the_projects_config(project, tmp_path):
     assert "def from_fs_path(path: str)" in helper
     [found] = [d for d, _ in diagnostics if d.code == "unknown-name"]
     assert found.severity == lsp.DiagnosticSeverity.Warning
+
+
+# Per real backend: the project's config file and its text setting the
+# severity of the undefined-name rule, and the code of that rule.
+SEVERITY_CONFIGS = {
+    "pyrefly": (
+        "pyrefly.toml",
+        lambda severity: f'[errors]\nunknown-name = "{severity}"\n',
+        "unknown-name",
+    ),
+    "basedpyright": (
+        "pyrightconfig.json",
+        lambda severity: json.dumps(
+            {"reportUndefinedVariable": "warning" if severity == "warn" else severity}
+        ),
+        "reportUndefinedVariable",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(SEVERITY_CONFIGS))
+def test_real_backend_follows_a_config_a_save_changed(project, tmp_path, name):
+    # Defect: a save rewrites the view root's config file, but the running
+    # backend read it at its start and is never told it changed, so the
+    # buffer keeps the old severities until the backend restarts.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    config_name, config_text, code = SEVERITY_CONFIGS[name]
+    (project / config_name).write_text(config_text("warn"))
+    source = "(print undefined-name)\n"
+    client = backend.BackendClient(view_root(project, tmp_path), argv, name=name)
+    uri = (project / "main.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def severity():
+        found = client.diagnostics_for(uri, view.text) or []
+        return [d.severity for d, _ in found if d.code == code]
+
+    async def published(wanted, timeout):
+        # Each publish of the buffer's diagnostics, until one has wanted.
+        deadline = asyncio.get_running_loop().time() + timeout
+        while severity() != [wanted]:
+            heard.clear()
+            left = deadline - asyncio.get_running_loop().time()
+            if left <= 0:
+                return severity()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(heard.wait(), left)
+        return severity()
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            before = await published(lsp.DiagnosticSeverity.Warning, 20)
+            (project / config_name).write_text(config_text("error"))
+            # Saved, never pushed again: the backend republishes by itself.
+            await client.saved(uri)
+            return before, await published(lsp.DiagnosticSeverity.Error, 15)
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    before, after = run_bounded(scenario(), timeout=90)
+    assert before == [lsp.DiagnosticSeverity.Warning]
+    assert after == [lsp.DiagnosticSeverity.Error]
 
 
 # Runs lispython's LSP with its real backends, and one extra request,
