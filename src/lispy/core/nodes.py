@@ -840,8 +840,25 @@ class FStrExpr(Wrapper):
     every nested field's text costs memory quadratic in the nesting.
     """
 
-    def __init__(self, value, expr_text=None, expr_padding=("", ""), **kwargs):
+    def __init__(
+        self,
+        value,
+        expr_text=None,
+        expr_padding=("", ""),
+        conversion=-1,
+        format_spec=None,
+        debug=None,
+        **kwargs,
+    ):
+        """``conversion`` is -1 (none) or the code of ``s``/``r``/``a``,
+        ``format_spec`` None or the spec's ``(f-string ...)`` node, ``debug``
+        None or the text of a ``{expr=}`` field from its ``=`` on.  A macro
+        may hand any value here: the compiler checks them
+        (``check_interpolated_parts``)."""
         super().__init__(**kwargs)
+        self.conversion = conversion
+        self.format_spec = format_spec
+        self.debug = debug
         self.value = data_to_generator_expression(value)
         self.expr_text = (
             expr_padding[0] + str(self.value) + expr_padding[1]
@@ -868,8 +885,8 @@ class FStrExpr(Wrapper):
         """Rebuild with conversion, format spec and expression text, so an
         f/t-string survives a quasiquote."""
         position_info = self.position_info
-        format_spec = getattr(self, "format_spec", None)
-        debug = getattr(self, "debug", None)
+        format_spec = self.format_spec
+        debug = self.debug
         text = self.expr_text
         if in_quasi and _contains_unquote_memoized(self.value):
             # The text is only known once the unquote is expanded.
@@ -886,7 +903,7 @@ class FStrExpr(Wrapper):
             Symbol(self.classname, **position_info),
             value,
             Keyword(Symbol("conversion")),
-            Constant(str(getattr(self, "conversion", -1))),
+            Constant(str(self.conversion)),
             Keyword(Symbol("format-spec")),
             Constant("None")
             if format_spec is None

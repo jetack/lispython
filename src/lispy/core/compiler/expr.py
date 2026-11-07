@@ -572,40 +572,77 @@ def await_compile(sexp):
     return ast.Await(value=(yield expr_steps(value)), **sexp.position_info)
 
 
-def check_interpolated_parts(sexp):
+# A field's conversion: none, or the code of !s, !r or !a.
+FIELD_CONVERSIONS = (-1, ord("s"), ord("r"), ord("a"))
+
+
+def check_field(field, label):
+    """Refuse a field slot holding what the reader never puts there: a
+    macro may build an FStrExpr with any conversion, debug or format spec."""
+    conversion = field.conversion
+    if type(conversion) is not int or conversion not in FIELD_CONVERSIONS:
+        raise LispyCompileError(
+            f"{label}: replacement field conversion must be -1 or the code of"
+            f" 's', 'r' or 'a', got {conversion!r}",
+            field,
+        )
+    if field.debug is not None and not isinstance(field.debug, str):
+        raise LispyCompileError(
+            f"{label}: replacement field debug text must be None or a str,"
+            f" got {type(field.debug).__name__}",
+            field,
+        )
+    spec = field.format_spec
+    if spec is not None and not (
+        paren_p(spec) and len(spec) and atom_text(spec.op) == "f-string"
+    ):
+        raise LispyCompileError(
+            f"{label}: replacement field format spec must be None or an"
+            f" (f-string ...) form, got {type(spec).__name__}",
+            field,
+        )
+
+
+def check_interpolated_parts(sexp, label=None):
     """Refuse an operand in the wrong slot of an f/t-string node.
 
     The reader builds literals (String) at even positions and fields (FStrExpr)
     at odd ones; a typed or macro-built ``(f-string ...)`` head need not.
+    ``label`` prefixes the errors: the head, or for a format spec its owner's
+    kind (``t-string format spec``).
     """
+    label = atom_text(sexp.op) if label is None else label
     for [k, part] in enumerate(sexp.operands):
         if k % 2 == 0 and not (
             isinstance(part, String) and isinstance(string_node_value(part), str)
         ):
             raise LispyCompileError(
-                f"{atom_text(sexp.op)}: part {k + 1} must be a string literal", part
+                f"{label}: part {k + 1} must be a string literal", part
             )
-        if k % 2 == 1 and not isinstance(part, FStrExpr):
-            raise LispyCompileError(
-                f"{atom_text(sexp.op)}: part {k + 1} must be a replacement field,"
-                ' written as {expr} inside an f"..." or t"..." literal',
-                part,
-            )
+        if k % 2 == 1:
+            if not isinstance(part, FStrExpr):
+                raise LispyCompileError(
+                    f"{label}: part {k + 1} must be a replacement field,"
+                    ' written as {expr} inside an f"..." or t"..." literal',
+                    part,
+                )
+            check_field(part, label)
 
 
-def interpolated_values(sexp, field_compile):
+def interpolated_values(sexp, field_compile, label=None):
     """Values of an f/t-string node: literals alternate with fields (FStrExpr).
 
     A ``{expr=}`` field echoes ``expr_text + debug`` at the end of the literal
     before it, built here so a field expanded from a quasiquote echoes its
     expanded text.  Empty literals are dropped, as in the AST CPython builds.
-    ``field_compile`` is the steps of one field.
+    ``field_compile`` is the steps of one field; ``label`` as in
+    check_interpolated_parts.
     """
-    check_interpolated_parts(sexp)
+    check_interpolated_parts(sexp, label)
     literals = [string_compile(v) for v in sexp.operands[0::2]]
     fields = sexp.operands[1::2]
     for [k, field] in enumerate(fields):
-        if getattr(field, "debug", None) is not None:
+        if field.debug is not None:
             literals[k].value += field.expr_text + field.debug
     values = []
     for [k, literal] in enumerate(literals):
@@ -616,24 +653,33 @@ def interpolated_values(sexp, field_compile):
     return values
 
 
-def format_spec_dict(sexp):
+def format_spec_dict(sexp, kind):
+    """The format spec of field ``sexp`` of an f/t-string of ``kind``."""
     if sexp.format_spec is None:
         return {}
-    return {"format_spec": (yield f_string_compile(sexp.format_spec))}
+    return {"format_spec": (yield f_string_compile(sexp.format_spec, kind))}
 
 
-def f_str_value_compile(sexp):
+def f_str_value_compile(sexp, kind="f-string"):
     return ast.FormattedValue(
         value=(yield expr_steps(sexp.value)),
         conversion=sexp.conversion,
-        **(yield format_spec_dict(sexp)),
+        **(yield format_spec_dict(sexp, kind)),
         **sexp.position_info,
     )
 
 
-def f_string_compile(sexp):
+def f_string_compile(sexp, kind=None):
+    """An f-string form, or (``kind`` given) the format spec of a field of
+    an f/t-string of that kind, whose errors name it."""
+    label = atom_text(sexp.op) if kind is None else f"{kind} format spec"
+    field_kind = "f-string" if kind is None else kind
     return ast.JoinedStr(
-        values=(yield interpolated_values(sexp, f_str_value_compile)),
+        values=(
+            yield interpolated_values(
+                sexp, lambda field: f_str_value_compile(field, field_kind), label
+            )
+        ),
         **sexp.position_info,
     )
 
@@ -648,7 +694,7 @@ def interpolation_compile(sexp):
             else text.rstrip()
         ),
         conversion=sexp.conversion,
-        **(yield format_spec_dict(sexp)),
+        **(yield format_spec_dict(sexp, "t-string")),
         **sexp.position_info,
     )
 
