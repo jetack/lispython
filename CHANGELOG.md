@@ -69,6 +69,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The operator `-` is no longer the Python name `_`: in a name slot (a value,
+  an assignment or loop target, a parameter, an import, an attribute such as
+  `a.-` or `(.- x)`, a keyword argument, a match capture, a slice operand) it
+  is a compile error, "- is an operator and cannot be used as a name", as `+`
+  already was. `(- a b)` and `(- x)` are unchanged, and hyphenated operator
+  names (`is-not`, `not-in`) stay the names `is_not` and `not_in`. A method
+  head such as `(.+ x)` now gets the same operator message.
 - A macro is called by either spelling of its name, as every other name is:
   after `(defmacro my_mac ...)`, `(my-mac ...)` expands it too, and the reverse;
   qualified names likewise (`mod.my-mac` is `mod.my_mac`), and so does a

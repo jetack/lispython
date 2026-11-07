@@ -295,9 +295,10 @@ def string_compile(string):
 # stmt.py, compiler/utils.py and features.py from reading a symbol's mangled
 # name around these functions.
 
-# Operator heads, named as such when one is refused as a name. Only the
-# wording: an operator whose mangled text is a name (``-`` is ``_``,
-# ``is-not`` is ``is_not``) stays a legal name, as it always was.
+# Operator heads. An operator is never a name, even where its mangled text is
+# one (``-`` mangles to ``_``), because operators have no function value: only
+# a hyphenated name (``is-not``, ``not-in``, the operator module's ``is_not``)
+# stays a name (operator_spelling_p).
 OPERATOR_TEXTS = frozenset([*unaryop_dict, *binop_dict, *compare_dict, *boolop_dict])
 
 
@@ -307,21 +308,41 @@ def identifier_p(name):
     return name.isidentifier() and not keyword.iskeyword(name)
 
 
+def operator_spelling_p(text):
+    """Whether the symbol part spelled ``text`` is an operator, which is never
+    a name: an OPERATOR_TEXTS spelling that is no hyphenated name
+    (hyphenated_name_p), so ``-`` is the operator and ``is-not`` the name
+    ``is_not``."""
+    return text in OPERATOR_TEXTS and not hyphenated_name_p(text)
+
+
+def name_spelling_p(text):
+    """Whether the undotted symbol spelled ``text`` is a Python name
+    python_name accepts: its mangled text passes identifier_p and it is no
+    operator (operator_spelling_p)."""
+    return identifier_p(Symbol(text).name) and not operator_spelling_p(text)
+
+
 def python_name(name, node):
     """``name`` (mangled text) as a Python name, else a LispyCompileError at
-    ``node``: the one home every emitted identifier passes through.
+    ``node``: the one home every emitted identifier passes through. With a
+    node, every ``.``-separated part of its spelling is checked for an
+    operator (operator_spelling_p), so ``a.-`` and the method head ``.-``
+    are refused too.
     """
     text = atom_text(node) if isinstance(node, Node) else name
     if keyword.iskeyword(name):
         raise LispyCompileError(
             f"{name} is a Python keyword and cannot be used as a name", node
         )
-    if not name.isidentifier():
-        msg = (
-            f"{text} is an operator and cannot be used as a name"
-            if text in OPERATOR_TEXTS
-            else _malformed_number_message(text) or f"{text} is not a valid Python name"
+    parts = text.split(".") if isinstance(text, str) else []
+    operator = next((part for part in parts if operator_spelling_p(part)), None)
+    if operator is not None:
+        raise LispyCompileError(
+            f"{operator} is an operator and cannot be used as a name", node
         )
+    if not name.isidentifier():
+        msg = _malformed_number_message(text) or f"{text} is not a valid Python name"
         raise LispyCompileError(msg, node)
     return name
 
