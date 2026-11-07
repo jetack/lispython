@@ -27,10 +27,10 @@
 (from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
-                             PYREFLY-UNCONFIGURED-PRESET ViewCache compile-buffer
+                             ViewCache compile-buffer
                              lpy-diagnostic-range lpy-range module-names name-key
                              name-spelling-p open-form-closers partial-span py-name
-                             pyrefly-preset-fallback-p source-lines source-prefix
+                             pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT suppression-tool])
 
@@ -506,42 +506,58 @@
   (_wake (.get DIAGNOSTIC-RUNS uri))
   (= (sub DIAGNOSTIC-RUNS uri) run)
   (if opened
-      (do (.document-opened backends uri)
-          (notify-preset-fallback ls uri)))
+      (.document-opened backends uri))
   (if (not-in uri _COMPILING)
       (do (.add _COMPILING uri)
           (_schedule-run (compile-latest uri)))))
 
-;; The project roots told of the pyrefly preset fallback, for this server's
-;; life.
+;; The project roots whose pyrefly preset fallback was decided, told or
+;; not, for this server's life.
 (= _PRESET-FALLBACK-NOTIFIED (set))
 
-(def notify-preset-fallback [ls uri]
-  "Tell the user once per project root, on the open of document uri, that
-   its pyrefly diagnostics run DEFAULT-PYREFLY-PRESET because the project
-   has no pyrefly config (pyrefly-preset-fallback-p), when the document's
-   backend is pyrefly and its diagnostics are forwarded.  Never raises."
-  ;; A showMessage, once: the view's preset differs from what pyrefly check
-  ;; runs over the same project, and the user must learn which one is in
-  ;; effect and how to choose; a logMessage alone sits unread in an output
-  ;; channel.  Once per root, never per compile or change, so it never nags.
+(def preset-fallback-message [root fallback]
+  "The notice that project root's pyrefly diagnostics run
+   DEFAULT-PYREFLY-PRESET, saying why (fallback, a PyreflyFallback)."
+  (= preset f"pyrefly's \"{DEFAULT-PYREFLY-PRESET}\" preset")
+  (cond (== fallback.reason "missing")
+        (return (+ f"lispython: {root} has no pyrefly config, so its Python diagnostics "
+                   f"use {preset}. To choose, add a [tool.pyrefly] table in pyproject.toml "
+                   f"or a pyrefly.toml, e.g. preset = \"{DEFAULT-PYREFLY-PRESET}\"."))
+        (== fallback.reason "malformed")
+        (return (+ f"lispython: {fallback.source} could not be read as a pyrefly config, "
+                   f"so the Python diagnostics of {root} use {preset}.")))
+  (return (+ f"lispython: pyrefly refused the settings in {fallback.source} "
+             "(the LSP log has the detail), so the Python diagnostics of "
+             f"{root} use {preset}.")))
+
+(def notify-preset-fallback [client]
+  "Tell the user once per project root, when backend client's start wrote
+   its view root (Backends' on-view-prepared), that its pyrefly diagnostics
+   run DEFAULT-PYREFLY-PRESET, and why, as the config writer recorded it
+   (pyrefly-fallback).  The root counts as decided whether or not it was
+   told.  Never raises."
+  ;; A showMessage, once: the view's preset may differ from what pyrefly
+  ;; check runs over the same project, and the user must learn which one is
+  ;; in effect and how to choose; a logMessage alone sits unread in an
+  ;; output channel.  Once per root, never per start or change, so it never
+  ;; nags; and read from the writer's record, so the project config is
+  ;; neither parsed on the loop nor checked by pyrefly twice.
   (try
-    (= client (.available-client backends uri))
-    (if (or (is client None) (!= client.name "pyrefly") (not client.check-types)
-            (in client.project-root _PRESET-FALLBACK-NOTIFIED)
-            (not (pyrefly-preset-fallback-p client.project-root)))
+    (if (or (!= client.name "pyrefly") (in client.project-root _PRESET-FALLBACK-NOTIFIED))
         (return))
     (.add _PRESET-FALLBACK-NOTIFIED client.project-root)
-    (= message (+ f"lispython: {client.project-root} has no pyrefly config, so its "
-                  f"Python diagnostics use pyrefly's \"{DEFAULT-PYREFLY-PRESET}\" preset "
-                  f"(pyrefly check alone would use \"{PYREFLY-UNCONFIGURED-PRESET}\" there). "
-                  "To choose, add a pyrefly.toml or a [tool.pyrefly] table in "
-                  f"pyproject.toml, e.g. preset = \"{DEFAULT-PYREFLY-PRESET}\"."))
+    (= fallback (pyrefly-fallback client.view-root))
+    (if (is fallback None)
+        (return))
+    (= message (preset-fallback-message client.project-root fallback))
     (.info logger "%s" message)
-    (.window-show-message ls (lsp.ShowMessageParams :type lsp.MessageType.Info
-                                                    :message message))
+    (.window-show-message server (lsp.ShowMessageParams :type lsp.MessageType.Info
+                                                        :message message))
     (except [Exception]
-      (.exception logger "lispython LSP: cannot tell of the pyrefly preset for %s" uri))))
+      (.exception logger "lispython LSP: cannot tell of the pyrefly preset for %s"
+                  client.project-root))))
+
+(= backends.on-view-prepared notify-preset-fallback)
 
 (async-def compile-latest [uri]
   "Compile document uri's latest run (compile-document, in a thread), and

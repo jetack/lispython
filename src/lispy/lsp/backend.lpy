@@ -412,6 +412,9 @@
     ;; Called with an lpy uri on the loop when its diagnostics arrive; set by
     ;; Backends.
     (= self.on-diagnostics None)
+    ;; Called with this client on the loop once a start wrote the view root
+    ;; (_prepare-view-root); set by Backends.
+    (= self.on-view-prepared None)
     ;; lpy uri -> its requests in flight (request), which a full view's
     ;; sync waits for.
     (= self._in-flight {}))
@@ -522,6 +525,8 @@
 
   (async-def _spawn [self]
     (await (asyncio.to-thread self._prepare-view-root))
+    (if (is-not self.on-view-prepared None)
+        (self.on-view-prepared self))
     (= self._docs {})
     (= root (os.fspath self.view-root))
     (= root-uri (.as-uri (pathlib.Path root)))
@@ -918,13 +923,15 @@
    the others never start one, and send to one only when it already runs
    (a start sends the pushed buffers itself).  on-diagnostics, set by the
    server, is called with an lpy uri when the backend published that
-   buffer's diagnostics."
+   buffer's diagnostics; on-view-prepared with a BackendClient once a start
+   wrote its view root's shadows and config file."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
     (= self.name None)
     (= self.python-diagnostics True)
     (= self.on-diagnostics None)
+    (= self.on-view-prepared None)
     (= self.clients {})
     (= self._tasks (set))
     (= self._closed False))
@@ -952,6 +959,14 @@
           (except [Exception]
             (.exception logger "lispython LSP: publishing diagnostics failed for %s"
                         lpy-uri)))))
+
+  (def _view-prepared [self client]
+    (if (is-not self.on-view-prepared None)
+        (try
+          (self.on-view-prepared client)
+          (except [Exception]
+            (.exception logger "lispython LSP: reacting to the view of %s failed"
+                        client.project-root)))))
 
   (def _project-root [self path]
     "The real path of the innermost workspace folder holding path, or None."
@@ -998,6 +1013,7 @@
                                      :definition-walks-up
                                      (in self.name DEFINITION-WALKS-UP)))
             (= client.on-diagnostics self._diagnostics-arrived)
+            (= client.on-view-prepared self._view-prepared)
             (= (sub self.clients root) client)))
     (if (is (.backend-uri client lpy-uri) None)
         (return None))

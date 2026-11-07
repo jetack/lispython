@@ -12,6 +12,7 @@
 
 (import ast)
 (import builtins)
+(import collections)
 (import contextlib)
 (import errno)
 (import functools)
@@ -1488,41 +1489,58 @@
                                   "enabled-ignores" "type-ignore-unknown-tag-behavior"
                                   "spec-compliant-overloads" "legacy-overload-expansion"]))
 
-;; The preset of a project with no pyrefly config of its own.  pyrefly's
-;; own for such a project, PYREFLY-UNCONFIGURED-PRESET, hides nearly every
-;; type error; default reports about what basedpyright's standard mode does.
+;; The preset of a project whose pyrefly settings the view cannot use: it
+;; has none, they cannot be read, or the installed pyrefly refuses them.
+;; pyrefly's own preset for a project with no config hides nearly every type
+;; error; default reports about what basedpyright's standard mode does.
 ;; pyrefly would migrate the project's pyright or mypy config there; that
 ;; migration is not mirrored.  The LSP tells the user once per project that
-;; this preset is in effect (server.lpy, notify-preset-fallback).
+;; this preset is in effect, and why (server.lpy, notify-preset-fallback).
 (= DEFAULT-PYREFLY-PRESET "default")
-(= PYREFLY-UNCONFIGURED-PRESET "basic")
+
+;; Why a view runs DEFAULT-PYREFLY-PRESET: reason is "missing" (no pyrefly
+;; config), "malformed" (source cannot be read as one) or "refused" (the
+;; installed pyrefly refuses source's settings); source is the project file
+;; that holds them (pyproject.toml when there is none).
+(= PyreflyFallback (collections.namedtuple "PyreflyFallback" ["reason" "source"]))
 
 (def _project-pyrefly-config [project-root]
   "The project's own pyrefly settings, as (path of the file that holds
-   them, dict): its pyrefly.toml, else [tool.pyrefly] of its
-   pyproject.toml, as pyrefly finds them; the dict is None when it has none
-   or that file is malformed."
+   them, dict, fallback reason): its pyrefly.toml, else [tool.pyrefly] of
+   its pyproject.toml, as pyrefly finds them.  The dict is None and the
+   reason \"missing\" when it has none, \"malformed\" when that file cannot
+   be read or its table is no table; the reason is None with a dict."
   (= path (osp.join project-root PYREFLY-CONFIG))
   (try
     (if (osp.isfile path)
         (with [(open path "rb") as f]
-          (return (, path (tomllib.load f)))))
+          (return (, path (tomllib.load f) None))))
     (= path (osp.join project-root "pyproject.toml"))
     (if (not (osp.isfile path))
-        (return (, path None)))
+        (return (, path None "missing")))
     (with [(open path "rb") as f]
       (= config (.get (.get (tomllib.load f) "tool" {}) "pyrefly")))
-    (return (, path (ife (isinstance config dict) config None)))
+    (cond (is config None)
+          (return (, path None "missing"))
+          (isinstance config dict)
+          (return (, path config None)))
+    (return (, path None "malformed"))
     (except [(, OSError ValueError AttributeError)]
       (.debug logger "lispython view: no pyrefly settings read from %s" path
               :exc-info True)
-      (return (, path None)))))
+      (return (, path None "malformed")))))
 
-(def pyrefly-preset-fallback-p [project-root]
-  "Whether project-root has no pyrefly config that the view reads
-   (_project-pyrefly-config: none, or a malformed one), so its view runs
-   DEFAULT-PYREFLY-PRESET (_pyrefly-rule-settings)."
-  (return (is (sub (_project-pyrefly-config project-root) 1) None)))
+;; View root -> its PyreflyFallback, or None when its pyrefly.toml holds the
+;; project's settings or checks nothing: decided by write-pyrefly-config,
+;; under the view root's lock, and only there.
+(= _PYREFLY-FALLBACKS {})
+
+(def pyrefly-fallback [view-root]
+  "Why view-root's last written pyrefly.toml runs DEFAULT-PYREFLY-PRESET
+   (a PyreflyFallback), or None: the project's settings are in it, its
+   checking is off, or none was written by this process.  A dict read,
+   never a file read or a pyrefly run, so the event loop may call it."
+  (return (.get _PYREFLY-FALLBACKS (osp.abspath (os.fspath view-root)))))
 
 (def _pyrefly-rule-settings [project check-types]
   "The rule settings of the view root's pyrefly.toml: the project's rule
@@ -1619,13 +1637,14 @@
    code or variant of another release) makes it drop the whole file and fall
    back to auto configuration, losing the search paths, the interpreter and
    preset off with it, so a refused text is replaced by one without any of
-   the project's settings, with a warning naming the project's config.  A
-   view root that overlaps the project is a ValueError; the write holds the
-   view root's lock.  Returns the path."
+   the project's settings, with a warning naming the project's config.
+   Why the written file runs DEFAULT-PYREFLY-PRESET, if it does, is recorded
+   for pyrefly-fallback.  A view root that overlaps the project is a
+   ValueError; the write holds the view root's lock.  Returns the path."
   (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
-  (= [source project] (_project-pyrefly-config project-root))
+  (= [source project reason] (_project-pyrefly-config project-root))
   (= paths {;; pyrefly looks in search-path before the directory of its
             ;; config (the view root), where pyright looks in its execution
             ;; root first: the root leads, so a module the view links (a
@@ -1646,7 +1665,8 @@
       ;; Refused before: the file holds the fallback, so the text differs
       ;; from it on every save; checked and warned about once.
       (== text (.get _REFUSED-PYREFLY root))
-      (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types) paths)))
+      (do (= reason "refused")
+          (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types) paths))))
 
       True
       (do (= problem (check text))
@@ -1655,7 +1675,10 @@
               (do (.warning logger "lispython LSP: pyrefly refuses the settings of %s, so the view uses none of them: %s"
                             source problem)
                   (= (sub _REFUSED-PYREFLY root) text)
+                  (= reason "refused")
                   (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types)
                                             paths)))))))
-    (_write-if-changed root path text))
+    (_write-if-changed root path text)
+    (= (sub _PYREFLY-FALLBACKS root)
+       (ife (and check-types (is-not reason None)) (PyreflyFallback reason source) None)))
   (return path))

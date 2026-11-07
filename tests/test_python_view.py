@@ -1082,16 +1082,16 @@ class TestShadows:
         # preset is pinned to the view's, not the one its own pyrefly runs.
         project, root = tmp_path / "project", tmp_path / "view"
         project.mkdir()
-        assert pv.pyrefly_preset_fallback_p(str(project))
         assert self.pyrefly_config(project, root)["preset"] == "default"
+        assert pv.pyrefly_fallback(str(root)).reason == "missing"
         (project / "pyproject.toml").write_text('[project]\nname = "p"\n')
-        assert pv.pyrefly_preset_fallback_p(str(project))
         assert self.pyrefly_config(project, root)["preset"] == "default"
+        assert pv.pyrefly_fallback(str(root)).reason == "missing"
         (project / "pyproject.toml").write_text(
             '[tool.pyrefly]\npython-version = "3.12"\n'
         )
-        assert not pv.pyrefly_preset_fallback_p(str(project))
         config = self.pyrefly_config(project, root)
+        assert pv.pyrefly_fallback(str(root)) is None
         assert "preset" not in config
         assert config["python-version"] == "3.12"
 
@@ -1201,6 +1201,10 @@ class TestShadows:
         )
         config = self.pyrefly_config(project, root, check=check)
         assert (config["preset"], "errors" in config) == ("default", False)
+        assert pv.pyrefly_fallback(str(root)) == (
+            "refused",
+            str(project / "pyrefly.toml"),
+        )
         # Saved again with the same refused config: the file holds the
         # fallback, which differs from the candidate, yet pyrefly is not run
         # again and the warning is not repeated on every save.
@@ -1209,8 +1213,10 @@ class TestShadows:
             config = self.pyrefly_config(project, root, check=check)
         assert (config["preset"], "errors" in config) == ("default", False)
         assert (len(checked), caplog.text.count("refuses")) == (calls, warnings)
+        assert pv.pyrefly_fallback(str(root)).reason == "refused"
         (project / "pyrefly.toml").write_text('preset = "strict"\n')
         assert self.pyrefly_config(project, root, check=check)["preset"] == "strict"
+        assert pv.pyrefly_fallback(str(root)) is None
         calls = len(checked)
         self.pyrefly_config(project, root, check=check)
         assert len(checked) == calls

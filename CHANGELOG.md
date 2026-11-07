@@ -22,8 +22,9 @@ follows [Semantic Versioning](https://semver.org/).
   (`"undefined-name" is not defined`). A parse or compile error hides them
   until the buffer compiles again. Rule settings (path settings excepted)
   come from the project's own config for that backend: `pyrefly.toml` or
-  `[tool.pyrefly]` in `pyproject.toml` (preset `default` when there is none,
-  which the server tells once per project), or `pyrightconfig.json` (JSONC)
+  `[tool.pyrefly]` in `pyproject.toml` (preset `default` when there is none
+  or it cannot be read or pyrefly refuses it, which the server tells once
+  per project, saying why), or `pyrightconfig.json` (JSONC)
   or `[tool.basedpyright]`/`[tool.pyright]` (`typeCheckingMode` `standard`
   when it sets none). A trailing `; pyrefly: ignore[code, ...]` under
   pyrefly, `; pyright: ignore[rule, ...]` under basedpyright (or a bare

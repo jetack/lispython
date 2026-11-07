@@ -146,6 +146,14 @@ def test_messages_quote_names_as_the_code_they_mark_spells_them():
     assert rename(missing, "(print undefined-name)") == missing
     literal = 'Type "Literal[\'s\']" is not assignable to "unused_x"'
     assert rename(literal, "(= unused-x 1)") == literal.replace("unused_x", "unused-x")
+    # pyrefly quotes in backticks, renamed alike; a name between two
+    # different quotes is quoted by neither, so it stays.
+    assert (
+        rename("Could not find name `undefined_name`", "undefined-name")
+        == "Could not find name `undefined-name`"
+    )
+    mismatched = 'Could not find name "undefined_name`'
+    assert rename(mismatched, "undefined-name") == mismatched
 
 
 # ---------------------------------------------------------------------------
@@ -235,14 +243,13 @@ def test_related_locations_are_placed_when_published(tmp_path):
 
 class Editor:
     """A language server double for one document: its workspace holds the
-    buffer, and publishes and shown messages are recorded."""
+    buffer, and publishes are recorded."""
 
     def __init__(self, uri):
         self.uri = uri
         self.workspace = self
         self.document = None
         self.published = []
-        self.shown = []
         self.versions = itertools.count(1)
 
     def get_text_document(self, uri):
@@ -250,9 +257,6 @@ class Editor:
 
     def text_document_publish_diagnostics(self, params):
         self.published.append(params.diagnostics)
-
-    def window_show_message(self, params):
-        self.shown.append(params)
 
     def edit(self, text, handler):
         self.document = TextDocument(self.uri, text, version=next(self.versions))
@@ -659,49 +663,98 @@ def test_a_compile_that_raises_never_stops_the_next(scripted, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def shown_on_open(tmp_path, monkeypatch, name, init_options=None, config=None):
-    """The messages the server shows while main.lpy and other.lpy of one
-    project are opened, with backend name installed (alone) and configured
-    by init_options; config is (file name, text) of a project file. The
-    backend's start is stubbed (no process): the notice reads the
-    configuration, not the backend's answers."""
+def shown_on_open(
+    tmp_path, monkeypatch, name, init_options=None, config=None, refuses=None
+):
+    """(project, view root, the messages the server shows) while main.lpy
+    and other.lpy of one project are opened, with backend name installed
+    (alone) and configured by init_options; config is (file name, text) of
+    a project file, and refuses a pyrefly.toml value the installed pyrefly
+    is taken to refuse. The backend's process never starts (its argv runs
+    nothing): the notice follows the view root the start writes first, not
+    the backend's answers."""
     project = tmp_path / "project"
     project.mkdir()
     if config is not None:
         (project / config[0]).write_text(config[1])
     for other in ("pyrefly", "basedpyright"):
-        argv = ["unused"] if other == name else None
+        argv = [str(tmp_path / "no-such-backend")] if other == name else None
         monkeypatch.setitem(backend.BACKENDS, other, lambda argv=argv: argv)
-    monkeypatch.setattr(backend.BackendClient, "start_soon", lambda self: None)
+    monkeypatch.setattr(
+        backend,
+        "pyrefly_config_problem",
+        lambda binary, text: (
+            f"unknown variant `{refuses}`" if refuses and refuses in text else None
+        ),
+    )
     folder = SimpleNamespace(uri=project.as_uri())
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
     backends.configure(init_options)
+    backends.on_view_prepared = server.notify_preset_fallback
     monkeypatch.setattr(server, "backends", backends)
     fresh_server_state(monkeypatch)
+    shown = []
+    monkeypatch.setattr(
+        server, "server", SimpleNamespace(window_show_message=shown.append)
+    )
     editors = [Editor((project / f).as_uri()) for f in ("main.lpy", "other.lpy")]
+
+    def started():
+        # A start begins at the open (start_soon) or never.
+        return all(
+            client._starting is None or client._starting.done()
+            for client in backends.clients.values()
+        )
 
     async def scenario():
         for editor in editors:
             editor.open("(= y 1)\n")
-        await until(lambda: all(editor.published for editor in editors))
+            await until(lambda: editor.published and started())
         for editor in editors:
             editor.close()
 
     run_bounded(scenario())
-    return project, [message for editor in editors for message in editor.shown]
+    roots = [client.view_root for client in backends.clients.values()]
+    return project, (roots or [None])[0], shown
 
 
-def test_a_project_without_pyrefly_config_is_told_once(tmp_path, monkeypatch):
-    # Defects: the user is never told that the view runs a preset of its own
-    # (pyrefly check over the same project reports far less), or is told on
-    # every open of the project's documents.
-    project, shown = shown_on_open(tmp_path, monkeypatch, "pyrefly")
+@pytest.mark.parametrize(
+    "config, refuses, reason, names",
+    [
+        (None, None, "missing", None),
+        (("pyproject.toml", '[project]\nname = "p"\n'), None, "missing", None),
+        (("pyproject.toml", "[tool.pyrefly\n"), None, "malformed", "pyproject.toml"),
+        (("pyrefly.toml", "preset = \n"), None, "malformed", "pyrefly.toml"),
+        (
+            ("pyrefly.toml", 'untyped-def-behavior = "nope"\n'),
+            "nope",
+            "refused",
+            "pyrefly.toml",
+        ),
+    ],
+    ids=[
+        "none",
+        "pyproject-without-pyrefly",
+        "bad-pyproject",
+        "bad-pyrefly",
+        "refused",
+    ],
+)
+def test_a_project_whose_pyrefly_config_is_not_used_is_told_once(
+    tmp_path, monkeypatch, config, refuses, reason, names
+):
+    # Defects: the user is never told that the view runs a preset of its own,
+    # is told on every open or start, or is told the project has no config
+    # when it has one the view could not read or pyrefly refused (the notice
+    # must name that file, the one to fix).
+    project, root, shown = shown_on_open(
+        tmp_path, monkeypatch, "pyrefly", config=config, refuses=refuses
+    )
+    assert pv.pyrefly_fallback(root).reason == reason
     [notice] = shown
     assert notice.type == lsp.MessageType.Info
-    assert str(project.resolve()) in notice.message
-    assert '"default"' in notice.message
-    assert '"basic"' in notice.message
-    assert "pyrefly.toml" in notice.message and "[tool.pyrefly]" in notice.message
+    if names is not None:
+        assert str(project / names) in notice.message
 
 
 @pytest.mark.parametrize(
@@ -724,7 +777,7 @@ def test_no_notice_where_the_preset_is_not_the_views(
     # Defects: the notice nags a project whose own pyrefly config decides
     # its preset, one whose Python diagnostics are off (nothing is checked),
     # or a basedpyright user, whose diagnostics no pyrefly preset decides.
-    _, shown = shown_on_open(tmp_path, monkeypatch, name, init_options, config)
+    _, _, shown = shown_on_open(tmp_path, monkeypatch, name, init_options, config)
     assert shown == []
 
 
