@@ -42,10 +42,11 @@
 ;; token leaves both when its compile ends.  epoch is the macro environment's
 ;; version.
 (class _Shared []
-  (def __init__ [self original-path-stats]
+  (def __init__ [self original-path-stats original-namespace-exec]
     (= self.local (threading.local))
     (= self.condition (threading.Condition))
     (= self.original-path-stats original-path-stats)
+    (= self.original-namespace-exec original-namespace-exec)
     (= self.files {})
     (= self.names (set))
     (= self.dep-files {})
@@ -97,6 +98,30 @@
           (pass))))
   (return (_SHARED.original-path-stats self path)))
 
+;; A namespace package has no file, so path_stats never sees it: a require of
+;; a directory with no __init__ yet binds an empty namespace module.  Its
+;; name is recorded to drop, with each portion directory (where a later
+;; __init__ goes) and its parent (where a later module file of that name
+;; goes) by mtime, when every portion is trackable.
+(def _recording-namespace-exec [self module]
+  (= windows (getattr _SHARED.local "windows" None))
+  (if windows
+      (do (= portions (list (getattr module "__path__" [])))
+          (if (and portions
+                   (all ((and (isinstance portion str)
+                              (_trackable-path-p (osp.realpath portion)))
+                         for portion in portions)))
+              (do (= reads (sub windows -1))
+                  (.append reads (, module.__name__ None None))
+                  (for portion in portions
+                    (for directory in [portion (osp.dirname portion)]
+                      (try
+                        (.append reads (, None directory
+                                          (. (os.stat directory) st-mtime-ns)))
+                        (except [OSError]
+                          (pass)))))))))
+  (return (_SHARED.original-namespace-exec self module)))
+
 ;; A missing module is never read, so path_stats cannot see it, and a require
 ;; swallows the ModuleNotFoundError (core/macro.py require_macro), so no
 ;; exception says so either.  The import system asks this finder, last on
@@ -124,17 +149,20 @@
       (return None))))
 
 ;; The fresh-modules windows open on each thread, innermost last: each a list
-;; of the (name, path, stamp) reads made in it, and (None, directory,
-;; st_mtime_ns) for each directory searched for a module no finder found.
-;; The wrapper and the observer are installed once per process, with the
-;; _Shared they write to, by the first import of this module; a later
-;; instance installs nothing, so nothing is wrapped twice.
+;; of the (name, path, stamp) reads made in it, (None, directory,
+;; st_mtime_ns) for each directory searched for a module no finder found or
+;; holding a namespace package, and (name, None, None) for a namespace
+;; package.  The wrappers and the observer are installed once per process,
+;; with the _Shared they write to, by the first import of this module; a
+;; later instance installs nothing, so nothing is wrapped twice.
 (= _SOURCE-LOADER importlib.machinery.SourceFileLoader)
+(= _NAMESPACE-LOADER importlib.machinery.NamespaceLoader)
 (= _SHARED (getattr _SOURCE-LOADER "_lispy_fresh_modules" None))
 (if (is _SHARED None)
-    (do (= _SHARED (_Shared _SOURCE-LOADER.path-stats))
+    (do (= _SHARED (_Shared _SOURCE-LOADER.path-stats _NAMESPACE-LOADER.exec-module))
         (setattr _SOURCE-LOADER "_lispy_fresh_modules" _SHARED)
         (= _SOURCE-LOADER.path-stats _recording-path-stats)
+        (= _NAMESPACE-LOADER.exec-module _recording-namespace-exec)
         (.append sys.meta-path _MissingModuleObserver)))
 
 (def _stale-state []
@@ -247,13 +275,16 @@
       (return False))
   (return (not (any ((_within-p real directory) for directory in _EXCLUDED-DIRS)))))
 
+(def _lispy-module-p [name]
+  (return (or (== name "lispy") (.startswith name "lispy."))))
+
 (def _trackable-p [name path]
   "Whether the module name read from path in a window may be dropped: a .py
    or .lpy file at a trackable path (_trackable-path-p) and no module of
    lispython itself.  The server's own modules (a user may edit lispython
    itself) and third-party or extension modules (numpy refuses a second
    load) must never be dropped."
-  (if (or (== name "lispy") (.startswith name "lispy."))
+  (if (_lispy-module-p name)
       (return False))
   (if (or (not (isinstance path str)) (not (.endswith path (, ".py" ".lpy"))))
       (return False))
@@ -276,9 +307,10 @@
     "Wrap one compile: first drop every tracked module once one is stale
      (_drop-stale, waiting), then track every .py or .lpy source the
      compile reads (_trackable-p) by the stamp its file had when read, the
-     trackable files in each such .lpy's cache record (_track-record), and
+     trackable files in each such .lpy's cache record (_track-record),
      every trackable directory searched for a module no finder found by its
-     mtime.  Yields the epoch the compile runs under."
+     mtime, and every namespace package it imports by its directories
+     (_recording-namespace-exec).  Yields the epoch the compile runs under."
     (= reads [])
     (= token (object))
     (with [_SHARED.condition]
@@ -300,6 +332,10 @@
                 (do (= directory (osp.realpath path))
                     (if (_trackable-path-p directory)
                         (.setdefault _SHARED.dirs directory stamp)))
+
+                (is path None)
+                (if (not (_lispy-module-p name))
+                    (.add _SHARED.names name))
 
                 (_trackable-p name path)
                 (do (.setdefault _SHARED.files path stamp)

@@ -1591,6 +1591,22 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert "yy = 2 * 2 * 2" in text()
 
+    def test_a_package_created_in_a_namespace_directory_is_seen(self, package):
+        # Defect: a require of a directory with no __init__ binds an empty
+        # namespace module, which no read tracks, so a later __init__.lpy
+        # there is never loaded while the server runs.
+        (package.pkg / "nosuch").mkdir()
+        src = "(require .nosuch *)\n(= yy (twice 2))"
+        kwargs = dict(
+            package=package.name,
+            name=package.name + ".mod",
+            import_root=str(package.root),
+        )
+        assert pv.compile_view(src, **kwargs).text.endswith("yy = twice(2)")
+        next_tick()
+        (package.pkg / "nosuch" / "__init__.lpy").write_text(THRICE)
+        assert pv.compile_view(src, **kwargs).text.endswith("yy = 2 * 2 * 2")
+
     def test_a_same_size_edit_in_the_same_second_is_seen(self, package, monkeypatch):
         # A pyc keeps the source's mtime in whole seconds plus its size, so
         # it would pass for the edited source; the .lpy cache must not.
@@ -1860,11 +1876,13 @@ class TestMacroModules:
         # windows of the instance already in use.
         loader = importlib.machinery.SourceFileLoader
         stats, finders = loader.path_stats, list(sys.meta_path)
+        namespace_exec = importlib.machinery.NamespaceLoader.exec_module
         monkeypatch.delitem(sys.modules, "lispy.lsp.macro_modules")
         second = importlib.import_module("lispy.lsp.macro_modules")
         assert second is not mm
         assert loader.path_stats is stats
         assert sys.meta_path == finders
+        assert importlib.machinery.NamespaceLoader.exec_module is namespace_exec
         assert self.view(package).text.endswith("yy = 2 + 2")
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert self.view(package).text.endswith("yy = 2 * 2 * 2")
