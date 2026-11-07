@@ -1105,9 +1105,11 @@
    view beside its shadows: each real .py and .pyi file as a file link, each
    regular package (_regular-package-p) as one directory link, so the
    backend analyses them as view modules, under the view's config, and they
-   see the shadows.  Left out: a path the view already has as a real
-   directory (a package overlaid around a shadow, _overlay-package, which
-   runs first), a .py that a shadow replaces (its .lpy wins on import),
+   see the shadows.  Left out: a view directory this sweep needs real, one
+   holding a shadow or a link of it (a package overlaid around a shadow,
+   _overlay-package, which runs first; a stale view directory of a package
+   that lost its last .lpy is replaced by the link), a .py that a shadow
+   replaces (its .lpy wins on import),
    _pruned-p directories and the view root's own files (_ROOT-FILES).  A
    namespace package (no __init__) or an extension module is not linked:
    the directory is no package, so it still resolves on the real path.
@@ -1117,6 +1119,12 @@
   (if (is view-dir None)
       (return))
   (= reserved (frozenset [(osp.join root name) for name in _ROOT-FILES]))
+  ;; The entries of view-dir that hold a shadow or link of this sweep.
+  (= needed (set))
+  (for kept in (+ (list shadows) (list links))
+    (= rel (osp.relpath kept view-dir))
+    (if (and (in os.sep rel) (not (.startswith rel (+ os.pardir os.sep))))
+        (.add needed (osp.join view-dir (sub (.split rel os.sep) 0)))))
   (try
     (= entries (sorted (os.listdir directory)))
     (except [OSError]
@@ -1124,11 +1132,10 @@
   (for name in entries
     (= target (osp.join directory name))
     (= path (osp.join view-dir name))
-    (if (or (in path shadows) (in path links) (in path reserved))
+    (if (or (in path shadows) (in path links) (in path reserved) (in path needed))
         (continue))
     (if (osp.isdir target)
-        (if (or (_pruned-p directory name) (not (_regular-package-p target))
-                (and (osp.isdir path) (not (osp.islink path))))
+        (if (or (_pruned-p directory name) (not (_regular-package-p target)))
             (continue))
         (if (not (and (.endswith name (, ".py" ".pyi")) (osp.isfile target)))
             (continue)))

@@ -549,6 +549,22 @@ class TestShadows:
             assert lpkg.is_dir() and not lpkg.is_symlink()
             assert (lpkg / "core.py").is_file() and not (lpkg / "core.py").is_symlink()
 
+    def test_a_package_that_lost_its_last_lpy_is_linked_at_once(self, tmp_path):
+        # Defect: the package's view directory from the sweep before, still
+        # real, is taken for one this sweep needs, so it is not linked, and
+        # the orphan sweep then removes it: the package is missing from the
+        # view until a third sweep.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= t 1)")
+        self.write(project / "pkg" / "__init__.py", "")
+        self.write(project / "pkg" / "a.py", "a = 1")
+        self.write(project / "pkg" / "m.lpy", "(= m 1)")
+        pv.write_shadows(str(project), str(root))
+        assert (root / "pkg").is_dir() and not (root / "pkg").is_symlink()
+        (project / "pkg" / "m.lpy").unlink()
+        pv.write_shadows(str(project), str(root))
+        assert os.readlink(root / "pkg") == str(project / "pkg")
+
     def test_sweep_follows_no_directory_link_and_skips_environments(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
         self.write(project / "top.lpy", "(= a 1)")
