@@ -9,11 +9,32 @@ nox.options.default_venv_backend = "uv"
 PYTHONS = ["3.11", "3.12", "3.13", "3.14", "3.15"]
 
 
+# Both backends (pyrefly: lsp, basedpyright: lsp-basedpyright), so every
+# real-backend test runs. The CI test job runs the same extras
+# (tests/test_ci_workflow.py).
+EXTRAS = ["dev", "lsp", "lsp-basedpyright"]
+
+
 @nox.session(python=PYTHONS)
 def tests(session):
-    # Both backends (pyrefly: lsp, basedpyright: lsp-basedpyright), so every
-    # real-backend test runs.
-    session.install(".[lsp,lsp-basedpyright,dev]")
+    """The locked set (uv.lock), as `uv run --frozen` and CI use it."""
+    flags = [arg for extra in EXTRAS for arg in ("--extra", extra)]
+    session.run_install(
+        "uv",
+        "sync",
+        "--frozen",
+        "--python",
+        session.virtualenv.location,
+        *flags,
+        env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
+    )
+    session.run("pytest", *session.posargs)
+
+
+@nox.session(python=PYTHONS)
+def tests_latest(session):
+    """The newest releases of every dependency, which the lock may lag."""
+    session.install("." + "[" + ",".join(EXTRAS) + "]")
     session.run("pytest", *session.posargs)
 
 
