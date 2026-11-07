@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.lsp_backends import REAL_BACKENDS
+from tests.lsp_backends import ONCE_MARKER, REAL_BACKENDS
 
 # Seconds: ~4x the slowest guarded test (test_nesting's fstring-format-spec
 # case, roughly linear in DEPTH, ~1.6 s on 3.11 idle), so a loaded box does
@@ -105,6 +105,24 @@ def make_backends(backend_project):
         return backends
 
     return make
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        f"{ONCE_MARKER}: run on the default real backend only (lsp_backends.once)",
+    )
+
+
+def pytest_runtest_setup(item):
+    """Skip a lsp_backends.once test on every real backend but the one the
+    server picks with no backend setting (backend.resolve_backend)."""
+    if item.get_closest_marker(ONCE_MARKER) is None:
+        return
+    backend = importlib.import_module("lispy.lsp.backend")
+    name = item.callspec.params["real_backends"]
+    if name != backend.resolve_backend(None):
+        pytest.skip(f"runs once, on the default backend, not {name}")
 
 
 @pytest.fixture(scope="session", params=REAL_BACKENDS)

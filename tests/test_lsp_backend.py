@@ -254,6 +254,13 @@ def test_backend_setting(monkeypatch):
     assert backend.resolve_backend({}) == "off"
 
 
+def test_the_real_backend_tests_cover_the_default_backends():
+    # Defect: a backend added to (or reordered in) DEFAULT_BACKENDS is never
+    # run by the real-backend tests, which list them without importing the
+    # LSP (lsp_backends.REAL_BACKENDS).
+    assert REAL_BACKENDS == backend.DEFAULT_BACKENDS
+
+
 @pytest.mark.parametrize(
     "init_options, installed",
     [({"backend": "off"}, True), ({"backend": "no-such"}, True), (None, False)],
