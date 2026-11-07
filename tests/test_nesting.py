@@ -10,7 +10,6 @@ import inspect
 import pathlib
 import re
 import sys
-import time
 import tracemalloc
 import types
 import typing
@@ -1387,16 +1386,6 @@ def test_a_format_spec_chain_past_the_recursion_limit_parses():
     assert [atom_text(n) for n in node.list] == ["f-string", "'x'"]
 
 
-def best_parse_time(src, repeats):
-    """The fastest of ``repeats`` parses of ``src``, in seconds."""
-    times = []
-    for _ in range(repeats):
-        start = time.perf_counter()
-        parse(src)
-        times.append(time.perf_counter() - start)
-    return min(times)
-
-
 class CountingPattern:
     """A compiled pattern that tallies the characters its searches were handed."""
 
@@ -1433,15 +1422,62 @@ class CountingPattern:
         yield from self._pattern.finditer(string, pos, endpos)
 
 
+class CountingSource(str):
+    """A source string that tallies the characters its scanning methods were
+    handed: the span ``[start, end)`` clamped as a slice is, plus one per call
+    (``startswith``/``endswith`` read only the prefix, so cost one per call).
+    """
+
+    def __new__(cls, text, tally):
+        self = super().__new__(cls, text)
+        self._tally = tally
+        return self
+
+    def _scan(self, name, args):
+        start, end = (list(args) + [None, None])[1:3]
+        start, end = slice(start, end).indices(len(self))[:2]
+        self._tally[0] += max(end - start, 0) + 1
+        return getattr(super(), name)(*args)
+
+    def count(self, *args):
+        return self._scan("count", args)
+
+    def find(self, *args):
+        return self._scan("find", args)
+
+    def rfind(self, *args):
+        return self._scan("rfind", args)
+
+    def index(self, *args):
+        return self._scan("index", args)
+
+    def rindex(self, *args):
+        return self._scan("rindex", args)
+
+    def startswith(self, *args):
+        # Reads only the prefix's length, whatever span it is given.
+        self._tally[0] += 1
+        return super().startswith(*args)
+
+    def endswith(self, *args):
+        self._tally[0] += 1
+        return super().endswith(*args)
+
+
 def parse_work(src):
-    """``(regex_chars, python_lines)`` one ``parse(src)`` costs.
+    """``(regex_chars, string_chars, python_lines)`` one ``parse(src)`` costs.
 
     Work counts, not wall clock, so the result does not depend on machine
     load. Regex chars are the characters the parser's patterns were handed,
     the work done inside the C regex engine that line events cannot see;
-    python lines are the line events traced, the work of Python-level loops.
+    string chars are the characters handed to the source string's own
+    ``count``/``find``/``index``/``startswith`` family (a span plus one per
+    call), C work that neither of the others sees; python lines are the line
+    events traced, the work of Python-level loops. Not seen: scans of a slice
+    or copy of the source (a plain str) and any other C-level work.
     """
     tally = [0]
+    string_tally = [0]
     patterns = {
         name: value
         for name, value in vars(parser_module).items()
@@ -1460,12 +1496,12 @@ def parse_work(src):
     previous = sys.gettrace()
     sys.settrace(tracer)
     try:
-        parse(src)
+        parse(CountingSource(src, string_tally))
     finally:
         sys.settrace(previous)
         for name, value in patterns.items():
             setattr(parser_module, name, value)
-    return tally[0], lines
+    return tally[0], string_tally[0], lines
 
 
 # (id, a nested source, a flat one with as many literals, fields and tokens).
@@ -1492,9 +1528,10 @@ def test_nested_literals_cost_what_the_same_literals_side_by_side_do(nested, fla
     # per-field walk of the field's text made the nesting many times the flat
     # work. Nested over flat measures 0.85-1.01 unmutated; those three
     # defects measure 2.9x or more, so 1.5 catches all of them.
-    nested_chars, nested_lines = parse_work(nested)
-    flat_chars, flat_lines = parse_work(flat)
+    nested_chars, nested_strs, nested_lines = parse_work(nested)
+    flat_chars, flat_strs, flat_lines = parse_work(flat)
     assert nested_chars <= 1.5 * flat_chars, (nested_chars, flat_chars)
+    assert nested_strs <= 1.5 * flat_strs, (nested_strs, flat_strs)
     assert nested_lines <= 1.5 * flat_lines, (nested_lines, flat_lines)
 
 
@@ -1568,11 +1605,19 @@ def test_a_long_token_in_a_field_lexes_in_constant_memory(src):
 @pytest.mark.usefixtures("time_bound")
 def test_a_literal_with_many_fields_costs_what_as_many_literals_do():
     # Positions come from line starts found once; counting lines from the
-    # literal's start for every piece made one literal quadratic.
-    fields = 6000
+    # literal's start for every piece made one literal quadratic, in
+    # str.count, which only the string-chars dimension sees. One over
+    # separate measures 0.50-0.67 unmutated; the per-piece count measures
+    # 570x (regex chars and python lines barely move), so 1.5 catches it.
+    fields = 2000
     one = 'f"""' + "{x}\n" * fields + '"""'
     separate = "\n".join(['f"{x}"'] * fields)
-    assert best_parse_time(one, 2) < best_parse_time(separate, 2)
+    for name, got, want in zip(
+        ("regex chars", "string chars", "python lines"),
+        parse_work(one),
+        parse_work(separate),
+    ):
+        assert got <= 1.5 * want, (name, got, want)
 
 
 @pytest.mark.usefixtures("time_bound")
