@@ -133,17 +133,23 @@
       (return None))
   (return (.join "" (reversed [closer for [_ closer] in stack]))))
 
-;; A pyright suppression in a comment's text, spaced as pyright takes one
-;; after its comment marker (a ; here, # there): ;pyright:ignore,
-;; ;; pyright: ignore[ruleA, ruleB]; group 1 is the rule list.
-(= _PYRIGHT-IGNORE (re.compile "(?:^|;)\\s*pyright:\\s*ignore(?:\\s*\\[([\\s\\w\\-,]*)\\]|\\s|$)"))
+;; A suppression comment of tool (pyright, pyrefly) in a comment's text,
+;; spaced as the tool takes one after its comment marker (a ; here, #
+;; there): ;pyright:ignore, ;; pyrefly: ignore[codeA, code-b]; group 1 is
+;; the rule list.  Each tool honours only its own marker, so the backend
+;; decides which one is read (backend.suppression-tool).
+(deco functools.cache
+(def _suppression-pattern [tool]
+  (return (re.compile (+ "(?:^|;)\\s*" (re.escape tool)
+                         ":\\s*ignore(?:\\s*\\[([\\s\\w\\-,]*)\\]|\\s|$)")))))
 
-(def pyright-ignores [source]
-  "Line (1-based) -> what a pyright suppression comment on it ignores in
-   source: the frozenset of the rules ; pyright: ignore[ruleA, ruleB]
-   names, or None for a bare ; pyright: ignore, every rule.  Comments are
-   the reader's own (tokenize's comment tokens), so a ; in a string is
-   none; a source the lexer cannot read keeps those before the failure."
+(def suppression-comments [source tool]
+  "Line (1-based) -> what a suppression comment of tool on it ignores in
+   source: the frozenset of the rules ; tool: ignore[ruleA, ruleB] names,
+   or None for a bare ; tool: ignore, every rule.  Comments are the
+   reader's own (tokenize's comment tokens), so a ; in a string is none; a
+   source the lexer cannot read keeps those before the failure."
+  (= pattern (_suppression-pattern tool))
   (try
     (= tokens (tokenize source :comments True))
     (except [Exception]
@@ -152,7 +158,7 @@
   (for [text tktype position _] in tokens
     (if (!= tktype "comment")
         (continue))
-    (= m (.search _PYRIGHT-IGNORE text))
+    (= m (.search pattern text))
     (if (is m None)
         (continue))
     (= rules (.group m 1))
@@ -1482,10 +1488,14 @@
                                   "enabled-ignores" "type-ignore-unknown-tag-behavior"
                                   "spec-compliant-overloads" "legacy-overload-expansion"]))
 
-;; The preset of a project with no pyrefly config of its own: the one
-;; pyrefly check runs over such a project.  pyrefly would migrate the
-;; project's pyright or mypy config there; that migration is not mirrored.
-(= DEFAULT-PYREFLY-PRESET "basic")
+;; The preset of a project with no pyrefly config of its own.  pyrefly's
+;; own for such a project, PYREFLY-UNCONFIGURED-PRESET, hides nearly every
+;; type error; default reports about what basedpyright's standard mode does.
+;; pyrefly would migrate the project's pyright or mypy config there; that
+;; migration is not mirrored.  The LSP tells the user once per project that
+;; this preset is in effect (server.lpy, notify-preset-fallback).
+(= DEFAULT-PYREFLY-PRESET "default")
+(= PYREFLY-UNCONFIGURED-PRESET "basic")
 
 (def _project-pyrefly-config [project-root]
   "The project's own pyrefly settings, as (path of the file that holds
@@ -1507,6 +1517,12 @@
       (.debug logger "lispython view: no pyrefly settings read from %s" path
               :exc-info True)
       (return (, path None)))))
+
+(def pyrefly-preset-fallback-p [project-root]
+  "Whether project-root has no pyrefly config that the view reads
+   (_project-pyrefly-config: none, or a malformed one), so its view runs
+   DEFAULT-PYREFLY-PRESET (_pyrefly-rule-settings)."
+  (return (is (sub (_project-pyrefly-config project-root) 1) None)))
 
 (def _pyrefly-rule-settings [project check-types]
   "The rule settings of the view root's pyrefly.toml: the project's rule

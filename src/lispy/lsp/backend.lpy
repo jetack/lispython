@@ -1,12 +1,12 @@
-;; The Python backend client: one Python language server (basedpyright, or
-;; pyrefly) per project, run as a subprocess LSP over the project's view root
-;; (python_view.lpy), so lispython's LSP can ask it about the compiled
+;; The Python backend client: one Python language server (pyrefly, or
+;; basedpyright) per project, run as a subprocess LSP over the project's
+;; view root (python_view.lpy), so lispython's LSP can ask it about the compiled
 ;; buffer (design: the vault page "LSP Python Delegation").
 ;;
 ;; Nothing here may raise into a feature handler: a backend that is off,
 ;; failed to start, died or timed out answers None, and the caller keeps its
-;; own answer.  A plain install (no basedpyright) resolves to "off" and never
-;; spawns anything.
+;; own answer.  A plain install (neither backend) resolves to "off" and
+;; never spawns anything.
 
 (require lispy.macros *)
 
@@ -106,9 +106,12 @@
 
 ;; Backend name -> a function giving its argv, or None when it is not
 ;; installed.  "off" is the name of no backend.  A test adds a fake backend
-;; here (any LSP over stdio).
+;; here (any LSP over stdio).  With no backend setting, the first installed
+;; of DEFAULT-BACKENDS runs (resolve-backend): pyrefly answers the LSP's
+;; features as often as basedpyright, starts faster and takes a third of
+;; its memory.
 (= OFF "off")
-(= DEFAULT-BACKEND "basedpyright")
+(= DEFAULT-BACKENDS (, "pyrefly" "basedpyright"))
 (= BACKENDS {"basedpyright" _basedpyright-argv
              "pyrefly" _pyrefly-argv})
 
@@ -156,6 +159,17 @@
   (= check (ife (is argv None) None (functools.partial pyrefly-config-problem (sub argv 0))))
   (return (write-pyrefly-config project-root view-root :check check **settings)))
 
+;; Backend name -> the tool name its suppression comments carry, as the tool
+;; honours them (; pyright: ignore, ; pyrefly: ignore); any other name (a
+;; test's fake) takes pyright's.
+(= SUPPRESSION-TOOLS {"basedpyright" "pyright"
+                      "pyrefly" "pyrefly"})
+
+(def suppression-tool [name]
+  "The tool name of backend name's suppression comments
+   (python_view.suppression-comments)."
+  (return (.get SUPPRESSION-TOOLS name "pyright")))
+
 ;; Backend name -> the writer of its config file in the view root; any other
 ;; name (a test's fake) takes pyrightconfig.json.
 (= CONFIG-WRITERS {"basedpyright" write-pyright-config
@@ -189,12 +203,15 @@
 
 (def resolve-backend [init-options]
   "The backend name from the LSP client's initializationOptions (a dict or
-   None), key \"backend\".  Missing or None: basedpyright when installed,
-   else off.  A name that is unknown or not installed: off, with a warning,
-   never another backend in its place."
+   None), key \"backend\".  Missing or None: the first installed of
+   DEFAULT-BACKENDS, else off.  A name that is unknown or not installed:
+   off, with a warning, never another backend in its place."
   (= name (ife (isinstance init-options dict) (.get init-options "backend") None))
   (if (is name None)
-      (return (ife (is-not (backend-argv DEFAULT-BACKEND) None) DEFAULT-BACKEND OFF)))
+      (do (for default in DEFAULT-BACKENDS
+            (if (is-not (backend-argv default) None)
+                (return default)))
+          (return OFF)))
   (if (== name OFF)
       (return OFF))
   (if (not (in name BACKENDS))
@@ -348,9 +365,10 @@
 (class BackendClient []
   "The Python backend of one project, over its ViewRoot view-root.  argv
    starts it; None is the off backend, which never spawns.  name is the
-   backend argv runs (a BACKENDS key).  The process starts on the first
-   request (request), after the view root's shadows and name's config file
-   (config-writer) are written; a process that exits without shutdown is
+   backend argv runs (a BACKENDS key), None for an unnamed one (a test's
+   fake), which takes pyright's config file and suppression comments.  The
+   process starts on the first request (request), after the view root's
+   shadows and name's config file (config-writer) are written; a process that exits without shutdown is
    restarted by the next request, once (MAX-SPAWNS), and a second death
    leaves the backend off.  state is idle (not started), running, dead
    (waiting for its restart), off or closed (after shutdown); process is
@@ -360,7 +378,7 @@
    view is synced back.  Its diagnostics are kept only for a full view's
    text (_diagnostics-published, diagnostics-for).  definition-walks-up is
    True for a backend in DEFINITION-WALKS-UP."
-  (def __init__ [self view-root argv :name DEFAULT-BACKEND :manifest None
+  (def __init__ [self view-root argv :name None :manifest None
                  :check-types True :definition-walks-up False]
     (= self.view-root view-root)
     (= self.name name)

@@ -235,13 +235,14 @@ def test_related_locations_are_placed_when_published(tmp_path):
 
 class Editor:
     """A language server double for one document: its workspace holds the
-    buffer, and publishes are recorded."""
+    buffer, and publishes and shown messages are recorded."""
 
     def __init__(self, uri):
         self.uri = uri
         self.workspace = self
         self.document = None
         self.published = []
+        self.shown = []
         self.versions = itertools.count(1)
 
     def get_text_document(self, uri):
@@ -249,6 +250,9 @@ class Editor:
 
     def text_document_publish_diagnostics(self, params):
         self.published.append(params.diagnostics)
+
+    def window_show_message(self, params):
+        self.shown.append(params)
 
     def edit(self, text, handler):
         self.document = TextDocument(self.uri, text, version=next(self.versions))
@@ -275,6 +279,7 @@ def fresh_server_state(monkeypatch):
     monkeypatch.setattr(server, "view_cache", pv.ViewCache())
     monkeypatch.setattr(server, "DIAGNOSTIC_RUNS", {})
     monkeypatch.setattr(server, "_COMPILING", set())
+    monkeypatch.setattr(server, "_PRESET_FALLBACK_NOTIFIED", set())
     for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
         monkeypatch.setattr(server, name, {})
 
@@ -295,6 +300,7 @@ def fake_served(tmp_path, monkeypatch):
     (project / "main.lpy").write_text("(= y 1)\n")
     script = tmp_path / "fake_backend.py"
     script.write_text(FAKE_SERVER)
+    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     monkeypatch.setitem(
         backend.BACKENDS, "basedpyright", lambda: [sys.executable, str(script)]
     )
@@ -649,6 +655,80 @@ def test_a_compile_that_raises_never_stops_the_next(scripted, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# The pyrefly preset fallback notice
+# ---------------------------------------------------------------------------
+
+
+def shown_on_open(tmp_path, monkeypatch, name, init_options=None, config=None):
+    """The messages the server shows while main.lpy and other.lpy of one
+    project are opened, with backend name installed (alone) and configured
+    by init_options; config is (file name, text) of a project file. The
+    backend's start is stubbed (no process): the notice reads the
+    configuration, not the backend's answers."""
+    project = tmp_path / "project"
+    project.mkdir()
+    if config is not None:
+        (project / config[0]).write_text(config[1])
+    for other in ("pyrefly", "basedpyright"):
+        argv = ["unused"] if other == name else None
+        monkeypatch.setitem(backend.BACKENDS, other, lambda argv=argv: argv)
+    monkeypatch.setattr(backend.BackendClient, "start_soon", lambda self: None)
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    backends.configure(init_options)
+    monkeypatch.setattr(server, "backends", backends)
+    fresh_server_state(monkeypatch)
+    editors = [Editor((project / f).as_uri()) for f in ("main.lpy", "other.lpy")]
+
+    async def scenario():
+        for editor in editors:
+            editor.open("(= y 1)\n")
+        await until(lambda: all(editor.published for editor in editors))
+        for editor in editors:
+            editor.close()
+
+    run_bounded(scenario())
+    return project, [message for editor in editors for message in editor.shown]
+
+
+def test_a_project_without_pyrefly_config_is_told_once(tmp_path, monkeypatch):
+    # Defects: the user is never told that the view runs a preset of its own
+    # (pyrefly check over the same project reports far less), or is told on
+    # every open of the project's documents.
+    project, shown = shown_on_open(tmp_path, monkeypatch, "pyrefly")
+    [notice] = shown
+    assert notice.type == lsp.MessageType.Info
+    assert str(project.resolve()) in notice.message
+    assert '"default"' in notice.message
+    assert '"basic"' in notice.message
+    assert "pyrefly.toml" in notice.message and "[tool.pyrefly]" in notice.message
+
+
+@pytest.mark.parametrize(
+    "name, init_options, config",
+    [
+        ("pyrefly", None, ("pyrefly.toml", 'preset = "basic"\n')),
+        (
+            "pyrefly",
+            None,
+            ("pyproject.toml", '[tool.pyrefly]\npython-version = "3.12"\n'),
+        ),
+        ("pyrefly", {"pythonDiagnostics": False}, None),
+        ("basedpyright", None, None),
+    ],
+    ids=["pyrefly.toml", "tool.pyrefly", "no-diagnostics", "basedpyright"],
+)
+def test_no_notice_where_the_preset_is_not_the_views(
+    tmp_path, monkeypatch, name, init_options, config
+):
+    # Defects: the notice nags a project whose own pyrefly config decides
+    # its preset, one whose Python diagnostics are off (nothing is checked),
+    # or a basedpyright user, whose diagnostics no pyrefly preset decides.
+    _, shown = shown_on_open(tmp_path, monkeypatch, name, init_options, config)
+    assert shown == []
+
+
+# ---------------------------------------------------------------------------
 # Real basedpyright
 # ---------------------------------------------------------------------------
 
@@ -691,7 +771,7 @@ def test_real_basedpyright_reports_on_the_lpy_word(
 
 
 # ---------------------------------------------------------------------------
-# ; pyright: ignore
+# ; pyright: ignore, ; pyrefly: ignore
 # ---------------------------------------------------------------------------
 
 SUPPRESSED = (
@@ -703,13 +783,12 @@ SUPPRESSED = (
 
 
 class StubBackends:
-    """A backend that published diagnostics (code, generated text) for the
-    view's text."""
+    """A backend, basedpyright unless name says otherwise, that published
+    diagnostics (code, generated text) for the view's text."""
 
-    name = "basedpyright"
-
-    def __init__(self, published):
+    def __init__(self, published, name="basedpyright"):
         self.published = published
+        self.name = name
 
     def backend_diagnostics(self, uri, text):
         found = []
@@ -728,12 +807,12 @@ class StubBackends:
         return [(diagnostic, []) for diagnostic in found]
 
 
-def survivors(monkeypatch, published):
-    """(code, .lpy line) of each backend diagnostic published on
-    SUPPRESSED's view that the server forwards."""
-    monkeypatch.setattr(server, "backends", StubBackends(published))
-    doc = TextDocument("file:///buffer.lpy", SUPPRESSED, version=1)
-    view = pv.compile_view(SUPPRESSED)
+def survivors(monkeypatch, published, source=SUPPRESSED, name="basedpyright"):
+    """(code, .lpy line) of each backend diagnostic published on source's
+    view that the server forwards, with backend name."""
+    monkeypatch.setattr(server, "backends", StubBackends(published, name))
+    doc = TextDocument("file:///buffer.lpy", source, version=1)
+    view = pv.compile_view(source)
     run = server.DiagnosticRun(None, doc)
     run.view = view
     found = asyncio.run(server.mapped_backend_diagnostics(run))
@@ -771,3 +850,24 @@ def test_an_ignore_inside_a_string_is_no_comment(monkeypatch):
     # string holding "; pyright: ignore" suppresses its line.
     published = [("reportUndefinedVariable", "undefined_d")]
     assert survivors(monkeypatch, published) == [("reportUndefinedVariable", 4)]
+
+
+PER_TOOL = (
+    "(print undefined-a) ; pyrefly: ignore[unknown-name, bad-call]\n"
+    "(print undefined-b) ;pyrefly:ignore\n"
+    "(print undefined-c) ; pyright: ignore\n"
+)
+
+
+@pytest.mark.parametrize(
+    "name, kept",
+    [("pyrefly", [3]), ("basedpyright", [1, 2]), ("fake", [1, 2])],
+)
+def test_each_backend_honours_only_its_own_suppressions(monkeypatch, name, kept):
+    # Defects: pyrefly's own ; pyrefly: ignore comments are ignored, so a
+    # pyrefly user cannot silence a line; or a ; pyright: ignore silences
+    # pyrefly (or the reverse), which the tool itself never does, so the
+    # same line reads differently in the editor and under the tool.
+    published = [("unknown-name", f"undefined_{c}") for c in "abc"]
+    found = survivors(monkeypatch, published, PER_TOOL, name)
+    assert [line for _, line in found] == kept

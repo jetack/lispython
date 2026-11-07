@@ -1073,21 +1073,24 @@ class TestShadows:
         assert (config["preset"], config["python-platform"]) == ("legacy", "win32")
         # A malformed file is no settings, never a failed write.
         (project / "pyproject.toml").write_text("[tool.pyrefly\n")
-        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        assert self.pyrefly_config(project, root)["preset"] == "default"
 
     def test_pyrefly_default_preset_only_without_a_project_config(self, tmp_path):
-        # Defects: a project with no pyrefly config runs pyrefly's own
-        # stricter default instead of the basic preset pyrefly check runs on
-        # it; or a project whose pyrefly config sets no preset is pinned to
-        # basic, silently weaker than the default its own pyrefly runs.
+        # Defects: a project with no pyrefly config runs pyrefly's
+        # unconfigured basic preset, which hides nearly every type error,
+        # or no preset at all; or a project whose pyrefly config sets no
+        # preset is pinned to the view's, not the one its own pyrefly runs.
         project, root = tmp_path / "project", tmp_path / "view"
         project.mkdir()
-        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        assert pv.pyrefly_preset_fallback_p(str(project))
+        assert self.pyrefly_config(project, root)["preset"] == "default"
         (project / "pyproject.toml").write_text('[project]\nname = "p"\n')
-        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        assert pv.pyrefly_preset_fallback_p(str(project))
+        assert self.pyrefly_config(project, root)["preset"] == "default"
         (project / "pyproject.toml").write_text(
             '[tool.pyrefly]\npython-version = "3.12"\n'
         )
+        assert not pv.pyrefly_preset_fallback_p(str(project))
         config = self.pyrefly_config(project, root)
         assert "preset" not in config
         assert config["python-version"] == "3.12"
@@ -1197,14 +1200,14 @@ class TestShadows:
             'preset = "strict"\n[errors]\nnot-a-code = "warn"\n'
         )
         config = self.pyrefly_config(project, root, check=check)
-        assert (config["preset"], "errors" in config) == ("basic", False)
+        assert (config["preset"], "errors" in config) == ("default", False)
         # Saved again with the same refused config: the file holds the
         # fallback, which differs from the candidate, yet pyrefly is not run
         # again and the warning is not repeated on every save.
         calls, warnings = len(checked), caplog.text.count("refuses")
         with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
             config = self.pyrefly_config(project, root, check=check)
-        assert (config["preset"], "errors" in config) == ("basic", False)
+        assert (config["preset"], "errors" in config) == ("default", False)
         assert (len(checked), caplog.text.count("refuses")) == (calls, warnings)
         (project / "pyrefly.toml").write_text('preset = "strict"\n')
         assert self.pyrefly_config(project, root, check=check)["preset"] == "strict"
