@@ -1410,17 +1410,22 @@ class CountingPattern:
     def _span(self, string, pos=0, endpos=None):
         return pos, len(string) if endpos is None else min(endpos, len(string))
 
-    def search(self, string, pos=0, endpos=None):
-        m = self._pattern.search(string, pos, *([] if endpos is None else [endpos]))
-        pos, endpos = self._span(string, pos, endpos)
-        self._tally[0] += (m.end() if m else endpos) - pos + 1
+    def _count(self, method, string, pos, endpos, failed):
+        """Run ``method`` and tally what it read: up to the match end on success,
+        else ``failed`` (the span a search scanned; one step for an anchored match).
+        """
+        m = method(string, pos, *([] if endpos is None else [endpos]))
+        start, stop = self._span(string, pos, endpos)
+        self._tally[0] += (m.end() - start + 1) if m else failed(start, stop)
         return m
 
+    def search(self, string, pos=0, endpos=None):
+        return self._count(
+            self._pattern.search, string, pos, endpos, lambda a, b: b - a + 1
+        )
+
     def match(self, string, pos=0, endpos=None):
-        m = self._pattern.match(string, pos, *([] if endpos is None else [endpos]))
-        pos, endpos = self._span(string, pos, endpos)
-        self._tally[0] += (m.end() if m else endpos) - pos + 1
-        return m
+        return self._count(self._pattern.match, string, pos, endpos, lambda a, b: 1)
 
     def finditer(self, string, pos=0, endpos=None):
         pos, endpos = self._span(string, pos, endpos)
@@ -1431,10 +1436,10 @@ class CountingPattern:
 def parse_work(src):
     """``(regex_chars, python_lines)`` one ``parse(src)`` costs.
 
-    Wall-clock ratios flaked under machine load; these counts do not. Regex
-    chars are the characters the parser's patterns were handed, the work done
-    inside the C regex engine that line events cannot see; python lines are
-    the line events traced, the work of Python-level loops.
+    Work counts, not wall clock, so the result does not depend on machine
+    load. Regex chars are the characters the parser's patterns were handed,
+    the work done inside the C regex engine that line events cannot see;
+    python lines are the line events traced, the work of Python-level loops.
     """
     tally = [0]
     patterns = {
@@ -1452,11 +1457,12 @@ def parse_work(src):
 
     for name, value in patterns.items():
         setattr(parser_module, name, CountingPattern(value, tally))
+    previous = sys.gettrace()
     sys.settrace(tracer)
     try:
         parse(src)
     finally:
-        sys.settrace(None)
+        sys.settrace(previous)
         for name, value in patterns.items():
             setattr(parser_module, name, value)
     return tally[0], lines
