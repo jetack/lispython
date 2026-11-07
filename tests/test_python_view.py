@@ -1607,6 +1607,59 @@ class TestMacroModules:
         (package.pkg / "nosuch" / "__init__.lpy").write_text(THRICE)
         assert pv.compile_view(src, **kwargs).text.endswith("yy = 2 * 2 * 2")
 
+    def flat_view(self, project, mac):
+        return pv.compile_view(
+            f"(require {mac} *)\n(= yy (twice 2))",
+            name="pvmmflat",
+            import_root=str(project),
+        )
+
+    def test_an_incidental_miss_leaves_the_import_root_unwatched(
+        self, package, tmp_path
+    ):
+        # Defect: a macro module's optional import that is missing stamps
+        # every sys.path directory, the import root among them, so in a flat
+        # layout any file written there (uv.lock) drops every module.
+        project = tmp_path / "flat"
+        project.mkdir()
+        mac = package.name + "flatmac"
+        (project / (mac + ".lpy")).write_text(
+            "(try (import pvmmnosuchoptional) (except [ImportError] (pass)))\n" + TWICE
+        )
+        try:
+            assert self.flat_view(project, mac).text.endswith("yy = 2 + 2")
+            epoch = mm.epoch()
+            next_tick()
+            (project / "uv.lock").write_text("")
+            assert mm.epoch() == epoch
+        finally:
+            sys.modules.pop(mac, None)
+
+    def test_a_created_top_level_macro_module_is_seen(self, package, tmp_path):
+        # A require's own top-level miss still watches sys.path, so a cached
+        # view misses once the module is created in the import root.
+        project = tmp_path / "flat"
+        project.mkdir()
+        mac = package.name + "flatmac"
+        cache = pv.ViewCache()
+
+        def text():
+            return cache.view(
+                "u",
+                1,
+                f"(require {mac} *)\n(= yy (twice 2))",
+                name="pvmmflat",
+                import_root=str(project),
+            ).text
+
+        try:
+            assert text().endswith("yy = twice(2)")
+            next_tick()
+            (project / (mac + ".lpy")).write_text(THRICE)
+            assert text().endswith("yy = 2 * 2 * 2")
+        finally:
+            sys.modules.pop(mac, None)
+
     def test_a_same_size_edit_in_the_same_second_is_seen(self, package, monkeypatch):
         # A pyc keeps the source's mtime in whole seconds plus its size, so
         # it would pass for the edited source; the .lpy cache must not.

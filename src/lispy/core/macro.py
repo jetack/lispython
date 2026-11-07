@@ -18,6 +18,10 @@ from lispy.core.utils import trampoline
 
 __macro_namespace: dict[str, Callable[[Node], ast.AST]] = {}
 
+# The filename of a require's compiled code: the LSP (lsp/macro_modules.lpy)
+# tells an import a require asked for by it.
+REQUIRE_FILENAME = "macro-requiring"
+
 
 def _unwrap_literal(node):
     if isinstance(node, Constant):
@@ -83,7 +87,7 @@ def require_macro(sexp, scope, include_meta=True):
             [transformed], scope, include_meta=include_meta, check_bindings=False
         )
         with compile_nesting_errors(body):
-            code = compile(ast.Interactive(body=body), "macro-requiring", "single")
+            code = compile(ast.Interactive(body=body), REQUIRE_FILENAME, "single")
         _eval_require(code, scope)
     except (ModuleNotFoundError, ImportError):
         import sys

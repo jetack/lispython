@@ -20,6 +20,7 @@
 
 (import lispy)
 (from lispy.core.importer [lpy-cache-path lpy-record])
+(from lispy.core.macro [REQUIRE-FILENAME])
 
 (= logger (logging.getLogger __name__))
 
@@ -127,16 +128,32 @@
 ;; exception says so either.  The import system asks this finder, last on
 ;; sys.meta_path, only once every other finder found nothing; it records the
 ;; directories that were searched (the parent package's __path__, or
-;; sys.path for a top-level name) with their mtime.  Creating a file there,
-;; or saving one by an atomic rename, changes that mtime: the signal
-;; FileFinder itself uses.  The module is never probed again with find_spec
-;; instead: that imports its parents outside any window, and the import root
-;; is on sys.path only while a compile runs.
+;; sys.path for a top-level name a require asked for) with their mtime.
+;; Creating a file there, or saving one by an atomic rename, changes that
+;; mtime: the signal FileFinder itself uses.  A top-level miss of any other
+;; import (a module's try: import optional) is not recorded, because sys.path
+;; holds the import root: in a flat layout every file written there (a lock,
+;; a backup) would drop every module.  The module is never probed again with
+;; find_spec instead: that imports its parents outside any window, and the
+;; import root is on sys.path only while a compile runs.
+(= _IMPORTLIB-FILE importlib.__file__)
+
+(def _asked-by-require-p [frame]
+  "Whether the import running at frame was asked for by a require's own
+   code (REQUIRE-FILENAME): the first frame up from it that is not
+   importlib's."
+  (while (and (is-not frame None)
+              (or (.startswith frame.f-code.co-filename "<frozen importlib")
+                  (== frame.f-code.co-filename _IMPORTLIB-FILE)))
+    (= frame frame.f-back))
+  (return (and (is-not frame None) (== frame.f-code.co-filename REQUIRE-FILENAME))))
+
 (class _MissingModuleObserver []
   (deco staticmethod
     (def find-spec [name path :target None]
       (= windows (getattr _SHARED.local "windows" None))
-      (if (not windows)
+      (if (or (not windows)
+              (and (is path None) (not (_asked-by-require-p (sys._getframe 1)))))
           (return None))
       (for directory in (list (ife (is path None) sys.path path))
         (if (isinstance directory str)
