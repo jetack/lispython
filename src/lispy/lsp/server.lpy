@@ -1778,16 +1778,16 @@
 (def general-items [doc :line None]
   "The completion items offered with no Python backend's answer:
    lispython's own (lispython-items), the Python builtins (builtin-names),
-   then the buffer's definitions (collect-definitions), each name once
-   (name-key) and labelled by its hyphen spelling (hyphen-spelling)."
+   then the buffer's definitions (buffer-definition-names), each name once
+   (name-key) and labelled by its hyphen spelling (hyphen-spelling; a
+   buffer macro as defined)."
   (= items (lispython-items))
   (= seen (set [(name-key item.label) for item in items]))
-  (for [name kind] in [*(builtin-names)
-                       *[(, name lsp.CompletionItemKind.Variable)
-                         for name in (buffer-definition-names doc line)]]
-    ;; Labelled by the hyphen spelling, one item per name (name-key), so
-    ;; a buffer's my_x and my-x are one item.
-    (= label (hyphen-spelling name))
+  (for [label kind] in [*[(, (hyphen-spelling name) kind)
+                          for [name kind] in (builtin-names)]
+                        *[(, name lsp.CompletionItemKind.Variable)
+                          for name in (buffer-definition-names doc line)]]
+    ;; One item per name (name-key), so a buffer's my_x and my-x are one.
     (if (not-in (name-key label) seen)
         (do (.add seen (name-key label))
             (.append items (lsp.CompletionItem :label label :kind kind)))))
@@ -2026,8 +2026,11 @@
   (return result))
 
 (def buffer-definition-names [doc line]
-  "The names doc's definitions bind (collect-definitions), in source order,
-   the one home of that list: over its partial parse and, since a form left
+  "The names doc's definitions bind (collect-definitions), in source order
+   and as completion offers them: each in its hyphen spelling
+   (hyphen-spelling), a top-level defmacro's as written, since a macro call
+   is found by its head's exact text.  The one home of that list: over its
+   partial parse and, since a form left
    open at the 1-based line (None: no cursor) swallows the rest of that
    parse, over the text from the first later line that opens a form in
    column 0, read as a top-level form (as Emacs's beginning-of-defun reads
@@ -2041,17 +2044,23 @@
         (do (.append texts (.join "\n" (sub lines [: i None])))
             (break))))
   (= names {})
+  (= macros (set))
   (for text in texts
     (try
-      (.update names (collect-definitions (parse text :partial True) doc.uri))
+      (= nodes (parse text :partial True))
+      (.update names (collect-definitions nodes doc.uri))
+      (for node in nodes
+        (if (and (isinstance node Paren) (>= (len node) 2)
+                 (== (atom-text node.op) "defmacro")
+                 (is-not (def-name-symbol (sub node 1)) None))
+            (.add macros (. (def-name-symbol (sub node 1)) value))))
       (except [Exception]
         (pass))))
-  (return (list names)))
+  (return [(ife (in name macros) name (hyphen-spelling name)) for name in names]))
 
 (def merged-items [doc line view items]
   "lispython's own items (lispython-items, then each macro of the view under
-   the hyphen spelling of the name it was registered as, view.macros)
-   followed by items, the
+   the spelling it was registered as, view.macros) followed by items, the
    backend's (backend-items), whose name (name-key) none of them has: a
    special form or macro wins over whatever the backend offers by that
    name.  Over a fallback view (only the text before the cursor compiled)
@@ -2060,16 +2069,19 @@
   (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
   ;; view.macros is keyed by name-key, as taken is, and holds the spelling.
+  ;; ⚠️ Never respell a macro (hyphen-spelling): a call is found by its
+  ;; head's exact text (core/macro.py), so (my-mac x) never expands a macro
+  ;; registered as my_mac.
   (for name in (sorted view.macros)
     ;; A qualified macro (module.name) is typed as an attribute
     ;; (qualified-macro-items).
     (if (and (not-in "." name) (not-in name taken))
-        (do (= label (hyphen-spelling (sub view.macros name)))
+        (do (= label (sub view.macros name))
             (.add taken name)
             (.append merged (own-item label *_MACRO-STYLE)))))
   (= rest (list items))
   (if view.fallback
-      (.extend rest [(lsp.CompletionItem :label (hyphen-spelling name)
+      (.extend rest [(lsp.CompletionItem :label name
                                          :kind lsp.CompletionItemKind.Variable)
                      for name in (buffer-definition-names doc line)]))
   (for item in rest
@@ -2083,10 +2095,9 @@
   "The macros of view a (require mod) registered for the base written glued
    to the dot before the word at the 1-based line and code-point col
    (glued-base: mod.|, a.b.ma|; never (. mod |), since such a macro is
-   called only as mod.name), as own items labelled by the hyphen spelling
-   of the name each was registered under (view.macros, hyphen-spelling:
-   my-mac, whether defined as my-mac or my_mac).  The
-   require registers them as mod.name keys of the macro table, and no
+   called only as mod.name), as own items labelled by the spelling each was
+   registered under (view.macros: my-mac, never its name-key my_mac; never
+   respelled, as in merged-items).  The require registers them as mod.name keys of the macro table, and no
    backend knows them: it never binds mod at runtime."
   (= text (line-text doc.source line))
   (= base (glued-base text (sub (partial-span text (min col (len text))) 0)))
@@ -2101,9 +2112,8 @@
             (if (and name (not-in "." name))
                 ;; name-key only turns a part's - into _, so the spelling's
                 ;; base prefix is as long as the key's.
-                (.append items (own-item (hyphen-spelling
-                                           (sub (sub view.macros key)
-                                                [: (len prefix) None]))
+                (.append items (own-item (sub (sub view.macros key)
+                                              [: (len prefix) None])
                                          *_MACRO-STYLE))))))
   (return items))
 

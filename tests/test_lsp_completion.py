@@ -491,12 +491,13 @@ def test_a_required_macro_is_offered_as_it_was_defined(merged, selection):
 
 
 @once
-def test_a_macro_defined_with_underscores_is_offered_hyphenated(merged):
-    # Defect: a macro keeps the _ spelling it was registered under (my_mac)
-    # instead of the hyphen spelling every other name is offered in.
+def test_a_macro_defined_with_underscores_keeps_its_spelling(merged):
+    # Defect: a macro respelled like every other name (my-mac for my_mac),
+    # though a call is found by its head's exact text, so accepting that
+    # completion calls a function my_mac that does not exist.
     items = by_label(merged("(defmacro my_mac [x] x)\n(print my|)")[2])
-    assert "my-mac" in items and "my_mac" not in items
-    assert items["my-mac"].label_details.description == "macro"
+    assert "my_mac" in items and "my-mac" not in items
+    assert items["my_mac"].label_details.description == "macro"
 
 
 @once
@@ -606,3 +607,16 @@ def test_the_fallback_list_keeps_the_definitions_after_the_cursor(
     # partial parse, so with no backend helper is not offered.
     marked = "(def main []\n  (hel|\n(def helper [] 1)"
     assert "helper" in by_label(complete(marked, off_backends)[2])
+
+
+@once
+def test_the_fallback_list_hyphenates_all_but_the_buffers_macros(
+    complete, off_backends
+):
+    # Defects: with no backend a buffer's my_val keeps its _ spelling, or is
+    # offered twice beside my-val; a defmacro name is respelled (my-mac for
+    # my_mac), a call no macro expands.
+    source = "(defmacro my_mac [x] x)\n(= my_val 1)\n(= my-val 2)\n(my|)"
+    labels = [item.label for item in complete(source, off_backends)[2]]
+    assert labels.count("my-val") == 1 and "my_val" not in labels
+    assert "my_mac" in labels and "my-mac" not in labels
