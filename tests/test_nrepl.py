@@ -508,3 +508,76 @@ def test_ns_field_has_one_spelling_in_tools():
     src = Path(tools.__file__).with_name("tools.lpy").read_text()
     assert tools.NREPL_NS_FIELD == "ns"
     assert re.findall(r'"ns"', src) == ['"ns"']
+
+
+@pytest.fixture
+def spelled_scope(tmp_path, monkeypatch):
+    (tmp_path / "mac_mod.lpy").write_text("(defmacro my-mac [] 1)\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "mac_mod", raising=False)
+    scope = {"__name__": "__nrepl_spelling__", "__macro_namespace": {}}
+    result = tools.nrepl_eval(
+        "(import collections)\n"
+        "(= my_val 1)\n"
+        "(= a__b 1)\n"
+        "(= _priv_x 1)\n"
+        "(defmacro my_mac [x] x)\n"
+        "(defmacro top-mac [] 3)\n"
+        "(require mac-mod)",
+        scope,
+    )
+    assert result["error"] is None
+    yield scope
+    sys.modules.pop("mac_mod", None)
+
+
+def complete_labels(prefix, scope):
+    return [item["label"] for item in tools.nrepl_complete(prefix, scope)["items"]]
+
+
+@pytest.mark.parametrize(
+    "prefix, label, absent",
+    [
+        ("my", "my-val", "my_val"),
+        ("a", "a__b", "a--b"),
+        ("_pri", "_priv-x", "_priv_x"),
+        ("collections.OrderedDict.move", "collections.OrderedDict.move-to-end", None),
+        ("my-v", "my-val", "my_val"),
+        # A typed _ asks for the Python spelling: an item carries no
+        # filterText, so the client filters labels by the typed my_v; a
+        # leading _ does not (every spelling of _priv_x starts with _pri).
+        ("my_v", "my_val", "my-val"),
+        ("my_", "my_val", "my-val"),
+        (
+            "collections.OrderedDict.move_to",
+            "collections.OrderedDict.move_to_end",
+            "collections.OrderedDict.move-to-end",
+        ),
+        # A macro takes the default spelling too, and its Python spelling
+        # once a _ is typed.
+        ("my", "my-mac", "my_mac"),
+        ("my_m", "my_mac", "my-mac"),
+        # A key registered with - is Python spelled too while _ is typed:
+        # the client drops a label that does not start with top_m.
+        ("top_m", "top_mac", "top-mac"),
+        ("mac_m", "mac_mod.my_mac", "mac-mod.my-mac"),
+    ],
+)
+def test_complete_labels_names_by_the_hyphen_spelling(
+    spelled_scope, prefix, label, absent
+):
+    # Defects: the nREPL drifting from the LSP's rule (hyphen_spelling), as
+    # its old unmangling did (a__b offered as a--b, another name); a _
+    # prefix that no label starts with, so the client shows nothing; a
+    # macro offered in a spelling other than the default; one name twice.
+    labels = complete_labels(prefix, spelled_scope)
+    assert labels.count(label) == 1
+    assert absent not in labels
+
+
+def test_a_dotted_macro_prefix_keeps_its_typed_head(spelled_scope):
+    # Defect: the whole key respelled under a dotted prefix (mac-mod.my-mac
+    # after mac_mod.), so no label starts with what the client typed and it
+    # shows nothing.
+    labels = complete_labels("mac_mod.my", spelled_scope)
+    assert labels == ["mac_mod.my-mac"]

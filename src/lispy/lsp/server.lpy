@@ -30,7 +30,7 @@
                        OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
-                             ViewCache compile-buffer glued-base
+                             ViewCache compile-buffer glued-base hyphen-spelling
                              lpy-diagnostic-range lpy-range module-names name-key
                              name-spelling-p open-form-closers partial-span py-name
                              pyrefly-fallback source-lines source-prefix
@@ -1699,28 +1699,34 @@
       (return (lsp.InsertReplaceEdit :new-text new-text :insert insert :replace replace)))
   (return (lsp.TextEdit :range insert :new-text new-text)))
 
-(def hyphen-spelling [name]
-  "name with each _ between two alphanumerics written -, or None when that
-   spelling does not stand for name again (py-name)."
-  (= spelled (re.sub "(?<=[^\\W_])_(?=[^\\W_])" "-" name))
-  (return (ife (== (py-name spelled) name) spelled None)))
+;; filterText decides whether the client keeps an item while the user types
+;; (VS Code and eglot's flex matching read it, not the label).  `-` is a
+;; completion trigger character, so the client asks again right after one
+;; and filters that answer by the word typed so far, hyphen included; `_` is
+;; not, so after a `_` the client filters the answer it already holds.  So
+;; an item carries the spelling being typed: its label, the hyphen spelling
+;; (hyphen-spelling), once the typed word holds a `-` (my-|), else the
+;; Python name, which also matches what a user typing `_` spells (my_|).
+(def completion-label [name spellings]
+  "The label of a backend item for Python name name: the buffer's own
+   spelling (spellings, buffer-spellings' map) when that is no hyphenated
+   spelling of name (ok? for ok_p, ->foo for _to_foo: name-key keeps it
+   apart from name), else the hyphen spelling (hyphen-spelling), so the
+   buffer's plain my_x never wins over my-x."
+  (= spelled (.get spellings name))
+  (if (and (is-not spelled None) (!= (name-key spelled) name))
+      (return spelled))
+  (return (hyphen-spelling name)))
 
-;; filterText decides whether the client keeps an item while the user types.
-;; `-` is a completion trigger character, so the client asks again right
-;; after one and filters that answer by the word typed so far, hyphen
-;; included; `_` is not, so after a `_` the client filters the answer it
-;; already holds.  So an item carries the spelling being typed: the hyphen
-;; spelling once the typed word holds a `-` (my-|), else the Python name,
-;; which also matches what a user typing `_` spells (my_|).
 (def filter-text [label name typed]
-  "The filterText of a completion item labelled label for Python name name,
-   when typed is the word typed so far."
-  (if (not-in "-" typed)
-      (return name))
-  (if (in "-" label)
+  "The filterText of a completion item labelled label (completion-label)
+   for Python name name, when typed is the word typed so far: a label that
+   is no hyphen spelling of name (the buffer's ok?, ->foo) itself, since
+   the user types it as written (? is no trigger character); else name
+   while typed holds no -, then label."
+  (if (!= label (hyphen-spelling name))
       (return label))
-  (= spelled (hyphen-spelling name))
-  (return (ife (is spelled None) label spelled)))
+  (return (ife (in "-" typed) label name)))
 
 (def client-capability-p [ls path]
   "Whether the client advertises the capability at path (attribute names
@@ -1788,18 +1794,20 @@
 (def general-items [doc :line None]
   "The completion items offered with no Python backend's answer:
    lispython's own (lispython-items), the Python builtins (builtin-names),
-   then the buffer's definitions (collect-definitions), each name once."
+   then the buffer's definitions (buffer-definition-names), each name once
+   (name-key); builtins labelled by their hyphen spelling (hyphen-spelling),
+   the buffer's definitions, macros included, as buffer-definition-names
+   labels them (completion-label)."
   (= items (lispython-items))
-  (= seen (set [item.label for item in items]))
-  (for [name kind] in (builtin-names)
-    (if (not-in name seen)
-        (do (.add seen name)
-            (.append items (lsp.CompletionItem :label name :kind kind)))))
-  (for name in (buffer-definition-names doc line)
-    (if (not-in name seen)
-        (do (.add seen name)
-            (.append items (lsp.CompletionItem :label name
-                                               :kind lsp.CompletionItemKind.Variable)))))
+  (= seen (set [(name-key item.label) for item in items]))
+  (for [label kind] in [*[(, (hyphen-spelling name) kind)
+                          for [name kind] in (builtin-names)]
+                        *[(, name lsp.CompletionItemKind.Variable)
+                          for name in (buffer-definition-names doc line)]]
+    ;; One item per name (name-key), so a buffer's my_x and my-x are one.
+    (if (not-in (name-key label) seen)
+        (do (.add seen (name-key label))
+            (.append items (lsp.CompletionItem :label label :kind kind)))))
   (return items))
 
 (def local-completion [doc :line None :col None]
@@ -1969,14 +1977,33 @@
         True
         (return (list answer))))
 
-(def buffer-spellings [source]
+(def buffer-texts [source line]
+  "The texts whose partial parses together read source: source itself and,
+   since a form left open at the 1-based line (None: no cursor) swallows the
+   rest of that parse, the text from the first later line that opens a form
+   in column 0, read as a top-level form (as Emacs's beginning-of-defun
+   reads one).  Limits: only the form open at the cursor is skipped, so a
+   second form left open after it loses what follows it; and a ( in column
+   0 inside a multi-line string is taken for a form's start."
+  (= lines (.split source "\n"))
+  (= texts [source])
+  (for i in (range (ife (is line None) (len lines) line) (len lines))
+    (if (.startswith (sub lines i) "(")
+        (do (.append texts (.join "\n" (sub lines [: i None])))
+            (break))))
+  (return texts))
+
+(def buffer-spellings [source :line None]
   "Python name -> the buffer's first spelling of it in source order: every
    Symbol counts, a dotted one (a.my-b) by each of its parts, each only
-   when it spells a name (name-spelling-p)."
-  (try
-    (= tree (parse source :partial True))
-    (except [Exception]
-      (return {})))
+   when it spells a name (name-spelling-p); with a 1-based line, also past
+   the form open there (buffer-texts)."
+  (= tree [])
+  (for text in (buffer-texts source line)
+    (try
+      (.extend tree (parse text :partial True))
+      (except [Exception]
+        (pass))))
   (= spellings {})
   (= stack (list (reversed tree)))
   (while stack
@@ -2003,10 +2030,11 @@
                (not-in item.label (vars builtins)))))
 
 (def backend-items [doc line col items insert-replace spellings]
-  "The backend's completion items as the buffer's: labelled by the
-   buffer's own spelling of each Python name (spellings, buffer-spellings'
-   map; none: the backend's name), with filterText and edit over the .lpy
-   word at the cursor.  What is positioned in or tied to the generated code
+  "The backend's completion items as the buffer's: labelled by
+   completion-label (the hyphen spelling, move-to-end, never move_to_end
+   whatever the buffer writes; the buffer's own spelling only where the
+   hyphen rule cannot spell it, ok?), with filterText and edit over the
+   .lpy word at the cursor.  What is positioned in or tied to the generated code
    (text_edit, insert_text, command, data) is dropped: it would land on
    lines the user never wrote.  So is an item with additional_text_edits
    (an auto-import of a symbol the buffer never binds), and a Python
@@ -2018,7 +2046,7 @@
     (if (or (python-syntax-p item) item.additional-text-edits)
         (continue))
     (= name item.label)
-    (= label (.get spellings name name))
+    (= label (completion-label name spellings))
     (.append result
       (lsp.CompletionItem
         :label label
@@ -2035,32 +2063,26 @@
   (return result))
 
 (def buffer-definition-names [doc line]
-  "The names doc's definitions bind (collect-definitions), in source order,
-   the one home of that list: over its partial parse and, since a form left
-   open at the 1-based line (None: no cursor) swallows the rest of that
-   parse, over the text from the first later line that opens a form in
-   column 0, read as a top-level form (as Emacs's beginning-of-defun reads
-   one).  Limits: only the form open at the cursor is skipped, so a second
-   form left open after it loses the definitions after that one; and a ( in
-   column 0 inside a multi-line string is taken for a form's start."
-  (= lines (.split doc.source "\n"))
-  (= texts [doc.source])
-  (for i in (range (ife (is line None) (len lines) line) (len lines))
-    (if (.startswith (sub lines i) "(")
-        (do (.append texts (.join "\n" (sub lines [: i None])))
-            (break))))
+  "The names doc's definitions bind (collect-definitions), in source order
+   and as completion offers them: each labelled as a backend item of its
+   Python name is (completion-label over buffer-spellings at line), so one
+   name gives one label, a defmacro's included.  The one home of that list,
+   over the partial parses of buffer-texts at the 1-based line (None: no
+   cursor)."
   (= names {})
-  (for text in texts
+  (for text in (buffer-texts doc.source line)
     (try
       (.update names (collect-definitions (parse text :partial True) doc.uri))
       (except [Exception]
         (pass))))
-  (return (list names)))
+  (= spellings (buffer-spellings doc.source :line line))
+  (return [(completion-label (py-name name) spellings) for name in names]))
 
 (def merged-items [doc line view items]
   "lispython's own items (lispython-items, then each macro of the view under
-   the spelling it was registered as, view.macros) followed by items, the
-   backend's (backend-items), whose name (name-key) none of them has: a
+   the hyphen spelling of its registered key, view.macros) followed by
+   items, the backend's (backend-items), whose name (name-key) none of them
+   has: a
    special form or macro wins over whatever the backend offers by that
    name.  Over a fallback view (only the text before the cursor compiled)
    the buffer's definitions the backend could not see
@@ -2072,7 +2094,7 @@
     ;; A qualified macro (module.name) is typed as an attribute
     ;; (qualified-macro-items).
     (if (and (not-in "." name) (not-in name taken))
-        (do (= label (sub view.macros name))
+        (do (= label (hyphen-spelling (sub view.macros name)))
             (.add taken name)
             (.append merged (own-item label *_MACRO-STYLE)))))
   (= rest (list items))
@@ -2091,10 +2113,11 @@
   "The macros of view a (require mod) registered for the base written glued
    to the dot before the word at the 1-based line and code-point col
    (glued-base: mod.|, a.b.ma|; never (. mod |), since such a macro is
-   called only as mod.name), as own items labelled by the spelling each was
-   registered under (view.macros: my-mac, never its name-key my_mac).  The
-   require registers them as mod.name keys of the macro table, and no
-   backend knows them: it never binds mod at runtime."
+   called only as mod.name), as own items labelled by the hyphen spelling
+   of the name each was registered under (view.macros, hyphen-spelling:
+   my-mac, whether defined as my-mac or my_mac).  The require registers
+   them as mod.name keys of the macro table, and no backend knows them: it
+   never binds mod at runtime."
   (= text (line-text doc.source line))
   (= base (glued-base text (sub (partial-span text (min col (len text))) 0)))
   (if (is base None)
@@ -2108,8 +2131,9 @@
             (if (and name (not-in "." name))
                 ;; name-key only turns a part's - into _, so the spelling's
                 ;; base prefix is as long as the key's.
-                (.append items (own-item (sub (sub view.macros key)
-                                              [: (len prefix) None])
+                (.append items (own-item (hyphen-spelling
+                                           (sub (sub view.macros key)
+                                                [: (len prefix) None]))
                                          *_MACRO-STYLE))))))
   (return items))
 
@@ -2219,8 +2243,8 @@
                                                     (ife attribute None MERGE-TIMEOUT))))
   (if (is view None)
       (return None))
-  (= spellings (buffer-spellings doc.source))
-  (= found (backend-items doc line col items insert-replace spellings))
+  (= found (backend-items doc line col items insert-replace
+                         (buffer-spellings doc.source :line line)))
   (= macros (qualified-macro-items doc line col view))
   (cond macros
         (do (= taken (set [(name-key item.label) for item in macros]))
@@ -2446,6 +2470,18 @@
             :active-signature answer.active-signature
             :active-parameter answer.active-parameter)))
 
+(def with-filter-texts [doc line col answer]
+  "answer with a filterText (filter-text, the label's py-name as the name)
+   on every item that has none, typed from completion-ranges at the 1-based
+   line and code-point col: the one pass that puts every item, whichever
+   builder made it (own items, macros, the fallback lists), under the rule
+   backend-items follows."
+  (= typed (sub (completion-ranges doc line col) 2))
+  (for item in answer.items
+    (if (is item.filter-text None)
+        (= item.filter-text (filter-text item.label (py-name item.label) typed))))
+  (return answer))
+
 (deco (server.feature
         lsp.TEXT_DOCUMENT_COMPLETION
         (lsp.CompletionOptions :trigger-characters ["." "-"]))
@@ -2462,9 +2498,9 @@
     (except [Exception]
       (.debug logger "backend completion failed" :exc-info True)
       (= result None)))
-  (if (is-not result None)
-      (return result))
-  (return (local-completion doc :line line :col col))))
+  (if (is result None)
+      (= result (local-completion doc :line line :col col)))
+  (return (with-filter-texts doc line col result))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend

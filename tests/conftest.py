@@ -81,7 +81,8 @@ def backend_project(tmp_path_factory):
     every buffer is opened as. helpers.py is a user .py module beside it and
     other.lpy a .lpy module (its shadow is the backend's other.py),
     lpy_macs.lpy a macro module (required as lpy-macs) and macmod.lpy a macro
-    module of one hyphenated macro (its shadow is macmod.py), all written
+    module of a hyphenated macro and one defined with an underscore (its
+    shadow is macmod.py), all written
     before any backend starts (the view root mirrors and compiles them then);
     no buffer names them unless it imports them, so they change no other
     answer."""
@@ -92,7 +93,9 @@ def backend_project(tmp_path_factory):
     (root / "lpy_macs.lpy").write_text(
         "(defmacro twice [x] `(do ~x ~x))\n(defmacro thrice [x] `(do ~x ~x ~x))\n"
     )
-    (root / "macmod.lpy").write_text("(defmacro my-mac [] 1)\n")
+    (root / "macmod.lpy").write_text(
+        "(defmacro my-mac [] 1)\n(defmacro my_umac [] 2)\n"
+    )
     return root
 
 

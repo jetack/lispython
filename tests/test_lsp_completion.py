@@ -63,7 +63,7 @@ def by_label(items):
     return {item.label: item for item in items}
 
 
-def test_members_take_the_buffer_spelling(complete):
+def test_a_member_takes_the_hyphen_spelling(complete):
     # Defects: the backend's Python name is shown (my_x beside or instead of
     # my-x); the filterText drops the item once the user types my- (or
     # keeps only the hyphen spelling when nothing hyphenated was typed).
@@ -76,27 +76,44 @@ def test_members_take_the_buffer_spelling(complete):
 
 
 @pytest.mark.parametrize(
-    "source, label, typed_filter",
+    "source, name, label, stem",
     [
         (
-            "(class A [Exception]\n  (def f [self]\n    self.with-|))",
+            "(class A [Exception]\n  (def f [self]\n    self.{}|))",
             "with_traceback",
             "with-traceback",
+            "with",
         ),
         (
             "(from collections [OrderedDict])\n"
-            "(class A [OrderedDict]\n  (def f [self]\n    self.move-|))",
+            "(class A [OrderedDict]\n  (def f [self]\n    self.{}|))",
             "move_to_end",
             "move-to-end",
+            "move",
         ),
     ],
     ids=["builtin base", "imported base"],
 )
-def test_a_member_never_spelled_in_the_buffer(complete, source, label, typed_filter):
-    # Defect: a hyphen typed toward a member the buffer never spells drops
-    # it, since the client filters with-  against with_traceback.
-    items = by_label(complete(source)[2])
-    assert items[label].filter_text == typed_filter
+def test_a_member_never_spelled_in_the_buffer(complete, source, name, label, stem):
+    # Defects: a member the buffer never spells is offered in its Python
+    # spelling (with_traceback), beside or instead of the hyphen spelling,
+    # or accepting it inserts the Python spelling; the filterText drops the
+    # item once a hyphen is typed (the client filters with- against
+    # with_traceback), or drops it while the user types its _ spelling.
+    # with alone is a keyword the view cannot compile as an attribute, so
+    # the word typed with no hyphen holds its first _ (with_|).
+    for typed, filter_text in [(stem + "_", name), (stem + "-", label)]:
+        items = by_label(complete(source.format(typed))[2])
+        assert label in items and name not in items
+        assert items[label].text_edit.new_text == label
+        assert items[label].filter_text == filter_text
+
+
+def test_the_buffers_underscore_spelling_never_wins(complete):
+    # Defect: the buffer's own _ spelling of a name (os.get_terminal_size)
+    # overrides the hyphen spelling completion offers by default.
+    items = by_label(complete("(import os)\n(os.get_terminal_size)\n(os.get|)")[2])
+    assert "get-terminal-size" in items and "get_terminal_size" not in items
 
 
 @pytest.mark.parametrize("source", ["osp.jo|in", "(. osp jo|in)"])
@@ -252,12 +269,16 @@ def test_a_required_modules_macros_follow_its_name(complete, backend_requests):
 
 
 @once
-def test_a_qualified_macro_is_offered_as_it_was_defined(complete, backend_requests):
-    # Defect: a macro after its module's name is labelled by its name-key
-    # (my_mac), not the spelling it was defined as (my-mac).
+def test_a_qualified_macro_takes_the_hyphen_spelling(complete, backend_requests):
+    # Defect: a macro after its module's name is labelled in a spelling
+    # other than the default: its name-key (my_mac) for one defined as
+    # my-mac.
     backend_requests.answer["value"] = []
     labels = by_label(complete("(require macmod)\n(macmod.my|)")[2])
     assert "my-mac" in labels and "my_mac" not in labels
+    # Defect: a macro defined with an underscore keeps it after mod. (my_umac)
+    # instead of the hyphen spelling every name is offered in.
+    assert "my-umac" in labels and "my_umac" not in labels
 
 
 @once
@@ -269,8 +290,8 @@ def test_a_required_macro_wins_over_the_backends_name(complete, backend_requests
         lsp.CompletionItem(label="my_attr", kind=lsp.CompletionItemKind.Variable),
     ]
     items = complete("(require lpy-macs)\n(lpy-macs.|)")[2]
-    assert macro_style([i for i in items if i.label != "my_attr"]) == LPY_MACS
-    assert "my_attr" in by_label(items)
+    assert macro_style([i for i in items if i.label != "my-attr"]) == LPY_MACS
+    assert "my-attr" in by_label(items)
 
 
 @once
@@ -471,11 +492,20 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
 
 
 @pytest.mark.parametrize("selection", ["*", "[my-mac]"])
-def test_a_required_macro_is_offered_as_it_was_defined(merged, selection):
-    # Defect: a macro the buffer never spells is labelled by its name-key
-    # (my_mac), not the spelling it was defined and required as (my-mac).
+def test_a_required_macro_takes_the_hyphen_spelling(merged, selection):
+    # Defect: a required macro the buffer never spells is labelled by its
+    # name-key (my_mac), not the hyphen spelling (my-mac).
     items = by_label(merged(f"(require macmod {selection})\n(print my|)")[2])
     assert "my-mac" in items and "my_mac" not in items
+
+
+@once
+def test_a_macro_defined_with_underscores_is_offered_as_my_mac(merged):
+    # Defect: a macro offered in a spelling other than the default (my_mac,
+    # as registered) where every other name takes the hyphen spelling.
+    items = by_label(merged("(defmacro my_mac [x] x)\n(print my|)")[2])
+    assert "my-mac" in items and "my_mac" not in items
+    assert items["my-mac"].label_details.description == "macro"
 
 
 @once
@@ -585,3 +615,82 @@ def test_the_fallback_list_keeps_the_definitions_after_the_cursor(
     # partial parse, so with no backend helper is not offered.
     marked = "(def main []\n  (hel|\n(def helper [] 1)"
     assert "helper" in by_label(complete(marked, off_backends)[2])
+
+
+@once
+def test_the_fallback_list_hyphenates_every_definition(complete, off_backends):
+    # Defects: with no backend a buffer's my_val keeps its _ spelling, or is
+    # offered twice beside my-val; a defmacro is offered in a spelling other
+    # than the default (my_mac).
+    source = "(defmacro my_mac [x] x)\n(= my_val 1)\n(= my-val 2)\n(my|)"
+    labels = [item.label for item in complete(source, off_backends)[2]]
+    assert labels.count("my-val") == 1 and "my_val" not in labels
+    assert "my-mac" in labels and "my_mac" not in labels
+
+
+@once
+def test_a_buffer_spelling_outside_the_hyphen_rule_wins(merged, backend_requests):
+    # Defects: a name the buffer spells outside the hyphen rule (ok? for
+    # ok_p, ->foo for _to_foo) is offered as the hyphen spelling of its
+    # Python name (ok-p, _to-foo), so the client drops it while the user
+    # types ->f; over a fallback view the buffer's own definition then sits
+    # beside it, two items for one name.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="ok_p", kind=lsp.CompletionItemKind.Function),
+        lsp.CompletionItem(label="_to_foo", kind=lsp.CompletionItemKind.Function),
+    ]
+    defs = "(def ok? [] 1)\n(def ->foo [] 1)\n"
+    for source in [defs + "(print ->f|)", "(def main []\n  (->f|\n" + defs]:
+        labels = [item.label for item in merged(source)[2]]
+        assert labels.count("ok?") == 1 and labels.count("->foo") == 1, source
+        assert not {"ok-p", "_to-foo", "ok_p", "_to_foo"} & set(labels), source
+    items = by_label(merged(defs + "(print ->f|)")[2])
+    assert items["->foo"].filter_text.startswith("->f")
+    # ? is no trigger character, so a filterText of ok_p drops the item
+    # once the user types ok?.
+    items = by_label(merged(defs + "(print ok?|)")[2])
+    assert items["ok?"].filter_text == "ok?"
+
+
+@once
+def test_a_fallback_definition_and_the_backends_item_share_a_label(
+    merged, backend_requests
+):
+    # Defect: over a fallback view the buffer's definition (ok?) and the
+    # backend's item of its Python name (ok_p, which the buffer first
+    # writes as ok_p, so ok-p) are labelled by two rules: two items for one
+    # name.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="ok_p", kind=lsp.CompletionItemKind.Function),
+    ]
+    source = "(print ok_p)\n(def main []\n  (ok|\n(def ok? [] 1)\n"
+    same = [
+        item.label for item in merged(source)[2] if server.py_name(item.label) == "ok_p"
+    ]
+    assert same == ["ok-p"]
+
+
+@once
+def test_the_fallback_list_hyphenates_a_nested_macro(complete, off_backends):
+    # Defect: a defmacro nested in a (do ...), which registers all the same,
+    # is offered in a spelling other than the default (in_do).
+    labels = by_label(complete("(do (defmacro in_do [x] x))\n(in|)", off_backends)[2])
+    assert "in-do" in labels and "in_do" not in labels
+
+
+@once
+def test_every_item_filters_by_the_word_typed(merged, off_backends, complete):
+    # Defect: only the backend's items carry a filterText, so an item
+    # labelled by its hyphen spelling (a view macro my-mac, a fallback
+    # my-val) is dropped once the user types its _ spelling (my_m, my_v),
+    # or once a - is typed (my-m, my-v), when the client asks again and
+    # filters by the hyphen spelling; and a label outside the hyphen rule
+    # (->) must filter as itself.
+    for typed, filter_text in [("my_m", "my_mac"), ("my-m", "my-mac")]:
+        items = by_label(merged(f"(defmacro my_mac [x] x)\n({typed}|)")[2])
+        assert items["my-mac"].filter_text == filter_text, typed
+    for typed, filter_text in [("my_v", "my_val"), ("my-v", "my-val")]:
+        items = by_label(complete(f"(= my_val 1)\n({typed}|)", off_backends)[2])
+        assert items["my-val"].filter_text == filter_text, typed
+    items = by_label(complete("(= x 1)\n(-|)", off_backends)[2])
+    assert items["->"].filter_text == "->"

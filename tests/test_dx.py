@@ -583,10 +583,14 @@ def required_scope(require):
     return scope
 
 
-@pytest.mark.parametrize("prefix", ["dx_nrepl_macro_mod.dx", "dx_nrepl"])
-def test_a_qualified_required_macro_is_a_macro(macro_module, prefix):
+# A word typed with an interior _ (dx_nrepl) labels names as Python spells
+# them, so the macro is dx_mac there; after the dot (dx) its hyphen spelling.
+@pytest.mark.parametrize(
+    "prefix, name", [("dx_nrepl_macro_mod.dx", "dx-mac"), ("dx_nrepl", "dx_mac")]
+)
+def test_a_qualified_required_macro_is_a_macro(macro_module, prefix, name):
     scope = required_scope(f"(require {macro_module})")
-    assert complete(prefix, scope)[f"{macro_module}.dx-mac"] == "macro"
+    assert complete(prefix, scope)[f"{macro_module}.{name}"] == "macro"
 
 
 def test_a_qualified_macro_item_under_a_dotted_prefix(macro_module):
