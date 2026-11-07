@@ -52,6 +52,21 @@ def test_nox_tests_session_syncs_the_lock_with_extras():
     names = {n.id for n in ast.walk(session) if isinstance(n, ast.Name)}
     assert {"sync", "--frozen"} <= strings
     assert "EXTRAS" in names
+    # The sync receives the flags built from EXTRAS, not a hand-written list.
+    spread = {
+        n.value.id
+        for n in ast.walk(session)
+        if isinstance(n, ast.Starred) and isinstance(n.value, ast.Name)
+    }
+    built = {
+        t.id
+        for n in ast.walk(session)
+        if isinstance(n, ast.Assign)
+        and "EXTRAS" in {m.id for m in ast.walk(n.value) if isinstance(m, ast.Name)}
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    assert spread & built
 
 
 def test_workflow_runs_the_locked_set():
