@@ -13,11 +13,11 @@ import time
 import pytest
 
 RUN = """
-import importlib, json, os
+import importlib, json, os, sys
 import lispy
 from lispy.core.importer import lpy_cache_path
-m = importlib.import_module("a")
-print(json.dumps({"result": m.result,
+m = importlib.import_module(sys.argv[1])
+print(json.dumps({"result": getattr(m, "result", None),
                   "cached": os.path.exists(lpy_cache_path(m.__file__))}))
 """
 
@@ -36,9 +36,9 @@ def modules(tmp_path):
     def write(name, text):
         (directory / name).write_text(text)
 
-    def run():
+    def run(module="a"):
         proc = subprocess.run(
-            [sys.executable, "-c", RUN],
+            [sys.executable, "-c", RUN, module],
             env=env,
             cwd=tmp_path,
             capture_output=True,
@@ -107,3 +107,23 @@ def test_unchanged_dependencies_load_the_cache(modules):
     second = modules.run()
     assert second["result"] == 1
     assert "EXPANDING" not in second["stderr"]
+
+
+def test_a_cached_module_a_macro_imports_brings_its_record(modules):
+    # n is read only while m compiles (m's macro imports it as it expands),
+    # so once m loads from its cache, n reaches a only through m's record.
+    modules("n.py", "VALUE = 1\n")
+    modules(
+        "m.lpy",
+        '(defmacro mv [] (import importlib) (return (. (importlib.import-module "n")'
+        " VALUE)))\n(= VALUE (mv))",
+    )
+    modules(
+        "a.lpy",
+        '(defmacro val [] (import importlib) (return (. (importlib.import-module "m")'
+        " VALUE)))\n(= result (val))",
+    )
+    modules.run("m")
+    assert modules.run()["result"] == 1
+    modules("n.py", "VALUE = 55555\n")
+    assert modules.run()["result"] == 55555

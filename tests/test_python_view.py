@@ -1495,6 +1495,53 @@ class TestMacroModules:
         (package.pkg / "base.lpy").write_text("(defmacro bump [x] (return `(* ~x 30)))")
         assert self.view(package).text.endswith("yy = 300")
 
+    def expansion_helper(self, package):
+        # mac's V comes from b's macro, which imports h only as it expands:
+        # h is read when mac compiles, never when mac loads from its cache.
+        (package.pkg / "h.py").write_text("VALUE = 1\n")
+        (package.pkg / "b.lpy").write_text(
+            "(defmacro val [] (import importlib)"
+            f' (return (. (importlib.import-module "{package.name}.h") VALUE)))'
+        )
+        (package.pkg / "mac.lpy").write_text(
+            "(require .b *)\n(= V (val))\n(defmacro twice [x] (return V))"
+        )
+
+    def test_a_module_read_by_a_cached_modules_compile_is_seen(
+        self, package, monkeypatch
+    ):
+        # After a drop, mac loads from its cache, so only its record names h.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        self.expansion_helper(package)
+        assert self.view(package).text.endswith("yy = 1")
+        init = package.pkg / "__init__.py"
+        st = os.stat(init)
+        os.utime(init, ns=(st.st_atime_ns, st.st_mtime_ns + 10**6))
+        assert self.view(package).text.endswith("yy = 1")
+        (package.pkg / "h.py").write_text("VALUE = 99\n")
+        assert self.view(package).text.endswith("yy = 99")
+
+    def test_a_server_starting_on_a_warm_cache_sees_its_record(
+        self, package, monkeypatch
+    ):
+        # Another process compiled mac, so this one loads it from its cache
+        # and never reads h.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        self.expansion_helper(package)
+        env = dict(os.environ)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        env["PYTHONPATH"] = str(package.root)
+        subprocess.run(
+            [sys.executable, "-c", f"import lispy, {package.name}.mac"],
+            env=env,
+            check=True,
+            timeout=120,
+        )
+        assert os.path.exists(lpy_cache_path(str(package.pkg / "mac.lpy")))
+        assert self.view(package).text.endswith("yy = 1")
+        (package.pkg / "h.py").write_text("VALUE = 99\n")
+        assert self.view(package).text.endswith("yy = 99")
+
     def test_a_second_instance_of_the_module_installs_nothing(
         self, package, monkeypatch
     ):

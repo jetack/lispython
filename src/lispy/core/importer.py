@@ -8,6 +8,7 @@ import os
 import os.path as osp
 import runpy
 import sys
+import tempfile
 import threading
 import types
 
@@ -155,6 +156,10 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
 _CACHE_MAGIC = b"LPYC"
 _LOCAL = threading.local()
 _RECORDS = {}
+# Real path to (st_mtime_ns, st_size) of every source path_stats observed, as
+# of its latest load: a macro module with no record (a .py) is stamped as it
+# was read, never as it is when a requiring module's compile ends.
+_READ_STAMPS = {}
 _cache_header = None
 _excluded_dirs = None
 
@@ -169,6 +174,13 @@ def lpy_cache_path(path):
     except (NotImplementedError, ValueError):
         return None
     return osp.splitext(pyc)[0] + ".lpyc"
+
+
+def lpy_record(path):
+    """The dependency record of the .lpy at path as this process last
+    compiled or loaded it from its cache: a tuple of (real path,
+    st_mtime_ns, st_size), its own source first; None when it has none."""
+    return _RECORDS.get(osp.realpath(path))
 
 
 def _header():
@@ -240,11 +252,13 @@ def _lpy_path_stats(self, path):
     # The stamp is taken here, before the loader reads the source, so it
     # predates the text compiled: an edit during the import makes the record
     # stale, never missed.
-    if getattr(_LOCAL, "windows", None):
-        try:
-            _record_into_windows([_stamp(path)], filtered=True)
-        except OSError:
-            pass
+    try:
+        stamp = _stamp(path)
+    except OSError:
+        pass
+    else:
+        _READ_STAMPS[stamp[0]] = stamp[1:]
+        _record_into_windows([stamp], filtered=True)
     return _org_path_stats(self, path)
 
 
@@ -266,14 +280,15 @@ def _read_cache(cache_path, own):
             if _stamp(real)[1:] != (mtime, size):
                 return None
         code = marshal.loads(data[start + 4 + length :])
-    except (OSError, EOFError, ValueError, TypeError):
+    except Exception:
+        # A corrupt or crafted file can fail anywhere in the unpacking.
         return None
     if not isinstance(code, types.CodeType):
         return None
     return code, tuple(tuple(dep) for dep in deps)
 
 
-def _write_cache(cache_path, deps, code):
+def _write_cache(cache_path, deps, code, source_path):
     """Write the cache atomically (a temporary file in its directory, then a
     rename); any OSError leaves no cache, as CPython does for a pyc."""
     payload = marshal.dumps((_header(), deps))
@@ -283,13 +298,16 @@ def _write_cache(cache_path, deps, code):
         + payload
         + marshal.dumps(code)
     )
-    temp = f"{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        os.makedirs(osp.dirname(cache_path), exist_ok=True)
-        fd = os.open(temp, os.O_EXCL | os.O_CREAT | os.O_WRONLY, 0o666)
+        directory = osp.dirname(cache_path)
+        os.makedirs(directory, exist_ok=True)
+        fd, temp = tempfile.mkstemp(dir=directory, prefix=osp.basename(cache_path))
         try:
             with open(fd, "wb") as f:
                 f.write(data)
+            # The source's permission bits, writable by its owner, as
+            # CPython gives a pyc (mkstemp creates the file owner-only).
+            os.chmod(temp, (os.stat(source_path).st_mode & 0o666) | 0o200)
             os.replace(temp, cache_path)
         except OSError:
             try:
@@ -319,10 +337,14 @@ def _dependencies(own, window, scope, fullname):
             continue
         record = _RECORDS.get(real)
         if record is None:
-            try:
-                record = (_stamp(real),)
-            except OSError:
-                continue
+            stamp = _READ_STAMPS.get(real)
+            if stamp is not None:
+                record = ((real, *stamp),)
+            else:
+                try:
+                    record = (_stamp(real),)
+                except OSError:
+                    continue
         for dep_real, mtime, size in record:
             deps.setdefault(dep_real, (mtime, size))
     for real, stamp in window.items():
@@ -367,7 +389,7 @@ def _lpy_get_code(self, fullname):
     _RECORDS[own[0]] = deps
     _record_into_windows(deps, filtered=False)
     if cache_path is not None and not sys.dont_write_bytecode:
-        _write_cache(cache_path, deps, code)
+        _write_cache(cache_path, deps, code, source_path)
     return code
 
 
