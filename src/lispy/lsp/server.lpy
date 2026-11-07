@@ -334,14 +334,21 @@
    test to make before parsing the buffer for builtin-macro-doc."
   (return (in (sub (.rpartition name ".") 2) BUILTIN-MACROS)))
 
-(def builtin-macro-doc [tree name]
+(def builtin-macro-doc [tree name :view None]
   "The hover markdown of the built-in macro `name` refers to in the buffer
-   tree, or None. The buffer's built-in macros are the compiler's: the
-   prelude, unless the buffer opts out of it (prelude-opted-out), plus
-   whatever its requires of the built-in macro modules register. The
-   opt-out is itself such a require, so the scan gives exactly its
-   selection; a name the buffer has no macro for (`fn` after the opt-out
-   (require lispy.macros [when])) is then just a name."
+   tree, or None.  With view, the buffer's full PythonView, its compile
+   decides (view.builtin-macros): a name the buffer's defmacro or another
+   module's require took is not the built-in.  Without one the syntax
+   scan decides: the prelude, unless the buffer opts out of it
+   (prelude-opted-out), plus whatever its requires of the built-in macro
+   modules register.  The opt-out is itself such a require, so the scan
+   gives exactly its selection; a name the buffer has no macro for (`fn`
+   after the opt-out (require lispy.macros [when])) is then just a name."
+  (if (is-not view None)
+      (do (= macro (.get view.builtin-macros (name-key name)))
+          (return (ife (in macro BUILTIN-MACROS)
+                       (hover-markdown (sub BUILTIN-MACROS macro))
+                       None))))
   (if (and (in name BUILTIN-MACROS) (not (prelude-opted-out tree)))
       (return (hover-markdown (sub BUILTIN-MACROS name))))
   (for node in tree
@@ -606,9 +613,10 @@
    replaces a newer; ignores memoises the buffer's suppression-comments of
    the backend's tool for every publish of the run.  refresh: the run was
    started by refresh-outdated or finish-run, so it starts no refresh
-   itself.  rerun: finish-run started it for a compile older than the
-   refresh target, so it is never rerun again."
-  (def __init__ [self ls doc :recompile False :refresh False :rerun False]
+   itself.  rerun: the refresh target (_REFRESH-TARGET) finish-run started
+   it for, a compile having missed that target; None when it is no rerun.
+   It is rerun again only for a greater target."
+  (def __init__ [self ls doc :recompile False :refresh False :rerun None]
     (= self.ls ls)
     (= self.doc doc)
     (= self.recompile recompile)
@@ -655,7 +663,7 @@
       (.error logger "lispython LSP: diagnostics failed" :exc-info (.exception task))))
 
 (def publish-diagnostics [ls uri :opened False :recompile False :refresh False
-                          :rerun False]
+                          :rerun None]
   "Publish document uri's diagnostics as it is now, from tasks of the loop
    (the handlers that call this are synchronous): the change becomes the
    document's latest run, which compile-latest compiles unless a newer
@@ -665,15 +673,13 @@
    recompile: compile again even at a cached version (a save: the macros
    may read what changed on disk).  refresh, rerun: DiagnosticRun's.  A
    run replaced before its compile began hands on its own: the new run
-   recompiles if either does, and is a refresh run, or a rerun, only if
-   both are, so a refresh never drops a pending change's refresh or a
-   save's recompile, and a change clears a pending rerun."
+   recompiles if either does, and is a refresh run only if both are, so a
+   refresh never drops a pending change's refresh or a save's recompile."
   (= doc (document-snapshot (.get-text-document ls.workspace uri)))
   (= prev (.get DIAGNOSTIC-RUNS uri))
   (if (and (is-not prev None) (not prev.compiled))
       (do (= recompile (or recompile prev.recompile))
-          (= refresh (and refresh prev.refresh))
-          (= rerun (and rerun prev.rerun))))
+          (= refresh (and refresh prev.refresh))))
   (= run (DiagnosticRun ls doc :recompile recompile :refresh refresh :rerun rerun))
   (_supersede prev)
   (= (sub DIAGNOSTIC-RUNS uri) run)
@@ -799,7 +805,8 @@
    refreshes the other documents (refresh-outdated); a run still the latest
    whose compile ran under an older macro environment than the last
    refresh's target (_REFRESH-TARGET) publishes again, as a refresh run and
-   a rerun, unless it is a rerun itself or a parse error."
+   a rerun for that target, unless it is a parse error or a rerun for that
+   target already."
   (if (not (_current-p run))
       (return))
   (= doc run.doc)
@@ -814,14 +821,19 @@
   ;; A refresh skips a document whose run is compiling (it has no epoch
   ;; yet), so that run may have published a compile from before the
   ;; environment the refresh brought the documents to, and would stay
-  ;; stale: it runs once more.  The target may never be reached (no drop
-  ;; happens while a hung compile blocks it, or the staleness vanishes), so
-  ;; termination rests on no epoch: a parse error ran no macro and is never
-  ;; rerun, and a rerun (DiagnosticRun.rerun) never reruns itself.
-  (if (and (_current-p run) (not run.rerun) (!= compiled.stage PARSE-STAGE)
+  ;; stale: it runs once more, for that target.  A rerun's own compile can
+  ;; miss a later refresh the same way (it ran past a second drop), so it
+  ;; reruns for a greater target.  The target may never be reached (no
+  ;; drop happens while a hung compile blocks it, or the staleness
+  ;; vanishes), so termination rests on no epoch: a parse error ran no
+  ;; macro and is never rerun, and each rerun of a chain needs a target
+  ;; greater than its own (DiagnosticRun.rerun), which only a refresh
+  ;; sets, so a chain ends with the refreshes.
+  (if (and (_current-p run) (!= compiled.stage PARSE-STAGE)
            (is-not compiled.epoch None)
-           (is-not _REFRESH-TARGET None) (< compiled.epoch _REFRESH-TARGET))
-      (publish-diagnostics run.ls doc.uri :refresh True :rerun True)))
+           (is-not _REFRESH-TARGET None) (< compiled.epoch _REFRESH-TARGET)
+           (or (is run.rerun None) (> _REFRESH-TARGET run.rerun)))
+      (publish-diagnostics run.ls doc.uri :refresh True :rerun _REFRESH-TARGET)))
 
 ;; The epoch of the compile that last started a refresh (refresh-outdated):
 ;; a run under no newer one starts none.
@@ -844,8 +856,9 @@
    epoch while a drop is due), so an edit to a macro module reaches the
    documents requiring it.  A run with no epoch (not compiled yet,
    compiling, or its compile raised or was given up on) is left alone: a
-   compiling one republishes itself if it ran under an older environment
-   (finish-run), and one whose compile always raises is not compiled again
+   compiling one reruns once it finished under an older environment than
+   this refresh's target (finish-run; a rerun only for a target newer than
+   its own), and one whose compile always raises is not compiled again
    every round.  Any run can see the new epoch first, not only a save's,
    because a newer change can supersede the save's run.  The runs it
    starts are refresh runs, which never refresh: a macro that rewrites a
@@ -1283,18 +1296,26 @@
             :contents (lsp.MarkupContent :kind lsp.MarkupKind.Markdown :value value)
             :range (node-range target))))
 
-(def form-hover [tree target]
+(def form-hover [tree target :view None]
   "lispython's own hover of Symbol target, or None: the alias doc on the
    type of a type alias, else a special form's doc, else the docstring of
-   one of the buffer's built-in macros (builtin-macro-doc).  It answers
-   before any backend, which knows no lispython form."
+   one of the buffer's built-in macros (builtin-macro-doc, over view, the
+   buffer's full view, when there is one).  It answers before any backend,
+   which knows no lispython form."
   (if (and (== target.value "type") (alias-keyword-p tree target))
       (return (markdown-hover TYPE-ALIAS-DOC target)))
   (= doc-text (or (.get SPECIAL-FORM-DOCS target.value)
-                  (builtin-macro-doc tree target.value)))
+                  (builtin-macro-doc tree target.value :view view)))
   (if doc-text
       (return (markdown-hover doc-text target)))
   (return None))
+
+(def compiled-view [doc]
+  "The full view of snapshot doc's version, compiled under the macro
+   environment of now (ViewCache.cached-view), or None: none compiled
+   yet, or the compile failed.  Hover and signature help read it, never
+   compile: they answer locally before any backend."
+  (return (.cached-view view-cache doc.uri doc.version)))
 
 (def builtin-hover [target]
   "The builtin-info hover of Symbol target, or None: the answer when no
@@ -1319,7 +1340,7 @@
   (= target (node-at-position tree (- line 1) col))
   (if (not (isinstance target Symbol))
       (return None))
-  (= local (form-hover tree target))
+  (= local (form-hover tree target :view (compiled-view doc)))
   (if (is-not local None)
       (return local))
   (try
@@ -1343,8 +1364,9 @@
   ;; Every Python name goes to the backend, the buffer's own bindings too:
   ;; it knows scopes (a function's local never answers for a global of the
   ;; same name), and maps a buffer binding back to the same .lpy place.
-  ;; Once it answered, its answer is final, an empty one included: the
-  ;; local lookup matches by name alone and would name some other binding.
+  ;; Once it answered, its answer is final, an empty or null one included:
+  ;; the local lookup matches by name alone and would name some other
+  ;; binding (another function's local of a name undefined here).
   ;; The exception is an answer none of whose locations maps to the editor
   ;; (UNMAPPED, e.g. a name bound only by a macro's expansion): the name
   ;; exists, so the buffer's own definition of it answers, but never the
@@ -1480,17 +1502,21 @@
                   (lsp.Position :line pos.line :character pos.character)))
   (return (, (+ server-pos.line 1) server-pos.character)))
 
-(def form-signature-help [source func-name]
+(def form-signature-help [source func-name :view None]
   "lispython's own SignatureHelp for a form headed func-name (None: no head),
    or None: a special form's documented usage, else the docstring usage of
-   one of the buffer's built-in macros (builtin-macro-doc).  The buffer is
-   parsed only when func-name could name a built-in macro
+   one of the buffer's built-in macros (builtin-macro-doc, over view, the
+   buffer's full view, when there is one).  The buffer is parsed only when
+   there is no view and func-name could name a built-in macro
    (builtin-macro-name-p)."
   (if (is func-name None)
       (return None))
   (= doc-text (or (.get SPECIAL-FORM-DOCS func-name)
                   (and (builtin-macro-name-p func-name)
-                       (builtin-macro-doc (parse source :partial True) func-name))))
+                       (builtin-macro-doc (ife (is view None)
+                                               (parse source :partial True)
+                                               None)
+                                          func-name :view view))))
   (if (not doc-text)
       (return None))
   (= m (re.search "```\\n(.+?)\\n```" doc-text re.DOTALL))
@@ -1537,7 +1563,8 @@
   (if (not heads)
       (return None))
   (= head (sub heads -1))
-  (= local (form-signature-help doc.source head))
+  (= view (compiled-view doc))
+  (= local (form-signature-help doc.source head :view view))
   (if (is-not local None)
       (return local))
   (try
@@ -1551,7 +1578,7 @@
       (return result))
   (= name (innermost-named heads))
   (if (is-not name head)
-      (do (= local (form-signature-help doc.source name))
+      (do (= local (form-signature-help doc.source name :view view))
           (if (is-not local None)
               (return local))))
   (return (builtin-signature-help name))))
@@ -2036,33 +2063,37 @@
   (= form (sub path -1))
   (return (or (> (len form) 2) (and (== (len form) 2) (is leaf None)))))
 
-(async-def backend-request [client doc line col timeout method make-params]
+(async-def backend-request [client doc line col timeout method make-params
+                            :failed None]
   "(view, answer): the cursor view of doc at the 1-based line and
-   code-point col, and the backend's answer to request method there, or
-   None for either that is missing.  make-params builds the request's
-   params from the backend's TextDocumentIdentifier and the view; None
-   sends no request.  timeout (None: REQUEST-TIMEOUT, read at each call)
-   bounds the view and the request together, the backend's start
-   included."
+   code-point col, or None, and the backend's answer to request method
+   there, or failed (default None) when there is none: no view, no
+   request, or none answered (view-request).  A backend's null answer is
+   None, told apart from failed only when failed is not None.  make-params
+   builds the request's params from the backend's TextDocumentIdentifier
+   and the view; None sends no request.  timeout (None: REQUEST-TIMEOUT,
+   read at each call) bounds the view and the request together, the
+   backend's start included."
   (= loop (asyncio.get-running-loop))
   (= deadline (+ (.time loop) (ife (is timeout None) REQUEST-TIMEOUT timeout)))
   (= path (to-fs-path doc.uri))
   (if (is path None)
-      (return (, None None)))
+      (return (, None failed)))
   (= [name package import-root] (module-names path))
   (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
                                    name package import-root))
   (try
     (= view (await (asyncio.wait-for making (max 0 (- deadline (.time loop))))))
     (except [TimeoutError]
-      (return (, None None))))
+      (return (, None failed))))
   (if (is view None)
-      (return (, None None)))
+      (return (, None failed)))
   (= params (make-params (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
                          view))
   (if (is params None)
-      (return (, view None)))
-  (return (, view (await (view-request client doc view method params deadline)))))
+      (return (, view failed)))
+  (return (, view (await (view-request client doc view method params deadline
+                                       :failed failed)))))
 
 (async-def view-request [client doc view method params deadline :failed None]
   "The backend's answer to request method with params over view, doc's
@@ -2648,6 +2679,10 @@
 ;; view-request's failed value in definition-answer: the check gave no answer.
 (= UNCHECKED (object))
 
+;; backend-request's failed value in backend-locations: no answer, as against
+;; the backend's null answer (None), which found nothing.
+(= NO-ANSWER (object))
+
 (async-def definition-answer [client doc view offset answer deadline]
   "answer, the backend's definition answer at the word offset code points
    from view's cursor, checked: [] when it is for an enclosing node, None
@@ -2685,8 +2720,10 @@
    from make, location-request) on the word at the 1-based line and
    code-point col (Symbol target there), as editor Locations in answer
    order without repeats: a list (empty only when the backend found
-   nothing); UNMAPPED when no location the backend gave maps to the
-   editor; None when there is no backend, no word, no view or no answer.
+   nothing, a null answer included); UNMAPPED when no location the backend
+   gave maps to the editor; None when there is no backend, no word, no view
+   or no answer, and for a null answer over a fallback view (only the text
+   before the cursor compiled, so a binding after it was never seen).
    doc is a snapshot.  The view
    is made with the cursor at the word's end and the request asks at its
    generated start (cursor-word, as backend-hover).  A location in a compiled view
@@ -2706,9 +2743,15 @@
   (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
   (= [view answer] (await (backend-request client doc line end REQUEST-TIMEOUT method
                                            (location-request (name-key target.value)
-                                                             offset make whole))))
-  (if (is answer None)
+                                                             offset make whole)
+                                           :failed NO-ANSWER)))
+  (if (is answer NO-ANSWER)
       (return None))
+  ;; A null answer is the backend's: it found nothing (an undefined name
+  ;; has no definition, whatever another scope binds by that name), so it
+  ;; is final, as an empty list is.
+  (if (is answer None)
+      (return (ife view.fallback None [])))
   ;; Every location is placed now, before any await: a sync meanwhile (a
   ;; push-buffer, another request) replaces an origin in the client.  The
   ;; buffer's own maps by the view this answer was computed over.

@@ -950,10 +950,6 @@ def test_a_refresh_keeps_a_pending_changes_recompile_and_refresh(scripted):
     server.publish_diagnostics(editor, editor.uri, refresh=True)
     run = server.DIAGNOSTIC_RUNS[editor.uri]
     assert (run.recompile, run.refresh) == (False, True)
-    del server.DIAGNOSTIC_RUNS[editor.uri]
-    server.publish_diagnostics(editor, editor.uri, refresh=True, rerun=True)
-    server.publish_diagnostics(editor, editor.uri)  # a change clears a rerun
-    assert not server.DIAGNOSTIC_RUNS[editor.uri].rerun
 
 
 def refreshes(monkeypatch, runs, now, refreshed_epoch, compiled_epoch):
@@ -1033,6 +1029,31 @@ def test_a_rerun_below_the_target_is_not_rerun(scripted, monkeypatch):
     compiled.epoch = 3
     asyncio.run(server.finish_run(rerun, compiled))
     assert server.DIAGNOSTIC_RUNS[editor.uri] is rerun
+
+
+def test_a_rerun_that_missed_a_later_refresh_reruns(scripted, monkeypatch):
+    # Defect: a rerun's compile ran past a second drop, so it finishes
+    # under an epoch below the newer refresh target too, and, being a
+    # rerun, never runs again: the document keeps diagnostics from before
+    # the second drop until its next edit.
+    editor, _ = scripted
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
+    held_runs(editor)
+    monkeypatch.setattr(server, "_REFRESHED_EPOCH", 10)
+    monkeypatch.setattr(server, "_REFRESH_TARGET", 10)
+    _, rerun = finished(editor, 3)
+    assert rerun.rerun == 10
+    monkeypatch.setattr(server, "_REFRESH_TARGET", 20)  # a second refresh
+    rerun.compiled = True
+    compiled = server.compile_document(editor.uri, None, editor.document.source)
+    compiled.epoch = 3
+    asyncio.run(server.finish_run(rerun, compiled))
+    again = server.DIAGNOSTIC_RUNS[editor.uri]
+    assert again is not rerun and again.rerun == 20 and not again.compiled
+    # Still under the target, with no newer one: it settles.
+    again.compiled = True
+    asyncio.run(server.finish_run(again, compiled))
+    assert server.DIAGNOSTIC_RUNS[editor.uri] is again
 
 
 def test_a_parse_error_under_an_unreached_target_settles(scripted, monkeypatch):

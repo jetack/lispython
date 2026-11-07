@@ -344,6 +344,14 @@ def test_a_name_with_no_definition_has_none(navigate, marked):
     assert spans(navigate(server.definition, marked)) == []
 
 
+def test_a_name_undefined_in_its_scope_has_no_definition(navigate):
+    # Defect: the backend answers null for a name with no binding in its
+    # scope, the null is taken for no answer, and the local lookup, which
+    # matches by name alone, jumps to another function's local helper.
+    marked = "(def f [] (= helper 1) (return helper))\n(def g [] (return hel|per))\n"
+    assert spans(navigate(server.definition, marked)) == []
+
+
 @basedpyright_only
 @pytest.mark.parametrize(
     "marked",

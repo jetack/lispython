@@ -408,6 +408,55 @@ class TestBuiltinMacroHover:
         assert "(cond test" in self._hover(source, line, 2)
 
 
+class TestBuiltinMacroDocsOverTheView:
+    """With the buffer's full view compiled (the one a change's diagnostics
+    cache), hover and signature help show a built-in macro's docs only for
+    a name the compile bound to that very macro."""
+
+    @pytest.fixture
+    def compiled(self, monkeypatch):
+        """compiled(marked) -> (hover text or None, signature label or None)
+        at the | of marked, its version's view compiled first."""
+        monkeypatch.setattr(server, "view_cache", server.ViewCache())
+
+        def run(marked):
+            [before, after] = marked.split("|")
+            source = before + after
+            assert server.compile_document(URI, 1, source).view is not None
+            ls = ls_with(source)
+            ls.workspace.get_text_document(URI).version = 1
+            lines = before.split("\n")
+            params = position(len(lines) - 1, len(lines[-1]))
+            hover = asyncio.run(server.hover(ls, params))
+            help = asyncio.run(server.signature_help(ls, params))
+            return (
+                None if hover is None else hover.contents.value,
+                None if help is None else help.signatures[0].label,
+            )
+
+        return run
+
+    def test_a_defmacro_shadowing_a_built_in_shows_no_built_in_docs(self, compiled):
+        # Defect: the syntax scan sees no opt-out, so the buffer's own inc
+        # gets the built-in inc's docstring and usage.
+        hover, label = compiled('(defmacro inc [x] "my doc" (return x))\n(in|c 1)')
+        assert hover is None or "built-in macro" not in hover
+        assert label != "(inc value)"
+
+    def test_a_built_in_macro_keeps_its_docs(self, compiled):
+        # Defect: the view's macro table misses the built-in (it is not
+        # told by identity), so no built-in macro has docs once compiled.
+        hover, label = compiled("(in|c 1)")
+        assert "(inc value)" in hover
+        assert label == "(inc value)"
+
+    def test_an_opt_out_keeps_only_its_selection(self, compiled):
+        hover, _ = compiled("(require lispy.macros [when])\n(co|nd x 1 y 2)")
+        assert hover is None
+        hover, _ = compiled("(require lispy.macros [when])\n(wh|en x 1)")
+        assert "(when test" in hover
+
+
 def test_headless_forms_are_no_hover_or_completion_entry():
     # A headless kind ("method call", "slice") is no word a user types.
     assert not (set(HEADLESS_FORMS) & set(server.SPECIAL_FORM_DOCS))
