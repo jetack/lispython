@@ -204,6 +204,21 @@ this module only reads them."""
 (= BUILTIN-MACRO-NAMESPACE (getattr lispy.macros "__macro_namespace"))
 (= BUILTIN-MACROS (builtin-macro-docs BUILTIN-MACRO-NAMESPACE))
 
+;; The one home of which of lispython's own names are what, read by LSP and
+;; nREPL completion (each maps a tag to its own kind vocabulary).
+(= SPECIAL-FORM-TAG "special form")
+(= MACRO-TAG "macro")
+(= FUNCTION-TAG "function")
+
+;; lispython's own names as (names, tag) rows, the first row naming a name
+;; winning: the special forms, the built-in macros (BUILTIN-MACROS, never a
+;; hand list), and `gensym`, a function that exists only inside defmacro
+;; bodies.
+(= OWN-NAME-TAGS
+   [(, SPECIAL-FORMS SPECIAL-FORM-TAG)
+    (, BUILTIN-MACROS MACRO-TAG)
+    (, ["gensym"] FUNCTION-TAG)])
+
 (def all-form-docs [special type-alias macros]
   "Every documented form, for the docs site: special forms, `type`, then the
    built-in macros. Raises if a macro shares a name with a special form, since

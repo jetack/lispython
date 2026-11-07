@@ -34,6 +34,7 @@
 (from lispy.core.unparse [unparse])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
                          format-compile-error nesting-error])
+(from lispy.form-docs [FUNCTION-TAG MACRO-TAG OWN-NAME-TAGS SPECIAL-FORM-TAG])
 
 (def report-compile-error [err :filename None :source None]
   "Print a LispyCompileError compiler-style (path:line:col, source, caret) to stderr."
@@ -705,37 +706,23 @@
     (except [Exception]
       (return None))))
 
-;; LisPython syntax offered by nREPL completion and reported as "keyword"
-;; (unless a macro of the same name is loaded).  _SPECIAL-FORMS is a
-;; different set: the forms the REPL indents as bodies.
-(= _COMPLETION-SYNTAX
-   [;; Definitions
-    "def" "defn" "defmacro" "async-def"
-    ;; Looping
-    "for" "async-for" "while"
-    ;; Flow
-    "return" "if" "ife" "when" "unless"
-    "cond" "conde" "else"
-    "break" "continue" "pass"
-    "match" "case" "do" "comment"
-    ;; Threading
-    "->" "->>" "as->"
-    ;; Functional
-    "fn" "lambda" "await"
-    "yield" "yield-from"
-    ;; Context
-    "with" "async-with" "deco"
-    ;; Error handling
-    "try" "except" "except*" "finally" "raise"
-    ;; Data
-    "del" "sub"
-    ;; Import / macro
-    "import" "from" "require"
-    "global" "nonlocal" "assert"
-    ;; Class
-    "class"
-    ;; Misc
-    "gensym" "pprint"])
+;; The nREPL completion kind of each of lispython's own tags (OWN-NAME-TAGS):
+;; a special form is "keyword", since the nREPL kinds have no special form.
+(= _TAG-KINDS
+   {SPECIAL-FORM-TAG "keyword"
+    MACRO-TAG "macro"
+    FUNCTION-TAG "function"})
+
+(def _own-name-kinds []
+  "{name: nREPL kind} of lispython's own names, the first row naming a name
+   winning."
+  (= kinds {})
+  (for [names tag] in OWN-NAME-TAGS
+    (for name in names
+      (.setdefault kinds name (sub _TAG-KINDS tag))))
+  (return kinds))
+
+(= _OWN-NAME-KINDS (_own-name-kinds))
 
 (def _completion-kind [obj]
   "The nREPL completion kind of a value: class, function or variable."
@@ -769,75 +756,75 @@
   (cond (isinstance raw _FUNCTION-DESCRIPTORS) (return "function")
         True (return (_completion-kind raw))))
 
+(def _scope-macro-names [scope]
+  "The keys of scope's macro table, as written: a macro is looked up by its
+   head's text, and (require mod) registers mod.name."
+  (with [(nrepl-scope-lock scope)]
+    (return (list (.get scope "__macro_namespace" {})))))
+
 (def nrepl-complete [prefix scope]
-  "Return completions matching prefix, including dot-completion."
-  (= has-dot (in "." prefix))
-  (if has-dot
+  "Return completions matching prefix, including dot-completion.  Every key
+   of the scope's macro table (defmacro, every require form) is a macro, so a
+   qualified macro (mod.name) is offered under a dotted prefix too."
+  (= macro-matches (set (filter (fn [k] (.startswith k prefix))
+                                (_scope-macro-names scope))))
+  (if (in "." prefix)
       (do
         ;; Dot completion: resolve object, list its attributes
         (= parts (.split prefix "."))
         (= obj-part (.join "." (sub parts [: -1])))
         (= attr-prefix (sub parts -1))
         (= obj (_resolve-obj obj-part scope))
-        (if (is obj None)
-            (return {"op" "complete-result" "completions" [] "kinds" {}}))
-        (= py-attr (.replace attr-prefix "-" "_"))
-        (= matches [])
         (= kinds {})
-        (for attr in (dir obj)
-          (if (.startswith attr py-attr)
-              (do (= full-name (+ obj-part "." (_unmangle attr)))
-                  (matches.append full-name)
-                  (= (sub kinds full-name) (_attribute-kind obj attr)))))
+        (if (is-not obj None)
+            (do (= py-attr (.replace attr-prefix "-" "_"))
+                (for attr in (dir obj)
+                  (if (.startswith attr py-attr)
+                      (= (sub kinds (+ obj-part "." (_unmangle attr)))
+                         (_attribute-kind obj attr))))))
+        (for name in macro-matches
+          (= (sub kinds name) "macro"))
         (return {"op" "complete-result"
-                 "completions" (sorted matches)
+                 "completions" (sorted kinds)
                  "kinds" kinds}))
       (do
-        ;; Prefix completion from scope, builtins, macros, keywords
+        ;; Prefix completion from macros, scope, builtins, keywords and
+        ;; lispython's own names
         (with [(nrepl-scope-lock scope)]
-          (= names (list scope))
-          (= macros (dict (.get scope "__macro_namespace" {}))))
-        (= matches [])
+          (= names (list scope)))
+        (= matches (set macro-matches))
         (= py-prefix (_mangle prefix))
         (for k in names
           (if (or (.startswith k prefix) (.startswith k py-prefix))
-              (matches.append (_unmangle k))))
+              (matches.add (_unmangle k))))
         (= builtins (ife (isinstance __builtins__ dict)
                          __builtins__
                          (vars __builtins__)))
         (for k in builtins
           (if (or (.startswith k prefix) (.startswith k py-prefix))
-              (matches.append k)))
-        (for k in macros
+              (matches.add k)))
+        (for k in [*keyword.kwlist *_OWN-NAME-KINDS]
           (if (.startswith k prefix)
-              (matches.append k)))
-        (for k in keyword.kwlist
-          (if (.startswith k prefix)
-              (matches.append k)))
-        ;; LisPython special forms and syntax
-        (for k in _COMPLETION-SYNTAX
-          (if (.startswith k prefix)
-              (matches.append k)))
+              (matches.add k)))
         ;; Build kinds dict
         (= kinds {})
-        (= builtins-dict (ife (isinstance __builtins__ dict)
-                              __builtins__
-                              (vars __builtins__)))
-        (for name in (set matches)
+        (for name in matches
           (= mangled (_mangle name))
-          (cond (in name macros)
+          (cond (in name macro-matches)
                 (= (sub kinds name) "macro")
-                (or (in name _COMPLETION-SYNTAX) (in name keyword.kwlist))
+                (in name _OWN-NAME-KINDS)
+                (= (sub kinds name) (sub _OWN-NAME-KINDS name))
+                (in name keyword.kwlist)
                 (= (sub kinds name) "keyword")
                 ;; A scope binding shadows the builtin of the same name.
                 (in mangled scope)
                 (= (sub kinds name) (_completion-kind (sub scope mangled)))
-                (in mangled builtins-dict)
-                (= (sub kinds name) (_completion-kind (sub builtins-dict mangled)))
+                (in mangled builtins)
+                (= (sub kinds name) (_completion-kind (sub builtins mangled)))
                 True
                 (= (sub kinds name) "variable")))
         (return {"op" "complete-result"
-                 "completions" (sorted (set matches))
+                 "completions" (sorted matches)
                  "kinds" kinds}))))
 
 (def nrepl-docs [symbol scope]
