@@ -303,6 +303,7 @@ class LispythonLexer(RegexLexer):
     flags = 0
 
     tokens = _tokens()
+    # Per-stream state: the lexer is not reentrant across interleaved streams.
     at_head = False
 
     def get_tokens_unprocessed(self, text, stack=("root",)):
