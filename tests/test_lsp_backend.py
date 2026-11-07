@@ -1269,6 +1269,16 @@ def test_real_pyrefly_refusal_keeps_the_views_settings(project, tmp_path, caplog
     assert written["python-interpreter-path"] == sys.executable
 
 
+@needs_pyrefly
+def test_real_pyrefly_config_problem_keeps_a_description_holding_a_bar():
+    # Defect: every output line holding a | is taken for the text excerpt,
+    # so a description quoting a value with a | in it (unknown variant
+    # `a|b`) is dropped and the generic answer given instead.
+    binary = backend.backend_argv("pyrefly")[0]
+    problem = backend.pyrefly_config_problem(binary, 'untyped-def-behavior = "a|b"\n')
+    assert "unknown variant `a|b`" in problem
+
+
 # pyrefly 1.4.1's initialize result, captured from `pyrefly lsp` answering an
 # initialize with empty client capabilities.
 PYREFLY_INITIALIZE_RESULT = json.loads(

@@ -18,6 +18,7 @@
 (import os)
 (import os.path as osp)
 (import pathlib)
+(import re)
 (import shutil)
 (import subprocess)
 (import sysconfig)
@@ -119,6 +120,10 @@
 ;; takes about 0.1 s, its interpreter query included).
 (= CONFIG-CHECK-TIMEOUT 20)
 
+;; A line of the text excerpt in pyrefly's TOML parse error: an optional
+;; line number, then a | gutter ("  |", "1 | key = 1", "  | ^").
+(= _EXCERPT-LINE (re.compile "^\\s*\\d*\\s*\\|"))
+
 (def pyrefly-config-problem [binary text]
   "Why the pyrefly at binary refuses pyrefly.toml text, or None when it
    reads it or cannot say (not runnable, timed out).  dump-config reads the
@@ -145,9 +150,10 @@
   (if (not (in "failed to parse" output))
       (return None))
   ;; Left out: the WARN and ERROR lines (the file and the position) and the
-  ;; excerpt of the text, whose lines hold a |.
+  ;; excerpt of the text, by its shape (_EXCERPT-LINE): the description
+  ;; itself may hold a | (unknown variant `a|b`).
   (= lines [(sub (.strip line) [: None 200]) for line in (.splitlines output)
-            if (and (.strip line) (not-in "|" line)
+            if (and (.strip line) (not (.match _EXCERPT-LINE line))
                     (not (.startswith (.strip line) (, "WARN" "ERROR" "Fatal configuration error"))))])
   (return (or (.join " " [(sub (.split line ", expected one of" 1) 0) for line in lines])
               "pyrefly cannot read it")))
