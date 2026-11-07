@@ -13,11 +13,14 @@ bypass an overridden ``__setitem__``/``__getitem__`` and would store or miss
 a key by its raw spelling.
 
 The table a module's code registers into at runtime is a MacroTable too
-(defmacro and require emit ``(.setdefault (globals) "__macro_namespace"
-(MacroTable))``, core_meta_functions.lpy), not only the compile-time one:
-with a plain dict, defining my_mac and then my-mac would leave two keys, and
-a module requiring it, which copies the entries in order, could end with
-either body depending on which spelling it is called by.
+(defmacro and require register through scope_table, core_meta_functions.lpy),
+not only the compile-time one: with a plain dict, defining my_mac and then
+my-mac would leave two keys, and a module requiring it could end with either
+body depending on which spelling it is called by. Every scope lispython
+builds starts with a MacroTable; scope_table converts a plain dict it finds
+(a scope a caller built), so the rule holds in any scope. A plain dict is
+left only in foreign tables (a hand-written .py macro module's), which are
+read, never written, through find_entry.
 
 This module imports only name_key, so the generated code that imports it
 costs nothing beyond what ``import lispy`` already loaded.
@@ -55,18 +58,18 @@ class MacroTable(MutableMapping):
     replaced is seeded again, and no side table outlives a scope.
 
     prelude: the built-in macros the scope was seeded with, what every later
-    unit start copies from and what tells a built-in from a user macro.
+    unit start copies from and what tells a built-in from a user macro; None
+    until seed_prelude (core/macro.py) seeds the table, which it does once.
     seeded: the keys a unit start (seed_prelude, MODULE, TOP) put there from
     the prelude and nothing has registered since: the entries a TOP start
     may take back. A require never adds to it. Its keys are spellings; look
-    them up in the table, which compares them by name. Both are read
-    through find_macro, since a caller may give a plain dict as prelude."""
+    them up in the table, which compares them by name."""
 
     __slots__ = ("_entries", "prelude", "seeded")
 
     def __init__(self, table=(), prelude=None):
         self._entries = {}
-        self.prelude = {} if prelude is None else prelude
+        self.prelude = prelude
         self.seeded = set()
         self.update(list(table.items()) if isinstance(table, Mapping) else table)
 
@@ -118,18 +121,28 @@ class MacroTable(MutableMapping):
         return f"MacroTable({dict(self.items())!r})"
 
 
+def scope_table(scope):
+    """scope's macro table for registering into, made a MacroTable first: a
+    missing one is created, a plain dict replaced by a MacroTable of its
+    entries (unseeded, so a later compile_unit still seeds it). The one way
+    generated defmacro and require code reaches the table."""
+    table = scope.get("__macro_namespace")
+    if not isinstance(table, MacroTable):
+        table = scope["__macro_namespace"] = MacroTable(table or ())
+    return table
+
+
 def find_entry(table, name):
     """``(spelling, macro)`` of the macro name stands for in table, or None.
-    table may be any mapping: a plain dict (a hand-written .py macro module's
-    ``__macro_namespace``, a scope a caller built) is read by exact spelling
-    first, then by name_key, the last matching key winning."""
+    table may be None (no macros) or any mapping: a plain dict (a
+    hand-written .py macro module's ``__macro_namespace``) is read by
+    name_key with the last matching key in insertion order winning, which
+    is the entry copying it into a MacroTable (require's qualified and *
+    forms) would keep."""
     if not isinstance(name, str) or table is None:
         return None
     if isinstance(table, MacroTable):
         return table.entry(name)
-    macro = table.get(name)
-    if macro is not None:
-        return (name, macro)
     key = _key(name)
     found = None
     for spelling, macro in list(table.items()):

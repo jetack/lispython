@@ -3,6 +3,7 @@
 call, a require's selection and the nREPL's docs, and a redefinition under
 either spelling replaces the one entry."""
 
+import ast
 import importlib
 import sys
 
@@ -10,7 +11,9 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy import tools
-from lispy.core.macro import MacroTable
+from lispy.core.macro import MacroTable, compile_unit, macroexpand
+from lispy.core.macro import macroexpand_then_compile as expand_compile
+from lispy.core.parser import parse
 
 
 def translate(src):
@@ -63,9 +66,47 @@ def test_a_redefinition_under_the_other_spelling_replaces_the_macro(import_dir):
         assert translate(f"(require nm-redef {selection})\n(my_mac)") == "2"
 
 
-def test_nrepl_docs_and_annotate_find_a_macro_by_either_spelling():
+def test_a_hand_written_plain_dict_table_agrees_on_the_last_entry(import_dir):
+    # A .py macro module's table is a plain dict, which may hold both
+    # spellings; every require form takes the last one in insertion order,
+    # the one copying the table keeps.
+    (import_dir / "nm_plain.py").write_text(
+        "def old():\n    return 1\n\n\ndef new():\n    return 2\n\n\n"
+        "__macro_namespace = {'my_mac': old, 'my-mac': new}\n"
+    )
+    for require, call in [
+        ["(require nm-plain [my_mac])", "(my_mac)"],
+        ["(require nm-plain [my-mac])", "(my_mac)"],
+        ["(require nm-plain *)", "(my_mac)"],
+        ["(require nm-plain)", "(nm_plain.my_mac)"],
+    ]:
+        assert translate(f"{require}\n{call}") == "2", require
+
+
+def test_a_redefinition_in_a_caller_built_plain_dict_scope_replaces_the_macro():
+    # The generated registration makes the scope's table a MacroTable, so
+    # the rule holds in a scope whose table started as a plain dict.
+    scope = {"__macro_namespace": {}}
+    src = "(defmacro my_mac [] (return 1))\n(defmacro my-mac [] (return 2))"
+    expand_compile(parse(src), scope)
+    assert len(scope["__macro_namespace"]) == 1
+    assert ast.unparse(expand_compile(parse("(my_mac)"), scope)[0]) == "2"
+
+
+def test_a_lookup_before_the_first_unit_leaves_the_scope_to_be_seeded():
+    # Expanding in a scope with no table must not create one that passes
+    # for seeded, or the next compile_unit gets no built-in macros.
+    scope = {}
+    macroexpand(parse("(f 1)")[0], scope)
+    body = compile_unit(parse("(when x 1)"), scope)
+    assert ast.unparse(ast.Module(body, [])) == "if x:\n    1"
+
+
+@pytest.mark.parametrize("defined", ["my-mac", "my_mac"])
+def test_nrepl_docs_and_annotate_find_a_macro_by_either_spelling(defined):
+    # annotate names a macro a macro, never the function it is.
     scope = tools.main_scope()
-    reply = tools.nrepl_eval('(defmacro my-mac [x] "Doc it." (return x))', scope)
+    reply = tools.nrepl_eval(f'(defmacro {defined} [x] "Doc it." (return x))', scope)
     assert reply["error"] is None
     for spelling in ["my-mac", "my_mac"]:
         assert tools.nrepl_docs(spelling, scope)["docs"] == "my-mac [x] - Doc it."

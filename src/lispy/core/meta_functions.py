@@ -3,6 +3,12 @@ from lispy.core.compiler.literal import identifier_p
 from lispy.core.nodes import *
 
 
+def macro_table():
+    """The generated code's form for the module lispy.core.macro_table: fresh
+    nodes per use, since compiling may change a node in place."""
+    return Paren(Symbol("importlib.import-module"), String('"lispy.core.macro_table"'))
+
+
 def defmacro_transform(sexp):
     [op, macroname, *body] = sexp.list
     macroname = str(macroname)
@@ -13,27 +19,18 @@ def defmacro_transform(sexp):
         Symbol("do"),
         Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
         Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
-        Paren(
-            Symbol("from"),
-            Symbol("lispy.core.macro-table"),
-            Bracket(Symbol("MacroTable"), Symbol("as"), Symbol("___MacroTable")),
-        ),
+        Paren(Symbol("import"), Symbol("importlib")),
         Paren(Symbol("def"), newname, *body),
         Paren(
             Symbol("="),
             Paren(
                 Symbol("sub"),
-                Paren(
-                    Symbol(".setdefault"),
-                    Paren(Symbol("globals")),
-                    String('"__macro_namespace"'),
-                    Paren(Symbol("___MacroTable")),
-                ),
+                Paren(Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))),
                 macroname,
             ),
             newname,
         ),
-        Paren(Symbol("del"), newname, Symbol("___MacroTable")),
+        Paren(Symbol("del"), newname),
     )
 
 
@@ -74,18 +71,6 @@ def require_transform(sexp):
         Symbol("do"),
         Paren(Symbol("import"), Symbol("importlib")),
         Paren(
-            Symbol("from"),
-            Symbol("lispy.core.macro-table"),
-            Bracket(
-                Symbol("MacroTable"),
-                Symbol("as"),
-                Symbol("___MacroTable"),
-                Symbol("required-macro"),
-                Symbol("as"),
-                Symbol("___required-macro"),
-            ),
-        ),
-        Paren(
             Symbol("="),
             Symbol("___imported-macros"),
             Paren(
@@ -104,10 +89,7 @@ def require_transform(sexp):
                 Paren(
                     Symbol("sub"),
                     Paren(
-                        Symbol(".setdefault"),
-                        Paren(Symbol("globals")),
-                        String('"__macro_namespace"'),
-                        Paren(Symbol("___MacroTable")),
+                        Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))
                     ),
                     Paren(Symbol("+"), str(module_name), String('"."'), Symbol("___k")),
                 ),
@@ -117,12 +99,7 @@ def require_transform(sexp):
         if kind == REQUIRE_QUALIFIED
         else Paren(
             Symbol(".update"),
-            Paren(
-                Symbol(".setdefault"),
-                Paren(Symbol("globals")),
-                String('"__macro_namespace"'),
-                Paren(Symbol("___MacroTable")),
-            ),
+            Paren(Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))),
             Paren(
                 Symbol("list"), Paren(Symbol(".items"), Symbol("___imported-macros"))
             ),
@@ -138,26 +115,19 @@ def require_transform(sexp):
                 Paren(
                     Symbol("sub"),
                     Paren(
-                        Symbol(".setdefault"),
-                        Paren(Symbol("globals")),
-                        String('"__macro_namespace"'),
-                        Paren(Symbol("___MacroTable")),
+                        Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))
                     ),
                     Symbol("___mac-name"),
                 ),
                 Paren(
-                    Symbol("___required-macro"),
+                    Symbol(".required-macro"),
+                    macro_table(),
                     Symbol("___imported-macros"),
                     Symbol("___mac-name"),
                 ),
             ),
         ),
-        Paren(
-            Symbol("del"),
-            Symbol("___imported-macros"),
-            Symbol("___MacroTable"),
-            Symbol("___required-macro"),
-        ),
+        Paren(Symbol("del"), Symbol("___imported-macros")),
     )
 
 

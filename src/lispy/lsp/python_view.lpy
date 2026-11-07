@@ -40,6 +40,7 @@
 (from lispy.core.nodes [Symbol])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.macro [compile-unit])
+(from lispy.core.macro-table [MacroTable])
 (from lispy.core.compiler.literal [identifier-p name-key])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
@@ -679,7 +680,7 @@
   (= scope {"__builtins__" builtins
             "__name__" name
             "__package__" package
-            "__macro_namespace" {}})
+            "__macro_namespace" (MacroTable)})
   (try
     (with [(compile-errors filename source)]
       (= forms (parse source)))

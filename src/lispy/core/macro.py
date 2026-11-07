@@ -134,15 +134,6 @@ def macroexpand_1(sexp, scope):
     return macroexpand_1_and_check(sexp, scope)[0]
 
 
-def _scope_macros(scope):
-    """scope's macro table, a new MacroTable when it has none. A scope a
-    caller built may hold a plain dict, which is read through find_macro."""
-    table = scope.get("__macro_namespace")
-    if table is None:
-        table = scope["__macro_namespace"] = MacroTable()
-    return table
-
-
 def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     """One node's step of macroexpand_1_and_check, as a generator.
 
@@ -174,7 +165,9 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
         elif name == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif (
-            (macro := find_macro(_scope_macros(scope), name)) is not None
+            # A lookup never creates the table: a scope without one has no
+            # macros, and one created here would pass for seeded.
+            (macro := find_macro(scope.get("__macro_namespace"), name)) is not None
             and not in_quasi
             and isinstance(sexp, Paren)
         ):
@@ -238,7 +231,7 @@ def active_macro_kind(scope):
         if found is None:
             return None
         key, macro = found
-        prelude = namespace.prelude if isinstance(namespace, MacroTable) else {}
+        prelude = namespace.prelude if isinstance(namespace, MacroTable) else None
         if find_macro(prelude, key) is macro:
             return ("built-in", key)
         return ("macro", key)
@@ -287,7 +280,8 @@ def seed_prelude(scope):
     the table already defines keeps its own macro. compile_unit seeds every
     scope it compiles in; how a unit start then reshapes the table is
     UnitStart's."""
-    if isinstance(scope.get("__macro_namespace"), MacroTable):
+    namespace = scope.get("__macro_namespace")
+    if isinstance(namespace, MacroTable) and namespace.prelude is not None:
         return
     if _prelude_source_p(scope):
         prelude = MacroTable()
@@ -295,11 +289,13 @@ def seed_prelude(scope):
         import lispy.macros
 
         prelude = MacroTable(getattr(lispy.macros, "__macro_namespace"))
-    # A plain dict cannot carry the record, so it is copied: a macro that
-    # running code registers in the old dict during this swap is lost, which
-    # only a user rebinding the table of a live scope can reach.
-    namespace = MacroTable(scope.get("__macro_namespace") or (), prelude)
-    scope["__macro_namespace"] = namespace
+    if not isinstance(namespace, MacroTable):
+        # A plain dict cannot carry the record, so it is copied: a macro that
+        # running code registers in the old dict during this swap is lost,
+        # which only a user rebinding the table of a live scope can reach.
+        namespace = MacroTable(namespace or ())
+        scope["__macro_namespace"] = namespace
+    namespace.prelude = prelude
     for name, macro in prelude.items():
         if name not in namespace:
             namespace[name] = macro
