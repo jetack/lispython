@@ -152,9 +152,9 @@ this module only reads them."""
    "defmacro"  (FormDoc MACRO-SYSTEM (, "(defmacro name [args] body...)") "Define a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression.")
    "require"   (FormDoc MACRO-SYSTEM (, "(require module)" "(require module *)" "(require module [names...])") "Import macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none.")})
 
-;; Reader syntax documented under a name, never typed as a head (`f"..."` is
-;; the reader's internal f-string head; the quote characters are prefixes), so
-;; hover and the docs show it but completion never offers it.
+;; Documented names not meant to be typed as heads (`f"..."` is the reader's
+;; spelling of the f-string head; the quote characters are prefixes): hover and
+;; the docs show them, completion never offers them.
 (= READER-SYNTAX-DOCS
   {"f-string"  (FormDoc EXPRESSION (, "f\"text {expr} more\"") "Formatted string literal (f-string).")
    "'"  (FormDoc MACRO-SYSTEM (tuple) "Quote — prevent evaluation; return the form as data.")
