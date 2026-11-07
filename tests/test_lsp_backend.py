@@ -1302,6 +1302,44 @@ def running_binary(pid):
 
 
 @needs_pyrefly
+def test_real_pyrefly_sees_shadows_from_a_pure_py_package(project, tmp_path):
+    # Defect: a pure-.py package beside the shadowed packages is not in the
+    # view, so pyrefly analyses the real file, which cannot see the shadows:
+    # a name it imports from a .lpy module is Unknown.
+    for name, text in [
+        ("lpkg/__init__.lpy", ""),
+        ("lpkg/core.lpy", "(def ffff [a] (return (+ a 1)))\n"),
+        ("purepkg/__init__.py", ""),
+        ("purepkg/helper.py", "from lpkg.core import ffff\nX = ffff\n"),
+    ]:
+        (project / name).parent.mkdir(parents=True, exist_ok=True)
+        (project / name).write_text(text)
+    source = "(from purepkg.helper [X])\n(= z X)\n"
+    (project / "main.lpy").write_text(source)
+    client = backend.BackendClient(
+        view_root(project, tmp_path), backend.backend_argv("pyrefly"), name="pyrefly"
+    )
+    uri = (project / "main.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    async def scenario():
+        try:
+            line, character = locate(view.text, "z =")
+            answer = await client.request(
+                lsp.TEXT_DOCUMENT_HOVER,
+                hover_params(client.backend_uri(uri), line, character),
+                uri=uri,
+                text=view.text,
+            )
+            return None if answer is None else answer.contents.value
+        finally:
+            await client.shutdown()
+
+    hover = run_bounded(scenario(), timeout=60)
+    assert hover is not None and "ffff" in hover
+
+
+@needs_pyrefly
 @pytestmark_lsp
 def test_real_pyrefly_exits_when_the_lsp_is_killed(tmp_path, project):
     # Defect: pyrefly outlives a killed LSP.  pyrefly ignores the

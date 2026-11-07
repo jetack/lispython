@@ -1094,16 +1094,29 @@
     (= self.sources {})
     (= self.import-roots [])))
 
+(def _regular-package-p [directory]
+  "Whether directory is a regular package (it holds an __init__.py or
+   __init__.pyi file)."
+  (return (any ((osp.isfile (osp.join directory name))
+                for name in (, "__init__.py" "__init__.pyi")))))
+
 (def _mirror-py-files [project-root root directory shadows links]
-  "Link the real .py files of directory, the import root of a top-level
-   module with a shadow, into the view beside that shadow; a .py that a
-   shadow replaces (its .lpy wins on import) is left out.  The directory is
-   no package, so a module missing from it is still found on the real
-   path.  Each link made or kept is added to links; a failure is logged and
+  "Link the modules of directory, an import root with a shadow, into the
+   view beside its shadows: each real .py and .pyi file as a file link, each
+   regular package (_regular-package-p) as one directory link, so the
+   backend analyses them as view modules, under the view's config, and they
+   see the shadows.  Left out: a path the view already has as a real
+   directory (a package overlaid around a shadow, _overlay-package, which
+   runs first), a .py that a shadow replaces (its .lpy wins on import),
+   _pruned-p directories and the view root's own files (_ROOT-FILES).  A
+   namespace package (no __init__) or an extension module is not linked:
+   the directory is no package, so it still resolves on the real path.
+   Each link made or kept is added to links; a failure is logged and
    skipped."
   (= view-dir (_view-dir project-root root directory))
   (if (is view-dir None)
       (return))
+  (= reserved (frozenset [(osp.join root name) for name in _ROOT-FILES]))
   (try
     (= entries (sorted (os.listdir directory)))
     (except [OSError]
@@ -1111,9 +1124,14 @@
   (for name in entries
     (= target (osp.join directory name))
     (= path (osp.join view-dir name))
-    (if (or (not (.endswith name ".py")) (in path shadows) (in path links)
-            (not (osp.isfile target)))
+    (if (or (in path shadows) (in path links) (in path reserved))
         (continue))
+    (if (osp.isdir target)
+        (if (or (_pruned-p directory name) (not (_regular-package-p target))
+                (and (osp.isdir path) (not (osp.islink path))))
+            (continue))
+        (if (not (and (.endswith name (, ".py" ".pyi")) (osp.isfile target)))
+            (continue)))
     (try
       (_link-if-changed root path target)
       (.add links path)
@@ -1227,8 +1245,10 @@
    written only when its text changed; a file that is gone or does not
    compile has none, and one that cannot be read keeps the shadow it has.
    Every package holding a shadow is overlaid whole beside the shadows
-   (_overlay-package), and the real .py files beside a top-level module's
-   shadow are linked in (_mirror-py-files).  One file that cannot be read
+   (_overlay-package), and the other modules of every import root with a
+   shadow are linked in (_mirror-py-files): every module an import root
+   offers is in the view but namespace packages and extension modules, so
+   the backend analyses those under the view's config.  One file that cannot be read
    or written is logged and left out of the manifest, so the next sweep
    tries it again; the rest go on.  Then _sweep-orphans clears what no
    current source accounts for.  Each source compiles with its import root
@@ -1304,9 +1324,11 @@
   (for lpy-path in (.values shadows)
     (= import-root (sub (sub names-of lpy-path) 2))
     (.add import-roots import-root)
+    ;; module-dirs is every import root with a shadow, its modules linked
+    ;; in (_mirror-py-files), not only one holding a top-level shadow.
+    (.add module-dirs import-root)
     (= directory (osp.dirname (osp.abspath lpy-path)))
-    (if (== directory import-root)
-        (.add module-dirs directory)
+    (if (!= directory import-root)
         (.add packages (_top-package project-root import-root directory))))
   (= manifest.import-roots (sorted import-roots))
   (= source-dirs (_source-dirs project-root sources))
@@ -1429,9 +1451,9 @@
    a src layout; one above the project, which lies inside a package, is
    left out), so import pkg finds the shadows before any real directory of
    uncompiled .lpy; then those import roots themselves, so what the view
-   lacks of one (a pure-.py package, a top-level .py or .pyi, an extension
-   module beside the shadowed packages) still resolves; then the project
-   and its .venv site-packages.  The one list of every backend's config."
+   lacks of one still resolves: only its namespace packages and extension
+   modules, since write-shadows links every other module of it into the
+   view; then the project and its .venv site-packages.  The one list of every backend's config."
   (= roots [])
   (for import-root in (or import-roots [])
     (= import-root (osp.abspath import-root))
@@ -1658,9 +1680,11 @@
   (= [source project reason unreadable] (_project-pyrefly-config project-root))
   (= paths {;; pyrefly looks in search-path before the directory of its
             ;; config (the view root), where pyright looks in its execution
-            ;; root first: the root leads, so a module the view links (a
-            ;; project .py) resolves to the link and is analysed under this
-            ;; config, never as the real file under the project's own.
+            ;; root first: the root leads, so a module the view links (every
+            ;; module of an import root with a shadow but its namespace
+            ;; packages and extension modules) resolves to the link and is
+            ;; analysed under this config, never as the real file under the
+            ;; project's own.
             "search-path" (+ [root] (_search-paths project-root root import-roots))
             "python-interpreter-path"
             (ife (is python None) (getattr view-root "python" sys.executable) python)})

@@ -519,6 +519,36 @@ class TestShadows:
         assert not init.is_symlink() and init.read_text() == "i = 1"
         assert (pkg / "__init__.py").read_text() == "from .helper import h"
 
+    def test_an_import_roots_modules_are_linked_beside_its_packages(self, tmp_path):
+        # Defect: an import root holding only shadowed packages has none of
+        # its other modules in the view, so a pure-.py package beside them
+        # resolves to the real directory, where pyrefly analyses it under
+        # the project's own config (or none) and it cannot see the shadows.
+        # A namespace package or a hidden directory is never linked.
+        project, root = tmp_path / "project", tmp_path / "view"
+        src = project / "src"
+        for name, text in [
+            ("lpkg/__init__.lpy", ""),
+            ("lpkg/core.lpy", "(def ffff [a] (return (+ a 1)))"),
+            ("purepkg/__init__.py", ""),
+            ("purepkg/helper.py", "from lpkg.core import ffff\nX = ffff\n"),
+            ("top.py", "t = 1"),
+            ("top.pyi", "t: int"),
+            ("nsdir/x.py", "x = 1"),
+            (".hidden/__init__.py", ""),
+        ]:
+            self.write(src / name, text)
+        view_src = root / "src"
+        for _ in range(2):  # the second sweep keeps every link
+            pv.write_shadows(str(project), str(root))
+            for name in ["purepkg", "top.py", "top.pyi"]:
+                assert os.readlink(view_src / name) == str(src / name)
+            assert not os.path.lexists(view_src / "nsdir")
+            assert not os.path.lexists(view_src / ".hidden")
+            lpkg = view_src / "lpkg"
+            assert lpkg.is_dir() and not lpkg.is_symlink()
+            assert (lpkg / "core.py").is_file() and not (lpkg / "core.py").is_symlink()
+
     def test_sweep_follows_no_directory_link_and_skips_environments(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
         self.write(project / "top.lpy", "(= a 1)")
@@ -631,10 +661,11 @@ class TestShadows:
 
     @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
     def test_src_layout_modules_outside_the_view_resolve(self, tmp_path):
-        # Only pkg is in the view: a pure-.py package, a top-level .py and a
-        # stub-only module beside it resolve from the real src, while pkg.m2,
-        # which exists only as .lpy, resolves from the view's shadow, and so
-        # does pkg.both, whose stale .py beside it in the real src lacks new.
+        # pkg is overlaid in the view and a pure-.py package, a top-level .py
+        # and a stub-only module beside it are linked in, so they resolve,
+        # while pkg.m2, which exists only as .lpy, resolves from the view's
+        # shadow, and so does pkg.both, whose stale .py beside it in the real
+        # src lacks new.
         project, root = tmp_path / "project", tmp_path / "view"
         src = project / "src"
         imports = (
