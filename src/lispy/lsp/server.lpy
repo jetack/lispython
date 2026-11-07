@@ -1343,8 +1343,9 @@
   ;; Every Python name goes to the backend, the buffer's own bindings too:
   ;; it knows scopes (a function's local never answers for a global of the
   ;; same name), and maps a buffer binding back to the same .lpy place.
-  ;; Once it answered, its answer is final, an empty one included: the
-  ;; local lookup matches by name alone and would name some other binding.
+  ;; Once it answered, its answer is final, an empty or null one included:
+  ;; the local lookup matches by name alone and would name some other
+  ;; binding (another function's local of a name undefined here).
   ;; The exception is an answer none of whose locations maps to the editor
   ;; (UNMAPPED, e.g. a name bound only by a macro's expansion): the name
   ;; exists, so the buffer's own definition of it answers, but never the
@@ -2036,33 +2037,37 @@
   (= form (sub path -1))
   (return (or (> (len form) 2) (and (== (len form) 2) (is leaf None)))))
 
-(async-def backend-request [client doc line col timeout method make-params]
+(async-def backend-request [client doc line col timeout method make-params
+                            :failed None]
   "(view, answer): the cursor view of doc at the 1-based line and
-   code-point col, and the backend's answer to request method there, or
-   None for either that is missing.  make-params builds the request's
-   params from the backend's TextDocumentIdentifier and the view; None
-   sends no request.  timeout (None: REQUEST-TIMEOUT, read at each call)
-   bounds the view and the request together, the backend's start
-   included."
+   code-point col, or None, and the backend's answer to request method
+   there, or failed (default None) when there is none: no view, no
+   request, or none answered (view-request).  A backend's null answer is
+   None, told apart from failed only when failed is not None.  make-params
+   builds the request's params from the backend's TextDocumentIdentifier
+   and the view; None sends no request.  timeout (None: REQUEST-TIMEOUT,
+   read at each call) bounds the view and the request together, the
+   backend's start included."
   (= loop (asyncio.get-running-loop))
   (= deadline (+ (.time loop) (ife (is timeout None) REQUEST-TIMEOUT timeout)))
   (= path (to-fs-path doc.uri))
   (if (is path None)
-      (return (, None None)))
+      (return (, None failed)))
   (= [name package import-root] (module-names path))
   (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
                                    name package import-root))
   (try
     (= view (await (asyncio.wait-for making (max 0 (- deadline (.time loop))))))
     (except [TimeoutError]
-      (return (, None None))))
+      (return (, None failed))))
   (if (is view None)
-      (return (, None None)))
+      (return (, None failed)))
   (= params (make-params (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
                          view))
   (if (is params None)
-      (return (, view None)))
-  (return (, view (await (view-request client doc view method params deadline)))))
+      (return (, view failed)))
+  (return (, view (await (view-request client doc view method params deadline
+                                       :failed failed)))))
 
 (async-def view-request [client doc view method params deadline :failed None]
   "The backend's answer to request method with params over view, doc's
@@ -2648,6 +2653,10 @@
 ;; view-request's failed value in definition-answer: the check gave no answer.
 (= UNCHECKED (object))
 
+;; backend-request's failed value in backend-locations: no answer, as against
+;; the backend's null answer (None), which found nothing.
+(= NO-ANSWER (object))
+
 (async-def definition-answer [client doc view offset answer deadline]
   "answer, the backend's definition answer at the word offset code points
    from view's cursor, checked: [] when it is for an enclosing node, None
@@ -2685,8 +2694,10 @@
    from make, location-request) on the word at the 1-based line and
    code-point col (Symbol target there), as editor Locations in answer
    order without repeats: a list (empty only when the backend found
-   nothing); UNMAPPED when no location the backend gave maps to the
-   editor; None when there is no backend, no word, no view or no answer.
+   nothing, a null answer included); UNMAPPED when no location the backend
+   gave maps to the editor; None when there is no backend, no word, no view
+   or no answer, and for a null answer over a fallback view (only the text
+   before the cursor compiled, so a binding after it was never seen).
    doc is a snapshot.  The view
    is made with the cursor at the word's end and the request asks at its
    generated start (cursor-word, as backend-hover).  A location in a compiled view
@@ -2706,9 +2717,15 @@
   (= deadline (+ (.time (asyncio.get-running-loop)) REQUEST-TIMEOUT))
   (= [view answer] (await (backend-request client doc line end REQUEST-TIMEOUT method
                                            (location-request (name-key target.value)
-                                                             offset make whole))))
-  (if (is answer None)
+                                                             offset make whole)
+                                           :failed NO-ANSWER)))
+  (if (is answer NO-ANSWER)
       (return None))
+  ;; A null answer is the backend's: it found nothing (an undefined name
+  ;; has no definition, whatever another scope binds by that name), so it
+  ;; is final, as an empty list is.
+  (if (is answer None)
+      (return (ife view.fallback None [])))
   ;; Every location is placed now, before any await: a sync meanwhile (a
   ;; push-buffer, another request) replaces an origin in the client.  The
   ;; buffer's own maps by the view this answer was computed over.
