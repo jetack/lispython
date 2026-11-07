@@ -385,35 +385,37 @@ def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
     assert "my-var" in by_label(items)  # the backend's other item stays
 
 
-def test_own_items_carry_their_tag_in_label_details_not_detail(
+@once
+def test_a_view_macro_carries_its_tag_in_label_details_not_detail(
     merged, backend_requests
 ):
-    # Defects: the tag is missing from labelDetails (the client sets no
-    # labelDetailsSupport, as eglot), or is back in detail, which lpy-mode
-    # shows as a signature.
+    # Defects: the view's macro lacks its tag in labelDetails (the client
+    # sets no labelDetailsSupport, as eglot), or has it back in detail,
+    # which lpy-mode shows as a signature. lispython-items: test_lsp.py.
     backend_requests.answer["value"] = [
         lsp.CompletionItem(label="my_var", kind=lsp.CompletionItemKind.Variable)
     ]
-    source = "(defmacro my-mac [x] x)\n(my|)"
-    items = by_label(merged(source)[2])
-    for label, tag in [("ife", "special form"), ("my-mac", "macro")]:
-        assert items[label].label_details.description == tag
-        assert items[label].detail is None
+    items = by_label(merged("(defmacro my-mac [x] x)\n(my|)")[2])
+    assert items["my-mac"].label_details.description == "macro"
+    assert items["my-mac"].detail is None
 
 
+@once
 def test_a_backend_items_label_details_pass_through(merged, backend_requests):
-    # Defect: the backend's own labelDetails (signature, type) is dropped or
-    # overwritten when own items gain theirs.
+    # Defect: the backend's own labelDetails or detail (signature, type) is
+    # dropped or overwritten the way lispython's own items are tagged.
     sent = lsp.CompletionItemLabelDetails(detail="(x)", description="int")
     backend_requests.answer["value"] = [
         lsp.CompletionItem(
             label="my_var",
             kind=lsp.CompletionItemKind.Variable,
+            detail="my_var: int",
             label_details=sent,
         )
     ]
     items = by_label(merged("(= my-var 1)\n(print my|)")[2])
     assert items["my-var"].label_details == sent
+    assert items["my-var"].detail == "my_var: int"
 
 
 def test_a_fallback_view_keeps_the_definitions_after_the_cursor(merged):
