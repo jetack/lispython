@@ -827,13 +827,11 @@ def stack_depth():
 def plus_limit(scope):
     """The most operands ``plus`` may have for compile() to take it here.
 
-    One compile of plus(PLUS_BOUND), the 3.11 depth check off so it is
-    built; each BinOp ``left`` down the chain is the tree of one operand
-    fewer, so compile() is bisected over those without compiling again.
+    One build of plus(PLUS_BOUND); each BinOp ``left`` down the chain is the
+    tree of one operand fewer, so compile() is bisected over those without
+    building again.
     """
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(features, "compile_depth_follows_recursion_limit", lambda: False)
-        [stmt] = macroexpand_then_compile(parse(plus(PLUS_BOUND)), scope)
+    [stmt] = macroexpand_then_compile(parse(plus(PLUS_BOUND)), scope)
     chains = [stmt.value]  # chains[k] is the tree of plus(PLUS_BOUND - k)
     while isinstance(chains[-1], ast.BinOp):
         chains.append(chains[-1].left)
@@ -859,12 +857,8 @@ def plus_limit(scope):
     return PLUS_BOUND - taken
 
 
-# On 3.11 the limit follows the stack, which l2py enters a few frames deeper.
-L2PY_MARGIN = 16
-
-
 def test_l2py_translates_as_deep_as_compile_takes(plus_limit):
-    operands = plus_limit - L2PY_MARGIN
+    operands = plus_limit
     pysrc = tools.l2py_s(plus(operands), fresh_scope=True, format=False)
     assert pysrc == "import lispy\n\n" + " + ".join(["1"] * operands)
 
@@ -1080,7 +1074,7 @@ def test_nested_f_strings_unparse_in_memory_linear_in_the_depth(build, fields):
 
 def test_translating_on_a_stack_with_no_room_is_a_positioned_error(scope):
     # unparse needs a chunk's worth of frames, more than this caller leaves.
-    [stmt] = compile_src(plus(200), scope)
+    _, stmt = compile_src("(= x 1)\n" + plus(200), scope)
 
     def at_depth(frames):
         return at_depth(frames - 1) if frames else tools.ast_to_python(stmt)
@@ -1089,7 +1083,7 @@ def test_translating_on_a_stack_with_no_room_is_a_positioned_error(scope):
         at_depth(sys.getrecursionlimit() - stack_depth() - 40)
     err = info.value
     assert err.msg == TRANSLATE_MESSAGE
-    assert (err.lineno, err.offset) == (1, 1)
+    assert (err.lineno, err.offset) == (2, 1)
 
 
 WORDS = ["for", "in", "a", "(a b)", "[]", ":x", "", "(FStrExpr a)", "f[T]"]

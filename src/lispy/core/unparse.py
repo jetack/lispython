@@ -191,7 +191,11 @@ def _fstrings_innermost_first(tree):
 
 
 def unparse(tree):
-    """``ast.unparse(tree)``, at any depth compile() takes."""
+    """``ast.unparse(tree)``'s text, at any depth compile() takes.
+
+    ``Interpolation.str`` is ignored: a t-string's expression text is
+    written from its value.
+    """
     cls = type(
         "_Translation", (_Chunked,), {"_interpolations": {}, "_format_specs": {}}
     )
