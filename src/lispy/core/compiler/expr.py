@@ -25,7 +25,7 @@ from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import *
 from lispy.core.compiler.utils import *
 from lispy.core.errors import LispyCompileError
-from lispy.core.nodes import atom_text
+from lispy.core.nodes import FStrExpr, String, atom_text
 from lispy.core.utils import *
 
 
@@ -572,6 +572,25 @@ def await_compile(sexp):
     return ast.Await(value=(yield expr_steps(value)), **sexp.position_info)
 
 
+def check_interpolated_parts(sexp):
+    """Refuse an operand in the wrong slot of an f/t-string node.
+
+    The reader builds literals (String) at even positions and fields (FStrExpr)
+    at odd ones; a typed or macro-built ``(f-string ...)`` head need not.
+    """
+    for [k, part] in enumerate(sexp.operands):
+        if k % 2 == 0 and not isinstance(part, String):
+            raise LispyCompileError(
+                f"{atom_text(sexp.op)}: part {k + 1} must be a string literal", part
+            )
+        if k % 2 == 1 and not isinstance(part, FStrExpr):
+            raise LispyCompileError(
+                f"{atom_text(sexp.op)}: part {k + 1} must be a replacement field,"
+                ' written as {expr} inside an f"..." or t"..." literal',
+                part,
+            )
+
+
 def interpolated_values(sexp, field_compile):
     """Values of an f/t-string node: literals alternate with fields (FStrExpr).
 
@@ -580,6 +599,7 @@ def interpolated_values(sexp, field_compile):
     expanded text.  Empty literals are dropped, as in the AST CPython builds.
     ``field_compile`` is the steps of one field.
     """
+    check_interpolated_parts(sexp)
     literals = [string_compile(v) for v in sexp.operands[0::2]]
     fields = sexp.operands[1::2]
     for [k, field] in enumerate(fields):
