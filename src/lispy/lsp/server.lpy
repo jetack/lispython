@@ -1140,7 +1140,8 @@
   (if (is-not symbols None)
       (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
 
-(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False
+                          :macros None]
   "Walk AST and collect all definition locations keyed by symbol name.
 
    defs feeds go-to-definition and completion, so it also holds the names
@@ -1150,7 +1151,8 @@
    with the kind definition-kind gives it.  Imports and loop variables bind
    names but declare nothing, so they get no symbol, and an = inside a def
    body (in-function) is a local, so it gets none either; module and
-   class-body assignments do."
+   class-body assignments do.  When macros is a set, the same pass adds the
+   name of every defmacro, nested ones (do, class) included."
   (if (is defs None)
       (= defs {}))
 
@@ -1170,10 +1172,12 @@
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
                   (_add-symbol symbols name (definition-kind form) loc)
+                  (if (and (== form "defmacro") (is-not macros None))
+                      (.add macros name))
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
                                            :defs defs :symbols symbols
-                                           :in-function True)))))
+                                           :in-function True :macros macros)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -1185,7 +1189,8 @@
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs :symbols symbols))))
+                  (collect-definitions body uri :defs defs :symbols symbols
+                                       :macros macros))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
@@ -1209,7 +1214,7 @@
                   (.append (.setdefault defs name []) loc)))
           (collect-definitions (sub node.list [: 1 None]) uri
                                :defs defs :symbols symbols
-                               :in-function in-function))
+                               :in-function in-function :macros macros))
 
       (in form IMPORT-HEADS)
       (for [name name-node] in (buffer-import-bindings node)
@@ -1219,7 +1224,8 @@
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs :symbols symbols :in-function in-function))))
+            uri :defs defs :symbols symbols :in-function in-function
+            :macros macros))))
 
   (return defs))
 
@@ -1707,6 +1713,17 @@
 ;; an item carries the spelling being typed: its label, the hyphen spelling
 ;; (hyphen-spelling), once the typed word holds a `-` (my-|), else the
 ;; Python name, which also matches what a user typing `_` spells (my_|).
+(def completion-label [name spellings]
+  "The label of a backend item for Python name name: the buffer's own
+   spelling (spellings, buffer-spellings' map) when that is no hyphenated
+   spelling of name (ok? for ok_p, ->foo for _to_foo: name-key keeps it
+   apart from name), else the hyphen spelling (hyphen-spelling), so the
+   buffer's plain my_x never wins over my-x."
+  (= spelled (.get spellings name))
+  (if (and (is-not spelled None) (!= (name-key spelled) name))
+      (return spelled))
+  (return (hyphen-spelling name)))
+
 (def filter-text [label name typed]
   "The filterText of a completion item labelled label (the hyphen spelling)
    for Python name name, when typed is the word typed so far."
@@ -1960,14 +1977,33 @@
         True
         (return (list answer))))
 
-(def buffer-spellings [source]
+(def buffer-texts [source line]
+  "The texts whose partial parses together read source: source itself and,
+   since a form left open at the 1-based line (None: no cursor) swallows the
+   rest of that parse, the text from the first later line that opens a form
+   in column 0, read as a top-level form (as Emacs's beginning-of-defun
+   reads one).  Limits: only the form open at the cursor is skipped, so a
+   second form left open after it loses what follows it; and a ( in column
+   0 inside a multi-line string is taken for a form's start."
+  (= lines (.split source "\n"))
+  (= texts [source])
+  (for i in (range (ife (is line None) (len lines) line) (len lines))
+    (if (.startswith (sub lines i) "(")
+        (do (.append texts (.join "\n" (sub lines [: i None])))
+            (break))))
+  (return texts))
+
+(def buffer-spellings [source :line None]
   "Python name -> the buffer's first spelling of it in source order: every
    Symbol counts, a dotted one (a.my-b) by each of its parts, each only
-   when it spells a name (name-spelling-p)."
-  (try
-    (= tree (parse source :partial True))
-    (except [Exception]
-      (return {})))
+   when it spells a name (name-spelling-p); with a 1-based line, also past
+   the form open there (buffer-texts)."
+  (= tree [])
+  (for text in (buffer-texts source line)
+    (try
+      (.extend tree (parse text :partial True))
+      (except [Exception]
+        (pass))))
   (= spellings {})
   (= stack (list (reversed tree)))
   (while stack
@@ -1993,11 +2029,12 @@
   (return (and (== item.kind lsp.CompletionItemKind.Keyword)
                (not-in item.label (vars builtins)))))
 
-(def backend-items [doc line col items insert-replace]
-  "The backend's completion items as the buffer's: labelled by the hyphen
-   spelling of each Python name (hyphen-spelling: move-to-end, never
-   move_to_end, whatever the buffer writes), with filterText and edit over
-   the .lpy word at the cursor.  What is positioned in or tied to the generated code
+(def backend-items [doc line col items insert-replace spellings]
+  "The backend's completion items as the buffer's: labelled by
+   completion-label (the hyphen spelling, move-to-end, never move_to_end
+   whatever the buffer writes; the buffer's own spelling only where the
+   hyphen rule cannot spell it, ok?), with filterText and edit over the
+   .lpy word at the cursor.  What is positioned in or tied to the generated code
    (text_edit, insert_text, command, data) is dropped: it would land on
    lines the user never wrote.  So is an item with additional_text_edits
    (an auto-import of a symbol the buffer never binds), and a Python
@@ -2009,7 +2046,7 @@
     (if (or (python-syntax-p item) item.additional-text-edits)
         (continue))
     (= name item.label)
-    (= label (hyphen-spelling name))
+    (= label (completion-label name spellings))
     (.append result
       (lsp.CompletionItem
         :label label
@@ -2028,32 +2065,16 @@
 (def buffer-definition-names [doc line]
   "The names doc's definitions bind (collect-definitions), in source order
    and as completion offers them: each in its hyphen spelling
-   (hyphen-spelling), a top-level defmacro's as written, since a macro call
-   is found by its head's exact text.  The one home of that list: over its
-   partial parse and, since a form left
-   open at the 1-based line (None: no cursor) swallows the rest of that
-   parse, over the text from the first later line that opens a form in
-   column 0, read as a top-level form (as Emacs's beginning-of-defun reads
-   one).  Limits: only the form open at the cursor is skipped, so a second
-   form left open after it loses the definitions after that one; and a ( in
-   column 0 inside a multi-line string is taken for a form's start."
-  (= lines (.split doc.source "\n"))
-  (= texts [doc.source])
-  (for i in (range (ife (is line None) (len lines) line) (len lines))
-    (if (.startswith (sub lines i) "(")
-        (do (.append texts (.join "\n" (sub lines [: i None])))
-            (break))))
+   (hyphen-spelling), a defmacro's as written (collect-definitions' macros),
+   since a macro call is found by its head's exact text.  The one home of
+   that list, over the partial parses of buffer-texts at the 1-based line
+   (None: no cursor)."
   (= names {})
   (= macros (set))
-  (for text in texts
+  (for text in (buffer-texts doc.source line)
     (try
-      (= nodes (parse text :partial True))
-      (.update names (collect-definitions nodes doc.uri))
-      (for node in nodes
-        (if (and (isinstance node Paren) (>= (len node) 2)
-                 (== (atom-text node.op) "defmacro")
-                 (is-not (def-name-symbol (sub node 1)) None))
-            (.add macros (. (def-name-symbol (sub node 1)) value))))
+      (.update names (collect-definitions (parse text :partial True) doc.uri
+                                          :macros macros))
       (except [Exception]
         (pass))))
   (return [(ife (in name macros) name (hyphen-spelling name)) for name in names]))
@@ -2223,7 +2244,8 @@
                                                     (ife attribute None MERGE-TIMEOUT))))
   (if (is view None)
       (return None))
-  (= found (backend-items doc line col items insert-replace))
+  (= found (backend-items doc line col items insert-replace
+                         (buffer-spellings doc.source :line line)))
   (= macros (qualified-macro-items doc line col view))
   (cond macros
         (do (= taken (set [(name-key item.label) for item in macros]))
