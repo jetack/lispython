@@ -941,16 +941,16 @@ class TestDefmacroBody:
     itself, not at no position inside its generated def."""
 
     @pytest.mark.parametrize(
-        "src",
+        ["src", "msg"],
         [
-            "(defmacro m [])",
-            "(defmacro m [x])",
-            "(defmacro m [] (do))",
-            "(defmacro m [] ^int)",
+            ("(defmacro m [])", "(defmacro ...) needs a body"),
+            ("(defmacro m [x])", "(defmacro ...) needs a body"),
+            ("(defmacro m [] (do))", "(def ...) needs a body: "),
+            ("(defmacro m [] ^int)", "(def ...) needs a body: "),
         ],
     )
-    def test_refused_at_the_defmacro(self, src):
+    def test_refused_at_the_defmacro(self, src, msg):
         with pytest.raises(LispyCompileError) as info:
             src_to_python_org("(do\n  " + src + ")")
-        assert info.value.msg.startswith("(def ...) needs a body: ")
+        assert info.value.msg.startswith(msg)
         assert (info.value.lineno, info.value.offset) == (2, 3)
