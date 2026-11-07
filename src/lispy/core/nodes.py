@@ -228,7 +228,8 @@ def macro_expansion_nodes(expansion, call):
     An Expression's list may be any list, tuple or deque; its copy is a plain
     list of nodes. Any other value (a dict, a set, an object, also as an
     Expression's list), or a form, list or tuple that contains itself (also
-    one a quasiquote unquoted, which the constructor leaves in place), is a
+    one a quasiquote unquoted, which the constructor leaves in place), or an
+    atom (Symbol, String, Constant) whose text is not a str, is a
     LispyCompileError at the call naming the macro.
 
     A macro builds its expansion at run time from quasiquote templates, so

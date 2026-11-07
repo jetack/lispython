@@ -905,6 +905,14 @@ def expr_steps(sexp, ctx=ast.Load):
         [sexp, ctx] = [sexp.value, ast.Load]
     if isinstance(sexp, GluedHead):
         raise sexp.misuse_error()
+    if isinstance(sexp, FStrExpr):
+        # Only a macro can put one here; the reader makes fields inside
+        # f/t-strings alone, which compile them without coming here.
+        raise LispyCompileError(
+            "a replacement field (FStrExpr) is valid only inside an f-string"
+            " or t-string",
+            sexp,
+        )
     return (
         paren_compiler(sexp, ctx)
         if paren_p(sexp)

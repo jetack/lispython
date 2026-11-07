@@ -690,7 +690,7 @@ class TestMacroBuiltFields:
         [
             (":conversion 5", "f-string: replacement field conversion"),
             (':conversion "r"', "f-string: replacement field conversion"),
-            (":conversion True", "f-string: replacement field conversion"),
+            (":conversion 115.0", "f-string: replacement field conversion"),
             (":debug 5", "f-string: replacement field debug text"),
             (
                 ':format-spec (String "\\"x\\"")',
@@ -728,6 +728,18 @@ class TestMacroBuiltFields:
         with pytest.raises(LispyCompileError) as info:
             compile_lpy(src)
         assert "an atom's text must be a str" in info.value.msg
+        assert info.value.lineno == 3
+
+    @pytest.mark.parametrize(
+        "use",
+        ["(= r (m))", "(m)", "(= (m) 1)", "(del (m))", "(for (m) in [1] (pass))"],
+    )
+    def test_field_outside_interpolation_refused(self, use):
+        # Expression, statement and target positions all reach expr_steps.
+        src = f'(defmacro m [] (return (FStrExpr (Symbol "x"))))\n\n{use}'
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(src)
+        assert info.value.msg.startswith("a replacement field (FStrExpr) is valid")
         assert info.value.lineno == 3
 
     @pytest.mark.parametrize("head", ["f-string", "t-string"])
