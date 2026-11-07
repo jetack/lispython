@@ -454,11 +454,13 @@
    for the backend's diagnostics; published counts its publishes, so an
    older one finishing last never replaces a newer; ignores memoises the
    buffer's suppression-comments of the backend's tool for every publish
-   of the run."
-  (def __init__ [self ls doc :recompile False]
+   of the run.  refresh: the run was started by refresh-outdated, so it
+   starts no refresh itself."
+  (def __init__ [self ls doc :recompile False :refresh False]
     (= self.ls ls)
     (= self.doc doc)
     (= self.recompile recompile)
+    (= self.refresh refresh)
     (= self.compiled False)
     (= self.lispy None)
     (= self.view None)
@@ -492,7 +494,7 @@
   (if (and (not (.cancelled task)) (is-not (.exception task) None))
       (.error logger "lispython LSP: diagnostics failed" :exc-info (.exception task))))
 
-(def publish-diagnostics [ls uri :opened False :recompile False]
+(def publish-diagnostics [ls uri :opened False :recompile False :refresh False]
   "Publish document uri's diagnostics as it is now, from tasks of the loop
    (the handlers that call this are synchronous): the change becomes the
    document's latest run, which compile-latest compiles unless a newer
@@ -500,9 +502,9 @@
    which starts its backend now (Backends.document-opened, never waiting),
    so a change before the open's compile cannot skip the start.
    recompile: compile again even at a cached version (a save: the macros
-   may read what changed on disk)."
+   may read what changed on disk).  refresh: DiagnosticRun's."
   (= doc (document-snapshot (.get-text-document ls.workspace uri)))
-  (= run (DiagnosticRun ls doc :recompile recompile))
+  (= run (DiagnosticRun ls doc :recompile recompile :refresh refresh))
   (_wake (.get DIAGNOSTIC-RUNS uri))
   (= (sub DIAGNOSTIC-RUNS uri) run)
   (if opened
@@ -608,31 +610,37 @@
            (.document-changed backends doc.uri doc.source run.view))
       (await (wait-backend-diagnostics run)))
   (await (publish-run run))
-  (await (refresh-outdated run.ls compiled)))
+  (if (not run.refresh)
+      (await (refresh-outdated run.ls doc.uri compiled))))
 
 ;; The macro environment (macro_modules.epoch) the open documents were last
 ;; refreshed for (refresh-outdated).
 (= _REFRESHED-EPOCH None)
 
-(async-def refresh-outdated [ls compiled]
-  "Once a published compile ran under a macro environment the open
-   documents were not refreshed for, publish again every open document
-   whose cached compile ran under another one, so an edit to a macro module
-   reaches the documents requiring it.  Triggered by whichever run sees the
-   new epoch first, never by the save alone, because a newer change can
-   supersede the save's run; the refreshed runs see that same epoch, so
-   they refresh nothing.  A document closed while the cache is read is
-   skipped, since publishing it would reopen it."
+(async-def refresh-outdated [ls uri compiled]
+  "Run when a diagnostic run of document uri published a compile under a
+   newer macro environment than the open documents were refreshed for:
+   publish again every other open document whose cached compile ran under
+   another one (ViewCache.outdated), so an edit to a macro module reaches
+   the documents requiring it.  Any run can see the new epoch first, not
+   only a save's, because a newer change can supersede the save's run.
+   The runs it starts are refresh runs, which never refresh: a macro that
+   rewrites a file it imports moves the epoch on every compile, so a
+   refreshed run refreshing again would never end.  A document closed
+   while the cache is read is skipped, since publishing it would reopen it."
   (global _REFRESHED-EPOCH)
-  (if (or (is compiled.epoch None) (== compiled.epoch _REFRESHED-EPOCH))
+  ;; The maximum: a slow run finishing under an older epoch moves nothing.
+  (if (or (is compiled.epoch None)
+          (and (is-not _REFRESHED-EPOCH None) (<= compiled.epoch _REFRESHED-EPOCH)))
       (return))
   (= _REFRESHED-EPOCH compiled.epoch)
-  (for uri in (await (asyncio.to-thread view-cache.outdated))
-    (if (in uri DIAGNOSTIC-RUNS)
+  (= candidates [other for other in DIAGNOSTIC-RUNS if (!= other uri)])
+  (for other in (await (asyncio.to-thread view-cache.outdated candidates))
+    (if (in other DIAGNOSTIC-RUNS)
         (try
-          (publish-diagnostics ls uri)
+          (publish-diagnostics ls other :refresh True)
           (except [Exception]
-            (.exception logger "lispython LSP: cannot refresh %s" uri))))))
+            (.exception logger "lispython LSP: cannot refresh %s" other))))))
 
 (async-def wait-backend-diagnostics [run]
   "Wait until the backend's diagnostics for run's view are known, at most

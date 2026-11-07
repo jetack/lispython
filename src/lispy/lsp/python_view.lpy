@@ -859,14 +859,16 @@
                  generation))
     (return result))
 
-  (def outdated [self]
-    "The uris whose cached compile ran under another macro environment than
-     the current one (all of them while a drop is due).  It stats the
-     tracked files, so callers on the loop run it in a thread."
+  (def outdated [self uris]
+    "Those of uris with no cached compile, or one that ran under another
+     macro environment than the current one (all of them while a drop is
+     due).  It stats the tracked files, so callers on the loop run it in a
+     thread."
     (= now (epoch))
     (with [self._lock]
-      (return [uri for [uri [key _]] in (.items self._views)
-               if (or (is now None) (!= (sub key 1) now))])))
+      (return [uri for uri in uris
+               if (or (is now None) (not-in uri self._views)
+                      (!= (sub (sub (sub self._views uri) 0) 1) now))])))
 
   (def forget [self uri]
     "Drop uri's entries (its document closed)."

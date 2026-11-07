@@ -549,6 +549,40 @@ def test_a_saved_macro_module_refreshes_the_documents_requiring_it(
     run_bounded(scenario())
 
 
+def test_a_macro_rewriting_what_it_imports_refreshes_a_bounded_number_of_times(
+    macro_documents,
+):
+    # Defect: a macro that rewrites a file it imports (codegen) moves the
+    # epoch on every compile, so each refreshed document's run refreshes
+    # the others (and itself) again, forever.
+    editor, mac, mod = macro_documents
+    gen = mac.parent / "gen.py"
+    gen.write_text("")
+    mac.write_text(
+        "(import os.path)\n"
+        f"(import {mac.parent.name}.gen)\n"
+        "(defmacro twice [x]\n"
+        '  (with [(open (os.path.join (os.path.dirname __file__) "gen.py") "a")'
+        " as f]\n"
+        '    (.write f "#\\n"))\n'
+        "  (return `(+ ~x ~x)))\n"
+    )
+    other = mod.parent / "other.lpy"
+    other.write_text(mod.read_text())
+
+    async def scenario():
+        uris = [editor.open(mod), editor.open(other)]
+        await until(lambda: all(uri in editor.published for uri in uris))
+        await asyncio.sleep(0.5)
+        before = sum(len(editor.published[uri]) for uri in uris)
+        editor.change(mod)
+        await asyncio.sleep(1.5)  # a refresh loop compiles dozens of times
+        after = sum(len(editor.published[uri]) for uri in uris)
+        assert 1 <= after - before < 4
+
+    run_bounded(scenario())
+
+
 def test_a_document_closed_during_a_refresh_is_left_closed(
     macro_documents, monkeypatch
 ):
@@ -559,8 +593,8 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
     real = server.view_cache.outdated
     armed, entered, go = threading.Event(), threading.Event(), threading.Event()
 
-    def held():
-        found = real()
+    def held(uris):
+        found = real(uris)
         if armed.is_set():
             entered.set()
             assert go.wait(10)
