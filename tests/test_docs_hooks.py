@@ -166,6 +166,16 @@ def test_syntax_file_holds_the_listed_pages_in_list_order(hooks, tmp_path):
     assert page_lines(out["llms-full.txt"]) == [f"Page: {t}" for _, t in NAV]
 
 
+def test_a_heading_repeated_across_listed_pages_fails_the_build(hooks, tmp_path):
+    with pytest.raises(PluginError, match="two '## Built-in macros' sections"):
+        build(hooks, tmp_path, LISTED, body="## Built-in macros\n\ntext")
+
+
+def test_a_heading_repeated_inside_a_code_fence_is_not_a_duplicate(hooks, tmp_path):
+    body = "```text\n## Built-in macros\n```"
+    assert "llms-syntax.txt" in build(hooks, tmp_path, LISTED, body=body)
+
+
 def test_index_links_the_syntax_file_before_the_full_file(hooks, tmp_path):
     index = build(hooks, tmp_path, LISTED)["llms.txt"]
     syntax_link = f"[llms-syntax.txt]({SITE}llms-syntax.txt)"

@@ -217,12 +217,30 @@ def on_post_build(config):
     ]
     for page in syntax:
         syntax_file += _page_block(page, config)
+    _refuse_repeated_headings(syntax_file)
     for name, lines in (
         ("llms.txt", index),
         ("llms-full.txt", full),
         ("llms-syntax.txt", syntax_file),
     ):
         (site_dir / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _refuse_repeated_headings(lines):
+    """llms-syntax.txt joins pages into one file, where a second-level heading
+    that two pages (or a page and a generated table) both emit is an ambiguous
+    anchor and two competing texts for one name."""
+    seen = set()
+    for line, in_code in docs_main.markdown_lines("\n".join(lines)):
+        if in_code or not line.startswith("## "):
+            continue
+        heading = line[3:].strip()
+        if heading in seen:
+            raise PluginError(
+                f"llms-syntax.txt has two '## {heading}' sections; give one a "
+                "distinct heading or drop it"
+            )
+        seen.add(heading)
 
 
 def _page_block(page, config):
