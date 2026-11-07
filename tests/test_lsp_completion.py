@@ -252,6 +252,15 @@ def test_a_required_modules_macros_follow_its_name(complete, backend_requests):
 
 
 @once
+def test_a_qualified_macro_is_offered_as_it_was_defined(complete, backend_requests):
+    # Defect: a macro after its module's name is labelled by its name-key
+    # (my_mac), not the spelling it was defined as (my-mac).
+    backend_requests.answer["value"] = []
+    labels = by_label(complete("(require macmod)\n(macmod.my|)")[2])
+    assert "my-mac" in labels and "my_mac" not in labels
+
+
+@once
 def test_a_required_macro_wins_over_the_backends_name(complete, backend_requests):
     # Defects: the backend's items replace the macros, or a backend item of
     # a macro's name is offered beside it.
@@ -459,6 +468,14 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
     labels = set(by_label(merged("(require lispy.macros *)\n(= x 1)\n(print x|)")[2]))
     assert {"->", "->>", "--"} <= labels
     assert not {"_to_", "_to_>", "__"} & labels
+
+
+@pytest.mark.parametrize("selection", ["*", "[my-mac]"])
+def test_a_required_macro_is_offered_as_it_was_defined(merged, selection):
+    # Defect: a macro the buffer never spells is labelled by its name-key
+    # (my_mac), not the spelling it was defined and required as (my-mac).
+    items = by_label(merged(f"(require macmod {selection})\n(print my|)")[2])
+    assert "my-mac" in items and "my_mac" not in items
 
 
 @once

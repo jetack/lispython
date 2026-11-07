@@ -476,13 +476,15 @@
    (a module, a dotted part of one, an imported name or its alias), and
    fallback, True when only the text before the cursor compiled; its tree
    is None, since its text was edited after the parse (and may not parse:
-   x.).  macros is the name (name-key) of every macro the buffer's
-   compile had registered once expanded: a name there is a lispython form at
-   a call's head, which no Python backend knows.  builtin-macros maps the
-   name (name-key) of each of those that is a built-in macro (the very
-   macro of lispy.macros, so never one a defmacro or another module's
-   require registered under that name) to the built-in's own name."
-  (def __init__ [self text position-map tree :macros (frozenset)
+   x.).  macros maps the name (name-key) of every macro the buffer's
+   compile had registered once expanded to the spelling it was registered
+   under (my-mac, mod.my-mac): a name there is a lispython form at a call's
+   head, which no Python backend knows, and the spelling is what completion
+   offers.  builtin-macros maps the name (name-key) of each of those that
+   is a built-in macro (the very macro of lispy.macros, so never one a
+   defmacro or another module's require registered under that name) to the
+   built-in's own name."
+  (def __init__ [self text position-map tree :macros {}
                  :builtin-macros {}]
     (= self._lines None)
     (= self.text text)
@@ -698,7 +700,11 @@
     (= position-map (build-position-map module tree source text))
     ;; Keys are the spellings a defmacro or require registered.
     (= table (list (.items (.get scope "__macro_namespace" {}))))
-    (= macros (frozenset [(name-key key) for [key _] in table]))
+    ;; Two keys sharing a name-key (my-mac, my_mac) keep the first in table
+    ;; order, so the label never depends on anything but the table.
+    (= macros {})
+    (for [key _] in table
+      (.setdefault macros (name-key key) key))
     (= builtin-macros {(name-key key) (sub _BUILTIN-MACRO-NAMES (id macro))
                        for [key macro] in table
                        if (in (id macro) _BUILTIN-MACRO-NAMES)})
