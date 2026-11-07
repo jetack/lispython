@@ -38,8 +38,10 @@ dev = [
     # tests/test_docs_hooks.py builds mkdocs' own File/Page objects.
     "mkdocs>=1.6.1,<2",
     "pre-commit>=3.6.0",
-    # lispy.highlight (tests/test_highlight.py). 2.21: older ones call os.path.commonprefix (deprecated in 3.15; the error::DeprecationWarning filter raises).
-    "pygments>=2.21",
+    # lispy.highlight (tests/test_highlight.py). 2.20: 2.19 calls
+    # os.path.commonprefix, deprecated in 3.15, so the DeprecationWarning error
+    # filter breaks every lexer, pytest's failure highlighting included.
+    "pygments>=2.20",
     "pytest>=8.0.0",
     "ruff>=0.8.0",
     "toml>=0.10.2",
@@ -54,8 +56,8 @@ docs = [
     "mkdocs-material>=9.6.14",
     "mkdocs-macros-plugin>=1.3.7",
     "mike>=2.1.3",
-    # lispy.highlight, the lexer of the ```lispython fences. 2.21: older ones call os.path.commonprefix (deprecated in 3.15).
-    "pygments>=2.21",
+    # lispy.highlight, the lexer of the ```lispython fences. 2.20: see dev.
+    "pygments>=2.20",
 ]
 
 [build-system]
