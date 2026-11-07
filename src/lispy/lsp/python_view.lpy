@@ -1623,7 +1623,8 @@
       (return None))))
 
 ;; View root -> the last pyrefly.toml text its check refused (one per root),
-;; read and written under the view root's lock.
+;; read and written under the view root's lock; dropped once the project has
+;; no usable pyrefly config or a text is accepted.
 (= _REFUSED-PYREFLY {})
 
 (def write-pyrefly-config [project-root view-root :import-roots None :check-types True
@@ -1660,6 +1661,10 @@
   ;; different pythonDiagnostics, the last to write decides its checking.
   (with [(_view-root-lock root)]
     (= text (_pyrefly-toml (| (_pyrefly-rule-settings project check-types) paths)))
+    ;; No usable project config: a refusal remembered from before no longer
+    ;; holds, so the same config restored later is checked and told again.
+    (if (is project None)
+        (.pop _REFUSED-PYREFLY root None))
     (cond
       (or (is check None) (is project None) (== text (_read-quietly path)))
       (pass)

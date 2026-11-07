@@ -1241,6 +1241,56 @@ class TestShadows:
         self.pyrefly_config(project, root, check=check)
         assert len(checked) == calls
 
+    def refusing_project(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+
+        def check(text):
+            return "unknown variant `nope`" if "nope" in text else None
+
+        return project, root, check
+
+    def test_a_refused_pyrefly_config_restored_after_removal_warns_again(
+        self, tmp_path, caplog
+    ):
+        # Defect: the refusal stays remembered while the project has no
+        # pyrefly config, so the same refused config put back later is taken
+        # for the one already told about: never checked, never warned.
+        project, root, check = self.refusing_project(tmp_path)
+        refused = 'untyped-def-behavior = "nope"\n'
+        (project / "pyrefly.toml").write_text(refused)
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            self.pyrefly_config(project, root, check=check)
+            assert caplog.text.count("refuses") == 1
+            (project / "pyrefly.toml").unlink()
+            self.pyrefly_config(project, root, check=check)
+            (project / "pyrefly.toml").write_text(refused)
+            self.pyrefly_config(project, root, check=check)
+        assert caplog.text.count("refuses") == 2
+        assert pv.pyrefly_fallback(str(root)).reason == "refused"
+
+    def test_a_refusal_is_remembered_for_its_text_only(self, tmp_path, caplog):
+        # Defect: a refusal is remembered per view root whatever the text,
+        # so another refused config, or the first one back after an accepted
+        # one, is never checked and never warned about.
+        project, root, check = self.refusing_project(tmp_path)
+        first = 'untyped-def-behavior = "nope"\n'
+        texts = [
+            first,
+            'untyped-def-behavior = "nope"\npython-version = "3.12"\n',
+            first,
+            'python-version = "3.12"\n',
+            first,
+        ]
+        counts = []
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            for text in texts:
+                (project / "pyrefly.toml").write_text(text)
+                config = self.pyrefly_config(project, root, check=check)
+                counts.append(caplog.text.count("refuses"))
+        assert counts == [1, 2, 3, 3, 4]
+        assert config["preset"] == "default"
+
     def test_a_project_config_in_a_package_never_replaces_the_views(self, tmp_path):
         # Defect: a project inside a package has its own pyrefly.toml or
         # pyrightconfig.json linked over the view root's on every shadow
