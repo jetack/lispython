@@ -1805,13 +1805,20 @@
   (return items))
 
 (def local-completion [doc :line None :col None]
-  "The completion answer when no Python backend gives one: the general
-   list, or none at all on an attribute (attribute-context-p at line and
-   col), because only the backend knows a base's members and a base it
-   cannot resolve has none."
+  "The completion answer when no Python view gives one: the general list,
+   or on an attribute (attribute-context-p at line and col) only the
+   qualified macros of its base (qualified-macro-items) over doc's cached
+   full view (compiled-view, never a compile: this runs on the loop), else
+   none, because only the backend knows a base's members and a base it
+   cannot resolve has none.  With no line or col (no cursor) it is the
+   general list."
   (if (and (is-not line None) (is-not col None)
            (attribute-context-p doc.source line col))
-      (return (lsp.CompletionList :is-incomplete False :items [])))
+      (do (= view (compiled-view doc))
+          (return (lsp.CompletionList
+                    :is-incomplete False
+                    :items (ife (is view None) []
+                                (qualified-macro-items doc line col view))))))
   (return (lsp.CompletionList :is-incomplete False
                               :items (general-items doc :line line))))
 
@@ -2087,17 +2094,48 @@
             (.append merged item))))
   (return merged))
 
-(def qualified-macro-items [doc line col view]
-  "The macros of view a (require mod) registered for the base written glued
-   to the dot before the word at the 1-based line and code-point col
-   (glued-base: mod.|, a.b.ma|; never (. mod |), since such a macro is
-   called only as mod.name), as own items labelled by the hyphen spelling
-   of the name each was registered under (view.macros, hyphen-spelling:
-   my-mac, whether defined as my-mac or my_mac).  The require registers
-   them as mod.name keys of the macro table, and no backend knows them: it
-   never binds mod at runtime."
+(def code-symbol-p [source line col]
+  "Whether the text of source before the 1-based line and code-point col
+   ends in a symbol the reader reads there (its last token, comments
+   included, a symbol ending at the cursor): code, never a string literal
+   or comment, whose text the reader gives no symbol.  A field of an f/t
+   string is code, read as such; a prefix the lexer stops on (an
+   unterminated f/t-string before the cursor) is none."
+  (try
+    (= tokens (tokenize (source-prefix source line col) :comments True))
+    (except [Exception]
+      (return False)))
+  (if (not tokens)
+      (return False))
+  (= [_ tktype position _] (sub tokens -1))
+  (return (and (== tktype "symbol")
+               (== (sub position "end_lineno") line)
+               (== (sub position "end_col_offset") col))))
+
+(def qualified-base [doc line col]
+  "The base of a qualified macro call being typed at the 1-based line and
+   code-point col of doc: the dotted name glued to the dot before the word
+   there (glued-base: mod for mod.|, a.b for a.b.ma|; never for (. mod |),
+   since such a macro is called only as mod.name), in code (code-symbol-p:
+   a full view compiles a string or comment holding mod.| fine, and its
+   macros must not be offered there); else None."
   (= text (line-text doc.source line))
-  (= base (glued-base text (sub (partial-span text (min col (len text))) 0)))
+  (= col (min col (len text)))
+  (= base (glued-base text (sub (partial-span text col) 0)))
+  (if (or (is base None) (not (code-symbol-p doc.source line col)))
+      (return None))
+  (return base))
+
+(def qualified-macro-items [doc line col view]
+  "The macros of view a (require mod) registered for the qualified-base at
+   the 1-based line and code-point col ([] when there is none), as own
+   items labelled by the hyphen spelling of the name each was registered
+   under (view.macros, hyphen-spelling: my-mac, whether defined as my-mac
+   or my_mac).  The require registers them as mod.name keys of the macro
+   table, and no backend knows them: it never binds mod at runtime, so
+   they are offered with no backend too (backend-completion over a cursor
+   view, local-completion over the cached full view)."
+  (= base (qualified-base doc line col))
   (if (is base None)
       (return []))
   (= prefix (+ (name-key base) "."))
@@ -2124,9 +2162,9 @@
   "Whether the cursor may be on an attribute name: a dot right before the
    word (x.a|, (.me| x)) or an operand past the receiver of an open
    (. recv ...).  A cheap gate, read before any view is compiled (the
-   Python view's attribute decides what the backend is asked); it also
-   makes the local answer empty (local-completion) when there is no
-   backend answer, no view or no items."
+   Python view's attribute decides what the backend is asked); with no
+   backend answer it limits the local answer (local-completion) to the
+   qualified macros of the cached full view."
   (= text (line-text source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
@@ -2142,6 +2180,32 @@
   (= form (sub path -1))
   (return (or (> (len form) 2) (and (== (len form) 2) (is leaf None)))))
 
+(def request-deadline [timeout]
+  "The loop time a request given timeout seconds (None: REQUEST-TIMEOUT,
+   read at each call) must be answered by."
+  (return (+ (.time (asyncio.get-running-loop))
+             (ife (is timeout None) REQUEST-TIMEOUT timeout))))
+
+(async-def awaited-cursor-view [doc line col deadline]
+  "The cursor view of snapshot doc at the 1-based line and code-point col
+   (scheduled-cursor-view, named as Python imports doc's file), or None: doc
+   is no file, the compile gave none, or it was not made by deadline (loop
+   time).  The one home of the view a request at the cursor is answered
+   over, with a backend (backend-request) or without (backend-completion's
+   qualified macros); only a request on an attribute may await it from
+   completion."
+  (= path (to-fs-path doc.uri))
+  (if (is path None)
+      (return None))
+  (= [name package import-root] (module-names path))
+  (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
+                                   name package import-root))
+  (try
+    (return (await (asyncio.wait-for making
+                                     (max 0 (- deadline (.time (asyncio.get-running-loop)))))))
+    (except [TimeoutError]
+      (return None))))
+
 (async-def backend-request [client doc line col timeout method make-params
                             :failed None]
   "(view, answer): the cursor view of doc at the 1-based line and
@@ -2153,18 +2217,8 @@
    and the view; None sends no request.  timeout (None: REQUEST-TIMEOUT,
    read at each call) bounds the view and the request together, the
    backend's start included."
-  (= loop (asyncio.get-running-loop))
-  (= deadline (+ (.time loop) (ife (is timeout None) REQUEST-TIMEOUT timeout)))
-  (= path (to-fs-path doc.uri))
-  (if (is path None)
-      (return (, None failed)))
-  (= [name package import-root] (module-names path))
-  (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
-                                   name package import-root))
-  (try
-    (= view (await (asyncio.wait-for making (max 0 (- deadline (.time loop))))))
-    (except [TimeoutError]
-      (return (, None failed))))
+  (= deadline (request-deadline timeout))
+  (= view (await (awaited-cursor-view doc line col deadline)))
   (if (is view None)
       (return (, None failed)))
   (= params (make-params (lsp.TextDocumentIdentifier :uri (.backend-uri client doc.uri))
@@ -2198,20 +2252,30 @@
              (and (isinstance answer lsp.CompletionList) (is answer.is-incomplete True)))))
 
 (async-def backend-completion [doc line col insert-replace]
-  "The completion answer with the Python backend's help, or None when it
-   gives none (no backend, a buffer with no Python view, no items), and
-   local-completion is the answer (empty at an attribute,
-   attribute-context-p).  doc is a snapshot (document-snapshot).
+  "The completion answer over a Python view of doc, with the backend's help
+   when there is one, or None when there is none (no view, no items), and
+   local-completion is the answer.  doc is a snapshot (document-snapshot).
    On an attribute the backend's items answer, after the qualified macros
    of its base (qualified-macro-items, winning by name-key), which answer
    alone when the backend gives no items; the request may start the
-   backend.  Elsewhere lispython's own items merged with the
+   backend.  With no backend (off, not installed, spent) the qualified
+   macros alone answer, over the cursor view awaited within
+   REQUEST-TIMEOUT, only where a qualified-base is typed: macros are
+   lispython's own.  Elsewhere lispython's own items merged with the
    backend's (merged-items) do, from an already running backend within
    MERGE-TIMEOUT, and a backend not yet running is started without
-   waiting for it (start-soon)."
+   waiting for it (start-soon); nothing off an attribute is awaited with
+   no backend."
   (= client (.available-client backends doc.uri))
   (if (is client None)
-      (return None))
+      (do (if (is (qualified-base doc line col) None)
+              (return None))
+          (= view (await (awaited-cursor-view doc line col (request-deadline None))))
+          (if (is view None)
+              (return None))
+          (= macros (qualified-macro-items doc line col view))
+          (return (ife macros (lsp.CompletionList :is-incomplete False :items macros)
+                       None))))
   (= attribute (attribute-context-p doc.source line col))
   (if (and (not attribute) (not client.running))
       ;; Start one for the next keystroke, and answer this one now.

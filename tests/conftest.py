@@ -153,15 +153,9 @@ def off_backends(make_backends, tmp_path):
 
 
 @pytest.fixture
-def lsp_buffer(backend_project, real_backends, monkeypatch):
-    """lsp_buffer(marked, backends=real_backends, **ls_attrs) -> (ls, uri,
-    position): the server pointed at backends, and a language server double
-    whose workspace holds marked (``|`` is the cursor, removed) as
-    backend_project's main.lpy at a new version (and no folders, which only
-    the local go-to-definition reads); position is the cursor in
-    UTF-16 units, as a client sends it. lsp_buffer.document is the last
-    buffer, a real pygls TextDocument, so lines and the position codec are
-    the ones the server uses. Each test gets a fresh view cache."""
+def lsp_document(backend_project, monkeypatch):
+    """lsp_document(marked, backends, **ls_attrs): lsp_buffer's buffer with
+    backends given (an off one, say), needing no real backend installed."""
     from lsprotocol import types as lsp
     from pygls.workspace import TextDocument
 
@@ -171,7 +165,7 @@ def lsp_buffer(backend_project, real_backends, monkeypatch):
     versions = itertools.count(1)
     uri = (backend_project / "main.lpy").as_uri()
 
-    def open_buffer(marked, backends=real_backends, **ls_attrs):
+    def open_buffer(marked, backends, **ls_attrs):
         monkeypatch.setattr(server, "backends", backends)
         before, after = marked.split("|")
         line_start = before.rfind("\n") + 1
@@ -183,6 +177,25 @@ def lsp_buffer(backend_project, real_backends, monkeypatch):
         open_buffer.document = document
         workspace = SimpleNamespace(get_text_document=lambda uri: document, folders={})
         return SimpleNamespace(workspace=workspace, **ls_attrs), uri, position
+
+    return open_buffer
+
+
+@pytest.fixture
+def lsp_buffer(lsp_document, real_backends):
+    """lsp_buffer(marked, backends=real_backends, **ls_attrs) -> (ls, uri,
+    position): the server pointed at backends, and a language server double
+    whose workspace holds marked (``|`` is the cursor, removed) as
+    backend_project's main.lpy at a new version (and no folders, which only
+    the local go-to-definition reads); position is the cursor in
+    UTF-16 units, as a client sends it. lsp_buffer.document is the last
+    buffer, a real pygls TextDocument, so lines and the position codec are
+    the ones the server uses. Each test gets a fresh view cache."""
+
+    def open_buffer(marked, backends=real_backends, **ls_attrs):
+        opened = lsp_document(marked, backends, **ls_attrs)
+        open_buffer.document = lsp_document.document
+        return opened
 
     return open_buffer
 
