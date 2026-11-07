@@ -4,6 +4,7 @@ signatureHelp, workspace/symbol, nREPL completion kinds and .nrepl-port."""
 import asyncio
 import functools
 import importlib
+import sys
 import types
 from types import SimpleNamespace
 
@@ -429,11 +430,61 @@ def test_completion_kinds(scope, prefix, name, kind):
 
 
 @pytest.mark.parametrize(
-    ["prefix", "name"],
-    [["->", "->"], ["->", "->>"], ["as", "as->"], ["gen", "gensym"]],
+    ["prefix", "name", "kind"],
+    [
+        ["->", "->", "macro"],
+        ["->", "->>", "macro"],
+        ["as", "as->", "macro"],
+        ["con", "cond", "macro"],
+        ["gen", "gensym", "function"],
+    ],
 )
-def test_syntax_without_its_macros_is_a_keyword(prefix, name):
-    assert complete(prefix, {"__macro_namespace": {}})[name] == "keyword"
+def test_lispythons_own_names_keep_their_kind_without_loaded_macros(prefix, name, kind):
+    assert complete(prefix, {"__macro_namespace": {}})[name] == kind
+
+
+def test_nrepl_and_lsp_classify_lispythons_own_names_alike():
+    # The LSP's own item tag is the word lpy-mode shows; nREPL's kind must
+    # name the same thing for every built-in macro and gensym.
+    tags = {
+        item.label: item.label_details.description for item in server.lispython_items()
+    }
+    for name in [*server.BUILTIN_MACROS, "gensym"]:
+        assert complete(name, {"__macro_namespace": {}})[name] == tags[name], name
+
+
+def test_a_session_defmacro_is_a_macro(scope):
+    assert tools.nrepl_eval("(defmacro twice-of [x] `(* 2 ~x))", scope)["error"] is None
+    assert complete("twice", scope)["twice-of"] == "macro"
+
+
+@pytest.fixture
+def macro_module(tmp_path, monkeypatch):
+    """A real .lpy module on sys.path defining the macro dx-mac."""
+    name = "dx_nrepl_macro_mod"
+    (tmp_path / f"{name}.lpy").write_text("(defmacro dx-mac [x] x)\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    yield name
+    sys.modules.pop(name, None)
+
+
+def required_scope(require):
+    scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}
+    assert tools.nrepl_eval(require, scope)["error"] is None
+    return scope
+
+
+@pytest.mark.parametrize("prefix", ["dx_nrepl_macro_mod.dx", "dx_nrepl"])
+def test_a_qualified_required_macro_is_a_macro(macro_module, prefix):
+    scope = required_scope(f"(require {macro_module})")
+    assert complete(prefix, scope)[f"{macro_module}.dx-mac"] == "macro"
+
+
+@pytest.mark.parametrize("selection", ["*", "[dx-mac]"])
+def test_an_unqualified_required_macro_is_a_macro(macro_module, selection):
+    scope = required_scope(f"(require {macro_module} {selection})")
+    assert complete("dx-", scope)["dx-mac"] == "macro"
 
 
 def test_a_scope_binding_shadows_a_builtin(scope):
