@@ -371,18 +371,15 @@ def test_required_macros_come_from_the_full_view_with_no_cursor_view(
 @pytest.mark.parametrize(
     "access", ['"lpy-macs.|"', "; lpy-macs.|", "(print 1) ; lpy-macs.|"]
 )
-@pytest.mark.parametrize("cached", [False, True], ids=["cursor view", "full view"])
 def test_required_macros_are_never_offered_in_a_string_or_comment(
-    off_complete, monkeypatch, access, cached
+    off_complete, monkeypatch, access
 ):
     # Defect: mod.| in a string literal or a comment is taken for a macro
-    # call, so its macros are offered there; the full view compiles such a
-    # buffer fine and holds them.
-    if cached:
-        monkeypatch.setattr(server, "cursor_view", lambda *args: None)
-    items = off_complete(
-        f"(require lpy-macs)\n{access}", before=cache_full_view if cached else None
-    )
+    # call, so its macros are offered there: the full view compiles such a
+    # buffer fine and holds them (the cursor view gives none there, so it
+    # cannot show the defect).
+    monkeypatch.setattr(server, "cursor_view", lambda *args: None)
+    items = off_complete(f"(require lpy-macs)\n{access}", before=cache_full_view)
     assert items[2] == []
 
 
