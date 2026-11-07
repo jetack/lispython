@@ -1064,9 +1064,10 @@
   "Make directory, under root, a real directory: a symlink or file standing
    for one of its components below root (a package overlay linked a
    directory that now holds .lpy) is removed first, since a shadow written
-   under it would land in the project itself.  Called only where a shadow is
-   about to be written, so a directory link stays while nothing is.  OSError
-   when directory leaves root (_check-in-root)."
+   under it would land in the project itself.  _write-shadows calls it only
+   right before writing a shadow, so a directory link stays while nothing is
+   written under it; _overlay-package for the directories it overlays.
+   OSError when directory leaves root (_check-in-root)."
   (= current root)
   (= rel (osp.relpath directory root))
   (if (!= rel os.curdir)
