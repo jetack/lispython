@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import importlib
 import json
+import logging
 import os
 import pathlib
 import signal
@@ -569,6 +570,38 @@ def test_a_timed_out_or_cancelled_request_ends_its_flight(project, tmp_path, fak
             await client.shutdown()
 
     run_bounded(scenario())
+
+
+def test_a_timed_out_request_logs_no_error(project, tmp_path, fake_argv, caplog):
+    # Defect: shield + wait_for on the request's future makes Python 3.14+
+    # log the backend's RequestCancelled reply to a timed-out request at
+    # ERROR (a traceback in the editor's LSP log).
+    client = backend.BackendClient(view_root(project, tmp_path), fake_argv)
+    uri = (project / "main.lpy").as_uri()
+    client.push_buffer(uri, "(= y 5)", pv.compile_view("(= y 5)"))
+
+    def hover(delay, timeout=None):
+        params = hover_params(client.backend_uri(uri), character=delay)
+        return client.request(lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, timeout=timeout)
+
+    async def scenario():
+        try:
+            assert await hover(0) is not None
+            assert await hover(5, timeout=0.1) is None
+            futures = client._client.protocol._request_futures
+            for _ in range(200):
+                if not futures:
+                    break
+                await asyncio.sleep(0.01)
+            assert not futures
+            for _ in range(5):
+                await asyncio.sleep(0)
+        finally:
+            await client.shutdown()
+
+    caplog.set_level(logging.ERROR, logger="asyncio")
+    run_bounded(scenario())
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
 def test_overlapping_requests_keep_their_text_until_the_last_answers(
