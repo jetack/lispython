@@ -389,6 +389,16 @@
         (return _SHARED.epoch))
     (return None)))
 
+(def epoch-and-target []
+  "(now, target) read under one hold of the shared lock: now, epoch's
+   answer; target, the least epoch a compile starting from now runs under:
+   now, or the counter + 1 while a drop is due.  Read apart, a drop landing
+   between the two reads would give a target no compile ever reaches."
+  (with [_SHARED.condition]
+    (if (_drop-stale False)
+        (return (, _SHARED.epoch _SHARED.epoch)))
+    (return (, None (+ _SHARED.epoch 1)))))
+
 (def current-epoch []
   "The epoch counter as it is, with no staleness check: the version of a
    result no macro took part in (a parse error)."

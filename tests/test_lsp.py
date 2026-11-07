@@ -24,6 +24,7 @@ from lispy.core.parser import parse
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
+macro_modules = importlib.import_module("lispy.lsp.macro_modules")
 
 URI = "file:///buffer.lpy"
 COMPLETE = "(def foo [] 1)\n(def bar [x] (foo))\n"
@@ -519,20 +520,20 @@ def test_completion_reads_the_view_generation_before_the_hand_off(
         return real_view_at_cursor(*args, **kwargs)
 
     monkeypatch.setattr(pv, "_view_at_cursor", counting)
-    real_to_thread = asyncio.to_thread
+    real_in_own_thread = server.in_own_thread
 
-    async def close_first(fn, *args, **kwargs):
+    def close_first(fn, *args):
         server.view_cache.forget(uri)  # the close lands before the worker
-        return await real_to_thread(fn, *args, **kwargs)
+        return real_in_own_thread(fn, *args)
 
     async def no_items(*args, **kwargs):
         return []
 
     client = SimpleNamespace(backend_uri=lambda u: u, request=no_items)
     document = TextDocument(uri, "(import os)\nos.pa", version=1)
-    monkeypatch.setattr(asyncio, "to_thread", close_first)
+    monkeypatch.setattr(server, "in_own_thread", close_first)
     asyncio.run(server.backend_answer(client, document, 2, 5, None))
-    monkeypatch.setattr(asyncio, "to_thread", real_to_thread)
+    monkeypatch.setattr(server, "in_own_thread", real_in_own_thread)
     asyncio.run(server.backend_answer(client, document, 2, 5, None))
     assert len(compiled) == 2  # the closed document's view was not kept
 
@@ -685,6 +686,83 @@ def test_a_newer_version_supersedes_pending_cursor_views(slow_views, tmp_path):
     assert slow_views.calls == [(1, 1), (3, 1)]
 
 
+def test_a_cursor_view_that_never_returns_stops_holding_up_its_document(
+    monkeypatch, tmp_path
+):
+    # Defect: a cursor view whose compile never returns (a macro looping
+    # forever) keeps every later request of its document waiting behind it.
+    started, release = threading.Event(), threading.Event()
+
+    def cursor_view(uri, version, source, line, col, *rest):
+        if version == 1:
+            started.set()
+            release.wait(10)
+        return SimpleNamespace(version=version)
+
+    monkeypatch.setattr(server, "cursor_view", cursor_view)
+    monkeypatch.setattr(macro_modules, "WAIT_LIMIT", 0.1)
+
+    async def scenario():
+        first = asyncio.ensure_future(view_of(tmp_path, 1, timeout=5))
+        await until(started.is_set)
+        second = await view_of(tmp_path, 2, timeout=3)
+        return await first, second
+
+    try:
+        (first, _), (second, _) = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert first is None
+    assert second.version == 2
+
+
+def test_a_request_with_no_timeout_still_has_a_deadline(
+    slow_views, monkeypatch, tmp_path
+):
+    # Defect: hover and signature help (timeout None) wait for a cursor
+    # view that never comes, forever.
+    monkeypatch.setattr(server, "REQUEST_TIMEOUT", 0.2)
+
+    async def scenario():
+        return await asyncio.wait_for(view_of(tmp_path, 1), 3)
+
+    assert asyncio.run(scenario()) == (None, None)
+
+
+def test_given_up_compiles_still_running_are_capped(monkeypatch):
+    # Defect: every compile given up on leaves its thread spinning in the
+    # macro, so a user typing over a macro that never returns piles up
+    # threads without bound; or a parked thread that ends still counts, so
+    # the cap holds every later hung compile for good.
+    monkeypatch.setattr(server, "MAX_PARKED_COMPILES", 1)
+    monkeypatch.setattr(server, "PARKED_COMPILES", server._ParkedCompiles())
+    monkeypatch.setattr(macro_modules, "WAIT_LIMIT", 0.05)
+    parked, held = threading.Event(), threading.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        superseded = asyncio.Event()
+        superseded.set()
+        first = server.in_own_thread(parked.wait, 10)
+        given_up = await server.compile_or_give_up(first, superseded, loop.time())
+        assert given_up is server.GAVE_UP
+        second = asyncio.ensure_future(
+            server.compile_or_give_up(
+                server.in_own_thread(held.wait, 10), superseded, loop.time()
+            )
+        )
+        await asyncio.sleep(0.3)  # several WAIT_LIMITs
+        assert not second.done()  # held at the cap
+        parked.set()  # the parked thread ends
+        return await asyncio.wait_for(second, 3)
+
+    try:
+        assert asyncio.run(scenario()) is server.GAVE_UP
+    finally:
+        parked.set()
+        held.set()
+
+
 def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
     # Defect: an exception in the compile thread never reaches the waiter,
     # so the request hangs instead of failing into the handler's except.
@@ -726,7 +804,7 @@ def cursor_view_references(path):
 
 
 def test_cursor_view_is_compiled_only_through_the_scheduler():
-    # Defect: a handler calling asyncio.to-thread cursor-view directly brings
+    # Defect: a handler running cursor-view in a thread directly brings
     # back one abandoned compile per keystroke, unbounded.
     lsp = pathlib.Path(server.__file__).parent
     sites = sorted(

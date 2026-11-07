@@ -384,6 +384,45 @@ class TestCache:
         assert len(calls) == 2  # nothing was cached for the closed document
 
     @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
+    def test_a_late_older_version_keeps_the_newer_entry(self, monkeypatch, method):
+        # Defect: an older version's compile (one given up on) that returns
+        # after a newer version was cached replaces the newer entry, so the
+        # newer version compiles again at its next request.
+        cache = pv.ViewCache()
+        calls = []
+        real = pv.compile_buffer
+
+        def at(version):
+            cursor = (1, 10) if method == "view_at_cursor" else ()
+            return ("u", version, "(print a.b)") + cursor
+
+        def late(source, **kw):
+            calls.append(source)
+            if len(calls) == 1:  # version 2 is cached while version 1 compiles
+                getattr(cache, method)(*at(2))
+            return real(source, **kw)
+
+        monkeypatch.setattr(pv, "compile_buffer", late)
+        getattr(cache, method)(*at(1))
+        getattr(cache, method)(*at(2))
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize(
+        ["table", "rest"], [("_views", ()), ("_cursor_views", (1, 10))]
+    )
+    def test_a_late_older_epoch_keeps_the_newer_entry(self, table, rest):
+        # Defect: a late compile (one given up on) at the same version but
+        # an older epoch replaces the entry a refresh stored under the newer
+        # epoch, so the next request at that epoch compiles again.
+        cache = pv.ViewCache()
+        entries = getattr(cache, table)
+        cache._store(entries, "u", (2, 5) + rest, "newer", cache.generation)
+        cache._store(entries, "u", (2, 4) + rest, "late", cache.generation)
+        assert entries["u"][1] == "newer"
+        cache._store(entries, "u", (2, 5) + rest, "fresh", cache.generation)
+        assert entries["u"][1] == "fresh"  # the same key: a fresh compile
+
+    @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
     def test_a_close_before_the_worker_starts_leaves_no_entry(
         self, monkeypatch, method
     ):

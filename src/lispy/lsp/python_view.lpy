@@ -803,8 +803,17 @@
     (= self._generation 0))
 
   (def _store [self table uri key result generation]
+    "Keep result as uri's entry in table under key, (version, epoch, ...),
+     unless the document was forgotten since generation, or the entry is of
+     a newer (version, epoch): a slow compile (one given up on) returning
+     late must not cost the newer entry a recompile.  An entry of the same
+     (version, epoch) is replaced (a fresh compile)."
     (with [self._lock]
-      (if (== generation self._generation)
+      (= old (.get table uri))
+      (if (and (== generation self._generation)
+               (or (is old None) (is (sub (sub old 0) 0) None) (is (sub key 0) None)
+                   (<= (, (sub (sub old 0) 0) (sub (sub old 0) 1))
+                       (, (sub key 0) (sub key 1)))))
           (= (sub table uri) (, key result)))))
 
   (def _hit [self table uri key]
@@ -858,17 +867,6 @@
         (._store self self._cursor-views uri (, version macro-epoch line col) result
                  generation))
     (return result))
-
-  (def outdated [self uris]
-    "Those of uris with no cached compile, or one that ran under another
-     macro environment than the current one (all of them while a drop is
-     due).  It stats the tracked files, so callers on the loop run it in a
-     thread."
-    (= now (epoch))
-    (with [self._lock]
-      (return [uri for uri in uris
-               if (or (is now None) (not-in uri self._views)
-                      (!= (sub (sub (sub self._views uri) 0) 1) now))])))
 
   (def forget [self uri]
     "Drop uri's entries (its document closed)."
