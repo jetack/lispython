@@ -6,11 +6,11 @@ from lispy.core.compiler import stmt_list_compile
 from lispy.core.compiler.literal import (
     ACTIVE_MACROS,
     constant_compile,
-    name_key,
     string_node_value,
 )
 from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import LispyCompileError
+from lispy.core.macro_table import MacroTable, find_entry, find_macro
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
 from lispy.core.nodes import atom_text, macro_expansion_nodes
@@ -134,6 +134,15 @@ def macroexpand_1(sexp, scope):
     return macroexpand_1_and_check(sexp, scope)[0]
 
 
+def _scope_macros(scope):
+    """scope's macro table, a new MacroTable when it has none. A scope a
+    caller built may hold a plain dict, which is read through find_macro."""
+    table = scope.get("__macro_namespace")
+    if table is None:
+        table = scope["__macro_namespace"] = MacroTable()
+    return table
+
+
 def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     """One node's step of macroexpand_1_and_check, as a generator.
 
@@ -165,14 +174,12 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
         elif name == "require" and not in_quasi:
             sexp = require_macro(sexp, scope, include_meta=include_meta)
         elif (
-            name in scope.setdefault("__macro_namespace", {})
+            (macro := find_macro(_scope_macros(scope), name)) is not None
             and not in_quasi
             and isinstance(sexp, Paren)
         ):
             try:
-                expansion = scope["__macro_namespace"][name](
-                    *[_unwrap_literal(o) for o in operands]
-                )
+                expansion = macro(*[_unwrap_literal(o) for o in operands])
             except LispyCompileError as error:
                 # A macro cannot see its own call form (literal operands
                 # arrive unwrapped), so an error it raises with no position
@@ -218,26 +225,23 @@ def active_macro_kind(scope):
     (lispy.macros.inc, from (require mod)) is never a bare name."""
 
     def kind(spelling):
-        namespace = scope.get("__macro_namespace") or {}
+        # A binding hides a macro when a call meant for the binding could be
+        # spelled as the macro: the two are one name (name_key, the table's
+        # identity, shared with the LSP). A hyphenated name's Python name is
+        # a second spelling of it (my-x and my_x); any other key (->, ok?)
+        # mangles to a name nobody calls it by (_to_, ok_p), so only its own
+        # spelling clashes.
+        if "." in spelling:
+            return None
+        namespace = scope.get("__macro_namespace")
+        found = find_entry(namespace, spelling)
+        if found is None:
+            return None
+        key, macro = found
         prelude = namespace.prelude if isinstance(namespace, MacroTable) else {}
-        found = None
-        # A snapshot: in the nREPL another connection's running code (a
-        # compiled defmacro or require) may add to the table meanwhile.
-        for key, macro in list(namespace.items()):
-            if "." in key:
-                continue
-            # Lookup is by spelling, so a binding hides a macro only when a
-            # call meant for the binding could be spelled as the macro: the
-            # two are one name (name_key, shared with the LSP). A hyphenated
-            # name's Python name is a second spelling of it (my-x and my_x);
-            # any other key (->, ok?) mangles to a name nobody calls it by
-            # (_to_, ok_p), so only its own spelling clashes.
-            if name_key(key) != name_key(spelling):
-                continue
-            if prelude.get(key) is macro:
-                return ("built-in", key)
-            found = ("macro", key)
-        return found
+        if find_macro(prelude, key) is macro:
+            return ("built-in", key)
+        return ("macro", key)
 
     return kind
 
@@ -259,27 +263,8 @@ def macroexpand_then_compile(sexp_list, scope, include_meta=True, check_bindings
 # The built-in macros every compilation unit starts with (Clojure's
 # clojure.core refer): copied into the unit's compile-time scope only, so
 # they emit no code and a module's runtime __macro_namespace holds only its
-# own defmacros and explicit requires.
-class MacroTable(dict):
-    """A scope's macro table (its ``__macro_namespace``) with the bookkeeping
-    that describes it, kept on the table and never as a key in the scope,
-    which is the user's globals (completion would offer it, ``(globals)``
-    would show it). Dropping the table drops its record with it, so a scope
-    whose table was replaced is seeded again, and no side table outlives a
-    scope.
-
-    prelude: the built-in macros the scope was seeded with, what every later
-    unit start copies from and what tells a built-in from a user macro.
-    seeded: the keys a unit start (seed_prelude, MODULE, TOP) put there from
-    the prelude and nothing has registered since: the entries a TOP start
-    may take back. A require never adds to it."""
-
-    __slots__ = ("prelude", "seeded")
-
-    def __init__(self, table=(), prelude=None):
-        super().__init__(table)
-        self.prelude = {} if prelude is None else prelude
-        self.seeded = set()
+# own defmacros and explicit requires. The table itself is MacroTable
+# (core/macro_table.py), re-exported here.
 
 
 PRELUDE_MODULE = "lispy.macros"
@@ -305,11 +290,11 @@ def seed_prelude(scope):
     if isinstance(scope.get("__macro_namespace"), MacroTable):
         return
     if _prelude_source_p(scope):
-        prelude = {}
+        prelude = MacroTable()
     else:
         import lispy.macros
 
-        prelude = dict(getattr(lispy.macros, "__macro_namespace"))
+        prelude = MacroTable(getattr(lispy.macros, "__macro_namespace"))
     # A plain dict cannot carry the record, so it is copied: a macro that
     # running code registers in the old dict during this swap is lost, which
     # only a user rebinding the table of a live scope can reach.

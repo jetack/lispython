@@ -403,7 +403,7 @@ def _tag_module(loader, fullname, record):
     the stamps it already holds.
 
     The tag is the union of the new record and the module's previous tag:
-    defmacro registers into globals().setdefault("__macro_namespace", {}), so
+    defmacro registers into globals().setdefault("__macro_namespace", ...), so
     a reload (a successful one, or one whose exec fails partway) leaves the
     earlier code's macros in the module, and a module requiring it may expand
     them.  A record holding two stamps of one path never validates again,

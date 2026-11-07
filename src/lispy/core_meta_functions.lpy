@@ -14,13 +14,16 @@
   (= newname (Symbol (+ "___defmacro_temp___" macroname)))
   (if (not (identifier-p newname.name))
       (= newname (Symbol "___defmacro_temp___")))
+  ;; The runtime table is a MacroTable too, so the module's code registers by
+  ;; name as the compiler does (why: core/macro_table.py).
   (return `(do (from lispy.core.nodes *)
                (from lispy.core.builtins *)
+               (from lispy.core.macro-table [MacroTable as ___MacroTable])
                (def ~newname ~@body)
-               (= (sub (.setdefault (globals) "__macro_namespace" {})
+               (= (sub (.setdefault (globals) "__macro_namespace" (___MacroTable))
                        ~macroname)
                   ~newname)
-               (del ~newname))))
+               (del ~newname ___MacroTable))))
 
 (= REQUIRE-QUALIFIED "qualified")
 (= REQUIRE-ALL "all")
@@ -49,28 +52,35 @@
   ;; The emitted code compiles in the requiring module, where binding a name
   ;; that is a macro there is an error: its own names are ___-prefixed so a
   ;; user macro named k or v cannot break the require.
+  ;; The required module's table may be a plain dict (a hand-written .py
+  ;; macro module), so a named macro is found through required-macro; the
+  ;; requirer's own table is a MacroTable (defmacro-transform).  Entries are
+  ;; read from a snapshot (list), since running code may add to the table.
   (return
     `(do (import importlib)
+         (from lispy.core.macro-table [MacroTable as ___MacroTable
+                                       required-macro as ___required-macro])
          (= ___imported-macros
             (getattr ~import-call
                      "__macro_namespace"
                      {}))
          ~(conde (== kind REQUIRE-QUALIFIED)
-                 `(for [___k ___v] in (.items (.copy ___imported-macros))
-                    (= (sub (.setdefault (globals) "__macro_namespace" {})
+                 `(for [___k ___v] in (list (.items ___imported-macros))
+                    (= (sub (.setdefault (globals) "__macro_namespace" (___MacroTable))
                             (+ ~(str module-name) "." ___k))
                        ___v))
                  (== kind REQUIRE-ALL)
-                 `(.update (.setdefault (globals) "__macro_namespace" {}) ___imported-macros)
+                 `(.update (.setdefault (globals) "__macro_namespace" (___MacroTable))
+                           (list (.items ___imported-macros)))
 
                  ;; else: an empty list loops over nothing
                  `(for ___mac-name in ~names
-                    (= (sub (.setdefault (globals) "__macro_namespace" {})
+                    (= (sub (.setdefault (globals) "__macro_namespace" (___MacroTable))
                             ___mac-name)
-                       (sub ___imported-macros ___mac-name)))
+                       (___required-macro ___imported-macros ___mac-name)))
                  )
          ;; (del importlib)
-         (del ___imported-macros))))
+         (del ___imported-macros ___MacroTable ___required-macro))))
 
 (when (== __name__ "__main__")
   (import os.path as osp)

@@ -698,13 +698,10 @@
     (= text (unparse module))
     (= tree (ast.parse text))
     (= position-map (build-position-map module tree source text))
-    ;; Keys are the spellings a defmacro or require registered.
+    ;; One entry per name (MacroTable), under the spelling a defmacro or
+    ;; require last registered it by.
     (= table (list (.items (.get scope "__macro_namespace" {}))))
-    ;; Two keys sharing a name-key (my-mac, my_mac) keep the first in table
-    ;; order, so the label never depends on anything but the table.
-    (= macros {})
-    (for [key _] in table
-      (.setdefault macros (name-key key) key))
+    (= macros {(name-key key) key for [key _] in table})
     (= builtin-macros {(name-key key) (sub _BUILTIN-MACRO-NAMES (id macro))
                        for [key macro] in table
                        if (in (id macro) _BUILTIN-MACRO-NAMES)})

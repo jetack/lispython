@@ -1,0 +1,84 @@
+"""A macro is called by any spelling of its name (core/macro_table.py):
+``my-mac`` and ``my_mac`` are one name (name_key), in a call, a qualified
+call, a require's selection and the nREPL's docs, and a redefinition under
+either spelling replaces the one entry."""
+
+import importlib
+import sys
+
+import pytest
+
+import lispy  # noqa: F401  (registers the .lpy importer)
+from lispy import tools
+from lispy.core.macro import MacroTable
+
+
+def translate(src):
+    return tools.src_to_python_org(src, scope={})
+
+
+@pytest.fixture
+def import_dir(tmp_path, monkeypatch):
+    """tmp_path on sys.path; modules imported from it are dropped after."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    before = set(sys.modules)
+    yield tmp_path
+    for name in set(sys.modules) - before:
+        del sys.modules[name]
+
+
+@pytest.mark.parametrize(
+    ["defined", "called"], [["my_mac", "my-mac"], ["my-mac", "my_mac"]]
+)
+def test_a_macro_is_called_by_either_spelling(defined, called):
+    src = f"(defmacro {defined} [x] (return `(f ~x)))\n({called} 2)"
+    assert translate(src) == "f(2)"
+
+
+@pytest.mark.parametrize(
+    ["require", "call"],
+    [
+        ["(require nm-mod)", "(nm_mod.my-mac 1)"],
+        ["(require nm_mod)", "(nm-mod.my-mac 1)"],
+        ["(require nm-mod [my-mac])", "(my-mac 1)"],
+        ["(require nm-mod *)", "(my-mac 1)"],
+    ],
+)
+def test_a_required_macro_is_called_by_either_spelling(import_dir, require, call):
+    (import_dir / "nm_mod.lpy").write_text("(defmacro my_mac [x] (return `(f ~x)))\n")
+    assert translate(f"{require}\n{call}") == "f(1)"
+
+
+def test_a_redefinition_under_the_other_spelling_replaces_the_macro(import_dir):
+    # The defining module's runtime table, which every requirer reads, holds
+    # the one name once, with the last body, whichever spelling asks for it.
+    (import_dir / "nm_redef.lpy").write_text(
+        "(defmacro my_mac [] (return 1))\n(defmacro my-mac [] (return 2))\n"
+        "(= v [(my_mac) (my-mac)])\n"
+    )
+    module = importlib.import_module("nm_redef")
+    assert module.v == [2, 2]
+    assert len(getattr(module, "__macro_namespace")) == 1
+    for selection in ["[my_mac]", "[my-mac]"]:
+        assert translate(f"(require nm-redef {selection})\n(my_mac)") == "2"
+
+
+def test_nrepl_docs_and_annotate_find_a_macro_by_either_spelling():
+    scope = tools.main_scope()
+    reply = tools.nrepl_eval('(defmacro my-mac [x] "Doc it." (return x))', scope)
+    assert reply["error"] is None
+    for spelling in ["my-mac", "my_mac"]:
+        assert tools.nrepl_docs(spelling, scope)["docs"] == "my-mac [x] - Doc it."
+        annotation = tools.nrepl_annotate(spelling, scope)["annotation"]
+        assert annotation == "<macro my-mac>"
+
+
+def test_every_way_of_writing_to_a_table_compares_by_name():
+    # A dict subclass would pass update and setdefault to dict's own C code,
+    # which stores a second key under the other spelling.
+    first, second, third = object(), object(), object()
+    table = MacroTable({"my-x": first})
+    table.update({"my_x": second})
+    table.setdefault("my-x", third)
+    assert list(table.items()) == [("my_x", second)]
+    assert "my-x" in table and table.pop("my-x") is second and not table
