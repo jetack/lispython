@@ -42,6 +42,18 @@ def test_workflow_extras_are_the_noxfile_extras():
     assert sorted(extras) == sorted(_nox_constant("EXTRAS"))
 
 
+def test_nox_tests_session_syncs_the_lock_with_extras():
+    # `tests` is the locked set; `tests_latest` is the only unlocked session.
+    tree = ast.parse((ROOT / "noxfile.py").read_text())
+    (session,) = [
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "tests"
+    ]
+    strings = {n.value for n in ast.walk(session) if isinstance(n, ast.Constant)}
+    names = {n.id for n in ast.walk(session) if isinstance(n, ast.Name)}
+    assert {"sync", "--frozen"} <= strings
+    assert "EXTRAS" in names
+
+
 def test_workflow_runs_the_locked_set():
     # nox's `tests` session syncs --frozen; CI must test the same set.
     assert "--frozen" in _test_command()
