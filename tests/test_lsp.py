@@ -14,6 +14,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from lsprotocol import types as lsp
 
 import lispy.macros
 from lispy import form_docs
@@ -304,13 +305,24 @@ def test_local_completion_tags_special_forms_in_label_details_not_detail():
 
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
     items = server.general_items(SimpleNamespace(source="", uri=URI))
-    keywords = {
+    macros = {
         i.label
         for i in items
-        if i.label_details and i.label_details.description == "keyword"
+        if i.label_details and i.label_details.description == "macro"
     }
-    # Beyond the macros, only `gensym` (a function inside defmacro bodies).
-    assert keywords - {"gensym"} == set(lispy.macros.__macro_namespace)
+    assert macros == set(lispy.macros.__macro_namespace)
+    # `gensym` is a function inside defmacro bodies, not a macro.
+    gensym = next(i for i in items if i.label == "gensym")
+    assert gensym.label_details.description == "function"
+
+
+def test_built_in_macro_is_tagged_macro_and_special_form_keeps_its_tag():
+    # Defect: built-ins read "keyword" beside project macros' "macro".
+    items = {i.label: i for i in server.lispython_items()}
+    assert items["when"].label_details.description == "macro"
+    assert items["when"].kind == lsp.CompletionItemKind.Function
+    assert items["ife"].label_details.description == "special form"
+    assert items["ife"].kind == lsp.CompletionItemKind.Keyword
 
 
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,

@@ -301,22 +301,20 @@ def test_merged_completion_offers_the_backends_names_as_the_buffer_spells_them(
 
 
 @pytest.mark.parametrize(
-    "source, label",
+    "source, label, kind",
     [
-        ("(def when [] 1)\n(print whe|)", "when"),
-        ("(= is_not 1)\n(print is_n|)", "is-not"),
+        ("(def when [] 1)\n(print whe|)", "when", lsp.CompletionItemKind.Function),
+        ("(= is_not 1)\n(print is_n|)", "is-not", lsp.CompletionItemKind.Keyword),
     ],
     ids=["same spelling", "same python name"],
 )
-def test_a_lispython_form_wins_over_the_backends_name(merged, source, label):
+def test_a_lispython_form_wins_over_the_backends_name(merged, source, label, kind):
     # Defect: the backend's item for a name lispython has a form for (when;
     # is_not, the Python name of is-not) is offered beside lispython's
     # item, or in its place.
     name = server.py_name(label)
     same = [item for item in merged(source)[2] if server.py_name(item.label) == name]
-    assert [(item.label, item.kind) for item in same] == [
-        (label, lsp.CompletionItemKind.Keyword)
-    ]
+    assert [(item.label, item.kind) for item in same] == [(label, kind)]
 
 
 @basedpyright_only
@@ -370,6 +368,17 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
 
 
 @once
+def test_a_view_macro_is_styled_as_a_built_in_macro(merged):
+    # Defect: the tag or kind of a view macro drifts from a built-in's.
+    items = by_label(merged("(defmacro my-mac [x] x)\n(print my|)")[2])
+
+    def style(label):
+        return (items[label].kind, items[label].label_details.description)
+
+    assert style("my-mac") == style("->")
+
+
+@once
 def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
     # Defects: a defmacro of the buffer is not offered, is offered by its
     # Python name (my_mac), or beside the backend's item of that name.
@@ -381,7 +390,7 @@ def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
     same = [item for item in items if server.py_name(item.label) == "my_mac"]
     assert [
         (item.label, item.kind, item.label_details.description) for item in same
-    ] == [("my-mac", lsp.CompletionItemKind.Keyword, "macro")]
+    ] == [("my-mac", lsp.CompletionItemKind.Function, "macro")]
     assert "my-var" in by_label(items)  # the backend's other item stays
 
 
