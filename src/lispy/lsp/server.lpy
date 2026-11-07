@@ -1726,18 +1726,27 @@
 ;; only inside defmacro bodies.
 (= _LPY-KEYWORDS [*BUILTIN-MACROS "gensym"])
 
+(def own-item [label tag]
+  "One of lispython's own completion items (the one home of their shape): a
+   Keyword whose short tag (\"macro\", ...) is labelDetails.description, drawn
+   inline, not detail, which lpy-mode shows as the focused item's signature.
+   Sent whatever the client advertises: eglot never sets labelDetailsSupport
+   and clients ignore a field they do not know."
+  (return (lsp.CompletionItem
+            :label label
+            :kind lsp.CompletionItemKind.Keyword
+            :label-details (lsp.CompletionItemLabelDetails :description tag))))
+
 (def lispython-items []
   "lispython's own completion items: the special forms, then the built-in
-   macros and gensym (_LPY-KEYWORDS), each once."
+   macros and gensym (_LPY-KEYWORDS), each once (own-item)."
   (= items [])
   (= seen (set))
-  (for [names detail] in [(, SPECIAL-FORM-DOCS "special form") (, _LPY-KEYWORDS "keyword")]
+  (for [names tag] in [(, SPECIAL-FORM-DOCS "special form") (, _LPY-KEYWORDS "keyword")]
     (for name in names
       (if (not-in name seen)
           (do (.add seen name)
-              (.append items (lsp.CompletionItem :label name
-                                                 :kind lsp.CompletionItemKind.Keyword
-                                                 :detail detail))))))
+              (.append items (own-item name tag))))))
   (return items))
 
 (def general-items [doc :line None]
@@ -2023,9 +2032,7 @@
     (if (and (not-in "." name) (not-in name taken))
         (do (= label (.get spellings name name))
             (.add taken name)
-            (.append merged (lsp.CompletionItem :label label
-                                                :kind lsp.CompletionItemKind.Keyword
-                                                :detail "macro")))))
+            (.append merged (own-item label "macro")))))
   (= rest (list items))
   (if view.fallback
       (.extend rest [(lsp.CompletionItem :label name

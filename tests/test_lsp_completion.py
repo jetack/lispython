@@ -379,10 +379,43 @@ def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
     ]
     items = merged("(defmacro my-mac [x] x)\n(= my-var 1)\n(print my|)")[2]
     same = [item for item in items if server.py_name(item.label) == "my_mac"]
-    assert [(item.label, item.kind, item.detail) for item in same] == [
-        ("my-mac", lsp.CompletionItemKind.Keyword, "macro")
-    ]
+    assert [
+        (item.label, item.kind, item.label_details.description) for item in same
+    ] == [("my-mac", lsp.CompletionItemKind.Keyword, "macro")]
     assert "my-var" in by_label(items)  # the backend's other item stays
+
+
+@once
+def test_a_view_macro_carries_its_tag_in_label_details_not_detail(
+    merged, backend_requests
+):
+    # Defects: the view's macro lacks its tag in labelDetails (the client
+    # sets no labelDetailsSupport, as eglot), or has it back in detail,
+    # which lpy-mode shows as a signature. lispython-items: test_lsp.py.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="my_var", kind=lsp.CompletionItemKind.Variable)
+    ]
+    items = by_label(merged("(defmacro my-mac [x] x)\n(my|)")[2])
+    assert items["my-mac"].label_details.description == "macro"
+    assert items["my-mac"].detail is None
+
+
+@once
+def test_a_backend_items_label_details_pass_through(merged, backend_requests):
+    # Defect: the backend's own labelDetails or detail (signature, type) is
+    # dropped or overwritten the way lispython's own items are tagged.
+    sent = lsp.CompletionItemLabelDetails(detail="(x)", description="int")
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(
+            label="my_var",
+            kind=lsp.CompletionItemKind.Variable,
+            detail="my_var: int",
+            label_details=sent,
+        )
+    ]
+    items = by_label(merged("(= my-var 1)\n(print my|)")[2])
+    assert items["my-var"].label_details == sent
+    assert items["my-var"].detail == "my_var: int"
 
 
 def test_a_fallback_view_keeps_the_definitions_after_the_cursor(merged):

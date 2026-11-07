@@ -294,9 +294,21 @@ class TestRequireSelection:
         assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
 
 
+def test_local_completion_tags_special_forms_in_label_details_not_detail():
+    # Defect: the no-backend path drops the tag from labelDetails (the client
+    # advertises nothing, as eglot) or leaves it in detail.
+    items = {i.label: i for i in run_completion(ls_with("(i"), position(0, 2)).items}
+    assert items["ife"].label_details.description == "special form"
+    assert items["ife"].detail is None
+
+
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
     items = server.general_items(SimpleNamespace(source="", uri=URI))
-    keywords = {i.label for i in items if i.detail == "keyword"}
+    keywords = {
+        i.label
+        for i in items
+        if i.label_details and i.label_details.description == "keyword"
+    }
     # Beyond the macros, only `gensym` (a function inside defmacro bodies).
     assert keywords - {"gensym"} == set(lispy.macros.__macro_namespace)
 
