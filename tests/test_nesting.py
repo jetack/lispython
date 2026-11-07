@@ -8,6 +8,7 @@ import functools
 import importlib
 import inspect
 import pathlib
+import re
 import sys
 import time
 import tracemalloc
@@ -1396,6 +1397,77 @@ def best_parse_time(src, repeats):
     return min(times)
 
 
+class CountingPattern:
+    """A compiled pattern that tallies the characters its searches were handed."""
+
+    def __init__(self, pattern, tally):
+        self._pattern = pattern
+        self._tally = tally
+
+    def __getattr__(self, name):
+        return getattr(self._pattern, name)
+
+    def _span(self, string, pos=0, endpos=None):
+        return pos, len(string) if endpos is None else min(endpos, len(string))
+
+    def _count(self, method, string, pos, endpos, failed):
+        """Run ``method`` and tally what it read: up to the match end on success,
+        else ``failed`` (the span a search scanned; one step for an anchored match).
+        """
+        m = method(string, pos, *([] if endpos is None else [endpos]))
+        start, stop = self._span(string, pos, endpos)
+        self._tally[0] += (m.end() - start + 1) if m else failed(start, stop)
+        return m
+
+    def search(self, string, pos=0, endpos=None):
+        return self._count(
+            self._pattern.search, string, pos, endpos, lambda a, b: b - a + 1
+        )
+
+    def match(self, string, pos=0, endpos=None):
+        return self._count(self._pattern.match, string, pos, endpos, lambda a, b: 1)
+
+    def finditer(self, string, pos=0, endpos=None):
+        pos, endpos = self._span(string, pos, endpos)
+        self._tally[0] += endpos - pos + 1
+        yield from self._pattern.finditer(string, pos, endpos)
+
+
+def parse_work(src):
+    """``(regex_chars, python_lines)`` one ``parse(src)`` costs.
+
+    Work counts, not wall clock, so the result does not depend on machine
+    load. Regex chars are the characters the parser's patterns were handed,
+    the work done inside the C regex engine that line events cannot see;
+    python lines are the line events traced, the work of Python-level loops.
+    """
+    tally = [0]
+    patterns = {
+        name: value
+        for name, value in vars(parser_module).items()
+        if isinstance(value, re.Pattern)
+    }
+    lines = 0
+
+    def tracer(frame, event, arg):
+        nonlocal lines
+        if event == "line":
+            lines += 1
+        return tracer
+
+    for name, value in patterns.items():
+        setattr(parser_module, name, CountingPattern(value, tally))
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        parse(src)
+    finally:
+        sys.settrace(previous)
+        for name, value in patterns.items():
+            setattr(parser_module, name, value)
+    return tally[0], lines
+
+
 # (id, a nested source, a flat one with as many literals, fields and tokens).
 PAYLOAD = "[" + " 1," * 300 + "]"
 NESTED_AND_FLAT = [
@@ -1416,9 +1488,14 @@ NESTED_AND_FLAT = [
 )
 def test_nested_literals_cost_what_the_same_literals_side_by_side_do(nested, flat):
     # Lexed in one pass, a character costs the same at any depth; re-lexing
-    # each field's text, or each field's symbol running to the chain's end,
-    # made the nesting many times the flat cost.
-    assert best_parse_time(nested, 3) < 3 * best_parse_time(flat, 3)
+    # each field's text, a field's symbol running to the chain's end, or any
+    # per-field walk of the field's text made the nesting many times the flat
+    # work. Nested over flat measures 0.85-1.01 unmutated; those three
+    # defects measure 2.9x or more, so 1.5 catches all of them.
+    nested_chars, nested_lines = parse_work(nested)
+    flat_chars, flat_lines = parse_work(flat)
+    assert nested_chars <= 1.5 * flat_chars, (nested_chars, flat_chars)
+    assert nested_lines <= 1.5 * flat_lines, (nested_lines, flat_lines)
 
 
 def peak_memory(run):
