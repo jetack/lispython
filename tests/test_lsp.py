@@ -271,15 +271,21 @@ class TestRequireSelection:
             "(require lispy.macros [a] b)",
             '(require lispy.macros "ab")',
             "(require lispy.macros :as x)",
-            "(require)",
         ],
     )
     def test_malformed_require_binds_nothing_and_does_not_raise(self, form):
-        # The module is a built-in macro module, so only the malformed
-        # selection stands between the buffer and a hover on `cond`.
+        # The module is a built-in macro module and the form opts out of the
+        # prelude, so only the malformed selection stands between the buffer
+        # and a hover on `cond`.
         tree = parse(form + "\n(cond)")
         assert server.find_import_for_name(tree, "print") is None
         assert server.builtin_macro_doc(tree, "cond") is None
+
+    def test_a_require_naming_no_module_keeps_the_prelude(self):
+        # (require) names no lispy.macros, so it is no opt-out.
+        tree = parse("(require)\n(cond)", partial=True)
+        assert server.find_import_for_name(tree, "print") is None
+        assert "(cond test" in server.builtin_macro_doc(tree, "cond")
 
     def test_bare_require_of_the_built_in_macros_is_qualified_only(self):
         tree = parse("(require lispy.macros)\n(cond)")
@@ -351,8 +357,9 @@ def test_an_undocumented_statement_head_is_refused():
 
 
 class TestBuiltinMacroHover:
-    """Hover on a built-in macro shows its docstring, where the buffer
-    requires it (the compiler's require rule)."""
+    """Hover on a built-in macro shows its docstring where the buffer has
+    that macro by the compiler's rule: the prelude unless the first form opts
+    out with (require lispy.macros ...), plus any require."""
 
     @staticmethod
     def _hover(source, line, character):
@@ -370,13 +377,34 @@ class TestBuiltinMacroHover:
         source = "(require lispy.macros)\n(lispy.macros.inc x)"
         assert "(inc value)" in self._hover(source, 1, 3)
 
+    def test_a_buffer_with_no_require_has_the_prelude(self):
+        assert "(inc value)" in self._hover("(inc x)", 0, 2)
+
     @pytest.mark.parametrize(
         "source",
-        ["(cond x 1 y 2)", "(require lispy.macros [when])\n(cond x 1 y 2)"],
+        [
+            "(require lispy.macros [when])\n(cond x 1 y 2)",
+            '"Docs."\n(require lispy.macros [when])\n(cond x 1 y 2)',
+        ],
     )
-    def test_no_macro_hover_where_the_buffer_does_not_require_it(self, source):
+    def test_an_opt_out_keeps_only_its_selection(self, source):
         line = source.count("\n")
         assert self._hover(source, line, 2) is None
+        assert "(when test" in server.builtin_macro_doc(parse(source), "when")
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "(import os)\n(require lispy.macros [when])\n(cond x 1 y 2)",
+            '"A."\n"B."\n(require lispy.macros [when])\n(cond x 1 y 2)',
+            "(require lispy.macros.sugar [when])\n(cond x 1 y 2)",
+        ],
+    )
+    def test_a_require_that_is_no_opt_out_keeps_the_prelude(self, source):
+        # Only lispy.macros itself, as the first form after one docstring,
+        # replaces the prelude (compile_unit's rule).
+        line = source.count("\n")
+        assert "(cond test" in self._hover(source, line, 2)
 
 
 def test_headless_forms_are_no_hover_or_completion_entry():

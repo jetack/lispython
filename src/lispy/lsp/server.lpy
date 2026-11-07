@@ -18,6 +18,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
+(from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
@@ -329,9 +330,15 @@
   (return (in (sub (.rpartition name ".") 2) BUILTIN-MACROS)))
 
 (def builtin-macro-doc [tree name]
-  "The hover markdown of the built-in macro `name` refers to, or None: only
-   where the buffer requires it from the built-in macro modules, since a
-   file without that require has no such macro (`fn` is then just a name)."
+  "The hover markdown of the built-in macro `name` refers to in the buffer
+   tree, or None. The buffer's built-in macros are the compiler's: the
+   prelude, unless the buffer opts out of it (prelude-opted-out), plus
+   whatever its requires of the built-in macro modules register. The
+   opt-out is itself such a require, so the scan gives exactly its
+   selection; a name the buffer has no macro for (`fn` after the opt-out
+   (require lispy.macros [when])) is then just a name."
+  (if (and (in name BUILTIN-MACROS) (not (prelude-opted-out tree)))
+      (return (hover-markdown (sub BUILTIN-MACROS name))))
   (for node in tree
     (if (and (isinstance node Paren)
              (> (len node) 1)
@@ -962,9 +969,9 @@
 
 (def form-hover [tree target]
   "lispython's own hover of Symbol target, or None: the alias doc on the
-   type of a type alias, else a special form's doc, else the docstring of a
-   built-in macro the buffer requires.  It answers before any backend,
-   which knows no lispython form."
+   type of a type alias, else a special form's doc, else the docstring of
+   one of the buffer's built-in macros (builtin-macro-doc).  It answers
+   before any backend, which knows no lispython form."
   (if (and (== target.value "type") (alias-keyword-p tree target))
       (return (markdown-hover TYPE-ALIAS-DOC target)))
   (= doc-text (or (.get SPECIAL-FORM-DOCS target.value)
@@ -1160,8 +1167,9 @@
 (def form-signature-help [source func-name]
   "lispython's own SignatureHelp for a form headed func-name (None: no head),
    or None: a special form's documented usage, else the docstring usage of
-   a built-in macro the buffer source requires.  The buffer is parsed only
-   when func-name could name a built-in macro (builtin-macro-name-p)."
+   one of the buffer's built-in macros (builtin-macro-doc).  The buffer is
+   parsed only when func-name could name a built-in macro
+   (builtin-macro-name-p)."
   (if (is func-name None)
       (return None))
   (= doc-text (or (.get SPECIAL-FORM-DOCS func-name)
@@ -1198,10 +1206,11 @@
 ;; The innermost open form decides, not the innermost named one: in
 ;; (print ((. x sort) |)) the call being typed is the method's, which only
 ;; the backend knows, while (print (when x |)) is inside a form no backend
-;; knows, so the local answer (when's usage where the buffer requires it,
-;; else none) stands rather than print's.  lispython's own forms answer
-;; first (form-signature-help); a macro the buffer defines has no usage to
-;; show, and the backend is not asked about it (signature-request).
+;; knows, so the local answer (when's usage where the buffer has it by the
+;; prelude rule, else none) stands rather than print's.  lispython's own
+;; forms answer first (form-signature-help); a macro the buffer defines has
+;; no usage to show, and the backend is not asked about it
+;; (signature-request).
 (deco (server.feature
         lsp.TEXT_DOCUMENT_SIGNATURE_HELP
         (lsp.SignatureHelpOptions :trigger-characters ["("]))
