@@ -532,32 +532,42 @@ def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
     assert run_bounded(scenario()) == [{"pythonPath": client.view_root.python}, {}]
 
 
-def test_a_save_that_changes_the_config_tells_the_backend(project, tmp_path, fake_argv):
+def test_a_save_that_changes_the_config_tells_the_backend(
+    project, tmp_path, fake_default
+):
     # Defects: a save that rewrote the view root's config file neither tells
     # the running backend the file changed (it keeps the config it read at
     # its start) nor on-view-prepared (a preset fallback that began with
     # the save is never told); or every save does, config unchanged.
-    client, hover = fake_client(project, tmp_path, fake_argv)
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
     uri = (project / "main.lpy").as_uri()
+    client = backends.client_for(uri)
+    params = hover_params(client.backend_uri(uri))
     config_uri = (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).as_uri()
     told = []
-    client.on_view_prepared = lambda c: told.append(c)
+    backends.on_view_prepared = told.append
+
+    async def save():
+        # As the server's didSave: the hook schedules the work.
+        backends.document_saved(uri)
+        await asyncio.gather(*backends._tasks)
 
     async def scenario():
         try:
-            await hover()
+            await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
             started = len(told)
-            await client.saved(uri)
+            await save()
             unchanged = len(told)
             (project / "pyrightconfig.json").write_text(
                 '{"typeCheckingMode": "strict"}'
             )
-            await client.saved(uri)
+            await save()
             changed = len(told)
-            watched = (await hover())["watched"]
-            return started, unchanged, changed, watched
+            answer = await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params)
+            return started, unchanged, changed, fake_hover(answer)["watched"]
         finally:
-            await client.shutdown()
+            await backends.shutdown_all()
 
     started, unchanged, changed, watched = run_bounded(scenario())
     assert (started, unchanged, changed) == (1, 1, 2)
