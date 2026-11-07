@@ -2469,6 +2469,18 @@
             :active-signature answer.active-signature
             :active-parameter answer.active-parameter)))
 
+(def with-filter-texts [doc line col answer]
+  "answer with a filterText (filter-text, the label's py-name as the name)
+   on every item that has none, typed from completion-ranges at the 1-based
+   line and code-point col: the one pass that puts every item, whichever
+   builder made it (own items, macros, the fallback lists), under the rule
+   backend-items follows."
+  (= typed (sub (completion-ranges doc line col) 2))
+  (for item in answer.items
+    (if (is item.filter-text None)
+        (= item.filter-text (filter-text item.label (py-name item.label) typed))))
+  (return answer))
+
 (deco (server.feature
         lsp.TEXT_DOCUMENT_COMPLETION
         (lsp.CompletionOptions :trigger-characters ["." "-"]))
@@ -2485,9 +2497,9 @@
     (except [Exception]
       (.debug logger "backend completion failed" :exc-info True)
       (= result None)))
-  (if (is-not result None)
-      (return result))
-  (return (local-completion doc :line line :col col))))
+  (if (is result None)
+      (= result (local-completion doc :line line :col col)))
+  (return (with-filter-texts doc line col result))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend

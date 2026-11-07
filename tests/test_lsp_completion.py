@@ -269,9 +269,10 @@ def test_a_required_modules_macros_follow_its_name(complete, backend_requests):
 
 
 @once
-def test_a_qualified_macro_is_offered_as_it_was_defined(complete, backend_requests):
-    # Defect: a macro after its module's name is labelled by its name-key
-    # (my_mac), not the spelling it was defined as (my-mac).
+def test_a_qualified_macro_takes_the_hyphen_spelling(complete, backend_requests):
+    # Defect: a macro after its module's name is labelled in a spelling
+    # other than the default: its name-key (my_mac) for one defined as
+    # my-mac.
     backend_requests.answer["value"] = []
     labels = by_label(complete("(require macmod)\n(macmod.my|)")[2])
     assert "my-mac" in labels and "my_mac" not in labels
@@ -491,9 +492,9 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
 
 
 @pytest.mark.parametrize("selection", ["*", "[my-mac]"])
-def test_a_required_macro_is_offered_as_it_was_defined(merged, selection):
-    # Defect: a macro the buffer never spells is labelled by its name-key
-    # (my_mac), not the spelling it was defined and required as (my-mac).
+def test_a_required_macro_takes_the_hyphen_spelling(merged, selection):
+    # Defect: a required macro the buffer never spells is labelled by its
+    # name-key (my_mac), not the hyphen spelling (my-mac).
     items = by_label(merged(f"(require macmod {selection})\n(print my|)")[2])
     assert "my-mac" in items and "my_mac" not in items
 
@@ -675,3 +676,17 @@ def test_the_fallback_list_hyphenates_a_nested_macro(complete, off_backends):
     # is offered in a spelling other than the default (in_do).
     labels = by_label(complete("(do (defmacro in_do [x] x))\n(in|)", off_backends)[2])
     assert "in-do" in labels and "in_do" not in labels
+
+
+@once
+def test_every_item_filters_by_the_word_typed(merged, off_backends, complete):
+    # Defect: only the backend's items carry a filterText, so an item
+    # labelled by its hyphen spelling (a view macro my-mac, a fallback
+    # my-val) is dropped once the user types its _ spelling (my_m, my_v);
+    # and a label outside the hyphen rule (->) must filter as itself.
+    items = by_label(merged("(defmacro my_mac [x] x)\n(my_m|)")[2])
+    assert items["my-mac"].filter_text == "my_mac"
+    items = by_label(complete("(= my_val 1)\n(my_v|)", off_backends)[2])
+    assert items["my-val"].filter_text == "my_val"
+    items = by_label(complete("(= x 1)\n(-|)", off_backends)[2])
+    assert items["->"].filter_text == "->"

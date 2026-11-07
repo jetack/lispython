@@ -511,18 +511,24 @@ def test_ns_field_has_one_spelling_in_tools():
 
 
 @pytest.fixture
-def spelled_scope():
+def spelled_scope(tmp_path, monkeypatch):
+    (tmp_path / "mac_mod.lpy").write_text("(defmacro my-mac [] 1)\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "mac_mod", raising=False)
     scope = {"__name__": "__nrepl_spelling__", "__macro_namespace": {}}
     result = tools.nrepl_eval(
         "(import collections)\n"
         "(= my_val 1)\n"
         "(= a__b 1)\n"
         "(= _priv_x 1)\n"
-        "(defmacro my_mac [x] x)",
+        "(defmacro my_mac [x] x)\n"
+        "(defmacro top-mac [] 3)\n"
+        "(require mac-mod)",
         scope,
     )
     assert result["error"] is None
-    return scope
+    yield scope
+    sys.modules.pop("mac_mod", None)
 
 
 def complete_labels(prefix, scope):
@@ -551,6 +557,10 @@ def complete_labels(prefix, scope):
         # once a _ is typed.
         ("my", "my-mac", "my_mac"),
         ("my_m", "my_mac", "my-mac"),
+        # A key registered with - is Python spelled too while _ is typed:
+        # the client drops a label that does not start with top_m.
+        ("top_m", "top_mac", "top-mac"),
+        ("mac_m", "mac_mod.my_mac", "mac-mod.my-mac"),
     ],
 )
 def test_complete_labels_names_by_the_hyphen_spelling(
@@ -563,3 +573,11 @@ def test_complete_labels_names_by_the_hyphen_spelling(
     labels = complete_labels(prefix, spelled_scope)
     assert labels.count(label) == 1
     assert absent not in labels
+
+
+def test_a_dotted_macro_prefix_keeps_its_typed_head(spelled_scope):
+    # Defect: the whole key respelled under a dotted prefix (mac-mod.my-mac
+    # after mac_mod.), so no label starts with what the client typed and it
+    # shows nothing.
+    labels = complete_labels("mac_mod.my", spelled_scope)
+    assert labels == ["mac_mod.my-mac"]

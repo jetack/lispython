@@ -809,10 +809,11 @@
    macros, lispython's own names, keywords, the scope, the builtins.  A name
    is labelled by its hyphen spelling (hyphen-spelling, as the LSP labels
    it), or as Python spells it while the typed word does
-   (_python-spelling-p); a macro key too, matched by its text or its
-   Python name.  Under a dotted prefix the typed head stays as typed."
+   (_python-spelling-p: name-key, so a macro key registered as top-mac is
+   top_mac); a macro key too, matched by its text or its Python name.
+   Under a dotted prefix the typed head stays as typed."
   (= python-spelling (_python-spelling-p prefix))
-  (= spell (fn [name] (ife python-spelling name (hyphen-spelling name))))
+  (= spell (fn [name] (ife python-spelling (name-key name) (hyphen-spelling name))))
   (= py-prefix (_py-name prefix))
   ;; name-key -> (label, (tag, runtime word)).
   (= entries {})
