@@ -221,16 +221,46 @@ def assert_fallback_list(labels):
     assert "__class__" not in labels
 
 
+def test_an_unresolved_base_offers_no_names(complete):
+    # Regression TASK-1117: an unresolved base offered the general list
+    # (special forms, builtins, the buffer's names), so heapq.nl with no
+    # import showed nonlocal and UnboundLocalError.
+    assert complete("(def f [] 1)\n(heapq.nl|")[2] == []
+    labels = set(by_label(complete("(import heapq)\n(heapq.nl|")[2]))
+    assert {"nlargest", "nsmallest"} <= labels
+    assert not labels & {"print", "def"}
+
+
 @once
 @pytest.mark.parametrize(
     "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
 )
-def test_a_backend_with_no_items_gives_the_fallback_list(
+def test_a_backend_with_no_items_at_an_attribute_gives_no_items(
     complete, backend_requests, empty
 ):
-    # Defect: an empty backend answer is returned as is: no completion.
+    # Defect: an attribute with no members is offered the general list.
     backend_requests.answer["value"] = empty
-    labels = set(by_label(complete(CLASS.format("self.|"))[2]))
+    items = complete(CLASS.format("self.|"))[2]
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
+    assert items == []
+
+
+@once
+@pytest.mark.parametrize(
+    "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
+)
+def test_a_backend_with_no_items_off_an_attribute_gives_the_fallback_list(
+    complete, backend_requests, real_backends, backend_project, empty
+):
+    # Defect: an empty backend answer off an attribute becomes an empty list
+    # instead of lispython's own. The backend must be running, or the
+    # completion returns before any request.
+    client = real_backends.available_client((backend_project / "main.lpy").as_uri())
+    complete(CLASS.format("self.|"))  # starts the backend
+    assert wait_running(client)
+    backend_requests.sent.clear()
+    backend_requests.answer["value"] = empty
+    labels = set(by_label(complete(CLASS.format("(pri|)"))[2]))
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
     assert_fallback_list(labels)
 
@@ -241,9 +271,12 @@ def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch
     # run) for a request that cannot be answered.
     views = []
     monkeypatch.setattr(server, "cursor_view", lambda *a: views.append(a))
-    labels = set(by_label(complete(CLASS.format("self.|"), off_backends)[2]))
+    labels = set(by_label(complete(CLASS.format("(pri|)"), off_backends)[2]))
     assert views == []
     assert_fallback_list(labels)
+    # An attribute gets nothing: only the backend knows self's members.
+    assert complete(CLASS.format("self.|"), off_backends)[2] == []
+    assert views == []
 
 
 @once
@@ -252,9 +285,12 @@ def test_a_buffer_that_does_not_compile_gives_the_fallback_list(
 ):
     # An earlier refused form: neither the buffer nor its prefix compiles,
     # so there is no view to ask the backend about.
-    labels = set(by_label(complete("(def)\n" + CLASS.format("self.|"))[2]))
+    labels = set(by_label(complete("(def)\n" + CLASS.format("(pri|)"))[2]))
     assert backend_requests.sent == []
     assert_fallback_list(labels)
+    # An attribute gets nothing: only the backend knows self's members.
+    assert complete("(def)\n" + CLASS.format("self.|"))[2] == []
+    assert backend_requests.sent == []
     # The backend does answer the same buffer once it compiles.
     labels = set(by_label(complete(CLASS.format("self.|"))[2]))
     assert "__class__" in labels and backend_requests.sent
