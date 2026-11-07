@@ -13,7 +13,7 @@ follows [Semantic Versioning](https://semver.org/).
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython
   tags (`special form`, `macro`, `function`), exactly as the LSP server sends
   its own items. Editor clients can read nREPL completion through their LSP
-  path. The `kinds` map is deprecated and kept for older clients.
+  path.
 - nREPL: `eval`, `complete` and `macroexpand` take an optional `ns` (an
   absolute file path) that picks that file's scope only. Tracebacks and
   linecache keep the eval's `<nrepl-N>` name. `file` wins when both are sent,
@@ -69,6 +69,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- nREPL: the `complete` reply no longer carries the `kinds` map. `items` is
+  the only kind channel; `completions` (the bare names) stays.
 - LSP: opening a `.lpy` file starts the Python backend while diagnostics are
   on (it used to wait for the first completion, hover or definition), and a
   buffer change compiles the buffer once, off the event loop (it used to
