@@ -296,13 +296,15 @@ docs = [
     { name = "pygments" },
 ]
 lsp = [
-    { name = "basedpyright" },
     { name = "pyrefly" },
+]
+lsp-basedpyright = [
+    { name = "basedpyright" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "basedpyright", marker = "extra == 'lsp'", specifier = ">=1.40" },
+    { name = "basedpyright", marker = "extra == 'lsp-basedpyright'", specifier = ">=1.40" },
     { name = "mike", marker = "extra == 'docs'", specifier = ">=2.1.3" },
     { name = "mkdocs", marker = "extra == 'dev'", specifier = ">=1.6.1,<2" },
     { name = "mkdocs-macros-plugin", marker = "extra == 'docs'", specifier = ">=1.3.7" },
@@ -318,7 +320,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "toml", marker = "extra == 'dev'", specifier = ">=0.10.2" },
 ]
-provides-extras = ["dev", "lsp", "docs"]
+provides-extras = ["dev", "lsp", "lsp-basedpyright", "docs"]
 
 [[package]]
 name = "lsprotocol"

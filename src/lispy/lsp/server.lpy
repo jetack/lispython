@@ -26,12 +26,13 @@
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
-(from lispy.lsp.python-view [COMPILE-STAGE PARSE-STAGE ViewCache compile-buffer
+(from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
+                             ViewCache compile-buffer
                              lpy-diagnostic-range lpy-range module-names name-key
                              name-spelling-p open-form-closers partial-span py-name
-                             pyright-ignores source-lines source-prefix spelled-in
-                             view-at-cursor])
-(from lispy.lsp.backend [Backends REQUEST-TIMEOUT])
+                             pyrefly-fallback source-lines source-prefix
+                             spelled-in suppression-comments view-at-cursor])
+(from lispy.lsp.backend [Backends REQUEST-TIMEOUT suppression-tool])
 
 (= logger (logging.getLogger __name__))
 
@@ -452,7 +453,8 @@
    buffer's full PythonView or None.  arrived is set while the run waits
    for the backend's diagnostics; published counts its publishes, so an
    older one finishing last never replaces a newer; ignores memoises the
-   buffer's pyright-ignores for every publish of the run."
+   buffer's suppression-comments of the backend's tool for every publish
+   of the run."
   (def __init__ [self ls doc :recompile False]
     (= self.ls ls)
     (= self.doc doc)
@@ -508,6 +510,57 @@
   (if (not-in uri _COMPILING)
       (do (.add _COMPILING uri)
           (_schedule-run (compile-latest uri)))))
+
+;; The project roots told of their pyrefly preset fallback, for this
+;; server's life.
+(= _PRESET-FALLBACK-NOTIFIED (set))
+
+(def preset-fallback-message [root fallback]
+  "The notice that project root's pyrefly diagnostics run
+   DEFAULT-PYREFLY-PRESET, saying why (fallback, a PyreflyFallback)."
+  (= preset f"pyrefly's \"{DEFAULT-PYREFLY-PRESET}\" preset")
+  (cond (== fallback.reason "missing")
+        (return (+ f"lispython: {root} has no pyrefly config, so its Python diagnostics "
+                   f"use {preset}. To choose, add a [tool.pyrefly] table in pyproject.toml "
+                   f"or a pyrefly.toml, e.g. preset = \"{DEFAULT-PYREFLY-PRESET}\"."))
+        (== fallback.reason "malformed")
+        (return (+ f"lispython: {fallback.source} could not be read as a pyrefly config "
+                   "(the LSP log has the detail), so the Python diagnostics of "
+                   f"{root} use {preset}.")))
+  (return (+ f"lispython: pyrefly refused the settings in {fallback.source} "
+             "(the LSP log has the detail), so the Python diagnostics of "
+             f"{root} use {preset}.")))
+
+(def notify-preset-fallback [client]
+  "Tell the user once per project root, when backend client started
+   (Backends' on-view-prepared), that its pyrefly diagnostics run
+   DEFAULT-PYREFLY-PRESET, and why, as the config writer recorded it
+   (pyrefly-fallback).  A start with no fallback marks nothing, so a
+   config that later breaks is still told at the next start.  Never
+   raises."
+  ;; A showMessage, once: the view's preset may differ from what pyrefly
+  ;; check runs over the same project, and the user must learn which one is
+  ;; in effect and how to choose; a logMessage alone sits unread in an
+  ;; output channel.  Once per root, never per start or change, so it never
+  ;; nags; and read from the writer's record (a dict lookup), so the
+  ;; project config is neither parsed on the loop nor checked by pyrefly
+  ;; twice.
+  (try
+    (if (or (!= client.name "pyrefly") (in client.project-root _PRESET-FALLBACK-NOTIFIED))
+        (return))
+    (= fallback (pyrefly-fallback client.view-root))
+    (if (is fallback None)
+        (return))
+    (.add _PRESET-FALLBACK-NOTIFIED client.project-root)
+    (= message (preset-fallback-message client.project-root fallback))
+    (.info logger "%s" message)
+    (.window-show-message server (lsp.ShowMessageParams :type lsp.MessageType.Info
+                                                        :message message))
+    (except [Exception]
+      (.exception logger "lispython LSP: cannot tell of the pyrefly preset for %s"
+                  client.project-root))))
+
+(= backends.on-view-prepared notify-preset-fallback)
 
 (async-def compile-latest [uri]
   "Compile document uri's latest run (compile-document, in a thread), and
@@ -2194,9 +2247,11 @@
 ;; code that is the very thing it marks (lpy-diagnostic-range).
 (= HINT-TAGS (frozenset [lsp.DiagnosticTag.Unnecessary lsp.DiagnosticTag.Deprecated]))
 
-;; A double-quoted Python identifier in a backend's message, as pyright
-;; quotes a name: "my_x" is not defined.
-(= _QUOTED-NAME (re.compile "\"([^\\W\\d]\\w*)\""))
+;; A quoted Python identifier in a backend's message, as pyright quotes a name
+;; in double quotes ("my_x" is not defined) and pyrefly in backticks
+;; (Could not find name `my_x`).  Group 1 is the quote, kept as it was; group 2
+;; the name.
+(= _QUOTED-NAME (re.compile "([\"`])([^\\W\\d]\\w*)\\1"))
 
 (def message-to-buffer [message lines span]
   "A backend's message with each quoted Python name that a symbol inside
@@ -2206,11 +2261,12 @@
    only elsewhere may be no symbol at all (a TypedDict key, a string)."
   (= [start end] span)
   (def spelled [m]
-    (= found (spelled-in lines start end (.group m 1)))
+    (= found (spelled-in lines start end (.group m 2)))
     (if (or (is found None) (!= (sub (sub found 0) 0) (sub (sub found 1) 0)))
         (return (.group m 0)))
     (= [[line col] [_ end-col]] found)
-    (return f"\"{(sub (sub lines (- line 1)) [: col end-col])}\""))
+    (= quote (.group m 1))
+    (return f"{quote}{(sub (sub lines (- line 1)) [: col end-col])}{quote}"))
   (return (.sub _QUOTED-NAME spelled message)))
 
 (async-def editor-diagnostic [doc origin lines diagnostic places origins deadline]
@@ -2249,9 +2305,9 @@
             :related-information (or related None))))
 
 (def suppressed-p [diagnostic ignores]
-  "Whether the editor's diagnostic is suppressed by a pyright comment on
-   the .lpy line its range starts on (ignores, pyright-ignores'): a bare
-   one suppresses every rule, a listed one the rules it names."
+  "Whether the editor's diagnostic is suppressed by a suppression comment
+   on the .lpy line its range starts on (ignores, suppression-comments'):
+   a bare one suppresses every rule, a listed one the rules it names."
   (= line (+ diagnostic.range.start.line 1))
   (if (not-in line ignores)
       (return False))
@@ -2261,15 +2317,16 @@
 (async-def mapped-backend-diagnostics [run]
   "The backend's diagnostics published for run's view, the full view of its
    document's source, as the editor's (editor-diagnostic), in the backend's
-   order, less those a ; pyright: ignore comment suppresses (suppressed-p,
-   the comments read once per run); [] when it has published none for that
+   order, less those a suppression comment of the backend's tool
+   suppresses (; pyright: ignore or ; pyrefly: ignore, suppression-tool;
+   suppressed-p; the comments read once per run); [] when it has published none for that
    text.  DIAGNOSTICS-TIMEOUT bounds the mapping of related locations."
   (= doc run.doc)
   (= published (.backend-diagnostics backends doc.uri run.view.text))
   (if (is published None)
       (return (list)))
   (if (is run.ignores None)
-      (= run.ignores (pyright-ignores doc.source)))
+      (= run.ignores (suppression-comments doc.source (suppression-tool backends.name))))
   (= origin (, doc.source run.view))
   (= lines (source-lines doc.source))
   (= deadline (+ (.time (asyncio.get-running-loop)) DIAGNOSTICS-TIMEOUT))

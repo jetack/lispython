@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.lsp_backends import ONCE_MARKER, REAL_BACKENDS
+
 # Seconds: ~4x the slowest guarded test (test_nesting's fstring-format-spec
 # case, roughly linear in DEPTH, ~1.6 s on 3.11 idle), so a loaded box does
 # not trip it while a runaway or quadratic regression still does. It also
@@ -44,10 +46,15 @@ def time_bound():
 
 # ---------------------------------------------------------------------------
 # The LSP server over a real Python backend (test_lsp_completion,
-# test_lsp_builtin_members): one basedpyright process for the session, over
-# one tmp project, on one event loop in a background thread (a basedpyright
-# start costs about a second and 400 MB). The lispy.lsp modules are imported
-# in the fixtures, so a run that uses none never loads the server.
+# test_lsp_builtin_members, test_lsp_navigation, test_lsp_diagnostics): a
+# process of each installed backend (lsp_backends.REAL_BACKENDS), over one
+# tmp project, on one event loop in a background thread. A test runs on each
+# installed backend unless it names its own (lsp_backends.on). The backend
+# is a parameter of a session fixture, so pytest stops one backend's
+# process before it starts the other's (it may restart one per module):
+# never both at once (basedpyright alone takes 400-750 MB). The lispy.lsp
+# modules are imported in the fixtures, so a run that uses none never loads
+# the server.
 # ---------------------------------------------------------------------------
 
 
@@ -100,10 +107,33 @@ def make_backends(backend_project):
     return make
 
 
-@pytest.fixture(scope="session")
-def real_backends(run_on_loop, make_backends, tmp_path_factory):
-    """The session's basedpyright Backends (started by its first request)."""
-    backends = make_backends(tmp_path_factory.mktemp("cache"), "basedpyright")
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        f"{ONCE_MARKER}: run on the default real backend only (lsp_backends.once)",
+    )
+
+
+def pytest_runtest_setup(item):
+    """Skip a lsp_backends.once test on every real backend but the one the
+    server picks with no backend setting (backend.resolve_backend)."""
+    if item.get_closest_marker(ONCE_MARKER) is None:
+        return
+    backend = importlib.import_module("lispy.lsp.backend")
+    name = item.callspec.params["real_backends"]
+    if name != backend.resolve_backend(None):
+        pytest.skip(f"runs once, on the default backend, not {name}")
+
+
+@pytest.fixture(scope="session", params=REAL_BACKENDS)
+def real_backends(request, run_on_loop, make_backends, tmp_path_factory):
+    """The session's Backends of one real backend (request.param, started by
+    its first request); skipped when that backend is not installed."""
+    backend = importlib.import_module("lispy.lsp.backend")
+    name = request.param
+    if backend.backend_argv(name) is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    backends = make_backends(tmp_path_factory.mktemp(f"cache-{name}"), name)
     yield backends
     run_on_loop(backends.shutdown_all())
 

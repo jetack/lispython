@@ -1030,12 +1030,15 @@ class TestShadows:
         with open(path, "rb") as f:
             return tomllib.load(f)
 
-    def test_pyrefly_config_takes_the_projects_rules_never_its_paths(self, tmp_path):
+    def test_pyrefly_config_takes_the_projects_rules_never_its_paths(
+        self, tmp_path, caplog
+    ):
         # Defects: the project's own preset, Python and error severities
         # never reach pyrefly; a path or tooling setting is copied, so
         # pyrefly reads the project's directories, interpreter or baseline
         # instead of the view's; [tool.pyrefly] is not read; a malformed
-        # file fails the write instead of reading as no settings.
+        # file fails the write instead of reading as no settings, or is
+        # logged below WARNING, where the user never sees which file broke.
         project, root = tmp_path / "project", tmp_path / "view"
         project.mkdir()
         (project / "pyrefly.toml").write_text(
@@ -1071,31 +1074,44 @@ class TestShadows:
         (project / "pyrefly.toml").unlink()
         config = self.pyrefly_config(project, root)
         assert (config["preset"], config["python-platform"]) == ("legacy", "win32")
-        # A malformed file is no settings, never a failed write.
+        # A malformed file is no settings, never a failed write, and the
+        # log names the file to fix at a level an editor shows.
         (project / "pyproject.toml").write_text("[tool.pyrefly\n")
-        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            assert self.pyrefly_config(project, root)["preset"] == "default"
+        assert str(project / "pyproject.toml") in caplog.text
+        caplog.clear()
+        (project / "pyproject.toml").write_text("[tool]\npyrefly = 1\n")
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            assert self.pyrefly_config(project, root)["preset"] == "default"
+        assert "[tool.pyrefly] is not a table" in caplog.text
 
     def test_pyrefly_default_preset_only_without_a_project_config(self, tmp_path):
-        # Defects: a project with no pyrefly config runs pyrefly's own
-        # stricter default instead of the basic preset pyrefly check runs on
-        # it; or a project whose pyrefly config sets no preset is pinned to
-        # basic, silently weaker than the default its own pyrefly runs.
+        # Defects: a project with no pyrefly config runs pyrefly's
+        # unconfigured basic preset, which hides nearly every type error,
+        # or no preset at all; or a project whose pyrefly config sets no
+        # preset is pinned to the view's, not the one its own pyrefly runs.
         project, root = tmp_path / "project", tmp_path / "view"
         project.mkdir()
-        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        assert self.pyrefly_config(project, root)["preset"] == "default"
+        assert pv.pyrefly_fallback(str(root)).reason == "missing"
         (project / "pyproject.toml").write_text('[project]\nname = "p"\n')
-        assert self.pyrefly_config(project, root)["preset"] == "basic"
+        assert self.pyrefly_config(project, root)["preset"] == "default"
+        assert pv.pyrefly_fallback(str(root)).reason == "missing"
         (project / "pyproject.toml").write_text(
             '[tool.pyrefly]\npython-version = "3.12"\n'
         )
         config = self.pyrefly_config(project, root)
+        assert pv.pyrefly_fallback(str(root)) is None
         assert "preset" not in config
         assert config["python-version"] == "3.12"
 
     def test_pyrefly_config_checks_nothing_without_diagnostics(self, tmp_path):
-        # Defect: with pythonDiagnostics false pyrefly still checks every
+        # Defects: with pythonDiagnostics false pyrefly still checks every
         # open buffer, at the project's preset, or the project's errors
-        # table turns codes back on under preset off, for nobody.
+        # table turns codes back on under preset off, for nobody; or the
+        # default preset is recorded as in effect, so the user is told of
+        # a preset that checks nothing.
         project, root = tmp_path / "project", tmp_path / "view"
         project.mkdir()
         (project / "pyrefly.toml").write_text(
@@ -1107,6 +1123,11 @@ class TestShadows:
         assert "errors" not in config
         # Hover and completion still follow the project's Python.
         assert config["python-version"] == "3.12"
+        # A project with no pyrefly config checks nothing too: no preset
+        # runs, so none is reported to the user as in effect.
+        (project / "pyrefly.toml").unlink()
+        assert self.pyrefly_config(project, root, check_types=False)["preset"] == "off"
+        assert pv.pyrefly_fallback(str(root)) is None
 
     def test_pyrefly_search_path_is_pyrights(self, tmp_path):
         # Defect: the two backends' search paths drift apart, so a module
@@ -1192,22 +1213,30 @@ class TestShadows:
         }
         assert str(project / "pyrefly.toml") in caplog.text
         assert "`nope`" in caplog.text
+        # Refused, but checking nothing: no preset is in effect to report.
+        assert pv.pyrefly_fallback(str(root)) is None
         # With checking, the errors table is refused too.
         (project / "pyrefly.toml").write_text(
             'preset = "strict"\n[errors]\nnot-a-code = "warn"\n'
         )
         config = self.pyrefly_config(project, root, check=check)
-        assert (config["preset"], "errors" in config) == ("basic", False)
+        assert (config["preset"], "errors" in config) == ("default", False)
+        assert pv.pyrefly_fallback(str(root)) == (
+            "refused",
+            str(project / "pyrefly.toml"),
+        )
         # Saved again with the same refused config: the file holds the
         # fallback, which differs from the candidate, yet pyrefly is not run
         # again and the warning is not repeated on every save.
         calls, warnings = len(checked), caplog.text.count("refuses")
         with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
             config = self.pyrefly_config(project, root, check=check)
-        assert (config["preset"], "errors" in config) == ("basic", False)
+        assert (config["preset"], "errors" in config) == ("default", False)
         assert (len(checked), caplog.text.count("refuses")) == (calls, warnings)
+        assert pv.pyrefly_fallback(str(root)).reason == "refused"
         (project / "pyrefly.toml").write_text('preset = "strict"\n')
         assert self.pyrefly_config(project, root, check=check)["preset"] == "strict"
+        assert pv.pyrefly_fallback(str(root)) is None
         calls = len(checked)
         self.pyrefly_config(project, root, check=check)
         assert len(checked) == calls

@@ -1,5 +1,5 @@
-"""Go-to-definition and references through the real Python backend
-(basedpyright).
+"""Go-to-definition and references through the real Python backends
+(each installed one, pyrefly and basedpyright; lsp_backends.py).
 
 The backend answers over the compiled views; every location it gives is
 mapped back: one in a .lpy file's view to that .lpy (the open buffer's to
@@ -10,7 +10,7 @@ it knows scopes; lispython's forms and macros keep the local answer, as do
 a buffer with no backend or no Python view, and references over a view of
 only the text before the cursor.
 
-The tests share the session's basedpyright over one tmp project
+The tests share the session's backend over one tmp project
 (``real_backends``, ``lsp_buffer``, ``backend_project`` in conftest.py:
 main.lpy is the buffer, other.lpy and helpers.py its neighbours). ``|`` in a
 source marks the cursor; it is removed first.
@@ -22,15 +22,11 @@ import pytest
 from lsprotocol import types as lsp
 
 import lispy  # noqa: F401  (registers the .lpy importer)
+from tests.lsp_backends import basedpyright_only, once
 
 server = importlib.import_module("lispy.lsp.server")
 backend = importlib.import_module("lispy.lsp.backend")
 python_view = importlib.import_module("lispy.lsp.python_view")
-
-pytestmark = pytest.mark.skipif(
-    backend.backend_argv("basedpyright") is None,
-    reason="basedpyright is not installed (the lsp extra)",
-)
 
 
 @pytest.fixture
@@ -119,6 +115,7 @@ def generated_range(text, word, nth=0):
     )
 
 
+@once
 def test_a_location_in_generated_code_is_dropped(
     navigate, backend_requests, real_backends, backend_project
 ):
@@ -144,6 +141,7 @@ def test_a_location_in_generated_code_is_dropped(
     assert spans(found) == [("main.lpy", 2, 7, 2, 11)]
 
 
+@once
 def test_the_buffer_maps_by_the_view_it_was_asked_over(
     navigate, backend_requests, real_backends, backend_project
 ):
@@ -168,6 +166,7 @@ def test_the_buffer_maps_by_the_view_it_was_asked_over(
     assert spans(found) == [("main.lpy", 1, 7, 1, 11)]
 
 
+@once
 def test_backend_off_gives_the_local_answers(navigate, off_backends):
     # Defect: no backend leaves definition or references empty instead of
     # the local answers: the name the import binds, the buffer's own
@@ -178,6 +177,7 @@ def test_backend_off_gives_the_local_answers(navigate, off_backends):
     assert spans(found) == [("main.lpy", 0, 13, 0, 21), ("main.lpy", 1, 1, 1, 9)]
 
 
+@once
 def test_a_buffer_that_does_not_compile_gives_the_local_answers(
     navigate, backend_requests
 ):
@@ -195,15 +195,17 @@ def test_a_buffer_that_does_not_compile_gives_the_local_answers(
 def test_definition_follows_python_scopes(navigate):
     # Defect: a function's local of the same name answers for the global
     # (a scope-blind lookup of the buffer's bindings): the outer sep is the
-    # one (from os [sep]) binds, which the backend follows into os.
+    # one (from os [sep]) binds, which the backend follows into os (its
+    # stub for basedpyright, its source for pyrefly).
     found = navigate(
         server.definition, '(from os [sep])\n(def f [] (= sep "/"))\n(print se|p)'
     )
     assert found
     assert not [span for span in spans(found) if span[:2] == ("main.lpy", 1)]
-    assert any(loc.uri.endswith(".pyi") for loc in found)
+    assert any(loc.uri.endswith((".pyi", ".py")) for loc in found)
 
 
+@once
 @pytest.mark.parametrize("handler", [server.definition, server.references])
 @pytest.mark.parametrize(
     "marked",
@@ -220,6 +222,7 @@ def test_a_macro_never_reaches_the_backend(navigate, backend_requests, handler, 
     assert backend_requests.sent == []
 
 
+@once
 def test_references_never_come_from_a_view_of_the_prefix(navigate, backend_requests):
     # The buffer ends mid-form, so only the text before the cursor compiles.
     # Defect: the backend's references over that prefix (lines 0 and 1)
@@ -234,6 +237,7 @@ def test_references_never_come_from_a_view_of_the_prefix(navigate, backend_reque
 SHADOWED = "(= my-x 1)\n(def f []\n  (= my-x 2))\n(print my-|x)"
 
 
+@once
 @pytest.mark.parametrize("handler", [server.definition, server.references])
 def test_an_empty_backend_answer_is_final(navigate, backend_requests, handler):
     # Defect: the backend found nothing, and the local lookup, which
@@ -248,6 +252,7 @@ def test_an_empty_backend_answer_is_final(navigate, backend_requests, handler):
     ]
 
 
+@once
 def test_a_macro_gets_the_local_answers(navigate, backend_requests):
     # Defect: the backend, never asked about a macro, counts as having
     # answered nothing, and the macro's own definition and uses are lost.
@@ -258,6 +263,17 @@ def test_a_macro_gets_the_local_answers(navigate, backend_requests):
         ("main.lpy", 1, 1, 1, 6),
     ]
     assert backend_requests.sent == []
+
+
+def checked_definition(real_backends):
+    """The requests a definition answer that maps nowhere takes: a backend
+    whose definition walks up (basedpyright) has it checked against the
+    word's type definition."""
+    return [lsp.TEXT_DOCUMENT_DEFINITION] + (
+        [lsp.TEXT_DOCUMENT_TYPE_DEFINITION]
+        if real_backends.name == "basedpyright"
+        else []
+    )
 
 
 def test_an_answer_that_maps_nowhere_gives_the_local_answer(
@@ -275,10 +291,7 @@ def test_an_answer_that_maps_nowhere_gives_the_local_answer(
         )
     ]
     found = navigate(server.definition, MACRO_BUFFER)
-    assert backend_requests.sent == [
-        lsp.TEXT_DOCUMENT_DEFINITION,
-        lsp.TEXT_DOCUMENT_TYPE_DEFINITION,
-    ]
+    assert backend_requests.sent == checked_definition(real_backends)
     assert spans(found) == [("main.lpy", 1, 3, 1, 7)]
 
 
@@ -306,12 +319,10 @@ def test_an_unmapped_answer_never_jumps_to_another_file(
     ]
     marked = "(defmacro swap [a b] `(= [~a ~b] [~b ~a]))\n(print made-|x)\n"
     assert navigate(server.definition, marked) is None
-    assert backend_requests.sent == [
-        lsp.TEXT_DOCUMENT_DEFINITION,
-        lsp.TEXT_DOCUMENT_TYPE_DEFINITION,
-    ]
+    assert backend_requests.sent == checked_definition(real_backends)
 
 
+@once
 def test_a_name_that_mangles_like_a_macro_reaches_the_backend(
     navigate, backend_requests
 ):
@@ -327,12 +338,13 @@ def test_a_name_that_mangles_like_a_macro_reaches_the_backend(
     ids=["undefined name", "unknown attribute"],
 )
 def test_a_name_with_no_definition_has_none(navigate, marked):
-    # Defect: basedpyright answers definition on a name it cannot resolve
-    # for the enclosing call, so go-to-definition jumps to print in
-    # builtins.pyi, and that answer is final.
-    assert navigate(server.definition, marked) == []
+    # Defect: the backend answers definition on a name it cannot resolve
+    # for the enclosing call (basedpyright does), so go-to-definition jumps
+    # to print in builtins.pyi, and that answer is final.
+    assert spans(navigate(server.definition, marked)) == []
 
 
+@basedpyright_only
 @pytest.mark.parametrize(
     "marked",
     ["(from data|classes [dataclass])", "(import os.pa|th)"],
@@ -354,6 +366,7 @@ def test_a_defined_name_in_a_call_keeps_its_definition(navigate):
     assert [span[:2] for span in spans(found)] == [("main.lpy", 0)]
 
 
+@basedpyright_only
 def test_a_failed_check_gives_the_local_answer(
     navigate, real_backends, backend_project, monkeypatch
 ):

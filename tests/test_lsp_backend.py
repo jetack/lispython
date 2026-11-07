@@ -1,11 +1,12 @@
 """The LSP's Python backend client (lispy.lsp.backend).
 
-The real-backend tests share one basedpyright process on one event loop in a
-background thread (a basedpyright start costs about a second and 400 MB). The
-others run a fake backend, a tiny pygls server whose hover answers with its
-pid, its copy of the document and the configuration the client gave it, and
-which publishes an Error on each undefined_name of a synced text, each on its
-own loop; none needs basedpyright installed.
+The real-backend tests share one process per installed backend on one event
+loop in a background thread (a basedpyright start costs about a second and
+400 MB), one backend at a time. The others run a fake backend, a tiny pygls
+server whose hover answers with its pid, its copy of the document and the
+configuration the client gave it, and which publishes an Error on each
+undefined_name of a synced text, each on its own loop; none needs a real
+backend installed.
 """
 
 import asyncio
@@ -29,6 +30,7 @@ from lsprotocol import types as lsp
 from pygls.lsp.client import LanguageClient
 
 import lispy  # noqa: F401  (registers the .lpy importer)
+from tests.lsp_backends import REAL_BACKENDS
 
 backend = importlib.import_module("lispy.lsp.backend")
 pv = importlib.import_module("lispy.lsp.python_view")
@@ -186,8 +188,10 @@ def fake_argv(fake_script):
 
 @pytest.fixture
 def fake_default(monkeypatch, fake_argv):
-    """The fake stands for basedpyright, the default backend, so Backends
-    resolves to it whether or not basedpyright is installed."""
+    """The fake stands for basedpyright, the default backend when pyrefly is
+    not installed (as here), so Backends resolves to it whatever is
+    installed."""
+    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: fake_argv)
 
 
@@ -233,17 +237,28 @@ def kill_quietly(pid):
 
 
 def test_backend_setting(monkeypatch):
-    # Defect: the default picks basedpyright whether or not it is installed,
-    # or an explicit backend that is missing falls back to another one.
+    # Defects: with no setting, basedpyright runs where pyrefly is installed
+    # too, or the default picks a backend that is not installed; or an
+    # explicit backend that is missing falls back to another one.
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["node", "bp"])
+    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: ["pyrefly", "lsp"])
+    assert backend.resolve_backend(None) == "pyrefly"
+    assert backend.resolve_backend({"backend": None}) == "pyrefly"
+    assert backend.resolve_backend({"backend": "basedpyright"}) == "basedpyright"
     monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     assert backend.resolve_backend(None) == "basedpyright"
-    assert backend.resolve_backend({"backend": None}) == "basedpyright"
     assert backend.resolve_backend({"backend": "pyrefly"}) == "off"
     assert backend.resolve_backend({"backend": "no-such"}) == "off"
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: None)
     assert backend.resolve_backend(None) == "off"
     assert backend.resolve_backend({}) == "off"
+
+
+def test_the_real_backend_tests_cover_the_default_backends():
+    # Defect: a backend added to (or reordered in) DEFAULT_BACKENDS is never
+    # run by the real-backend tests, which list them without importing the
+    # LSP (lsp_backends.REAL_BACKENDS).
+    assert REAL_BACKENDS == backend.DEFAULT_BACKENDS
 
 
 @pytest.mark.parametrize(
@@ -257,6 +272,7 @@ def test_off_never_spawns(
     # place, the default starts on a plain install, or a request on an off
     # backend raises.
     argv = fake_argv if installed else None
+    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: argv)
     folder = SimpleNamespace(uri=project.as_uri())
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
@@ -667,7 +683,8 @@ def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):
 # The lpy-lsp server process and its backends
 # ---------------------------------------------------------------------------
 
-# Runs lispython's LSP with the fake as basedpyright, the default backend, and
+# Runs lispython's LSP with the fake as basedpyright, the default backend
+# with pyrefly not installed, and
 # one extra request, lispy-test/backendHover, that hovers through the
 # server's own Backends (no feature routes to a backend yet).
 LAUNCHER = textwrap.dedent(
@@ -680,6 +697,7 @@ LAUNCHER = textwrap.dedent(
     from lispy.lsp import backend
 
     fake = [sys.executable, sys.argv[1], "--linger"]
+    backend.BACKENDS["pyrefly"] = lambda: None
     backend.BACKENDS["basedpyright"] = lambda: fake
 
     from lispy.lsp.server import backends, server  # noqa: E402
@@ -850,7 +868,7 @@ def test_lsp_honours_backend_off(tmp_path, fake_script, project):
 
 
 # ---------------------------------------------------------------------------
-# Real backend: basedpyright
+# Real backends
 # ---------------------------------------------------------------------------
 
 
@@ -870,11 +888,14 @@ def on_loop(event_loop, coroutine, timeout=30):
     return asyncio.run_coroutine_threadsafe(coroutine, event_loop).result(timeout)
 
 
-@pytest.fixture(scope="session")
-def real(loop, tmp_path_factory):
-    argv = backend.backend_argv("basedpyright")
+# Module-scoped and parametrized: pytest stops one backend's process before
+# it starts the next, and both before the session's real_backends (conftest).
+@pytest.fixture(scope="module", params=REAL_BACKENDS)
+def real(request, loop, tmp_path_factory):
+    name = request.param
+    argv = backend.backend_argv(name)
     if argv is None:
-        pytest.skip("basedpyright is not installed (the lsp extra)")
+        pytest.skip(f"{name} is not installed (its lsp extra)")
     root = tmp_path_factory.mktemp("real-project")
     (root / "main.lpy").write_text("(= y 1)\n")
     (root / "helper.lpy").write_text(
@@ -882,7 +903,7 @@ def real(loop, tmp_path_factory):
     )
     cache = tmp_path_factory.mktemp("real-cache")
     client = backend.BackendClient(
-        pv.view_root_for(str(root), cache_home=str(cache)), argv
+        pv.view_root_for(str(root), cache_home=str(cache)), argv, name=name
     )
     yield client, root
     process = client.process
@@ -891,7 +912,7 @@ def real(loop, tmp_path_factory):
 
 
 def real_hover(loop, real, source, word, nth=0):
-    """basedpyright's hover text on word in the view of source, sent as
+    """The real backend's hover text on word in the view of source, sent as
     main.lpy's text."""
     client, root = real
     uri = (root / "main.lpy").as_uri()
@@ -911,7 +932,7 @@ def test_real_backend_analyses_the_synced_text(loop, real):
     path_hover = real_hover(loop, real, "(import os)\n(= x os.path)", "path")
     assert "path: Module" in path_hover
     sep_hover = real_hover(loop, real, "(import os)\n(= x os.sep)", "sep")
-    assert "(variable) sep: LiteralString" in sep_hover
+    assert "sep: LiteralString" in sep_hover
 
 
 def test_real_backend_resolves_a_sibling_lpy_module(loop, real):
