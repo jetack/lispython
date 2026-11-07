@@ -608,3 +608,44 @@ class TestHyphenSpelling:
         # Defect: a name offered in its Python spelling (move_to_end), or a
         # dotted name converted as one part.
         assert hyphen_spelling(name) == spelled
+
+
+class TestTypedInterpolatedHeads:
+    """A typed ``(f-string ...)`` head is not reader-built: parts out of place
+    are refused at the part, never an AttributeError."""
+
+    @pytest.mark.parametrize(
+        ["src", "msg", "col"],
+        [
+            (
+                '(f-string "a" 1 "b")',
+                "f-string: part 2 must be a replacement field",
+                17,
+            ),
+            ('(f-string "a" "b")', "f-string: part 2 must be a replacement field", 17),
+            ("(f-string 5)", "f-string: part 1 must be a string literal", 13),
+            ('(f-string b"a")', "f-string: part 1 must be a string literal", 13),
+        ],
+    )
+    def test_refused(self, src, msg, col):
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy("\n  " + src)
+        assert info.value.msg.startswith(msg)
+        assert (info.value.lineno, info.value.offset) == (2, col)
+
+    def test_macro_built_bytes_part_refused(self):
+        src = '(defmacro mk [s] (return `(f-string ~s)))\n(= a (mk b"x"))'
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(src)
+        assert info.value.msg.startswith("f-string: part 1 must be a string literal")
+        assert (info.value.lineno, info.value.offset) == (2, 6)
+
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings need 3.14")
+    def test_t_string_refused(self):
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy('(t-string "a" 1 "b")')
+        assert info.value.msg.startswith("t-string: part 2 must be a replacement")
+
+    @pytest.mark.parametrize("src", ["(f-string)", '(f-string "a")'])
+    def test_valid_heads_compile(self, src):
+        assert compile_lpy(src)
