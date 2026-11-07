@@ -14,38 +14,63 @@
 (import os)
 (import os.path as osp)
 (import sys)
+(import sysconfig)
 (import threading)
 (import time)
 
 (import lispy)
 (from lispy.core.importer [lpy-cache-path lpy-record])
+(from lispy.core.macro [REQUIRE-FILENAME])
 
 (= logger (logging.getLogger __name__))
 
-;; One condition guards _tracked, _dep-files, _dirs, _active and _epoch.
-;; _tracked maps a module name to (path, (st_mtime_ns, st_size)): its file as
-;; it was stat'ed just before it was read.  _dep-files maps each file under
-;; the import root in the cache record of a tracked .lpy (lpy-record) to its
-;; recorded stamp: a module loaded from its cache reads none of the files its
-;; compile read (a module a macro imported as it expanded), so no window sees
-;; them.  _dirs maps a directory searched for a module no finder found to its
-;; st_mtime_ns when searched.
-(= _CONDITION (threading.Condition))
-(= _tracked {})
-(= _dep-files {})
-(= _dirs {})
-(= _active 0)
-(= _epoch 0)
+;; Every mutable piece of this module's state, one object per process (_SHARED,
+;; kept on the loader): a second instance of this module (a reload, or an
+;; import after it was dropped from sys.modules) takes that same object, so
+;; its compiles and drops wait for one another's.  local holds each thread's
+;; open windows; condition guards the rest.  files maps each tracked file's
+;; path to (st_mtime_ns, st_size), the first stamp it had when read in this
+;; epoch (an earlier stamp can only make it stale, never missed); it is keyed
+;; by path, never by module name, because one name may be read from two
+;; source roots in one epoch.  names holds the modules a drop pops from
+;; sys.modules.  dep-files maps each trackable file in the cache record of a
+;; tracked .lpy (lpy-record) to its recorded stamp: a module loaded from its
+;; cache reads none of the files its compile read (a module a macro imported
+;; as it expanded), so no window sees them.  dirs maps a directory searched
+;; for a module no finder found, or holding a namespace package, to its
+;; st_mtime_ns then.  running holds a token per compile in progress (one
+;; object per fresh-modules entry), hung the running ones a drop's wait timed
+;; out on: a token leaves both when its compile ends.  epoch is the macro
+;; environment's version.
+(class _Shared []
+  (def __init__ [self original-path-stats original-namespace-exec]
+    (= self.local (threading.local))
+    (= self.condition (threading.Condition))
+    (= self.original-path-stats original-path-stats)
+    (= self.original-namespace-exec original-namespace-exec)
+    (= self.files {})
+    (= self.names (set))
+    (= self.dep-files {})
+    (= self.dirs {})
+    (= self.running (set))
+    (= self.hung (set))
+    (= self.epoch 0)))
 
 ;; How long, in seconds, a compile waits for the running ones to end before
 ;; it drops stale modules.  Unbounded, a macro hung in one compile would hold
 ;; every later one (filling the worker threads, and write-shadows holds the
-;; view root's lock while it waits); bounded, a compile that times out goes
-;; on with the modules as they are, and a later one drops them.
+;; view root's lock while it waits).  A compile still running when the wait
+;; ends is marked hung (it may only be slow): no drop waits for it again, so
+;; it costs one WAIT-LIMIT.
 (= WAIT-LIMIT 5.0)
 
 (= _EXCLUDED-PARTS (frozenset ["site-packages" "dist-packages"]))
 (= _LISPY-DIR (osp.dirname (osp.realpath lispy.__file__)))
+;; lispython's own package and the interpreter's library directories.
+(= _EXCLUDED-DIRS
+   (+ (, _LISPY-DIR)
+      (tuple (sorted {, (osp.realpath (sub (sysconfig.get-paths) key))
+                        for key in ["stdlib" "platstdlib" "purelib" "platlib"]}))))
 
 (def _stamp [path]
   "(st_mtime_ns, st_size) of path; OSError when it cannot be read."
@@ -54,10 +79,10 @@
 
 (def _windows []
   "This thread's open windows."
-  (= windows (getattr _LOCAL "windows" None))
+  (= windows (getattr _SHARED.local "windows" None))
   (if (is windows None)
       (do (= windows [])
-          (= _LOCAL.windows windows)))
+          (= _SHARED.local.windows windows)))
   (return windows))
 
 ;; The stamp is taken where a module's source is read, never off sys.modules
@@ -67,29 +92,78 @@
 ;; module records it, and a module whose import failed (a parse error in it)
 ;; is tracked too, so fixing its file moves the epoch.
 (def _recording-path-stats [self path]
-  (= windows (getattr _LOCAL "windows" None))
+  (= windows (getattr _SHARED.local "windows" None))
   (if windows
       (try
         (.append (sub windows -1) (, self.name path (_stamp path)))
         (except [OSError]
           (pass))))
-  (return (_original-path-stats self path)))
+  (return (_SHARED.original-path-stats self path)))
+
+;; A namespace package has no file, so path_stats never sees it: a require of
+;; a directory with no __init__ yet binds an empty namespace module.  Its
+;; name is recorded to drop, with each portion directory by mtime (where a
+;; later __init__ goes) and the module files that would replace it beside
+;; that directory (<name>.py, <name>.lpy) by their stamp, None while absent,
+;; when every portion is trackable.  Never the parent directory's mtime:
+;; for a top-level namespace in a flat layout that is the import root, where
+;; every lock or backup file would drop every module.
+(def _recording-namespace-exec [self module]
+  (= windows (getattr _SHARED.local "windows" None))
+  (if windows
+      (do (= portions (list (getattr module "__path__" [])))
+          (if (and portions
+                   (all ((and (isinstance portion str)
+                              (_trackable-path-p (osp.realpath portion)))
+                         for portion in portions)))
+              (do (= reads (sub windows -1))
+                  (= stem (sub (.rpartition module.__name__ ".") 2))
+                  (.append reads (, module.__name__ None None))
+                  (for portion in portions
+                    (try
+                      (.append reads (, None portion (. (os.stat portion) st-mtime-ns)))
+                      (except [OSError]
+                        (pass)))
+                    (for suffix in [".py" ".lpy"]
+                      (= candidate (osp.join (osp.dirname portion) (+ stem suffix)))
+                      (try
+                        (= stamp (_stamp candidate))
+                        (except [OSError]
+                          (= stamp None)))
+                      (.append reads (, module.__name__ candidate stamp))))))))
+  (return (_SHARED.original-namespace-exec self module)))
 
 ;; A missing module is never read, so path_stats cannot see it, and a require
 ;; swallows the ModuleNotFoundError (core/macro.py require_macro), so no
 ;; exception says so either.  The import system asks this finder, last on
 ;; sys.meta_path, only once every other finder found nothing; it records the
 ;; directories that were searched (the parent package's __path__, or
-;; sys.path for a top-level name) with their mtime.  Creating a file there,
-;; or saving one by an atomic rename, changes that mtime: the signal
-;; FileFinder itself uses.  The module is never probed again with find_spec
-;; instead: that imports its parents outside any window, and the import root
-;; is on sys.path only while a compile runs.
+;; sys.path for a top-level name a require asked for) with their mtime.
+;; Creating a file there, or saving one by an atomic rename, changes that
+;; mtime: the signal FileFinder itself uses.  A top-level miss of any other
+;; import (a module's try: import optional) is not recorded, because sys.path
+;; holds the import root: in a flat layout every file written there (a lock,
+;; a backup) would drop every module.  The module is never probed again with
+;; find_spec instead: that imports its parents outside any window, and the
+;; import root is on sys.path only while a compile runs.
+(= _IMPORTLIB-FILE importlib.__file__)
+
+(def _asked-by-require-p [frame]
+  "Whether the import running at frame was asked for by a require's own
+   code (REQUIRE-FILENAME): the first frame up from it that is not
+   importlib's."
+  (while (and (is-not frame None)
+              (or (.startswith frame.f-code.co-filename "<frozen importlib")
+                  (== frame.f-code.co-filename _IMPORTLIB-FILE)))
+    (= frame frame.f-back))
+  (return (and (is-not frame None) (== frame.f-code.co-filename REQUIRE-FILENAME))))
+
 (class _MissingModuleObserver []
   (deco staticmethod
     (def find-spec [name path :target None]
-      (= windows (getattr _LOCAL "windows" None))
-      (if (not windows)
+      (= windows (getattr _SHARED.local "windows" None))
+      (if (or (not windows)
+              (and (is path None) (not (_asked-by-require-p (sys._getframe 1)))))
           (return None))
       (for directory in (list (ife (is path None) sys.path path))
         (if (isinstance directory str)
@@ -102,21 +176,20 @@
       (return None))))
 
 ;; The fresh-modules windows open on each thread, innermost last: each a list
-;; of the (name, path, stamp) reads made in it, and (None, directory,
-;; st_mtime_ns) for each directory searched for a module no finder found.
-;; The wrapper and the observer are installed once per process, by the first
-;; import of this module, and keep the thread-local they write to on the
-;; loader (_lispy_fresh_windows).  A second instance of this module (a reload,
-;; or an import after it was dropped from sys.modules) takes that same
-;; thread-local and installs nothing, so the windows of every instance see
-;; every read, and nothing is wrapped twice.
+;; of the (name, path, stamp) reads made in it, (None, directory,
+;; st_mtime_ns) for each directory searched for a module no finder found or
+;; holding a namespace package, and (name, None, None) for a namespace
+;; package.  The wrappers and the observer are installed once per process,
+;; with the _Shared they write to, by the first import of this module; a
+;; later instance installs nothing, so nothing is wrapped twice.
 (= _SOURCE-LOADER importlib.machinery.SourceFileLoader)
-(= _original-path-stats _SOURCE-LOADER.path-stats)
-(= _LOCAL (getattr _SOURCE-LOADER "_lispy_fresh_windows" None))
-(if (is _LOCAL None)
-    (do (= _LOCAL (threading.local))
-        (setattr _SOURCE-LOADER "_lispy_fresh_windows" _LOCAL)
+(= _NAMESPACE-LOADER importlib.machinery.NamespaceLoader)
+(= _SHARED (getattr _SOURCE-LOADER "_lispy_fresh_modules" None))
+(if (is _SHARED None)
+    (do (= _SHARED (_Shared _SOURCE-LOADER.path-stats _NAMESPACE-LOADER.exec-module))
+        (setattr _SOURCE-LOADER "_lispy_fresh_modules" _SHARED)
         (= _SOURCE-LOADER.path-stats _recording-path-stats)
+        (= _NAMESPACE-LOADER.exec-module _recording-namespace-exec)
         (.append sys.meta-path _MissingModuleObserver)))
 
 (def _stale-state []
@@ -125,17 +198,19 @@
    whose mtime changed or that is gone).  A module is stale by its file
    alone, never by being absent from sys.modules: a module whose import
    failed is in none, and stays tracked until its file changes.  Under
-   _CONDITION."
+   _SHARED.condition."
   (= changed [])
-  (for [path stamp] in (+ (list (.values _tracked)) (list (.items _dep-files)))
+  ;; A None stamp is a file tracked while absent: stale once it exists.
+  (for [path stamp] in (+ (list (.items _SHARED.files)) (list (.items _SHARED.dep-files)))
     (try
       (if (!= (_stamp path) stamp)
           (.append changed path))
       (except [OSError]
-        (.append changed path))))
+        (if (is-not stamp None)
+            (.append changed path)))))
   (if changed
       (return (, changed True)))
-  (for [directory mtime] in (list (.items _dirs))
+  (for [directory mtime] in (list (.items _SHARED.dirs))
     (try
       (if (!= (. (os.stat directory) st-mtime-ns) mtime)
           (return (, changed True)))
@@ -158,28 +233,34 @@
       (.warning logger "lispython LSP: cannot remove the bytecode of %s: %s"
                 path e))))
 
-(def _drop-stale []
-  "Drop every tracked module once one is stale, after the compiles running
-   have ended, waiting at most WAIT-LIMIT for them; once the wait timed
-   out, drop nothing while one is running and go on with the modules as
-   they are.  Under _CONDITION."
-  (global _epoch)
+(def _drop-stale [wait]
+  "Drop every tracked module once one is stale, once the compiles running
+   (less the hung ones) have ended.  wait: wait for them up to WAIT-LIMIT,
+   then mark those still running hung and drop all the same; else drop
+   only when none is running.  True when nothing is stale afterwards (no
+   drop was due, or it was made).  Under _SHARED.condition."
   ;; A wait rather than a drop at once: deleting a sys.modules entry while
   ;; another thread is importing it makes that import raise (importlib's
   ;; _load_unlocked pops the entry back out).  A compile arriving while a
-  ;; module is stale waits too, so none goes on with stale modules, within
-  ;; WAIT-LIMIT.
+  ;; module is stale waits too, so none goes on with stale modules.
   (= deadline (+ (time.monotonic) WAIT-LIMIT))
   (while True
     (= [changed stale] (_stale-state))
     (if (not stale)
-        (return))
-    (if (> _active 0)
-        (do (= remaining (- deadline (time.monotonic)))
-            (if (<= remaining 0)
-                (return))
-            (.wait _CONDITION remaining)
-            (continue)))
+        (return True))
+    (= blockers (- _SHARED.running _SHARED.hung))
+    (if blockers
+        (do (if (not wait)
+                (return False))
+            (= remaining (- deadline (time.monotonic)))
+            (if (> remaining 0)
+                (do (.wait _SHARED.condition remaining)
+                    (continue)))
+            ;; A compile past WAIT-LIMIT may only be slow.  Dropping under it
+            ;; can fail an import it has in progress; its result is keyed by
+            ;; the epoch it began under, now outdated, so it is compiled
+            ;; again.
+            (.update _SHARED.hung blockers)))
     ;; A pyc keeps its source's mtime in whole seconds and its size, so an
     ;; edit of the same size within that second would load the old pyc: a
     ;; changed .py loses its pyc.  Every tracked .lpy loses its cache too,
@@ -190,101 +271,126 @@
     (for path in changed
       (if (.endswith path ".py")
           (_remove-bytecode path)))
-    (for [path _] in (list (.values _tracked))
+    (for path in (list _SHARED.files)
       (if (.endswith path ".lpy")
           (_remove-bytecode path)))
     ;; Every tracked module goes, not just the changed one: the import graph
     ;; is unknown, and a module importing the changed one holds its old
     ;; functions.
-    (for name in (list _tracked)
+    (for name in (list _SHARED.names)
       (.pop sys.modules name None))
-    (.clear _tracked)
-    (.clear _dep-files)
-    (.clear _dirs)
+    (.clear _SHARED.files)
+    (.clear _SHARED.names)
+    (.clear _SHARED.dep-files)
+    (.clear _SHARED.dirs)
     (importlib.invalidate-caches)
-    (+= _epoch 1)
-    (.notify-all _CONDITION)
-    (return)))
+    (+= _SHARED.epoch 1)
+    (.notify-all _SHARED.condition)
+    (return True)))
 
-(def _under-root-p [real root]
-  "Whether the real path real lies under root (already real), outside
-   site-packages, dist-packages and lispython's own package."
+(def _within-p [real directory]
+  "Whether the real path real is directory (already real) or below it."
   (try
-    (if (!= (osp.commonpath [real root]) root)
-        (return False))
-    (if (== (osp.commonpath [real _LISPY-DIR]) _LISPY-DIR)
-        (return False))
+    (return (== (osp.commonpath [real directory]) directory))
     ;; Paths on different drives (Windows) share no root.
     (except [ValueError]
-      (return False)))
-  (return (.isdisjoint _EXCLUDED-PARTS (.split real os.sep))))
+      (return False))))
 
-(def _trackable-p [name path root]
+(def _trackable-path-p [real]
+  "Whether the file or directory at the real path real may be tracked: it
+   lies outside lispython's own package, the interpreter's library
+   directories (_EXCLUDED-DIRS) and every site-packages or dist-packages
+   directory.  Any other source root qualifies (a workspace member, an
+   editable install, a PYTHONPATH entry), not only the compiling file's."
+  (if (not (.isdisjoint _EXCLUDED-PARTS (.split real os.sep)))
+      (return False))
+  (return (not (any ((_within-p real directory) for directory in _EXCLUDED-DIRS)))))
+
+(def _lispy-module-p [name]
+  (return (or (== name "lispy") (.startswith name "lispy."))))
+
+(def _trackable-p [name path]
   "Whether the module name read from path in a window may be dropped: a .py
-   or .lpy file under root (_under-root-p) and no module of lispython
-   itself.  The server's own modules (a user may edit lispython itself) and
-   third-party or extension modules (numpy refuses a second load) must
-   never be dropped."
-  (if (or (== name "lispy") (.startswith name "lispy."))
+   or .lpy file at a trackable path (_trackable-path-p) and no module of
+   lispython itself.  The server's own modules (a user may edit lispython
+   itself) and third-party or extension modules (numpy refuses a second
+   load) must never be dropped."
+  (if (_lispy-module-p name)
       (return False))
   (if (or (not (isinstance path str)) (not (.endswith path (, ".py" ".lpy"))))
       (return False))
-  (return (_under-root-p (osp.realpath path) root)))
+  (return (_trackable-path-p (osp.realpath path))))
 
-(def _track-record [path root]
-  "Track the files under root in the cache record of the .lpy at path, the
+(def _track-record [path]
+  "Track the trackable files in the cache record of the .lpy at path, the
    record of the code loaded from it (none while its latest compile failed,
-   so a broken file is tracked by its own stamp alone).  Under _CONDITION."
+   so a broken file is tracked by its own stamp alone).  Under
+   _SHARED.condition."
   (= record (lpy-record path))
   (if (is record None)
       (return))
   (for [real mtime size] in record
-    (if (_under-root-p real root)
-        (.setdefault _dep-files real (, mtime size)))))
+    (if (_trackable-path-p real)
+        (.setdefault _SHARED.dep-files real (, mtime size)))))
 
 (deco contextlib.contextmanager
-  (def fresh-modules [import-root]
+  (def fresh-modules []
     "Wrap one compile: first drop every tracked module once one is stale
-     (_drop-stale), then track every .py or .lpy source the
-     compile reads under import-root (nothing for None, _trackable-p) by the
-     stamp its file had when read, the files under it in each such .lpy's
-     cache record (_track-record), and every directory under it searched for
-     a module no finder found by its mtime."
-    (global _active)
+     (_drop-stale, waiting), then track every .py or .lpy source the
+     compile reads (_trackable-p) by the stamp its file had when read, the
+     trackable files in each such .lpy's cache record (_track-record),
+     every trackable directory searched for a module no finder found by its
+     mtime, and every namespace package it imports by its directories
+     (_recording-namespace-exec).  Yields the epoch the compile runs under."
     (= reads [])
-    (with [_CONDITION]
-      (_drop-stale)
-      (+= _active 1))
+    (= token (object))
+    (with [_SHARED.condition]
+      (_drop-stale True)
+      (= current _SHARED.epoch)
+      (.add _SHARED.running token))
     (try
       (.append (_windows) reads)
-      (yield)
+      (yield current)
       (finally
         (= windows (_windows))
         (if (and windows (is (sub windows -1) reads))
             (.pop windows))
-        (with [_CONDITION]
+        (with [_SHARED.condition]
           (try
-            (if (is-not import-root None)
-                (do (= root (osp.realpath import-root))
-                    (for [name path stamp] in reads
-                      (cond
-                        (is name None)
-                        (do (= directory (osp.realpath path))
-                            (if (_under-root-p directory root)
-                                (= (sub _dirs directory) stamp)))
+            (for [name path stamp] in reads
+              (cond
+                (is name None)
+                (do (= directory (osp.realpath path))
+                    (if (_trackable-path-p directory)
+                        (.setdefault _SHARED.dirs directory stamp)))
 
-                        (_trackable-p name path root)
-                        (do (= (sub _tracked name) (, path stamp))
-                            (if (.endswith path ".lpy")
-                                (_track-record path root)))))))
+                (is path None)
+                (if (not (_lispy-module-p name))
+                    (.add _SHARED.names name))
+
+                (_trackable-p name path)
+                (do (.setdefault _SHARED.files path stamp)
+                    (.add _SHARED.names name)
+                    (if (and (is-not stamp None) (.endswith path ".lpy"))
+                        (_track-record path)))))
             (finally
-              (-= _active 1)
-              (.notify-all _CONDITION))))))))
+              (.discard _SHARED.running token)
+              (.discard _SHARED.hung token)
+              (.notify-all _SHARED.condition))))))))
 
 (def epoch []
-  "The macro environment's version: it moves whenever the tracked modules
-   are dropped, which this drops first when one is stale, as a compile
-   would.  A view or shadow made under one epoch is stale under another."
-  (with [_CONDITION]
-    (_drop-stale)
-    (return _epoch)))
+  "The macro environment's version, never waiting: it moves whenever the
+   tracked modules are dropped, which this does first when one is stale
+   and no compile (less the hung ones) runs.  None while such a drop is
+   due but compiles run: every view or shadow made before is stale then.  A
+   view or shadow made under one epoch is stale under another."
+  (with [_SHARED.condition]
+    (if (_drop-stale False)
+        (return _SHARED.epoch))
+    (return None)))
+
+(def current-epoch []
+  "The epoch counter as it is, with no staleness check: the version of a
+   result no macro took part in (a parse error)."
+  (with [_SHARED.condition]
+    (return _SHARED.epoch)))

@@ -575,7 +575,7 @@ class TestShadows:
         for skipped in ["venv", "node_modules", "__pycache__", "site-packages"]:
             self.write(project / skipped / "dep.lpy", "(= d 1)")
         # Each path to a file is its own module, so the link gets a shadow too.
-        assert pv.write_shadows(str(project), str(root)) == [
+        assert pv.write_shadows(str(project), str(root)).shadows == [
             str(root / "alias.py"),
             str(root / "top.py"),
         ]
@@ -772,7 +772,7 @@ class TestShadows:
                 try:
                     assert not wait or paused.wait(5)
                     name = threading.current_thread().name
-                    shadows[name] = pv.write_shadows(str(project), str(root))
+                    shadows[name] = pv.write_shadows(str(project), str(root)).shadows
                 except BaseException as e:
                     errors.append(e)
 
@@ -835,7 +835,7 @@ class TestShadows:
         shadow = root / "pkg" / "m.py"
         assert shadow.is_symlink()
         self.write(pkg / "m.lpy", "(= m 1)")  # compiles to m.py's very text
-        assert str(shadow) in pv.write_shadows(str(project), str(root))
+        assert str(shadow) in pv.write_shadows(str(project), str(root)).shadows
         assert not shadow.is_symlink() and shadow.read_text() == "m = 1"
         assert (pkg / "m.py").read_text() == "m = 1"
 
@@ -860,10 +860,10 @@ class TestShadows:
         project, root = tmp_path / "project", tmp_path / "view"
         self.write(project / "top.lpy", "(= a 1)")
         shadows = [str(root / "top.py")]
-        assert pv.write_shadows(str(project), str(root)) == shadows
+        assert pv.write_shadows(str(project), str(root)).shadows == shadows
         (project / "top.lpy").chmod(0)
         try:
-            assert pv.write_shadows(str(project), str(root)) == shadows
+            assert pv.write_shadows(str(project), str(root)).shadows == shadows
         finally:
             (project / "top.lpy").chmod(0o600)
         assert (root / "top.py").read_text() == "a = 1"
@@ -881,7 +881,9 @@ class TestShadows:
         self.write(root / "top.py.tmp", "theirs")
         manifest = pv.ShadowManifest()
         try:
-            shadows = pv.write_shadows(str(project), str(root), manifest=manifest)
+            shadows = pv.write_shadows(
+                str(project), str(root), manifest=manifest
+            ).shadows
         finally:
             (root / "locked").chmod(0o700)
         assert shadows == [str(root / "top.py")]
@@ -900,15 +902,15 @@ class TestShadows:
         self.write(project / ".hidden" / "h.lpy", "(= h 1)")
         self.write(root / "pyrightconfig.json", "{}")
         manifest = pv.ShadowManifest()
-        shadows = pv.write_shadows(str(project), str(root), manifest=manifest)
+        shadows = pv.write_shadows(str(project), str(root), manifest=manifest).shadows
         mod, top = root / "pkg" / "mod.py", root / "top.py"
         assert shadows == sorted([str(mod), str(top)])
         assert mod.read_text() == "my_x = 1"
 
         calls = []
-        real = pv.compile_view
+        real = pv.compile_buffer
         monkeypatch.setattr(
-            pv, "compile_view", lambda s, **kw: calls.append(s) or real(s, **kw)
+            pv, "compile_buffer", lambda s, **kw: calls.append(s) or real(s, **kw)
         )
         stamp = mod.stat().st_mtime_ns
         pv.write_shadows(str(project), str(root), manifest=manifest)
@@ -922,7 +924,9 @@ class TestShadows:
         (project / "top.lpy").unlink()
         self.write(project / "pkg" / "mod.lpy", "(= 1 1)")  # stops compiling
         os.utime(project / "pkg" / "mod.lpy", ns=(stamp + 2 * 10**9,) * 2)
-        assert pv.write_shadows(str(project), str(root), manifest=manifest) == []
+        assert (
+            pv.write_shadows(str(project), str(root), manifest=manifest).shadows == []
+        )
         assert not mod.exists() and not top.exists()
         assert (root / "pyrightconfig.json").read_text() == "{}"
 
@@ -1468,27 +1472,77 @@ class TestMacroModules:
         [diagnostic] = server.compute_diagnostics(src, uri)
         assert "pvmm-boom" in diagnostic.message
 
-    def test_a_module_outside_the_import_root_is_never_dropped(
+    def test_a_module_from_another_source_root_is_seen(
         self, package, tmp_path, monkeypatch
     ):
-        # Only modules under the import root are dropped: a library a macro
-        # imports keeps its one instance (an extension refuses a second load).
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        ext = "pvmmoutsideext"
-        (outside / (ext + ".py")).write_text("VALUE = 1\n")
-        monkeypatch.syspath_prepend(str(outside))
+        # Defect: only modules under the compiling file's import root are
+        # tracked, so a helper from another source root (a workspace member,
+        # an editable install, a PYTHONPATH entry) keeps its old instance.
+        other = tmp_path / "other"
+        other.mkdir()
+        helper = package.name + "helper"
+        (other / (helper + ".py")).write_text("VALUE = 1\n")
+        monkeypatch.syspath_prepend(str(other))
+        monkeypatch.delitem(sys.modules, helper, raising=False)
+        (package.pkg / "mac.lpy").write_text(
+            f"(import {helper})\n(defmacro twice [x] (return {helper}.VALUE))"
+        )
+        try:
+            assert self.view(package).text.endswith("yy = 1")
+            (other / (helper + ".py")).write_text("VALUE = 22\n")
+            assert self.view(package).text.endswith("yy = 22")
+        finally:
+            sys.modules.pop(helper, None)
+
+    def test_a_module_in_site_packages_is_never_dropped(
+        self, package, tmp_path, monkeypatch
+    ):
+        # A library a macro imports keeps its one instance (an extension
+        # refuses a second load).
+        site = tmp_path / "lib" / "site-packages"
+        site.mkdir(parents=True)
+        ext = package.name + "ext"
+        (site / (ext + ".py")).write_text("VALUE = 1\n")
+        monkeypatch.syspath_prepend(str(site))
         monkeypatch.delitem(sys.modules, ext, raising=False)
         (package.pkg / "mac.lpy").write_text(f"(import {ext})\n" + TWICE)
         try:
             self.view(package)
             module = sys.modules[ext]
-            (outside / (ext + ".py")).write_text("VALUE = 22\n")
+            (site / (ext + ".py")).write_text("VALUE = 22\n")
             (package.pkg / "mac.lpy").write_text(f"(import {ext})\n" + THRICE)
             assert self.view(package).text.endswith("yy = 2 * 2 * 2")
             assert sys.modules[ext] is module
         finally:
             sys.modules.pop(ext, None)
+
+    def test_one_name_from_two_roots_tracks_both_files(self, package, tmp_path):
+        # Defect: tracking by module name lets the second root's file replace
+        # the first's, so fixing the first (whose import failed) is never
+        # seen: the name stays bound to the second root's module.
+        name = package.name + "two"
+        first, second = tmp_path / "first", tmp_path / "second"
+        for root in [first, second]:
+            root.mkdir()
+        (first / (name + ".lpy")).write_text("(defmacro twice [x]")
+        (second / (name + ".lpy")).write_text(THRICE)
+
+        def view(root):
+            return pv.compile_view(
+                f"(require {name} *)\n(= yy (twice 2))",
+                name="pvmmtwo",
+                import_root=str(root),
+            )
+
+        try:
+            assert view(first) is None
+            assert view(second).text.endswith("yy = 2 * 2 * 2")
+            (first / (name + ".lpy")).write_text(
+                "(defmacro twice [x] (return `(- ~x ~x)))"
+            )
+            assert view(first).text.endswith("yy = 2 - 2")
+        finally:
+            sys.modules.pop(name, None)
 
     def consumer(self, kind, package, tmp_path):
         """The text a ViewCache view (one uri and version throughout) or a
@@ -1541,6 +1595,108 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert "yy = 2 * 2 * 2" in text()
 
+    def test_a_package_created_in_a_namespace_directory_is_seen(self, package):
+        # Defect: a require of a directory with no __init__ binds an empty
+        # namespace module, which no read tracks, so a later __init__.lpy
+        # there is never loaded while the server runs.
+        (package.pkg / "nosuch").mkdir()
+        src = "(require .nosuch *)\n(= yy (twice 2))"
+        kwargs = dict(
+            package=package.name,
+            name=package.name + ".mod",
+            import_root=str(package.root),
+        )
+        assert pv.compile_view(src, **kwargs).text.endswith("yy = twice(2)")
+        next_tick()
+        (package.pkg / "nosuch" / "__init__.lpy").write_text(THRICE)
+        assert pv.compile_view(src, **kwargs).text.endswith("yy = 2 * 2 * 2")
+
+    def flat_namespace(self, package, tmp_path):
+        """(project, name): a flat layout whose import root holds a
+        directory name with no __init__, after a view requiring it."""
+        project = tmp_path / "flat"
+        name = package.name + "ns"
+        (project / name).mkdir(parents=True)
+        assert self.flat_view(project, name).text.endswith("yy = twice(2)")
+        next_tick()
+        return project, name
+
+    def test_a_module_created_beside_a_namespace_directory_is_seen(
+        self, package, tmp_path
+    ):
+        # A module file of the namespace's name replaces it on import.
+        project, name = self.flat_namespace(package, tmp_path)
+        try:
+            (project / (name + ".lpy")).write_text(THRICE)
+            assert self.flat_view(project, name).text.endswith("yy = 2 * 2 * 2")
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_namespace_leaves_its_parent_directory_unwatched(self, package, tmp_path):
+        # Defect: a top-level namespace stamps its parent directory, the
+        # import root of a flat layout, so any file written there drops
+        # every module.
+        project, name = self.flat_namespace(package, tmp_path)
+        try:
+            epoch = mm.epoch()
+            (project / "uv.lock").write_text("")
+            assert mm.epoch() == epoch
+        finally:
+            sys.modules.pop(name, None)
+
+    def flat_view(self, project, mac):
+        return pv.compile_view(
+            f"(require {mac} *)\n(= yy (twice 2))",
+            name="pvmmflat",
+            import_root=str(project),
+        )
+
+    def test_an_incidental_miss_leaves_the_import_root_unwatched(
+        self, package, tmp_path
+    ):
+        # Defect: a macro module's optional import that is missing stamps
+        # every sys.path directory, the import root among them, so in a flat
+        # layout any file written there (uv.lock) drops every module.
+        project = tmp_path / "flat"
+        project.mkdir()
+        mac = package.name + "flatmac"
+        (project / (mac + ".lpy")).write_text(
+            "(try (import pvmmnosuchoptional) (except [ImportError] (pass)))\n" + TWICE
+        )
+        try:
+            assert self.flat_view(project, mac).text.endswith("yy = 2 + 2")
+            epoch = mm.epoch()
+            next_tick()
+            (project / "uv.lock").write_text("")
+            assert mm.epoch() == epoch
+        finally:
+            sys.modules.pop(mac, None)
+
+    def test_a_created_top_level_macro_module_is_seen(self, package, tmp_path):
+        # A require's own top-level miss still watches sys.path, so a cached
+        # view misses once the module is created in the import root.
+        project = tmp_path / "flat"
+        project.mkdir()
+        mac = package.name + "flatmac"
+        cache = pv.ViewCache()
+
+        def text():
+            return cache.view(
+                "u",
+                1,
+                f"(require {mac} *)\n(= yy (twice 2))",
+                name="pvmmflat",
+                import_root=str(project),
+            ).text
+
+        try:
+            assert text().endswith("yy = twice(2)")
+            next_tick()
+            (project / (mac + ".lpy")).write_text(THRICE)
+            assert text().endswith("yy = 2 * 2 * 2")
+        finally:
+            sys.modules.pop(mac, None)
+
     def test_a_same_size_edit_in_the_same_second_is_seen(self, package, monkeypatch):
         # A pyc keeps the source's mtime in whole seconds plus its size, so
         # it would pass for the edited source; the .lpy cache must not.
@@ -1564,12 +1720,12 @@ class TestMacroModules:
         entered, release = threading.Event(), threading.Event()
 
         def hold():
-            with mm.fresh_modules(None):
+            with mm.fresh_modules():
                 entered.set()
                 release.wait(30)
 
         def wait():
-            with mm.fresh_modules(None):
+            with mm.fresh_modules():
                 pass
 
         holder = threading.Thread(target=hold, daemon=True)
@@ -1586,6 +1742,80 @@ class TestMacroModules:
             holder.join(10)
             if waiter.ident is not None:
                 waiter.join(10)
+
+    @contextlib.contextmanager
+    def held_compile(self, monkeypatch, limit=0.3):
+        """A compile hung in its macros for the whole block (a thread inside
+        fresh-modules), WAIT_LIMIT set to limit; yields the list of the
+        timed waits on the shared condition made meanwhile."""
+        monkeypatch.setattr(mm, "WAIT_LIMIT", limit)
+        condition = mm._SHARED.condition
+        real, waits = condition.wait, []
+
+        def counting(timeout=None):
+            if timeout is not None:
+                waits.append(timeout)
+            return real(timeout)
+
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules():
+                entered.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(10)
+            monkeypatch.setattr(condition, "wait", counting)
+            yield waits
+        finally:
+            release.set()
+            holder.join(10)
+            assert not holder.is_alive()
+
+    def test_a_hung_compile_costs_one_wait_and_drops_resume(self, package, monkeypatch):
+        # Defect: a compile hung in a macro keeps every later drop from
+        # happening, so no edit is seen again and every compile waits
+        # WAIT_LIMIT anew; and epoch waits too, before every cached lookup.
+        mac = package.pkg / "mac.lpy"
+        assert self.view(package).text.endswith("yy = 2 + 2")
+        edits = [
+            (THRICE, "yy = 2 * 2 * 2"),
+            ("(defmacro twice [x] (return `(- ~x ~x ~x ~x)))", "yy = 2 - 2 - 2 - 2"),
+            ("(defmacro twice [x] (return `(+ ~x 1)))", "yy = 2 + 1"),
+        ]
+        with self.held_compile(monkeypatch) as waits:
+            for number, (text, expected) in enumerate(edits):
+                next_tick()
+                mac.write_text(text)
+                if number == 0:
+                    assert mm.epoch() is None
+                    assert waits == []
+                assert self.view(package).text.endswith(expected)
+            assert len(waits) == 1
+
+    def test_a_cursor_view_waits_once_for_a_hung_compile(self, package, monkeypatch):
+        # Defect: a cursor view waits for the hung compile in epoch and again
+        # in each of its compiles (the buffer's, then its prefix's), past the
+        # backend's request timeout.  The open form makes the prefix compile.
+        cache = pv.ViewCache()
+        src = "(require .mac *)\n(= yy (+ (twice 2) zz)"
+        kwargs = dict(
+            package=package.name,
+            name=package.name + ".mod",
+            import_root=str(package.root),
+        )
+        line, col = plus(locate(src, "zz"), 2)
+        first = cache.view_at_cursor("u", 1, src, line, col, **kwargs)
+        assert "yy = 2 + 2 + zz" in first.text
+        with self.held_compile(monkeypatch) as waits:
+            next_tick()
+            (package.pkg / "mac.lpy").write_text(THRICE)
+            view = cache.view_at_cursor("u", 2, src, line, col, **kwargs)
+            assert len(waits) == 1
+        assert view.fallback and "yy = 2 * 2 * 2 + zz" in view.text
 
     def test_a_missing_module_keeps_the_environment_settled(
         self, package, tmp_path, monkeypatch
@@ -1613,11 +1843,11 @@ class TestMacroModules:
         pv.write_shadows(str(project), str(root), manifest=manifest)
         entries = dict(manifest.sources)
         compiled = []
-        compile_view = pv.compile_view
+        compile_buffer = pv.compile_buffer
         monkeypatch.setattr(
             pv,
-            "compile_view",
-            lambda *a, **k: compiled.append(a) or compile_view(*a, **k),
+            "compile_buffer",
+            lambda *a, **k: compiled.append(a) or compile_buffer(*a, **k),
         )
         pv.write_shadows(str(project), str(root), manifest=manifest)
         assert compiled == []
@@ -1736,21 +1966,57 @@ class TestMacroModules:
         # windows of the instance already in use.
         loader = importlib.machinery.SourceFileLoader
         stats, finders = loader.path_stats, list(sys.meta_path)
+        namespace_exec = importlib.machinery.NamespaceLoader.exec_module
         monkeypatch.delitem(sys.modules, "lispy.lsp.macro_modules")
         second = importlib.import_module("lispy.lsp.macro_modules")
         assert second is not mm
         assert loader.path_stats is stats
         assert sys.meta_path == finders
+        assert importlib.machinery.NamespaceLoader.exec_module is namespace_exec
         assert self.view(package).text.endswith("yy = 2 + 2")
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert self.view(package).text.endswith("yy = 2 * 2 * 2")
 
+    def test_a_second_instances_compile_holds_the_first_instances_drop(
+        self, package, monkeypatch
+    ):
+        # Defect: each instance keeps its own condition and compile count, so
+        # the first drops modules while a compile of the second imports them.
+        assert self.view(package).text.endswith("yy = 2 + 2")
+        monkeypatch.delitem(sys.modules, "lispy.lsp.macro_modules")
+        second = importlib.import_module("lispy.lsp.macro_modules")
+        assert second is not mm
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            with second.fresh_modules():
+                entered.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        dropper = threading.Thread(target=lambda: self.view(package), daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(10)
+            (package.pkg / "mac.lpy").write_text(THRICE)
+            dropper.start()
+            dropper.join(0.5)
+            assert dropper.is_alive()
+            release.set()
+            dropper.join(10)
+            assert not dropper.is_alive()
+        finally:
+            release.set()
+            holder.join(10)
+            if dropper.ident is not None:
+                dropper.join(10)
+
     def test_lispython_own_modules_are_never_tracked(self, tmp_path):
-        root = os.path.realpath(tmp_path)
-        path = os.path.join(root, "m.py")
-        assert mm._trackable_p("pvmmown.m", path, root)
-        assert not mm._trackable_p("lispy", path, root)
-        assert not mm._trackable_p("lispy.lsp.m", path, root)
+        path = os.path.join(os.path.realpath(tmp_path), "m.py")
+        assert mm._trackable_p("pvmmown.m", path)
+        assert not mm._trackable_p("lispy", path)
+        assert not mm._trackable_p("lispy.lsp.m", path)
+        assert not mm._trackable_p("pvmmown.m", os.__file__)
 
 
 def fresh_with_p(node):

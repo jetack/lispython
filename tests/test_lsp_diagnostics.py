@@ -14,6 +14,7 @@ import itertools
 import pathlib
 import re
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -284,6 +285,7 @@ def fresh_server_state(monkeypatch):
     monkeypatch.setattr(server, "DIAGNOSTIC_RUNS", {})
     monkeypatch.setattr(server, "_COMPILING", set())
     monkeypatch.setattr(server, "_PRESET_FALLBACK_NOTIFIED", set())
+    monkeypatch.setattr(server, "_REFRESHED_EPOCH", None, raising=False)
     for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
         monkeypatch.setattr(server, name, {})
 
@@ -445,6 +447,180 @@ def test_a_save_compiles_again(fake_served, monkeypatch):
 
     run_bounded(scenario())
     sys.modules.pop("diag_flag_mac", None)
+
+
+class Documents:
+    """A language server double for several open documents.  As pygls
+    does, a closed document is read back from disk on request."""
+
+    def __init__(self):
+        self.workspace = self
+        self.documents = {}
+        self.published = {}
+
+    def get_text_document(self, uri):
+        if uri not in self.documents:
+            path = pathlib.Path(uri[len("file://") :])
+            return TextDocument(uri, path.read_text())
+        return self.documents[uri]
+
+    def text_document_publish_diagnostics(self, params):
+        self.published.setdefault(params.uri, []).append(params.diagnostics)
+
+    def open(self, path):
+        uri = path.as_uri()
+        self.documents[uri] = TextDocument(uri, path.read_text(), version=1)
+        doc = SimpleNamespace(uri=uri, version=1)
+        server.did_open(self, SimpleNamespace(text_document=doc))
+        return uri
+
+    def update(self, path):
+        uri = path.as_uri()
+        version = self.documents[uri].version + 1
+        self.documents[uri] = TextDocument(uri, path.read_text(), version=version)
+        return SimpleNamespace(text_document=SimpleNamespace(uri=uri, version=version))
+
+    def save(self, path):
+        server.did_save(self, self.update(path))
+
+    def change(self, path):
+        server.did_change(self, self.update(path))
+
+    def close(self, path):
+        params = SimpleNamespace(text_document=SimpleNamespace(uri=path.as_uri()))
+        del self.documents[path.as_uri()]
+        server.did_close(self, params)
+
+
+@pytest.fixture
+def macro_documents(fake_served, monkeypatch):
+    """(editor, mac, mod): an open macro module and an open document
+    requiring it, published, the backend off."""
+    _, backends = fake_served
+    backends.configure({"backend": "off"})
+    project = pathlib.Path(backends.folders()[0].uri[len("file://") :])
+    name = "diagmmsave"
+    pkg = project / name
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    mac, mod = pkg / "mac.lpy", pkg / "mod.lpy"
+    mac.write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+    mod.write_text("(require .mac *)\n(= yy (twice 2))\n")
+    for key in [name, name + ".mac"]:
+        monkeypatch.delitem(sys.modules, key, raising=False)
+    yield Documents(), mac, mod
+    for key in list(sys.modules):
+        if key == name or key.startswith(name + "."):
+            del sys.modules[key]
+
+
+BOOM = '(defmacro twice [x] (raise (ValueError "diag-boom")))\n'
+
+
+async def opened(editor, mac, mod):
+    mod_uri, mac_uri = editor.open(mod), editor.open(mac)
+    await until(lambda: mod_uri in editor.published and mac_uri in editor.published)
+    assert editor.published[mod_uri][-1] == []
+    return mod_uri
+
+
+@pytest.mark.parametrize("superseded", [False, True])
+def test_a_saved_macro_module_refreshes_the_documents_requiring_it(
+    macro_documents, superseded
+):
+    # Defects: only the saved document is compiled again, so another open
+    # document requiring the saved macro module keeps the diagnostics (and
+    # backend view) of the old macros until its own next edit; and the
+    # refresh hangs on the save's run, which an edit right after the save
+    # supersedes before it finishes.
+    editor, mac, mod = macro_documents
+
+    async def scenario():
+        mod_uri = await opened(editor, mac, mod)
+        count = len(editor.published[mod_uri])
+        mac.write_text(BOOM)
+        editor.save(mac)
+        if superseded:
+            editor.change(mac)
+        await until(lambda: len(editor.published[mod_uri]) > count, timeout=5)
+        [warning] = editor.published[mod_uri][-1]
+        assert "diag-boom" in warning.message
+
+    run_bounded(scenario())
+
+
+def test_a_macro_rewriting_what_it_imports_refreshes_a_bounded_number_of_times(
+    macro_documents,
+):
+    # Defect: a macro that rewrites a file it imports (codegen) moves the
+    # epoch on every compile, so each refreshed document's run refreshes
+    # the others (and itself) again, forever.
+    editor, mac, mod = macro_documents
+    gen = mac.parent / "gen.py"
+    gen.write_text("")
+    mac.write_text(
+        "(import os.path)\n"
+        f"(import {mac.parent.name}.gen)\n"
+        "(defmacro twice [x]\n"
+        '  (with [(open (os.path.join (os.path.dirname __file__) "gen.py") "a")'
+        " as f]\n"
+        '    (.write f "#\\n"))\n'
+        "  (return `(+ ~x ~x)))\n"
+    )
+    other = mod.parent / "other.lpy"
+    other.write_text(mod.read_text())
+
+    async def scenario():
+        uris = [editor.open(mod), editor.open(other)]
+        await until(lambda: all(uri in editor.published for uri in uris))
+        await asyncio.sleep(0.5)
+        before = sum(len(editor.published[uri]) for uri in uris)
+        editor.change(mod)
+        await asyncio.sleep(1.5)  # a refresh loop compiles dozens of times
+        after = sum(len(editor.published[uri]) for uri in uris)
+        assert 1 <= after - before < 4
+
+    run_bounded(scenario())
+
+
+def test_a_document_closed_during_a_refresh_is_left_closed(
+    macro_documents, monkeypatch
+):
+    # Defect: the refresh publishes every outdated uri it read before a
+    # close, which reads the closed file back from disk, publishes its
+    # diagnostics and keeps a cache entry for it that nobody forgets.
+    editor, mac, mod = macro_documents
+    real = server.view_cache.outdated
+    armed, entered, go = threading.Event(), threading.Event(), threading.Event()
+
+    def held(uris):
+        found = real(uris)
+        if armed.is_set():
+            entered.set()
+            assert go.wait(10)
+        return found
+
+    monkeypatch.setattr(server.view_cache, "outdated", held)
+
+    async def scenario():
+        mod_uri = await opened(editor, mac, mod)
+        armed.set()
+        mac.write_text(BOOM)
+        editor.save(mac)
+        await until(entered.is_set)
+        editor.close(mod)
+        count = len(editor.published[mod_uri])
+        go.set()
+        await asyncio.sleep(0.5)  # a refresh of mod would have compiled by now
+        assert len(editor.published[mod_uri]) == count
+        assert editor.published[mod_uri][-1] == []
+        assert mod_uri not in server.DIAGNOSTIC_RUNS
+        assert mod_uri not in server.view_cache._views
+
+    try:
+        run_bounded(scenario())
+    finally:
+        go.set()
 
 
 class ScriptedBackends:

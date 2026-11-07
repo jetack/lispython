@@ -395,6 +395,48 @@ def fake_client(project, tmp_path, argv):
     return client, hover
 
 
+def test_a_save_tells_the_backend_of_every_shadow_it_rewrote(
+    project, tmp_path, monkeypatch
+):
+    # Defect: a save notifies only the saved file's shadow, so after a macro
+    # module's edit the backend keeps analysing its dependents' old shadows,
+    # which the sweep rewrote, and never hears of one the sweep removed.
+    name = "bkmmsave"
+    pkg = project / name
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))")
+    (pkg / "mod.lpy").write_text("(require .mac *)\n(= yy (twice 2))")
+    (pkg / "gone.lpy").write_text("(= g 1)")
+    for key in [name, name + ".mac"]:
+        monkeypatch.delitem(sys.modules, key, raising=False)
+    client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
+    sent = []
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    client._client = SimpleNamespace(workspace_did_change_watched_files=sent.append)
+    try:
+        client._prepare_view_root()
+        shadow = pathlib.Path(client.view_root.path) / name / "mod.py"
+        assert "yy = 2 + 2" in shadow.read_text()
+        (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(* ~x ~x ~x)))")
+        (pkg / "gone.lpy").unlink()
+        run_bounded(client.file_saved((pkg / "mac.lpy").as_uri()))
+        assert "yy = 2 * 2 * 2" in shadow.read_text()
+        [params] = sent
+        changes = {(change.uri, change.type) for change in params.changes}
+        uri = client.backend_uri
+        assert changes == {
+            (uri((pkg / "mod.lpy").as_uri()), lsp.FileChangeType.Changed),
+            (uri((pkg / "mac.lpy").as_uri()), lsp.FileChangeType.Changed),
+            (uri((pkg / "gone.lpy").as_uri()), lsp.FileChangeType.Deleted),
+        }
+    finally:
+        for key in list(sys.modules):
+            if key == name or key.startswith(name + "."):
+                del sys.modules[key]
+
+
 def test_crashed_backend_restarts_once(project, tmp_path, fake_argv, spawned):
     # Defect: a backend that crashed stays dead for the session, or one that
     # keeps crashing is respawned on every request.

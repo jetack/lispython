@@ -43,7 +43,7 @@
 (from lispy.core.compiler.literal [identifier-p name-key])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
-(from lispy.lsp.macro-modules [epoch fresh-modules])
+(from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
 
 (= logger (logging.getLogger __name__))
 
@@ -622,8 +622,10 @@
    when that is None, stage, where it failed, and error, the exception.
    PARSE-STAGE is the reader, COMPILE-STAGE macro expansion and the
    compiler (what diagnostics report); VIEW-STAGE is the unparse or the
-   re-parse of the generated module, which no diagnostic names."
-  (def __init__ [self view :stage None :error None]
+   re-parse of the generated module, which no diagnostic names.  epoch is
+   the macro environment it compiled under (macro_modules.epoch)."
+  (def __init__ [self view :stage None :error None :epoch None]
+    (= self.epoch epoch)
     (= self.view view)
     (= self.stage stage)
     (= self.error error)))
@@ -650,12 +652,15 @@
     (with [(compile-errors filename source)]
       (= forms (parse source)))
     (except [Exception as e]
-      (return (CompiledBuffer None :stage PARSE-STAGE :error e))))
+      ;; No macro ran, so any epoch holds it.
+      (return (CompiledBuffer None :stage PARSE-STAGE :error e :epoch (current-epoch)))))
+  (= macro-epoch None)
   (try
-    (with [(fresh-modules import-root) (_on-sys-path import-root)]
+    (with [(fresh-modules) as entered (_on-sys-path import-root)]
+      (= macro-epoch entered)
       (= body (list (compile-unit forms scope))))
     (except [Exception as e]
-      (return (CompiledBuffer None :stage COMPILE-STAGE :error e))))
+      (return (CompiledBuffer None :stage COMPILE-STAGE :error e :epoch macro-epoch))))
   (try
     (= module (ast.Module :body body :type-ignores (list)))
     (= text (unparse module))
@@ -664,8 +669,9 @@
     ;; Keys are the spellings a defmacro or require registered.
     (= macros (frozenset (map name-key (.get scope "__macro_namespace" {}))))
     (except [Exception as e]
-      (return (CompiledBuffer None :stage VIEW-STAGE :error e))))
-  (return (CompiledBuffer (PythonView text position-map tree :macros macros))))
+      (return (CompiledBuffer None :stage VIEW-STAGE :error e :epoch macro-epoch))))
+  (return (CompiledBuffer (PythonView text position-map tree :macros macros)
+                          :epoch macro-epoch)))
 
 (def compile-view [source :package "" :name "__main__" :import-root None]
   "The PythonView of source (compile-buffer), or None when it does not
@@ -698,7 +704,14 @@
   (return found))
 
 (def view-at-cursor [source line col :package "" :name "__main__" :import-root None]
-  "The PythonView of source for a request at 1-based line, code-point col,
+  "The PythonView of source at the cursor (_view-at-cursor)."
+  (return (sub (_view-at-cursor source line col :package package :name name
+                                :import-root import-root)
+               0)))
+
+(def _view-at-cursor [source line col :package "" :name "__main__" :import-root None]
+  "(view, epoch): view-at-cursor's view and the earliest macro environment
+   its compiles ran under (None when none ran).  The PythonView of source for a request at 1-based line, code-point col,
    or None.  The partial word before the cursor (name characters back to a
    dot, space, bracket, quote, comma or ;, less a leading prefix such as :
    or *) is replaced by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
@@ -713,28 +726,34 @@
    compile-view's."
   (= lines (.split source "\n"))
   (if (not (<= 1 line (len lines)))
-      (return None))
+      (return (, None None)))
   (= text (sub lines (- line 1)))
   (if (not (<= 0 col (len text)))
-      (return None))
+      (return (, None None)))
   (= [start end] (partial-span text col))
   (= partial (sub text [: start col]))
   (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: end None])))
   (= marked (.join "\n" lines))
   (= sentinel-end (+ start (len CURSOR-SENTINEL)))
   (= fallback False)
-  (= view (compile-view marked :package package :name name :import-root import-root))
+  (= compiled (compile-buffer marked :package package :name name :import-root import-root))
+  (= view compiled.view)
+  (= macro-epoch compiled.epoch)
   (if (is view None)
       (do (= prefix (source-prefix marked line sentinel-end))
           (= closers (open-form-closers prefix))
           (if (is closers None)
-              (return None))
-          (= view (compile-view (+ prefix closers) :package package :name name
-                                :import-root import-root))
+              (return (, None macro-epoch)))
+          (= compiled (compile-buffer (+ prefix closers) :package package :name name
+                                      :import-root import-root))
+          (= view compiled.view)
+          (if (or (is macro-epoch None)
+                  (and (is-not compiled.epoch None) (< compiled.epoch macro-epoch)))
+              (= macro-epoch compiled.epoch))
           (= fallback True)))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
-      (return None))
+      (return (, None macro-epoch)))
   (= in-import (any ((> (_identifier-count node CURSOR-SENTINEL) 0)
                      for node in (ast.walk view.tree)
                      if (isinstance node (, ast.Import ast.ImportFrom)))))
@@ -748,7 +767,7 @@
   ;; that parses.  An empty partial leaves what the user is typing (x.)
   ;; unparsable, as it is.
   (if (and partial (not (identifier-p restored)))
-      (return None))
+      (return (, None macro-epoch)))
   (= view.text (+ (sub view.text [: None index]) restored
                   (sub view.text [: (+ index (len CURSOR-SENTINEL)) None])))
   (.shift view.map
@@ -761,12 +780,13 @@
   (= view.attribute (and (> index 0) (== (sub view.text (- index 1)) ".")))
   (= view.in-import in-import)
   (= view.fallback fallback)
-  (return view))
+  (return (, view macro-epoch)))
 
 (class ViewCache []
   "The latest view of each document, by version and macro environment
-   (macro_modules.epoch, read before the compile, so a hit needs the modules
-   its requires imported unchanged), and cursor for view-at-cursor: one
+   (the epoch its compile ran under: a hit needs macro_modules.epoch to be
+   that one now, so the modules its requires imported are unchanged), and
+   cursor for view-at-cursor: one
    entry per uri, so the cache never outgrows the open documents.  A None
    result is cached like any other.  Views are made in
    worker threads while forget runs on the LSP's loop, so a view stores
@@ -787,6 +807,16 @@
       (if (== generation self._generation)
           (= (sub table uri) (, key result)))))
 
+  (def _hit [self table uri key]
+    "uri's entry in table when it is stored under key, whose second item is
+     the epoch read now (None, a drop due: every entry is stale); else None."
+    (if (is (sub key 1) None)
+        (return None))
+    (= hit (.get table uri))
+    (if (and (is-not hit None) (== (sub hit 0) key))
+        (return hit))
+    (return None))
+
   (deco property
     (def generation [self]
       "The forget count a view made from now on stores under."
@@ -799,13 +829,13 @@
      same version share it.  fresh compiles again, replacing the entry."
     (if (is generation None)
         (= generation self._generation))
-    (= key (, version (epoch)))
-    (= hit (.get self._views uri))
-    (if (and (not fresh) (is-not hit None) (== (sub hit 0) key))
+    (= hit (._hit self self._views uri (, version (epoch))))
+    (if (and (not fresh) (is-not hit None))
         (return (sub hit 1)))
     (= result (compile-buffer source :package package :name name :import-root import-root
                               :filename filename))
-    (._store self self._views uri key result generation)
+    (if (is-not result.epoch None)
+        (._store self self._views uri (, version result.epoch) result generation))
     (return result))
 
   (def view [self uri version source :package "" :name "__main__" :import-root None
@@ -819,14 +849,26 @@
                        :generation None]
     (if (is generation None)
         (= generation self._generation))
-    (= key (, version (epoch) line col))
-    (= hit (.get self._cursor-views uri))
-    (if (and (is-not hit None) (== (sub hit 0) key))
+    (= hit (._hit self self._cursor-views uri (, version (epoch) line col)))
+    (if (is-not hit None)
         (return (sub hit 1)))
-    (= result (view-at-cursor source line col :package package :name name
-                              :import-root import-root))
-    (._store self self._cursor-views uri key result generation)
+    (= [result macro-epoch] (_view-at-cursor source line col :package package :name name
+                                             :import-root import-root))
+    (if (is-not macro-epoch None)
+        (._store self self._cursor-views uri (, version macro-epoch line col) result
+                 generation))
     (return result))
+
+  (def outdated [self uris]
+    "Those of uris with no cached compile, or one that ran under another
+     macro environment than the current one (all of them while a drop is
+     due).  It stats the tracked files, so callers on the loop run it in a
+     thread."
+    (= now (epoch))
+    (with [self._lock]
+      (return [uri for uri in uris
+               if (or (is now None) (not-in uri self._views)
+                      (!= (sub (sub (sub self._views uri) 0) 1) now))])))
 
   (def forget [self uri]
     "Drop uri's entries (its document closed)."
@@ -1217,8 +1259,10 @@
    (bottom up, never root).  Other files, the view root's own files
    (_ROOT-FILES) among them, are never touched.  A directory link is unlinked, never
    followed, and nothing is removed in a directory that leaves root
-   (_check-in-root): that one is logged and skipped."
+   (_check-in-root): that one is logged and skipped.  Returns the links and
+   .py files removed."
   (= stale-before (- (time.time) _TEMP-MAX-AGE))
+  (= removed [])
   (for [dirpath dirnames filenames] in (os.walk root :topdown False :followlinks False)
     (for name in (+ dirnames filenames)
       (= path (osp.join dirpath name))
@@ -1234,7 +1278,8 @@
 
           (or (osp.islink path) (and (.endswith name ".py") (osp.isfile path)))
           (do (_check-in-root root dirpath)
-              (os.remove path)))
+              (os.remove path)
+              (.append removed path)))
         (except [FileNotFoundError]
           (pass))
         (except [OSError as e]
@@ -1244,7 +1289,8 @@
           (_check-in-root root dirpath)
           (os.rmdir dirpath)
           (except [OSError]
-            (pass))))))
+            (pass)))))
+  (return removed))
 
 (def write-shadows [project-root view-root :manifest None]
   "Write a compiled shadow .py into view-root for every .lpy under
@@ -1263,8 +1309,8 @@
    source compiles with its import root on sys.path (a relative require
    imports its package), which is left as it was.  A view root that overlaps the project is a ValueError before
    anything is touched; the whole sweep holds the view root's lock, and
-   nothing is written or removed through a link out of it.  Returns the
-   sorted shadow paths."
+   nothing is written or removed through a link out of it.  Returns its
+   ShadowSweep."
   (_refuse-overlap project-root view-root)
   (if (is manifest None)
       (= manifest (ShadowManifest)))
@@ -1273,16 +1319,28 @@
   (with [(_view-root-lock root)]
     (return (_write-shadows project-root root manifest))))
 
+(class ShadowSweep []
+  "What one write-shadows sweep did: shadows, the sorted shadow paths;
+   written, the sorted shadows whose text it wrote; removed, the sorted
+   links and .py files it removed (_sweep-orphans), so a backend can be
+   told of every file that changed."
+  (def __init__ [self shadows written removed]
+    (= self.shadows shadows)
+    (= self.written written)
+    (= self.removed removed)))
+
 (def _write-shadows [project-root root manifest]
   "write-shadows' sweep, under the view root's lock."
   (= sources (project-sources project-root))
   (= current (set sources))
+  ;; None: a drop is due, so every entry is stale.
   (= macro-epoch (epoch))
   (for path in (list manifest.sources)
     (if (not (in path current))
         (del (sub manifest.sources path))))
   (= names-of {})
   (= shadows {})
+  (= written [])
   (for lpy-path in sources
     (= shadow (view-path project-root root lpy-path))
     (= names (module-names lpy-path))
@@ -1298,7 +1356,7 @@
       (= stamp (, st.st_mtime_ns st.st_size))
       (= known (.get manifest.sources lpy-path))
       (if (and (is-not known None) (== (sub known 0) stamp) (== (sub known 1) names)
-               (== (sub known 3) macro-epoch)
+               (is-not macro-epoch None) (== (sub known 3) macro-epoch)
                (or (not (sub known 2)) (_regular-file-p shadow)))
           (do (if (sub known 2)
                   (= (sub shadows shadow) lpy-path))
@@ -1318,12 +1376,14 @@
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e)
         (continue)))
     (try
-      (= view (compile-view source :name (sub names 0) :package (sub names 1)
-                            :import-root (sub names 2)))
+      (= compiled (compile-buffer source :name (sub names 0) :package (sub names 1)
+                                  :import-root (sub names 2)))
+      (= view compiled.view)
       (if (is-not view None)
-          (do (_write-if-changed root shadow view.text)
+          (do (if (_write-if-changed root shadow view.text)
+                  (.append written shadow))
               (= (sub shadows shadow) lpy-path)))
-      (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) macro-epoch))
+      (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
       (except [OSError as e]
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
   (= import-roots (set))
@@ -1345,8 +1405,8 @@
     (_overlay-package project-root root package source-dirs shadows links))
   (for directory in (sorted module-dirs)
     (_mirror-py-files project-root root directory shadows links))
-  (_sweep-orphans root shadows links)
-  (return (sorted shadows)))
+  (= removed (_sweep-orphans root shadows links))
+  (return (ShadowSweep (sorted shadows) (sorted written) (sorted removed))))
 
 ;; The project's rule settings the view root's config takes over: these,
 ;; typeCheckingMode and every report* rule.  Never a path setting (include,
