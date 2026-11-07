@@ -2579,7 +2579,11 @@
       (return (local-completion doc))))
   (= insert-replace (insert-replace-support ls))
   ;; Once per completion: it lexes the whole text before the cursor.
-  (= base (qualified-base doc line col))
+  (try
+    (= base (qualified-base doc line col))
+    (except [Exception]
+      (.debug logger "qualified base failed" :exc-info True)
+      (= base None)))
   (try
     (= result (await (backend-completion doc line col base insert-replace)))
     (except [Exception]

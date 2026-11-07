@@ -340,6 +340,9 @@ def test_required_macros_follow_their_module_with_no_backend(off_complete):
     assert macro_style(off_complete("(require lpy-macs)\n(lpy-macs.|)")[2]) == LPY_MACS
     labels = by_label(off_complete("(require macmod)\n(macmod.my|)")[2])
     assert set(labels) == {"my-mac", "my-umac"}
+    # Defect: the require gate compares the module's raw spelling, so a base
+    # written lpy_macs (the same name as lpy-macs) compiles nothing.
+    assert macro_style(off_complete("(require lpy-macs)\n(lpy_macs.|)")[2]) == LPY_MACS
 
 
 def cache_full_view(document):
