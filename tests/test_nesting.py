@@ -1474,7 +1474,9 @@ def parse_work(src):
     ``count``/``find``/``index``/``startswith`` family (a span plus one per
     call), C work that neither of the others sees; python lines are the line
     events traced, the work of Python-level loops. Not seen: scans of a slice
-    or copy of the source (a plain str) and any other C-level work.
+    or copy of the source (a plain str) and any other C-level work. Python lines
+    include the counting wrappers' own lines (``CountingPattern`` and
+    ``CountingSource`` methods are traced too), a constant per call.
     """
     tally = [0]
     string_tally = [0]
@@ -1608,10 +1610,15 @@ def test_a_literal_with_many_fields_costs_what_as_many_literals_do():
     # literal's start for every piece made one literal quadratic, in
     # str.count, which only the string-chars dimension sees. One over
     # separate measures 0.50-0.67 unmutated; the per-piece count measures
-    # 570x (regex chars and python lines barely move), so 1.5 catches it.
+    # 570x (regex chars and python lines barely move), so 1.5 catches it. The
+    # absolute bound catches a count from the source start, which slows every
+    # literal alike and so leaves the ratio alone.
     fields = 2000
     one = 'f"""' + "{x}\n" * fields + '"""'
     separate = "\n".join(['f"{x}"'] * fields)
+    for src in (one, separate):
+        string_chars = parse_work(src)[1]
+        assert string_chars <= len(src), (string_chars, len(src))
     for name, got, want in zip(
         ("regex chars", "string chars", "python lines"),
         parse_work(one),
