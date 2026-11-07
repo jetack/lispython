@@ -528,10 +528,11 @@
   (UnitStart.TOP): its first form re-derives only the built-in macros, so
   the file's own macros stay.  Any other eval only adds, since editor
   clients send file, line and column with every region.
-  A compiled eval records how its code spells each name in the scope's
-  spellings (nrepl-scope-spellings), which completion labels by: a
-  whole-file eval replaces the record, as it is the whole buffer; any other
-  eval updates it, the latest code winning per name as its binding does.
+  A compiled eval records each name its code spells other than by a
+  hyphenated spelling (ok? for ok_p) in the scope's spellings
+  (nrepl-scope-spellings), which completion labels by: a whole-file eval
+  replaces the record, as it is the whole buffer; any other eval updates
+  it, the latest code winning per name as its binding does.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
   ;; Only a line the request sent as 1 is the file's top: a file eval with
@@ -569,8 +570,12 @@
     (with [(nrepl-scope-lock scope) (compile-errors filename padded)]
       (= tree (parse padded))
       ;; Read before compiling: the spellings are the source's, never a
-      ;; macro expansion's.
-      (= spelled (name-spellings tree))
+      ;; macro expansion's.  Only a spelling that is no hyphenated spelling
+      ;; of its name is kept, the only kind completion-label uses, so a
+      ;; later (ok-p) never erases the ok? the code defined, which the LSP's
+      ;; first-spelling rule keeps.
+      (= spelled {name spelling for [name spelling] in (.items (name-spellings tree))
+                  if (!= (name-key spelling) name)})
       (= stl (compile-unit tree scope :start start))
       (= codes [])
       (for st stl
@@ -833,6 +838,19 @@
   (return (or (.startswith text prefix)
               (.startswith (_py-name text) py-prefix))))
 
+(def _typed-label [name spellings word]
+  "The label of runtime name name when word is the typed word: the first of
+   its code spelling (completion-label), hyphen spelling and Python name
+   that starts with word, since an nREPL item carries no filterText and the
+   client keeps only labels starting with the typed word (_to finds _to_foo,
+   whose code spelling ->foo it would drop); the code spelling when none
+   does."
+  (= label (completion-label name spellings))
+  (for candidate in [label (hyphen-spelling name) (name-key name)]
+    (if (.startswith candidate word)
+        (return candidate)))
+  (return label))
+
 (def nrepl-complete [prefix scope]
   "Return completions matching prefix, including dot-completion.  Every key
    of the scope's macro table (defmacro, every require form) is a macro, so a
@@ -843,7 +861,8 @@
    typed head is dropped, the reply's word is what a label replaces); a
    runtime name (scope, builtins, attributes) by completion-label over the
    spellings of the code evaluated in the scope (ok? for ok_p, else the
-   hyphen spelling), a macro key by the hyphen spelling it was registered
+   hyphen spelling) when that starts with the typed word (_typed-label),
+   a macro key by the hyphen spelling it was registered
    under; while the typed word is in Python spelling (_python-spelling-p)
    every name is labelled by name-key, so a macro key registered as top-mac
    is top_mac.  A name or macro key matches by its text or its Python name."
@@ -853,7 +872,7 @@
   (= macro-spell (fn [name] (ife python-spelling (name-key name) (hyphen-spelling name))))
   (= spell (fn [name] (ife python-spelling
                            (name-key name)
-                           (completion-label name spellings))))
+                           (_typed-label name spellings word))))
   (= py-prefix (_py-name prefix))
   (= parts (.split prefix "."))
   (= head-parts (sub parts [: -1]))

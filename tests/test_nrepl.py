@@ -602,6 +602,40 @@ def test_complete_labels_a_name_as_the_evaluated_code_spells_it(isolated):
     assert complete_labels("->f", isolated) == ["->foo"]
 
 
+def test_a_later_hyphen_spelling_keeps_the_code_spelling(isolated):
+    # Defect: a later eval's ok-p overwriting the recorded ok?, so ok_p is
+    # labelled ok-p while the LSP (the buffer's first spelling) keeps ok?,
+    # and a client merging both shows the name twice.
+    assert dispatch(isolated, code="(def ok? [] 1)")["error"] is None
+    assert dispatch(isolated, code="(ok-p)")["error"] is None
+    assert complete_labels("ok", isolated) == ["ok?"]
+
+
+def test_load_file_replaces_the_recorded_spellings(isolated, tmp_path):
+    # Defect: a reload merged into the record, so the ok? the file no longer
+    # spells outlives the edit that respelled it ok-p.
+    path = tmp_path / "prog.lpy"
+    path.write_text("(def ok? [] 1)\n")
+    assert op(isolated, "load-file", path=str(path))["error"] is None
+    path.write_text("(def ok-p [] 1)\n")
+    assert op(isolated, "load-file", path=str(path))["error"] is None
+    assert complete_labels("ok", tools.nrepl_file_scope(str(path))) == ["ok-p"]
+
+
+@pytest.mark.parametrize(
+    "prefix, label, dropped", [("ok-", "ok-p", "ok?"), ("_to", "_to-foo", "->foo")]
+)
+def test_a_label_starts_with_the_typed_word(isolated, prefix, label, dropped):
+    # Defect: the code spelling (ok?, ->foo) offered for a word typed in
+    # another spelling; an item has no filterText, so the client drops a
+    # label that does not start with the typed word and shows nothing.
+    code = "(def ok? [] 1)\n(def ->foo [] 2)"
+    assert dispatch(isolated, code=code)["error"] is None
+    labels = complete_labels(prefix, isolated)
+    assert label in labels
+    assert dropped not in labels
+
+
 def test_a_failed_load_file_keeps_the_recorded_spellings(isolated, tmp_path):
     # Defect: the record cleared or updated before the compile succeeded, so
     # a load-file that bound nothing respells the name the scope still holds.
