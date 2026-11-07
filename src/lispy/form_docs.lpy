@@ -13,7 +13,10 @@ this module only reads them."""
 (from typing [NamedTuple])
 
 (import lispy.macros)
+(from lispy.core.compiler.expr [COMPREHENSION-FORS])
+(from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.compiler.utils [FORM-USAGE HEADLESS-FORMS STATEMENT-HEADS])
+(from lispy.core.nodes [Symbol])
 (from lispy.core.utils [augassignop-dict])
 
 ;; Sections of the form reference; hover labels a BUILTIN-MACRO entry.
@@ -187,6 +190,19 @@ this module only reads them."""
 
 ;; Everything hover and the docs document under a special-form name.
 (= SPECIAL-FORMS {**HEAD-FORMS **READER-SYNTAX-DOCS})
+
+;; The special-form names a user can bind: the compiler reads one as the form
+;; only at a form head and as the name it binds anywhere else (`(= ife 3)`),
+;; so its readers ask for a head (form-at-p in lsp/server.lpy, _HEAD_ONLY in
+;; highlight.py).  Bindable is the compiler's name model: the name's Python
+;; spelling passes identifier-p (so `-`, spelled `_`, is one; `if`, `+` and
+;; `except*` are not).  A comprehension clause keyword (COMPREHENSION-FORS:
+;; async-for) is excluded although it spells a name: in a form's second slot
+;; the compiler reads it as the clause, so it is the form there too.
+(= BINDABLE-FORMS
+   (frozenset (name for name in SPECIAL-FORMS
+                if (and (identifier-p (. (Symbol name) name))
+                        (not-in name COMPREHENSION-FORS)))))
 
 ;; Not in SPECIAL-FORMS: `type` is also the builtin, so the LSP shows this only
 ;; where type-alias-p (the compiler's own test) accepts the form.
