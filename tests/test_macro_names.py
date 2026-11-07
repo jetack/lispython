@@ -93,6 +93,24 @@ def test_a_redefinition_in_a_caller_built_plain_dict_scope_replaces_the_macro():
     assert ast.unparse(expand_compile(parse("(my_mac)"), scope)[0]) == "2"
 
 
+def test_defmacro_and_require_bind_no_global_of_the_module(import_dir):
+    # The code they generate runs in the module: a binding it made would
+    # replace the user's own value, and a macro of that name would make the
+    # next defmacro or require a clash.
+    (import_dir / "nm_mod.lpy").write_text("(defmacro my_mac [] (return 1))\n")
+    (import_dir / "nm_user.lpy").write_text(
+        "(= importlib 5)\n(defmacro foo [] (return 2))\n"
+        "(require nm-mod [my-mac])\n(require nm-mod)\n(require nm-mod *)\n"
+        "(= v [importlib (foo) (my-mac)])\n"
+    )
+    assert importlib.import_module("nm_user").v == [5, 2, 1]
+    src = (
+        "(defmacro importlib [] (return 1))\n(defmacro foo [] (return 2))\n"
+        "(require nm-mod *)\n[(importlib) (foo) (my-mac)]"
+    )
+    assert translate(src) == "[1, 2, 1]"
+
+
 def test_a_lookup_before_the_first_unit_leaves_the_scope_to_be_seeded():
     # Expanding in a scope with no table must not create one that passes
     # for seeded, or the next compile_unit gets no built-in macros.

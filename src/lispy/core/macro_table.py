@@ -127,8 +127,15 @@ def scope_table(scope):
     entries (unseeded, so a later compile_unit still seeds it). The one way
     generated defmacro and require code reaches the table."""
     table = scope.get("__macro_namespace")
+    if table is None:
+        # setdefault: two threads creating the table at once share one.
+        table = scope.setdefault("__macro_namespace", MacroTable())
     if not isinstance(table, MacroTable):
-        table = scope["__macro_namespace"] = MacroTable(table or ())
+        # The swap is not atomic: a macro other running code registers in the
+        # plain dict meanwhile is lost, which only a scope a caller built with
+        # a plain dict (every scope lispython builds starts with a MacroTable)
+        # can reach.
+        table = scope["__macro_namespace"] = MacroTable(table)
     return table
 
 
@@ -165,3 +172,20 @@ def required_macro(table, name):
     if macro is None:
         raise KeyError(name)
     return macro
+
+
+def register_required(scope, module, prefix="", names=None):
+    """Register module's macros in scope's table, for the code a require
+    generates (core_meta_functions.lpy): with names, exactly those
+    (required_macro); else every one, its key prefixed (``"mod."`` for a
+    qualified require, nothing for ``*``). The module's table is read from a
+    snapshot, since running code may add to it. Living here, the work binds
+    no global of the requiring module."""
+    imported = getattr(module, "__macro_namespace", {})
+    table = scope_table(scope)
+    if names is None:
+        for key, macro in list(imported.items()):
+            table[prefix + key] = macro
+    else:
+        for name in names:
+            table[name] = required_macro(imported, name)

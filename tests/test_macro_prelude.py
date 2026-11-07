@@ -168,7 +168,7 @@ def test_the_prelude_emits_no_code():
     assert meta == "1 + 1"
     src = "(require lispy.macros *)\n(inc 1)"
     meta = tools.src_to_python_org(src, include_meta=True, scope={})
-    assert meta.count("importlib.import_module('lispy.macros')") == 1
+    assert meta.count("import_module('lispy.macros')") == 1
     assert meta.endswith("\n1 + 1")
     assert translate(src) == "1 + 1"
 

@@ -4,9 +4,13 @@ from lispy.core.nodes import *
 
 
 def macro_table():
-    """The generated code's form for the module lispy.core.macro_table: fresh
-    nodes per use, since compiling may change a node in place."""
-    return Paren(Symbol("importlib.import-module"), String('"lispy.core.macro_table"'))
+    """The generated code's form for the module lispy.core.macro_table."""
+    return Paren(
+        Symbol("__import__"),
+        String('"lispy.core.macro_table"'),
+        Keyword(Symbol("fromlist")),
+        Bracket(String('"MacroTable"')),
+    )
 
 
 def defmacro_transform(sexp):
@@ -19,7 +23,6 @@ def defmacro_transform(sexp):
         Symbol("do"),
         Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
         Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
-        Paren(Symbol("import"), Symbol("importlib")),
         Paren(Symbol("def"), newname, *body),
         Paren(
             Symbol("="),
@@ -59,75 +62,28 @@ def require_transform(sexp):
     is_relative = module_name_str.startswith(".")
     import_call = (
         Paren(
-            Symbol("importlib.import-module"),
+            Symbol(".import-module"),
+            Paren(Symbol("__import__"), String('"importlib"')),
             module_name_str,
             Keyword(Symbol("package")),
             Symbol("__package__"),
         )
         if is_relative
-        else Paren(Symbol("importlib.import-module"), module_name_str)
+        else Paren(
+            Symbol(".import-module"),
+            Paren(Symbol("__import__"), String('"importlib"')),
+            module_name_str,
+        )
     )
+    prefix = str(module_name) + "." if kind == REQUIRE_QUALIFIED else ""
+    selected = names if kind == REQUIRE_NAMED else Constant("None")
     return Paren(
-        Symbol("do"),
-        Paren(Symbol("import"), Symbol("importlib")),
-        Paren(
-            Symbol("="),
-            Symbol("___imported-macros"),
-            Paren(
-                Symbol("getattr"), import_call, String('"__macro_namespace"'), Brace()
-            ),
-        ),
-        Paren(
-            Symbol("for"),
-            Bracket(Symbol("___k"), Symbol("___v")),
-            Symbol("in"),
-            Paren(
-                Symbol("list"), Paren(Symbol(".items"), Symbol("___imported-macros"))
-            ),
-            Paren(
-                Symbol("="),
-                Paren(
-                    Symbol("sub"),
-                    Paren(
-                        Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))
-                    ),
-                    Paren(Symbol("+"), str(module_name), String('"."'), Symbol("___k")),
-                ),
-                Symbol("___v"),
-            ),
-        )
-        if kind == REQUIRE_QUALIFIED
-        else Paren(
-            Symbol(".update"),
-            Paren(Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))),
-            Paren(
-                Symbol("list"), Paren(Symbol(".items"), Symbol("___imported-macros"))
-            ),
-        )
-        if kind == REQUIRE_ALL
-        else Paren(
-            Symbol("for"),
-            Symbol("___mac-name"),
-            Symbol("in"),
-            names,
-            Paren(
-                Symbol("="),
-                Paren(
-                    Symbol("sub"),
-                    Paren(
-                        Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))
-                    ),
-                    Symbol("___mac-name"),
-                ),
-                Paren(
-                    Symbol(".required-macro"),
-                    macro_table(),
-                    Symbol("___imported-macros"),
-                    Symbol("___mac-name"),
-                ),
-            ),
-        ),
-        Paren(Symbol("del"), Symbol("___imported-macros")),
+        Symbol(".register-required"),
+        macro_table(),
+        Paren(Symbol("globals")),
+        import_call,
+        prefix,
+        selected,
     )
 
 
