@@ -1291,6 +1291,27 @@ class TestShadows:
         assert counts == [1, 2, 3, 3, 4]
         assert config["preset"] == "default"
 
+    def test_a_malformed_pyrefly_config_is_told_once_per_problem(
+        self, tmp_path, caplog
+    ):
+        # Defects: the warning about a malformed project config repeats on
+        # every write (every backend start and every save); or it is told
+        # once for good, so another malformation, or the same one after the
+        # config was fixed, is never told.
+        project, root = tmp_path / "project", tmp_path / "view"
+        project.mkdir()
+        config = project / "pyrefly.toml"
+        broken, other = 'preset = "strict"\npreset = "basic"\n', "[errors\n"
+        fixed = 'preset = "strict"\n'
+        counts = []
+        with caplog.at_level("WARNING", logger="lispy.lsp.python_view"):
+            # The last malformation comes back after the fix: told again.
+            for text in [broken, broken, other, fixed, other]:
+                config.write_text(text)
+                self.pyrefly_config(project, root, check_types=False)
+                counts.append(caplog.text.count("cannot read the pyrefly settings"))
+        assert counts == [1, 1, 2, 2, 3]
+
     def test_a_project_config_in_a_package_never_replaces_the_views(self, tmp_path):
         # Defect: a project inside a package has its own pyrefly.toml or
         # pyrightconfig.json linked over the view root's on every shadow
