@@ -646,11 +646,23 @@
             (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
   (return (sub entry 1)))
 
-(def _nrepl-request-scope [msg field scope]
-  "The scope a request runs in: the file's when its field names a file (a
-   string), else the session scope."
-  (= path (.get msg field))
-  (return (ife (isinstance path str) (nrepl-file-scope path) scope)))
+(def _nrepl-request-scope [msg fields scope]
+  "The scope a request runs in: the file scope of the first of fields (tried
+   in order) whose value is a string path, else the session scope.  The one
+   home of the ns rule: a present, non-null ns must be an absolute path
+   (standard clients send namespace names, which would otherwise become
+   <cwd>/name), checked even when an earlier field wins; ValueError if not."
+  (if (in "ns" fields)
+      (do (= ns (.get msg "ns"))
+          (if (and (is-not ns None)
+                   (not (and (isinstance ns str) (osp.isabs ns))))
+              (raise (ValueError
+                       (+ "ns must be an absolute file path, got " (repr ns)))))))
+  (for field in fields
+    (= path (.get msg field))
+    (if (isinstance path str)
+        (return (nrepl-file-scope path))))
+  (return scope))
 
 (def nrepl-macroexpand [src scope]
   "Macroexpand LisPython source and return the expanded s-expression."
@@ -925,8 +937,11 @@
         ;; file/line/column: where code sits in the client's buffer; a missing
         ;; or null field goes to nrepl-eval as None, which tells it apart
         ;; from a sent 1 (a file eval with no line is not the file's start).
+        ;; ns (also on macroexpand and complete) picks the scope only: with
+        ;; no file the filename stays None, so linecache and tracebacks never
+        ;; name the ns file; file wins when both are sent.
         (do (= result (nrepl-eval (sub msg "code")
-                                  (_nrepl-request-scope msg "file" scope)
+                                  (_nrepl-request-scope msg ["file" "ns"] scope)
                                   :filename (.get msg "file")
                                   :line (.get msg "line")
                                   :column (.get msg "column")))
@@ -935,25 +950,25 @@
 
         (== op "load-file")
         (do (= result (nrepl-load-file (sub msg "path")
-                                       (_nrepl-request-scope msg "path" scope)))
+                                       (_nrepl-request-scope msg ["path"] scope)))
             (= (sub result "op") "load-file-result")
             (return result))
 
         (== op "macroexpand")
         (return (nrepl-macroexpand (sub msg "code")
-                                   (_nrepl-request-scope msg "file" scope)))
+                                   (_nrepl-request-scope msg ["file" "ns"] scope)))
 
         (== op "complete")
         (return (nrepl-complete (sub msg "prefix")
-                                (_nrepl-request-scope msg "file" scope)))
+                                (_nrepl-request-scope msg ["file" "ns"] scope)))
 
         (== op "docs")
         (return (nrepl-docs (sub msg "symbol")
-                            (_nrepl-request-scope msg "file" scope)))
+                            (_nrepl-request-scope msg ["file"] scope)))
 
         (== op "annotate")
         (return (nrepl-annotate (sub msg "symbol")
-                                (_nrepl-request-scope msg "file" scope)))
+                                (_nrepl-request-scope msg ["file"] scope)))
 
         (== op "ping")
         (return {"op" "pong"}))
