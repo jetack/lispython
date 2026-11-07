@@ -48,10 +48,6 @@ def define_macro(sexp, scope, include_meta=True):
         raise LispyCompileError(
             f"(defmacro ...) expects an undotted name, got {name}", name
         )
-    if len(sexp) == 3:
-        # Name and parameters only: report it as the defmacro's own, not as
-        # the generated def's.
-        raise LispyCompileError("(defmacro ...) needs a body", sexp)
     transformed = defmacro_transform(sexp)
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
@@ -69,7 +65,11 @@ def define_macro(sexp, scope, include_meta=True):
         # annotation) has no position of its own. The generated nodes stay
         # positionless, because the LSP position map must see them as no
         # user code; only the error is placed at the defmacro.
-        raise LispyCompileError(err.msg, sexp) from None
+        msg = err.msg
+        if msg.startswith("(def ...) needs a body"):
+            # The generated def's wording; the user wrote a defmacro.
+            msg = "(defmacro ...) needs a body"
+        raise LispyCompileError(msg, sexp) from None
     with compile_nesting_errors(body):
         code = compile(ast.Interactive(body=body), "macro-defining", "single")
     eval(code, scope)

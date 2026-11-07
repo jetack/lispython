@@ -945,8 +945,8 @@ class TestDefmacroBody:
         [
             ("(defmacro m [])", "(defmacro ...) needs a body"),
             ("(defmacro m [x])", "(defmacro ...) needs a body"),
-            ("(defmacro m [] (do))", "(def ...) needs a body: "),
-            ("(defmacro m [] ^int)", "(def ...) needs a body: "),
+            ("(defmacro m [] (do))", "(defmacro ...) needs a body"),
+            ("(defmacro m [] ^int)", "(defmacro ...) needs a body"),
         ],
     )
     def test_refused_at_the_defmacro(self, src, msg):
