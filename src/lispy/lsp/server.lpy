@@ -2228,9 +2228,11 @@
 ;; code that is the very thing it marks (lpy-diagnostic-range).
 (= HINT-TAGS (frozenset [lsp.DiagnosticTag.Unnecessary lsp.DiagnosticTag.Deprecated]))
 
-;; A double-quoted Python identifier in a backend's message, as pyright
-;; quotes a name: "my_x" is not defined.
-(= _QUOTED-NAME (re.compile "\"([^\\W\\d]\\w*)\""))
+;; A quoted Python identifier in a backend's message, as pyright quotes a name
+;; in double quotes ("my_x" is not defined) and pyrefly in backticks
+;; (Could not find name `my_x`).  Group 1 is the quote, kept as it was; group 2
+;; the name.
+(= _QUOTED-NAME (re.compile "([\"`])([^\\W\\d]\\w*)\\1"))
 
 (def message-to-buffer [message lines span]
   "A backend's message with each quoted Python name that a symbol inside
@@ -2240,11 +2242,12 @@
    only elsewhere may be no symbol at all (a TypedDict key, a string)."
   (= [start end] span)
   (def spelled [m]
-    (= found (spelled-in lines start end (.group m 1)))
+    (= found (spelled-in lines start end (.group m 2)))
     (if (or (is found None) (!= (sub (sub found 0) 0) (sub (sub found 1) 0)))
         (return (.group m 0)))
     (= [[line col] [_ end-col]] found)
-    (return f"\"{(sub (sub lines (- line 1)) [: col end-col])}\""))
+    (= quote (.group m 1))
+    (return f"{quote}{(sub (sub lines (- line 1)) [: col end-col])}{quote}"))
   (return (.sub _QUOTED-NAME spelled message)))
 
 (async-def editor-diagnostic [doc origin lines diagnostic places origins deadline]

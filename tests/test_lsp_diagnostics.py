@@ -733,11 +733,11 @@ def test_no_notice_where_the_preset_is_not_the_views(
 # ---------------------------------------------------------------------------
 
 
-# Each real backend's diagnostic on an undefined name, as (code, message);
-# None: its message is not pinned.
+# Each real backend's diagnostic on an undefined name, as (code, message in
+# the buffer's spelling).
 UNDEFINED_NAME = {
     "basedpyright": ("reportUndefinedVariable", '"undefined-name" is not defined'),
-    "pyrefly": ("unknown-name", None),
+    "pyrefly": ("unknown-name", "Could not find name `undefined-name`"),
 }
 
 
@@ -771,8 +771,7 @@ def test_a_real_backend_reports_on_the_lpy_word(
     code, message = UNDEFINED_NAME[name]
     assert found.code == code
     assert found.severity == lsp.DiagnosticSeverity.Error
-    if message is not None:
-        assert found.message == message
+    assert found.message == message
     assert (found.range.start.line, found.range.start.character) == (0, 7)
     assert (found.range.end.line, found.range.end.character) == (0, 21)
 
