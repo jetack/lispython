@@ -682,11 +682,15 @@ def test_the_fallback_list_hyphenates_a_nested_macro(complete, off_backends):
 def test_every_item_filters_by_the_word_typed(merged, off_backends, complete):
     # Defect: only the backend's items carry a filterText, so an item
     # labelled by its hyphen spelling (a view macro my-mac, a fallback
-    # my-val) is dropped once the user types its _ spelling (my_m, my_v);
-    # and a label outside the hyphen rule (->) must filter as itself.
-    items = by_label(merged("(defmacro my_mac [x] x)\n(my_m|)")[2])
-    assert items["my-mac"].filter_text == "my_mac"
-    items = by_label(complete("(= my_val 1)\n(my_v|)", off_backends)[2])
-    assert items["my-val"].filter_text == "my_val"
+    # my-val) is dropped once the user types its _ spelling (my_m, my_v),
+    # or once a - is typed (my-m, my-v), when the client asks again and
+    # filters by the hyphen spelling; and a label outside the hyphen rule
+    # (->) must filter as itself.
+    for typed, filter_text in [("my_m", "my_mac"), ("my-m", "my-mac")]:
+        items = by_label(merged(f"(defmacro my_mac [x] x)\n({typed}|)")[2])
+        assert items["my-mac"].filter_text == filter_text, typed
+    for typed, filter_text in [("my_v", "my_val"), ("my-v", "my-val")]:
+        items = by_label(complete(f"(= my_val 1)\n({typed}|)", off_backends)[2])
+        assert items["my-val"].filter_text == filter_text, typed
     items = by_label(complete("(= x 1)\n(-|)", off_backends)[2])
     assert items["->"].filter_text == "->"

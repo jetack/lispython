@@ -1795,8 +1795,9 @@
   "The completion items offered with no Python backend's answer:
    lispython's own (lispython-items), the Python builtins (builtin-names),
    then the buffer's definitions (buffer-definition-names), each name once
-   (name-key) and labelled by its hyphen spelling (hyphen-spelling; a
-   buffer macro as defined)."
+   (name-key); builtins labelled by their hyphen spelling (hyphen-spelling),
+   the buffer's definitions, macros included, as buffer-definition-names
+   labels them (completion-label)."
   (= items (lispython-items))
   (= seen (set [(name-key item.label) for item in items]))
   (for [label kind] in [*[(, (hyphen-spelling name) kind)
