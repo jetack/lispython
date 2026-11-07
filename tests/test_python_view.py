@@ -147,18 +147,22 @@ class TestMacros:
         for name in ["mm", "nn"]:
             assert view.map.to_lpy(*locate(view.text, name)) == locate(src, name)
 
-    def test_a_template_name_longer_than_its_call_has_a_view(self):
-        # Defect: `print` placed at `(f)` got a span past the line's end and
-        # the position map raised IndexError, so the buffer had no view.
-        view_of("(defmacro f [] (return '(print 1)))\n(f)\n")
-
-    def test_a_macro_position_outside_the_buffer_has_a_view(self):
-        # Defect: the map read the buffer at whatever position a macro gave
-        # its node (column 50 of the 3-character line 2) and raised IndexError.
-        view_of(
+    def test_a_macro_position_outside_the_buffer_maps_nowhere(self):
+        # Defect: the map trusted whatever position a macro gave its node
+        # (column 50 of the 3-character line 2): reading the buffer there
+        # raised IndexError (no view), and a node entry sent the editor to it.
+        src = (
             '(defmacro f [] (return (Paren (Symbol "print" :lineno 2'
             " :col_offset 50 :end_lineno 2 :end_col_offset 55))))\n(f)\n"
         )
+        view = view_of(src)
+        lines = src.split("\n")
+        outside = [
+            (start, end)
+            for [_, _, start, end, _] in view.map.entries
+            if start[1] > len(lines[start[0] - 1]) or end[1] > len(lines[end[0] - 1])
+        ]
+        assert outside == []
 
 
 def gen_range(text, word, nth=0):

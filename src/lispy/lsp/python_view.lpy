@@ -328,21 +328,23 @@
       (= end-col col))
   (return (, (, line col) (, end-line end-col))))
 
+(def _in-buffer-p [lines span]
+  "Whether .lpy span span lies inside the buffer text lines: a macro may give
+   a node any explicit position, so the map never trusts an AST position."
+  (= [[line col] [end-line end-col]] span)
+  (return (and (<= 1 line end-line (len lines))
+               (<= 0 col (len (sub lines (- line 1))))
+               (<= 0 end-col (len (sub lines (- end-line 1)))))))
+
 (def _lpy-name-span [lines span name]
   "The .lpy span spelling Python name name within node span span, or None.
    The spelling sits at no fixed place: a dotted symbol or (. x a) ends the
    node with it, a method call (.ff x) starts it right after the dot, a
    keyword parameter after its colon, and a macro may put anything there;
-   so each place is tried and the one whose py-name matches wins."
+   so each place is tried and the one whose py-name matches wins.  span
+   lies inside lines (_in-buffer-p)."
   (= [[line col] [end-line end-col]] span)
-  ;; A macro may give a node any explicit position, so the span is trusted
-  ;; only inside the buffer text.
-  (if (or (< line 1) (> end-line (len lines)) (< end-line line) (< col 0))
-      (return None))
   (= text (sub lines (- line 1)))
-  (if (or (> col (len text)) (< end-col 0)
-          (> end-col (len (sub lines (- end-line 1)))))
-      (return None))
   (if (and (== line end-line) (== (py-name (sub text [: col end-col])) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))
@@ -406,6 +408,8 @@
     (if (and (is-not (type a) (type b)) (not leaf))
         (continue))
     (= lpy (_lpy-span a))
+    (if (and (is-not lpy None) (not (_in-buffer-p lines lpy)))
+        (= lpy None))
     (= gen (ife (is lpy None) None (_gen-span b columns)))
     (if (is-not gen None)
         (do (.append entries (, (sub gen 0) (sub gen 1) (sub lpy 0) (sub lpy 1) False))
