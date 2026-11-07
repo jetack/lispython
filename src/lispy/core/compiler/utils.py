@@ -41,11 +41,17 @@ def keyword_arg_p(sexp):
 
 
 def merge_position_infos(*position_infos):
+    """The span covering every given span. Start and end are compared as
+    (line, column) pairs: a column is only meaningful with its own line, so
+    taking each field's min/max apart pairs one span's line with another's
+    column (a method call split across lines)."""
+    start = min((x["lineno"], x["col_offset"]) for x in position_infos)
+    end = max((x["end_lineno"], x["end_col_offset"]) for x in position_infos)
     return {
-        "lineno": min(map(lambda x: x["lineno"], position_infos)),
-        "col_offset": min(map(lambda x: x["col_offset"], position_infos)),
-        "end_lineno": max(map(lambda x: x["end_lineno"], position_infos)),
-        "end_col_offset": max(map(lambda x: x["end_col_offset"], position_infos)),
+        "lineno": start[0],
+        "col_offset": start[1],
+        "end_lineno": end[0],
+        "end_col_offset": end[1],
     }
 
 

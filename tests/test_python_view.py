@@ -147,6 +147,23 @@ class TestMacros:
         for name in ["mm", "nn"]:
             assert view.map.to_lpy(*locate(view.text, name)) == locate(src, name)
 
+    def test_a_macro_position_outside_the_buffer_maps_nowhere(self):
+        # Defect: the map trusted whatever position a macro gave its node
+        # (column 50 of the 3-character line 2): reading the buffer there
+        # raised IndexError (no view), and a node entry sent the editor to it.
+        src = (
+            '(defmacro f [] (return (Paren (Symbol "print" :lineno 2'
+            " :col_offset 50 :end_lineno 2 :end_col_offset 55))))\n(f)\n"
+        )
+        view = view_of(src)
+        lines = src.split("\n")
+        outside = [
+            (start, end)
+            for [_, _, start, end, _] in view.map.entries
+            if start[1] > len(lines[start[0] - 1]) or end[1] > len(lines[end[0] - 1])
+        ]
+        assert outside == []
+
 
 def gen_range(text, word, nth=0):
     start = locate(text, word, nth)
