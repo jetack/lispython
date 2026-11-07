@@ -105,13 +105,9 @@ def _symbol_tokens(text, start, after_paren):
 
 
 def _symbol(lexer, match):
-    start = match.start()
-    # A head: the first token after "(", blanks and line breaks between.
-    before = start - 1
-    while before >= 0 and match.string[before] in " \t\r\n\f":
-        before -= 1
-    after_paren = before >= 0 and match.string[before] == "("
-    yield from _symbol_tokens(match.group(), start, after_paren)
+    # A head: the first token after "(", whitespace and comments between;
+    # get_tokens_unprocessed keeps lexer.at_head.
+    yield from _symbol_tokens(match.group(), match.start(), lexer.at_head)
 
 
 def _number(lexer, match):
@@ -307,6 +303,18 @@ class LispythonLexer(RegexLexer):
     flags = 0
 
     tokens = _tokens()
+    at_head = False
+
+    def get_tokens_unprocessed(self, text, stack=("root",)):
+        # The callbacks run lazily, as each token is pulled, so this sees every
+        # token before the next symbol is classified.
+        self.at_head = False
+        for index, kind, value in super().get_tokens_unprocessed(text, stack):
+            if kind is Punctuation and value == "(":
+                self.at_head = True
+            elif kind not in (Whitespace, Comment.Single):
+                self.at_head = False
+            yield index, kind, value
 
     def analyse_text(text):
         return 0.8 if "(require lispy.macros" in text else 0.0

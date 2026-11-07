@@ -201,6 +201,23 @@ def test_a_head_after_blanks_is_a_head(lexer, src, name):
     assert kind_of(lexer, src, name) is Keyword
 
 
+@pytest.mark.parametrize(
+    "src, name, kind",
+    [
+        ("(;; c\n ife a b c)", "ife", Keyword),
+        ("(foo\n  ;; (\n  ife)", "ife", Name),
+        ("(foo ;; (\n  match)", "match", Name),
+    ],
+)
+def test_a_comment_between_the_paren_and_a_token_does_not_move_the_head(
+    lexer, src, name, kind
+):
+    # Defect: the head was found by scanning characters back over blanks, so a
+    # comment ended the scan: its text "(" made the next token a head, and a
+    # comment before the head hid it.
+    assert kind_of(lexer, src, name) is kind
+
+
 def lispython_fences(docs_main):
     """The text of every ```lispython fence on the docs pages, and the usage
     block docs/main.py generates for every built-in macro."""
