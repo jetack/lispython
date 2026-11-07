@@ -491,3 +491,10 @@ def test_ns_eval_at_line_one_never_re_derives_the_prelude(isolated, tmp_path):
     assert dispatch(isolated, code="(+ 1 2)", ns=ns, line=1, column=1)["error"] is None
     # still absent: the ns eval at line 1 was not a TOP start
     assert op(isolated, "macroexpand", code=probe, ns=ns)["expansion"] == probe
+
+
+@pytest.mark.parametrize("name", ["eval", "complete", "macroexpand"])
+def test_null_ns_counts_as_absent(name):
+    [reply] = serve([line(op=name, id=1, code="(+ 1 2)", prefix="pri", ns=None)])
+    assert reply["op"] != "error"
+    assert reply["id"] == 1
