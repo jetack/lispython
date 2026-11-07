@@ -300,8 +300,6 @@ NON_BINDING_NAME_READS = {
     "scope_names": "global/nonlocal declare a scope, binding nothing",
     "import_aliases": "the imported name; the bound one goes to check_binding",
     "importfrom_parse": "the module a from-import reads",
-    "param_name": "unchecked only for the compiler's own parameter list "
-    "(Expression.compiler_form, def_args_parse)",
 }
 
 
@@ -374,9 +372,9 @@ def test_a_defmacro_parameter_is_a_binding_on_import(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("tool", ["String", "gensym", "Paren"])
 def test_a_macro_named_like_a_macro_tool_allows_later_defmacros(tool):
-    # The next defmacro's generated closure binds every macro tool as a
-    # parameter (def_args_parse leaves the compiler's own list unchecked),
-    # and the macro still expands in a defmacro body.
+    # The next defmacro's generated function imports every macro tool
+    # (import_aliases leaves the compiler's own [names] unchecked), and the
+    # macro still expands in a defmacro body.
     src = (
         f"(defmacro {tool} [x] (return x))\n"
         "(defmacro m [] (return `(+ 1 2)))\n"

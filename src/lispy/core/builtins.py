@@ -24,11 +24,12 @@ from lispy.core.nodes import (
 )
 
 # The one home of the names a defmacro body sees: defmacro-transform
-# (core_meta_functions.lpy) closes the body over exactly these, never binding
-# them in the user's module, and (from lispy.core.builtins *) brings the same
-# names into a module for its macro helpers. A quasiquote compiles to calls
-# of node classes by bare name (Node.classname), so every node class with a
-# classname must be listed, or a quasiquote in a macro body fails.
+# (core_meta_functions.lpy) imports exactly these in a function around the
+# body, never binding them in the user's module, and
+# (from lispy.core.builtins *) brings the same names into a module for its
+# macro helpers. A quasiquote compiles to calls of node classes by bare name
+# (Node.classname), so every node class with a classname must be listed, or
+# a quasiquote in a macro body fails.
 __all__ = [
     "Node",
     "Expression",
@@ -54,13 +55,6 @@ __all__ = [
     "gensym",
     "replace_symbol",
 ]
-
-
-def macro_scope():
-    """``{name: value}`` for every name of ``__all__``: what a defmacro's
-    generated code passes the function that closes its body over them."""
-    namespace = globals()
-    return {name: namespace[name] for name in __all__}
 
 
 _gensym_counter = 0

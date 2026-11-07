@@ -189,9 +189,9 @@ def test_defmacro_and_require_survive_user_names_of_their_own_parts(
 
 
 def test_a_defmacro_binds_no_module_global(import_dir):
-    # The body sees the macro tools as closure cells (defmacro-transform), so
-    # the module keeps its own Paren and gensym and gains no name it did not
-    # write.
+    # The body sees the macro tools through a function-local import
+    # (defmacro-transform), so the module keeps its own Paren and gensym and
+    # gains no name it did not write.
     (import_dir / "nm_own_tools.lpy").write_text(
         '(= Paren 5)\n(= gensym "mine")\n'
         "(defmacro m [] (return (String (repr (str (gensym))))))\n(= v (m))\n"
@@ -220,6 +220,17 @@ def test_a_required_macro_quasiquotes_past_its_modules_later_bindings(import_dir
     assert importlib.import_module("nm_rebinds_user").out == 42
 
 
+def test_a_defmacro_in_a_function_or_class_body(import_dir):
+    # The generated code imports by an explicit list, which Python allows in
+    # any scope; a star import is a SyntaxError outside a module's top level.
+    (import_dir / "nm_nested.lpy").write_text(
+        "(def f []\n  (defmacro m [] (return `(+ 1 2)))\n  (return (m)))\n"
+        "(class C []\n  (defmacro k [] (return 4))\n  (= v (k)))\n"
+        "(= out [(f) C.v])\n"
+    )
+    assert importlib.import_module("nm_nested").out == [3, 4]
+
+
 def test_every_class_a_quasiquote_calls_is_a_macro_tool():
     # A quasiquote compiles to calls of node classes by their classname; a
     # name missing from the macro tools is a NameError in a defmacro body.
@@ -238,7 +249,6 @@ def test_every_class_a_quasiquote_calls_is_a_macro_tool():
     }
     assert "Paren" in classnames and "UnquoteSplice" in classnames
     assert classnames <= set(builtins.__all__), classnames - set(builtins.__all__)
-    assert set(builtins.macro_scope()) == set(builtins.__all__)
 
 
 @pytest.mark.parametrize("collection", ["[defmacro foo [x] x]", "{defmacro foo [x] x}"])

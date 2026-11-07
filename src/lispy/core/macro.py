@@ -59,8 +59,8 @@ def define_macro(sexp, scope, include_meta=True):
     # is a binding the body's (name ...) would expand past, and lpy and the
     # importer refuse it when they compile this same form as the module's
     # code (include_meta). The generated ___defmacro_ names never clash,
-    # and the macro tools the body closes over are the compiler's own
-    # parameters, never checked (def_args_parse).
+    # and the compiler's own import of the macro tools around the body is
+    # never checked (import_aliases).
     try:
         body = macroexpand_then_compile([transformed], scope, include_meta=include_meta)
     except LispyCompileError as err:

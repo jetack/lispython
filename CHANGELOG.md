@@ -72,6 +72,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A `defmacro` no longer binds any name in the module that defines it. It
+  used to star-import `lispy.core.nodes` and `lispy.core.builtins` there,
+  overwriting the module's own `Paren`, `Symbol` or `gensym` and leaving
+  `deque`, `atom_text` and the rest as module globals. A macro body now sees
+  exactly `lispy.core.builtins.__all__`: the node classes, `gensym` and
+  `replace_symbol`. Module-level code that used those names after a
+  `defmacro` without importing them needs `(from lispy.core.builtins *)`, and
+  a body that used another name of either module (`reset_gensym_counter`,
+  `atom_text`, `deque`, ...) imports it itself. `defmacro` now also works
+  inside a function or class body.
 - The operator `-` is no longer the Python name `_`: in a name slot (a value,
   an assignment or loop target, a parameter, an import, an attribute such as
   `a.-` or `(.- x)`, a keyword argument, a match capture, a slice operand) it

@@ -624,9 +624,9 @@ class Expression(Node):
     # require-transform mark through mark_compiler_forms): a Paren's head is
     # never a macro call or meta form, because a user macro named after one of
     # its heads (do, def, sub, lambda, ...) must not rewrite the compiler's
-    # code, and a Bracket's parameters are never refused for shadowing a macro
-    # (def_args_parse). Its children still expand, so the user's forms inside
-    # it do.
+    # code, and a Bracket's imported names are never refused for shadowing a
+    # macro (import_aliases). Its children still expand, so the user's forms
+    # inside it do.
     compiler_form = False
 
     def __init__(self, *tokens, **kwargs):

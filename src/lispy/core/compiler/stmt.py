@@ -146,6 +146,11 @@ def import_aliases(names, form, from_p=False):
     """
     if names == "*":
         return [(ast.alias(name="*", **names.position_info), None, None)]
+    # The compiler's own [names] (defmacro's local import of the macro tools,
+    # Expression.compiler_form) may bind a name a user macro has, such as
+    # String or gensym: a (String ...) in the user's macro body still expands
+    # the macro, as it would with no such import.
+    checked = not (isinstance(names, Bracket) and names.compiler_form)
     rst = []
     q = deque(names)
     while q:
@@ -158,7 +163,7 @@ def import_aliases(names, form, from_p=False):
             q.popleft()
             asname = import_name(q.popleft(), form, dotted=False)
             alias.asname = binding_name(asname)
-        else:
+        elif checked:
             # Unaliased, the import binds the name, or a module path's first
             # part (import_bindings).
             check_binding(n, atom_text(n).split(".")[0])
