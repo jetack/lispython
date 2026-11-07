@@ -3,10 +3,26 @@ from lispy.core.compiler.literal import identifier_p
 from lispy.core.nodes import *
 
 
+def builtin(name):
+    """The generated code's form for the builtin NAME, read from a function's
+    __builtins__, never by a global lookup: the user module can rebind a global
+    name (or make it a macro), while a function's __builtins__ is the dict an
+    import statement reads."""
+    return Paren(
+        Symbol("sub"),
+        Paren(
+            Symbol("."),
+            Paren(Symbol("lambda"), Bracket(), Constant("0")),
+            Symbol("__builtins__"),
+        ),
+        name,
+    )
+
+
 def macro_table():
     """The generated code's form for the module lispy.core.macro_table."""
     return Paren(
-        Symbol("__import__"),
+        builtin("__import__"),
         String('"lispy.core.macro_table"'),
         Keyword(Symbol("fromlist")),
         Bracket(String('"MacroTable"')),
@@ -28,7 +44,7 @@ def defmacro_transform(sexp):
             Symbol("="),
             Paren(
                 Symbol("sub"),
-                Paren(Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))),
+                Paren(Symbol(".scope-table"), macro_table(), Paren(builtin("globals"))),
                 macroname,
             ),
             newname,
@@ -63,7 +79,7 @@ def require_transform(sexp):
     import_call = (
         Paren(
             Symbol(".import-module"),
-            Paren(Symbol("__import__"), String('"importlib"')),
+            Paren(builtin("__import__"), String('"importlib"')),
             module_name_str,
             Keyword(Symbol("package")),
             Symbol("__package__"),
@@ -71,7 +87,7 @@ def require_transform(sexp):
         if is_relative
         else Paren(
             Symbol(".import-module"),
-            Paren(Symbol("__import__"), String('"importlib"')),
+            Paren(builtin("__import__"), String('"importlib"')),
             module_name_str,
         )
     )
@@ -80,7 +96,7 @@ def require_transform(sexp):
     return Paren(
         Symbol(".register-required"),
         macro_table(),
-        Paren(Symbol("globals")),
+        Paren(builtin("globals")),
         import_call,
         prefix,
         selected,

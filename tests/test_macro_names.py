@@ -141,3 +141,48 @@ def test_every_way_of_writing_to_a_table_compares_by_name():
     table.setdefault("my-x", third)
     assert list(table.items()) == [("my_x", second)]
     assert "my-x" in table and table.pop("my-x") is second and not table
+
+
+@pytest.mark.parametrize(
+    "rebinding",
+    [
+        "(= __import__ 5)",
+        "(= globals 5)",
+        "(defmacro __import__ [] (return 5))",
+        "(defmacro globals [] (return 5))",
+    ],
+)
+def test_defmacro_and_require_survive_a_rebound_builtin(import_dir, rebinding):
+    # The generated registration reaches __import__ and globals as builtins:
+    # a global lookup would find the module's own value (at run time) or
+    # expand its macro (at compile time).
+    (import_dir / "nm_mod.lpy").write_text("(defmacro my_mac [] (return 1))\n")
+    body = (
+        "(defmacro foo [] (return 2))\n(require nm-mod [my-mac])\n"
+        "(require nm-mod)\n(= v [(foo) (my-mac) (nm-mod.my-mac)])\n"
+    )
+    (import_dir / "nm_rebound.lpy").write_text(f"{rebinding}\n{body}")
+    module = importlib.import_module("nm_rebound")
+    assert module.v == [2, 1, 1]
+    table = getattr(module, "__macro_namespace")
+    assert all(key in table for key in ["foo", "my_mac", "nm_mod.my_mac"])
+
+
+@pytest.mark.parametrize("collection", ["[defmacro foo [x] x]", "{defmacro foo [x] x}"])
+def test_a_defmacro_head_in_brackets_or_braces_defines_nothing(collection):
+    # A meta form is one only at a ( head, as a macro call is.
+    scope = {}
+    out = tools.src_to_python_org(f"(print {collection})\n(foo 1)", scope=scope)
+    assert "foo" not in scope["__macro_namespace"]
+    assert out.endswith("foo(1)")
+
+
+@pytest.mark.parametrize(
+    "collection", ["[require nm-mod [my-mac]]", "{require nm-mod}"]
+)
+def test_a_require_head_in_brackets_or_braces_registers_nothing(import_dir, collection):
+    (import_dir / "nm_mod.lpy").write_text("(defmacro my_mac [] (return 1))\n")
+    scope = {}
+    tools.src_to_python_org(f"(print {collection})", scope=scope)
+    table = scope["__macro_namespace"]
+    assert not any(key in table for key in ["my_mac", "nm_mod.my_mac"])
