@@ -115,10 +115,11 @@ class _Chunked(_Stdlib):
         return text
 
     def visit_Interpolation(self, node):
-        # The compiler sets Interpolation.str to the lispython text, which is
-        # what a Template reports at runtime; the stdlib writes str verbatim
-        # unless it is None, and Python source needs the Python text. A
-        # shallow copy keeps the caller's tree as it was.
+        # The one home of the t-string fix for every AST->Python text (l2py,
+        # the LSP view). The compiler sets Interpolation.str to the lispython
+        # text, which is what a Template reports at runtime; the stdlib writes
+        # str verbatim unless it is None, and Python source needs the Python
+        # text. A shallow copy keeps the caller's tree as it was.
         python = copy.copy(node)
         python.str = None
         super().visit_Interpolation(python)

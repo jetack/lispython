@@ -40,7 +40,7 @@
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.compiler.literal [identifier-p name-key])
-(from lispy.core.compiler.utils [python-interpolations])
+(from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
 (from lispy.lsp.macro-modules [epoch fresh-modules])
 
@@ -641,8 +641,8 @@
     (except [Exception as e]
       (return (CompiledBuffer None :stage COMPILE-STAGE :error e))))
   (try
-    (= module (python-interpolations (ast.Module :body body :type-ignores (list))))
-    (= text (ast.unparse module))
+    (= module (ast.Module :body body :type-ignores (list)))
+    (= text (unparse module))
     (= tree (ast.parse text))
     (= position-map (build-position-map module tree source text))
     ;; Keys are the spellings a defmacro or require registered.

@@ -84,6 +84,26 @@ class TestNames:
         assert view.map.to_lpy(*plus(gen, 1)) == plus(lpy, 1)
         assert view.map.to_generated(*lpy) == gen
 
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings: 3.14+")
+    def test_t_string_field_is_written_in_python(self):
+        # Interpolation.str holds the lispython text (what a Template reports);
+        # written verbatim, the view would read t'{my-x}', a subtraction.
+        src = '(= my-x 1)\n(print t"{my-x}" t"{(+ my-x 1)!r:>{my-x}}")'
+        view = view_of(src)
+        assert view.text == "my_x = 1\nprint(t'{my_x}', t'{my_x + 1!r:>{my_x}}')"
+        gen, lpy = locate(view.text, "my_x", 1), locate(src, "my-x", 1)
+        assert view.map.to_lpy(*plus(gen, 1)) == plus(lpy, 1)
+
+    def test_nested_past_ast_unparse(self):
+        # 1000 operands nest 1000 BinOps: ast.unparse fails a few hundred
+        # levels down, while ast.parse and the map's walk take them.
+        src = "(= my-x 1)\n(print (+" + " 1" * 1000 + " my-x))"
+        view = view_of(src)
+        assert view.text == "my_x = 1\nprint(" + "1 + " * 1000 + "my_x)"
+        gen, lpy = locate(view.text, "my_x", 1), locate(src, "my-x", 1)
+        assert view.map.to_lpy(*plus(gen, 1)) == plus(lpy, 1)
+        assert view.map.to_generated(*plus(lpy, 1)) == plus(gen, 1)
+
     def test_parameter_after_its_colon_and_keyword_argument(self):
         src = "(def f [a :bb-c 1] (g :kw-d 2))"
         view = view_of(src)
