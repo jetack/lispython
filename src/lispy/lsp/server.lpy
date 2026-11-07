@@ -1725,23 +1725,22 @@
 ;; (BUILTIN-MACROS, never a hand list) tagged "macro", and `gensym`, a function
 ;; that exists only inside defmacro bodies, tagged "function".
 (= _LPY-OWN-TAGS
-   [(, SPECIAL-FORM-DOCS "special form")
-    (, BUILTIN-MACROS "macro")
-    (, ["gensym"] "function")])
+   [(, SPECIAL-FORM-DOCS "special form" lsp.CompletionItemKind.Keyword)
+    (, BUILTIN-MACROS "macro" lsp.CompletionItemKind.Function)
+    (, ["gensym"] "function" lsp.CompletionItemKind.Function)])
 
-(def own-item [label tag]
+(def own-item [label tag kind]
   "One of lispython's own completion items (the one home of their shape):
    its short tag (\"macro\", ...) is labelDetails.description, drawn inline,
    not detail, which lpy-mode shows as the focused item's signature.  The kind
-   is Keyword for a special form and Function for everything callable: LSP has
-   no Macro kind, and Function is the nearest (Keyword would read as syntax).
+   is Keyword for a special form and Function for everything callable (a
+   caller's choice): LSP has no Macro kind, and Function is the nearest
+   (Keyword would read as syntax).
    Sent whatever the client advertises: eglot never sets labelDetailsSupport
    and clients ignore a field they do not know."
   (return (lsp.CompletionItem
             :label label
-            :kind (ife (== tag "special form")
-                       lsp.CompletionItemKind.Keyword
-                       lsp.CompletionItemKind.Function)
+            :kind kind
             :label-details (lsp.CompletionItemLabelDetails :description tag))))
 
 (def lispython-items []
@@ -1749,11 +1748,11 @@
    macros and gensym (_LPY-OWN-TAGS), each once (own-item)."
   (= items [])
   (= seen (set))
-  (for [names tag] in _LPY-OWN-TAGS
+  (for [names tag kind] in _LPY-OWN-TAGS
     (for name in names
       (if (not-in name seen)
           (do (.add seen name)
-              (.append items (own-item name tag))))))
+              (.append items (own-item name tag kind))))))
   (return items))
 
 (def general-items [doc :line None]
@@ -2039,7 +2038,7 @@
     (if (and (not-in "." name) (not-in name taken))
         (do (= label (.get spellings name name))
             (.add taken name)
-            (.append merged (own-item label "macro")))))
+            (.append merged (own-item label "macro" lsp.CompletionItemKind.Function)))))
   (= rest (list items))
   (if view.fallback
       (.extend rest [(lsp.CompletionItem :label name
