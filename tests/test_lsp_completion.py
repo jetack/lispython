@@ -4,6 +4,7 @@ and basedpyright; lsp_backends.py).
 The tests share the session's backend over one tmp project
 (``real_backends``, ``lsp_buffer`` in conftest.py); each test points the
 server at it and gets a fresh view cache. ``|`` in a source marks the cursor.
+The ``off_complete`` tests need no backend installed (lsp_document).
 """
 
 import importlib
@@ -41,15 +42,14 @@ def capabilities(insert_replace):
     )
 
 
-@pytest.fixture
-def complete(lsp_buffer, run_on_loop, real_backends):
-    """complete(source) -> (line, character, items) at the | of source."""
-
-    def run(source, backends=real_backends, insert_replace=True):
-        ls, uri, position = lsp_buffer(
+def completer(open_buffer, run_on_loop, default_backends):
+    def run(source, backends=default_backends, insert_replace=True, before=None):
+        ls, uri, position = open_buffer(
             source, backends, client_capabilities=capabilities(insert_replace)
         )
-        run.document = lsp_buffer.document
+        run.document = open_buffer.document
+        if before is not None:
+            before(run.document)
         params = lsp.CompletionParams(
             text_document=lsp.TextDocumentIdentifier(uri=uri), position=position
         )
@@ -57,6 +57,19 @@ def complete(lsp_buffer, run_on_loop, real_backends):
         return position.line, position.character, result.items
 
     return run
+
+
+@pytest.fixture
+def complete(lsp_buffer, run_on_loop, real_backends):
+    """complete(source) -> (line, character, items) at the | of source;
+    before(document), if given, runs once the buffer is open."""
+    return completer(lsp_buffer, run_on_loop, real_backends)
+
+
+@pytest.fixture
+def off_complete(lsp_document, run_on_loop, off_backends):
+    """complete with the backend off, needing none installed."""
+    return completer(lsp_document, run_on_loop, off_backends)
 
 
 def by_label(items):
@@ -317,6 +330,91 @@ def test_required_macros_follow_only_their_modules_name(
     # (. mod |) form, where mod.name is no macro call.
     backend_requests.answer["value"] = []
     assert complete(f"(require lpy-macs)\n{access}")[2] == []
+
+
+def test_required_macros_follow_their_module_with_no_backend(off_complete):
+    # Defects: the mod.name macros a (require mod) registers are offered
+    # only when a Python backend answers, though they are lispython's own,
+    # so with the backend off (or not installed) the attribute answer is
+    # empty; or they are offered in another spelling than the hyphen one.
+    assert macro_style(off_complete("(require lpy-macs)\n(lpy-macs.|)")[2]) == LPY_MACS
+    labels = by_label(off_complete("(require macmod)\n(macmod.my|)")[2])
+    assert set(labels) == {"my-mac", "my-umac"}
+    # Defect: the require gate compares the module's raw spelling, so a base
+    # written lpy_macs (the same name as lpy-macs) compiles nothing.
+    assert macro_style(off_complete("(require lpy-macs)\n(lpy_macs.|)")[2]) == LPY_MACS
+
+
+def cache_full_view(document):
+    """Compile document's full view into the server's cache, as its
+    diagnostics would."""
+    name, package, import_root = python_view.module_names(document.path)
+    server.view_cache.compiled(
+        document.uri,
+        document.version,
+        document.source,
+        name=name,
+        package=package,
+        import_root=import_root,
+    )
+    assert server.view_cache.cached_view(document.uri, document.version) is not None
+
+
+def test_required_macros_come_from_the_full_view_with_no_cursor_view(
+    off_complete, monkeypatch
+):
+    # Defect: with no cursor view (its compile gave none or timed out) the
+    # attribute answer is empty, though the version's full view, compiled
+    # for its diagnostics, holds the module's macros.
+    monkeypatch.setattr(server, "cursor_view", lambda *args: None)
+    items = off_complete("(require lpy-macs)\n(lpy-macs.tw|)", before=cache_full_view)
+    assert macro_style(items[2]) == LPY_MACS
+
+
+@pytest.mark.parametrize(
+    "access", ['"lpy-macs.|"', "; lpy-macs.|", "(print 1) ; lpy-macs.|"]
+)
+def test_required_macros_are_never_offered_in_a_string_or_comment(
+    off_complete, monkeypatch, access
+):
+    # Defect: mod.| in a string literal or a comment is taken for a macro
+    # call, so its macros are offered there: the full view compiles such a
+    # buffer fine and holds them (the cursor view gives none there, so it
+    # cannot show the defect).
+    monkeypatch.setattr(server, "cursor_view", lambda *args: None)
+    items = off_complete(f"(require lpy-macs)\n{access}", before=cache_full_view)
+    assert items[2] == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        CLASS.format("self.|"),
+        "(require lpy-macs)\n(import os)\n(os.path.|)",
+        "(require lpy-macs [twice])\n(lpy-macs.|)",
+        "(require lpy-macs *)\n(lpy-macs.|)",
+    ],
+    ids=["no require", "another module", "named", "star"],
+)
+def test_no_backend_compiles_nothing_for_a_base_no_require_qualifies(
+    off_complete, monkeypatch, source
+):
+    # Defect: with no backend, every keystroke after a dot compiles a cursor
+    # view (the buffer's macros, a thread, up to REQUEST-TIMEOUT the editor
+    # waits on), though only a base a bare (require mod) names can have
+    # qualified macros to offer.
+    views = []
+    monkeypatch.setattr(server, "cursor_view", lambda *args: views.append(args))
+    assert off_complete(source)[2] == []
+    assert views == []
+
+
+@pytest.mark.parametrize("access", ["(nope.|)", "(. lpy-macs |)"])
+def test_no_backend_offers_nothing_after_another_base(off_complete, access):
+    # Defects: with no backend, the qualified macros are offered after any
+    # base, or in the (. mod |) form, where mod.name is no macro call; or an
+    # unresolved base gets the general list.
+    assert off_complete(f"(require lpy-macs)\n{access}")[2] == []
 
 
 @once
