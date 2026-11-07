@@ -23,6 +23,8 @@
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
+;; The one completion-spelling rule, shared with the nREPL.
+(from lispy.core.compiler.literal [completion-label name-spellings])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
@@ -32,7 +34,7 @@
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
                              ViewCache compile-buffer glued-base hyphen-spelling
                              lpy-diagnostic-range lpy-range module-names name-key
-                             name-spelling-p open-form-closers partial-span py-name
+                             open-form-closers partial-span py-name
                              pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT suppression-tool])
@@ -1710,17 +1712,6 @@
 ;; an item carries the spelling being typed: its label, the hyphen spelling
 ;; (hyphen-spelling), once the typed word holds a `-` (my-|), else the
 ;; Python name, which also matches what a user typing `_` spells (my_|).
-(def completion-label [name spellings]
-  "The label of a backend item for Python name name: the buffer's own
-   spelling (spellings, buffer-spellings' map) when that is no hyphenated
-   spelling of name (ok? for ok_p, ->foo for _to_foo: name-key keeps it
-   apart from name), else the hyphen spelling (hyphen-spelling), so the
-   buffer's plain my_x never wins over my-x."
-  (= spelled (.get spellings name))
-  (if (and (is-not spelled None) (!= (name-key spelled) name))
-      (return spelled))
-  (return (hyphen-spelling name)))
-
 (def filter-text [label name typed]
   "The filterText of a completion item labelled label (completion-label)
    for Python name name, when typed is the word typed so far: a label that
@@ -1997,9 +1988,8 @@
   (return texts))
 
 (def buffer-spellings [source :line None]
-  "Python name -> the buffer's first spelling of it in source order: every
-   Symbol counts, a dotted one (a.my-b) by each of its parts, each only
-   when it spells a name (name-spelling-p); with a 1-based line, also past
+  "Python name -> the buffer's first spelling of it in source order
+   (name-spellings over the parsed buffer); with a 1-based line, also past
    the form open there (buffer-texts)."
   (= tree [])
   (for text in (buffer-texts source line)
@@ -2007,22 +1997,7 @@
       (.extend tree (parse text :partial True))
       (except [Exception]
         (pass))))
-  (= spellings {})
-  (= stack (list (reversed tree)))
-  (while stack
-    (= node (.pop stack))
-    (cond (isinstance node Symbol)
-          (for part in (.split node.value ".")
-            (if (name-spelling-p part)
-                (.setdefault spellings (py-name part) part)))
-          (isinstance node Expression)
-          (.extend stack (reversed node.list))
-          (isinstance node (, Wrapper MetaIndicator))
-          (if (is-not node.value None)
-              (.append stack node.value))
-          (isinstance node GluedHead)
-          (.extend stack [node.params node.head])))
-  (return spellings))
+  (return (name-spellings tree)))
 
 (def python-syntax-p [item]
   "Whether a backend completion item is Python syntax (else, yield), which

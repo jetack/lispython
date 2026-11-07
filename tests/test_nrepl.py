@@ -541,18 +541,14 @@ def complete_labels(prefix, scope):
         ("my", "my-val", "my_val"),
         ("a", "a__b", "a--b"),
         ("_pri", "_priv-x", "_priv_x"),
-        ("collections.OrderedDict.move", "collections.OrderedDict.move-to-end", None),
+        ("collections.OrderedDict.move", "move-to-end", None),
         ("my-v", "my-val", "my_val"),
         # A typed _ asks for the Python spelling: an item carries no
         # filterText, so the client filters labels by the typed my_v; a
         # leading _ does not (every spelling of _priv_x starts with _pri).
         ("my_v", "my_val", "my-val"),
         ("my_", "my_val", "my-val"),
-        (
-            "collections.OrderedDict.move_to",
-            "collections.OrderedDict.move_to_end",
-            "collections.OrderedDict.move-to-end",
-        ),
+        ("collections.OrderedDict.move_to", "move_to_end", "move-to-end"),
         # A macro takes the default spelling too, and its Python spelling
         # once a _ is typed.
         ("my", "my-mac", "my_mac"),
@@ -577,7 +573,52 @@ def test_complete_labels_names_by_the_hyphen_spelling(
 
 def test_a_dotted_macro_prefix_keeps_its_typed_head(spelled_scope):
     # Defect: the whole key respelled under a dotted prefix (mac-mod.my-mac
-    # after mac_mod.), so no label starts with what the client typed and it
-    # shows nothing.
-    labels = complete_labels("mac_mod.my", spelled_scope)
-    assert labels == ["mac_mod.my-mac"]
+    # after mac_mod.), so the legacy full name no longer starts with what the
+    # client typed and it shows nothing.
+    reply = tools.nrepl_complete("mac_mod.my", spelled_scope)
+    assert [item["label"] for item in reply["items"]] == ["my-mac"]
+    assert reply["completions"] == ["mac_mod.my-mac"]
+
+
+def test_a_dotted_prefix_labels_the_name_after_its_last_dot(isolated):
+    # Defect: labels carrying the typed head (heapq.nlargest), which every
+    # client then strips itself, unlike the LSP's labels; and no word to tell
+    # a client how much typed text a label replaces.
+    assert dispatch(isolated, code="(import heapq)")["error"] is None
+    reply = op(isolated, "complete", prefix="heapq.nl")
+    assert reply["word"] == "nl"
+    assert [item["label"] for item in reply["items"]] == ["nlargest"]
+    assert reply["completions"] == ["heapq.nlargest"]
+    assert op(isolated, "complete", prefix="heapq")["word"] == "heapq"
+
+
+def test_complete_labels_a_name_as_the_evaluated_code_spells_it(isolated):
+    # Defects (TASK-1141): ok_p offered as ok-p beside the LSP's ok?, so an
+    # editor merging both shows the name twice; _to_foo offered as _to-foo
+    # at the typed ->f, a label the client's prefix filter drops.
+    code = "(def ok? [] 1)\n(def ->foo [] 2)"
+    assert dispatch(isolated, code=code)["error"] is None
+    assert complete_labels("ok", isolated) == ["ok?"]
+    assert complete_labels("->f", isolated) == ["->foo"]
+
+
+def test_load_file_replaces_the_spellings_and_a_failed_compile_keeps_them(
+    isolated, tmp_path
+):
+    path = tmp_path / "prog.lpy"
+    path.write_text("(def ok? [] 1)\n")
+    assert op(isolated, "load-file", path=str(path))["error"] is None
+    scope = tools.nrepl_file_scope(str(path))
+    assert complete_labels("ok", scope) == ["ok?"]
+    # Defect: a reload merged into the record, so a spelling the buffer no
+    # longer has (ok?) outlives the edit that removed it.
+    path.write_text("(def ok-p [] 1)\n")
+    assert op(isolated, "load-file", path=str(path))["error"] is None
+    assert complete_labels("ok", scope) == ["ok-p"]
+    # Defect: the record cleared or updated before the compile succeeded, so
+    # code that bound nothing respells the name.
+    path.write_text("(def ok? [] 1)\n")
+    assert op(isolated, "load-file", path=str(path))["error"] is None
+    path.write_text("(def ok-p [] (return 1 2))\n")
+    assert op(isolated, "load-file", path=str(path))["error"] is not None
+    assert complete_labels("ok", scope) == ["ok?"]

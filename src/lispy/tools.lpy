@@ -29,7 +29,8 @@
 (from lispy.core.nodes *)
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
-(from lispy.core.compiler.literal [hyphen-spelling name-key])
+(from lispy.core.compiler.literal [completion-label hyphen-spelling name-key
+                                   name-spellings])
 (from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.utils [compile-nesting-errors])
@@ -527,6 +528,10 @@
   (UnitStart.TOP): its first form re-derives only the built-in macros, so
   the file's own macros stay.  Any other eval only adds, since editor
   clients send file, line and column with every region.
+  A compiled eval records how its code spells each name in the scope's
+  spellings (nrepl-scope-spellings), which completion labels by: a
+  whole-file eval replaces the record, as it is the whole buffer; any other
+  eval updates it, the latest code winning per name as its binding does.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
   ;; Only a line the request sent as 1 is the file's top: a file eval with
@@ -562,7 +567,11 @@
     ;; Compiling reshapes the scope's macro table; running the code holds
     ;; no lock, so a long eval never blocks another connection.
     (with [(nrepl-scope-lock scope) (compile-errors filename padded)]
-      (= stl (compile-unit (parse padded) scope :start start))
+      (= tree (parse padded))
+      ;; Read before compiling: the spellings are the source's, never a
+      ;; macro expansion's.
+      (= spelled (name-spellings tree))
+      (= stl (compile-unit tree scope :start start))
       (= codes [])
       (for st stl
         (with [(compile-nesting-errors [st])]
@@ -570,7 +579,12 @@
                    (ife (isinstance st ast.Expr)
                         (, eval (compile (ast.Expression :body st.value) filename "eval"))
                         (, exec (compile (ast.Module :body [st] :type-ignores [])
-                                         filename "exec")))))))
+                                         filename "exec"))))))
+      ;; Only code that compiled binds anything, so only it is recorded.
+      (= spellings (nrepl-scope-spellings scope))
+      (if whole-file
+          (.clear spellings))
+      (.update spellings spelled))
     (= last-val None)
     (for [run code] codes
       (= last-val (run code scope)))
@@ -628,11 +642,21 @@
             (= (sub _NREPL-FILE-SCOPES key) scope))))
   (return scope))
 
-;; id(scope) -> (scope, lock), under _NREPL-FILE-SCOPES-LOCK.  A side table,
-;; never a key in the scope, which is the user's globals (completion would
-;; offer it, pickling fails, and code that clears its globals would swap
-;; it).  The entry keeps the scope alive, so its id is never reused.
+;; id(scope) -> (scope, lock, spellings), under _NREPL-FILE-SCOPES-LOCK.  A
+;; side table, never a key in the scope, which is the user's globals
+;; (completion would offer it, pickling fails, and code that clears its
+;; globals would swap it).  The entry keeps the scope alive, so its id is
+;; never reused.
 (= _NREPL-SCOPE-LOCKS {})
+
+(def _nrepl-scope-entry [scope]
+  "scope's side-table entry (scope, lock, spellings), created on first use."
+  (with [_NREPL-FILE-SCOPES-LOCK]
+    (= entry (.get _NREPL-SCOPE-LOCKS (id scope)))
+    (if (is entry None)
+        (do (= entry (, scope (threading.RLock) {}))
+            (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
+  (return entry))
 
 (def nrepl-scope-lock [scope]
   "The lock of scope's macro table, created on first use.  Connections are
@@ -643,12 +667,14 @@
    Running code holds no lock and may still add to the table (a compiled
    defmacro or require), so every iteration over the table or scope is
    over a snapshot (list/dict), never the live dict."
-  (with [_NREPL-FILE-SCOPES-LOCK]
-    (= entry (.get _NREPL-SCOPE-LOCKS (id scope)))
-    (if (is entry None)
-        (do (= entry (, scope (threading.RLock)))
-            (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
-  (return (sub entry 1)))
+  (return (sub (_nrepl-scope-entry scope) 1)))
+
+(def nrepl-scope-spellings [scope]
+  "Python name -> how the code evaluated in scope spells it (name-spellings,
+   recorded by nrepl-eval), which completion labels the name by
+   (completion-label, the LSP's rule over its buffer).  Read and written
+   only under nrepl-scope-lock."
+  (return (sub (_nrepl-scope-entry scope) 2)))
 
 (= NREPL-NS-FIELD "ns")  ; the request field naming an eval/complete/macroexpand scope
 
@@ -726,24 +752,29 @@
   "The (tag, runtime word) class of a name with no tag: a keyword or a value."
   (return (, None word)))
 
-(def _complete-result [classes]
-  "The complete reply over {name: (tag, runtime word)}, every name once in
-   sorted order.  `items` is the contract, LSP-shaped: {label, kind} with
+(def _complete-result [head word classes]
+  "The complete reply over {label: (tag, runtime word)} for a prefix that is
+   head (its text through its last ., or empty) then word, every label once
+   in sorted order.  `items` is the contract, LSP-shaped: {label, kind} with
    the LSP CompletionItemKind number, plus labelDetails.description only for
    a tagged name (OWN-TAG-KINDS gives its kind, _RUNTIME-KINDS any other's).
-   `completions` is the bare name list, read only by clients older than
-   `items`."
-  (= names (sorted classes))
+   A label is the text after head, as the LSP labels an item after a dot,
+   and `word` is the typed text each label replaces, so a client places an
+   item by replacing that many characters before the cursor in its own
+   string units.  `completions` is the full name list (head + label, in
+   items' order), read only by clients older than `items`."
+  (= labels (sorted classes))
   (= items [])
-  (for name in names
-    (= [tag word] (sub classes name))
+  (for label in labels
+    (= [tag kind-word] (sub classes label))
     (if (is tag None)
-        (.append items {"label" name "kind" (sub _RUNTIME-KINDS word)})
-        (.append items {"label" name
+        (.append items {"label" label "kind" (sub _RUNTIME-KINDS kind-word)})
+        (.append items {"label" label
                         "kind" (sub OWN-TAG-KINDS tag)
                         "labelDetails" {"description" tag}})))
   (return {"op" "complete-result"
-           "completions" names
+           "word" word
+           "completions" [(+ head label) for label in labels]
            "items" items}))
 
 (def _completion-kind [obj]
@@ -786,7 +817,8 @@
 
 (def _python-spelling-p [prefix]
   "Whether completion labels each name as Python spells it (the Python name)
-   rather than by its hyphen spelling (hyphen-spelling): when the word being
+   rather than by its hyphen or code spelling (hyphen-spelling,
+   completion-label): when the word being
    typed, prefix's last .-part, holds no - and a _ past its leading ones
    (my_v, my_; never _pri, whose hyphen spellings still start with it).  An
    nREPL item carries no filterText and a client asks once per prefix,
@@ -805,38 +837,47 @@
   "Return completions matching prefix, including dot-completion.  Every key
    of the scope's macro table (defmacro, every require form) is a macro, so a
    qualified macro (mod.name) is offered under a dotted prefix too.  Each
-   name is offered once (name-key), the first source naming it winning:
-   macros, lispython's own names, keywords, the scope, the builtins.  A name
-   is labelled by its hyphen spelling (hyphen-spelling, as the LSP labels
-   it), or as Python spells it while the typed word does
-   (_python-spelling-p: name-key, so a macro key registered as top-mac is
-   top_mac); a macro key too, matched by its text or its Python name.
-   Under a dotted prefix the typed head stays as typed."
+   name is offered once (name-key of its full name), the first source naming
+   it winning: macros, lispython's own names, keywords, the scope, the
+   builtins.  Labels are the LSP's: the text after prefix's last . (the
+   typed head is dropped, the reply's word is what a label replaces); a
+   runtime name (scope, builtins, attributes) by completion-label over the
+   spellings of the code evaluated in the scope (ok? for ok_p, else the
+   hyphen spelling), a macro key by the hyphen spelling it was registered
+   under; while the typed word is in Python spelling (_python-spelling-p)
+   every name is labelled by name-key, so a macro key registered as top-mac
+   is top_mac.  A name or macro key matches by its text or its Python name."
   (= python-spelling (_python-spelling-p prefix))
-  (= spell (fn [name] (ife python-spelling (name-key name) (hyphen-spelling name))))
+  (with [(nrepl-scope-lock scope)]
+    (= spellings (dict (nrepl-scope-spellings scope))))
+  (= macro-spell (fn [name] (ife python-spelling (name-key name) (hyphen-spelling name))))
+  (= spell (fn [name] (ife python-spelling
+                           (name-key name)
+                           (completion-label name spellings))))
   (= py-prefix (_py-name prefix))
-  ;; name-key -> (label, (tag, runtime word)).
+  (= parts (.split prefix "."))
+  (= head-parts (sub parts [: -1]))
+  ;; The typed text through the last ., which every candidate starts with.
+  (= head (.join "" [(+ part ".") for part in head-parts]))
+  (= word (sub parts -1))
+  ;; name-key of the full name -> (label, (tag, runtime word)).
   (= entries {})
   (def add [label cls]
-    (.setdefault entries (name-key label) (, label cls)))
-  (= head (sub (.split prefix ".") [: -1]))
+    (.setdefault entries (name-key (+ head label)) (, label cls)))
   (for key in (_scope-macro-names scope)
     (if (_prefix-match-p key prefix py-prefix)
-        (add (.join "." [*head (spell (.join "." (sub (.split key ".")
-                                                       [: (len head) None])))])
+        (add (macro-spell (.join "." (sub (.split key ".")
+                                          [: (len head-parts) None])))
              (_tagged MACRO-TAG))))
   (if (in "." prefix)
       (do
         ;; Dot completion: resolve object, list its attributes
-        (= parts (.split prefix "."))
-        (= obj-part (.join "." (sub parts [: -1])))
-        (= attr-prefix (sub parts -1))
-        (= obj (_resolve-obj obj-part scope))
+        (= obj (_resolve-obj (.join "." head-parts) scope))
         (if (is-not obj None)
-            (do (= py-attr (_py-name attr-prefix))
+            (do (= py-attr (_py-name word))
                 (for attr in (dir obj)
                   (if (.startswith attr py-attr)
-                      (add (+ obj-part "." (spell attr))
+                      (add (spell attr)
                            (_untagged (_attribute-kind obj attr))))))))
       (do
         ;; Prefix completion from lispython's own names, keywords, scope
@@ -859,7 +900,7 @@
         (for k in builtins
           (if (_prefix-match-p k prefix py-prefix)
               (add (spell k) (_untagged (_completion-kind (sub builtins k))))))))
-  (return (_complete-result (dict (.values entries)))))
+  (return (_complete-result head word (dict (.values entries)))))
 
 (def nrepl-docs [symbol scope]
   "Return documentation for a symbol."

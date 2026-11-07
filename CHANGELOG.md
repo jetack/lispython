@@ -12,8 +12,11 @@ follows [Semantic Versioning](https://semver.org/).
   `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython
   tags (`special form`, `macro`, `function`), exactly as the LSP server sends
-  its own items. Editor clients can read nREPL completion through their LSP
-  path.
+  its own items. Labels are the LSP's too: only the part after the prefix's
+  last `.` (`heapq.nl` offers `nlargest`, with the reply's new `word`, `nl`,
+  the typed text a label replaces), and a name spelled as the evaluated code
+  spells it when that is no hyphen spelling (`ok?`, `->foo`). Editor
+  clients can read nREPL completion through their LSP path.
 - nREPL: `eval`, `complete` and `macroexpand` take an optional `ns` (an
   absolute file path) that picks that file's scope only. Tracebacks and
   linecache keep the eval's `<nrepl-N>` name. `file` wins when both are sent,

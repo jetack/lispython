@@ -407,17 +407,28 @@ def scope():
 _KIND_WORDS = {7: "class", 3: "function", 6: "variable", 14: "keyword"}
 
 
+def labels_after_head(prefix, reply):
+    """Check the reply's label shape: each label is the full name past the
+    prefix's typed head (through its last ``.``), the LSP's shape, and
+    ``word`` is the typed text it replaces."""
+    head, _dot, word = prefix.rpartition(".")
+    head = head + _dot
+    assert reply["word"] == word
+    assert [head + item["label"] for item in reply["items"]] == reply["completions"]
+
+
 def complete(prefix, scope):
+    """The reply's items as {full name: kind word}."""
     result = tools.nrepl_complete(prefix, scope)
     assert "kinds" not in result
-    assert [item["label"] for item in result["items"]] == result["completions"]
+    labels_after_head(prefix, result)
     return {
-        item["label"]: (
+        name: (
             "macro"
             if item.get("labelDetails", {}).get("description") == "macro"
             else _KIND_WORDS[item["kind"]]
         )
-        for item in result["items"]
+        for name, item in zip(result["completions"], result["items"])
     }
 
 
@@ -470,12 +481,11 @@ def test_lispythons_own_names_keep_their_kind_without_loaded_macros(prefix, name
 
 def wire_items(prefix, scope):
     """The complete reply's ``items`` as a client decodes them (through the
-    nREPL encoder and JSON), by label; their labels are ``completions``, in
-    order."""
+    nREPL encoder and JSON), by label."""
     reply = json.loads(
         tools._nrepl_encode({"id": 7}, tools.nrepl_complete(prefix, scope))
     )
-    assert [item["label"] for item in reply["items"]] == reply["completions"]
+    labels_after_head(prefix, reply)
     return {item["label"]: item for item in reply["items"]}
 
 
@@ -529,8 +539,8 @@ def test_import_lispy_does_not_load_lsprotocol():
         ["my", {"label": "my-var", "kind": 6}],
         ["my", {"label": "my-fn", "kind": 3}],
         ["My", {"label": "MyClass", "kind": 7}],
-        ["os.ge", {"label": "os.getcwd", "kind": 3}],
-        ["os.pa", {"label": "os.pathsep", "kind": 6}],
+        ["os.ge", {"label": "getcwd", "kind": 3}],
+        ["os.pa", {"label": "pathsep", "kind": 6}],
         [
             "twice",
             {"label": "twice-of", "kind": 3, "labelDetails": {"description": "macro"}},
@@ -595,8 +605,8 @@ def test_a_qualified_required_macro_is_a_macro(macro_module, prefix, name):
 
 def test_a_qualified_macro_item_under_a_dotted_prefix(macro_module):
     scope = required_scope(f"(require {macro_module})")
-    assert wire_items(f"{macro_module}.dx", scope)[f"{macro_module}.dx-mac"] == {
-        "label": f"{macro_module}.dx-mac",
+    assert wire_items(f"{macro_module}.dx", scope)["dx-mac"] == {
+        "label": "dx-mac",
         "kind": 3,
         "labelDetails": {"description": "macro"},
     }
