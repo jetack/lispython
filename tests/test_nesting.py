@@ -1486,13 +1486,14 @@ def parse_work(src):
     Work counts, not wall clock, so the result does not depend on machine
     load. Regex chars are the characters the parser's patterns were handed,
     the work done inside the C regex engine that line events cannot see;
-    string chars are the characters handed to the source string's own
-    ``count``/``find``/``index``/``startswith`` family (a span plus one per
-    call), C work that neither of the others sees; python lines are the line
-    events traced, the work of Python-level loops. Not seen: scans of a slice
-    or copy of the source (a plain str) and any other C-level work. Python lines
-    include the counting wrappers' own lines (``CountingPattern`` and
-    ``CountingSource`` methods are traced too), a constant per call.
+    string chars are the characters the source string's own
+    ``count``/``find``/``index``/``startswith`` family read (as
+    ``CountingSource`` charges them), C work that neither of the others sees;
+    python lines are the line events traced, the work of Python-level loops.
+    Not seen: scans of a slice or copy of the source (a plain str) and any
+    other C-level work. Python lines include the counting wrappers' own lines
+    (``CountingPattern`` and ``CountingSource`` methods are traced too), a
+    constant per call.
     """
     tally = [0]
     string_tally = [0]
