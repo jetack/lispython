@@ -1152,7 +1152,7 @@
    names but declare nothing, so they get no symbol, and an = inside a def
    body (in-function) is a local, so it gets none either; module and
    class-body assignments do.  When macros is a set, the same pass adds the
-   name of every defmacro, nested ones (do, class) included."
+   name of every defmacro, one nested in a form such as do included."
   (if (is defs None)
       (= defs {}))
 
@@ -1725,8 +1725,13 @@
   (return (hyphen-spelling name)))
 
 (def filter-text [label name typed]
-  "The filterText of a completion item labelled label (the hyphen spelling)
-   for Python name name, when typed is the word typed so far."
+  "The filterText of a completion item labelled label (completion-label)
+   for Python name name, when typed is the word typed so far: a label that
+   is no hyphen spelling of name (the buffer's ok?, ->foo) itself, since
+   the user types it as written (? is no trigger character); else name
+   while typed holds no -, then label."
+  (if (!= label (hyphen-spelling name))
+      (return label))
   (return (ife (in "-" typed) label name)))
 
 (def client-capability-p [ls path]
@@ -2064,9 +2069,10 @@
 
 (def buffer-definition-names [doc line]
   "The names doc's definitions bind (collect-definitions), in source order
-   and as completion offers them: each in its hyphen spelling
-   (hyphen-spelling), a defmacro's as written (collect-definitions' macros),
-   since a macro call is found by its head's exact text.  The one home of
+   and as completion offers them: each labelled as a backend item of its
+   Python name is (completion-label over buffer-spellings at line), so one
+   name gives one label; a defmacro's as written (collect-definitions'
+   macros), since a macro call is found by its head's exact text.  The one home of
    that list, over the partial parses of buffer-texts at the 1-based line
    (None: no cursor)."
   (= names {})
@@ -2077,7 +2083,9 @@
                                           :macros macros))
       (except [Exception]
         (pass))))
-  (return [(ife (in name macros) name (hyphen-spelling name)) for name in names]))
+  (= spellings (buffer-spellings doc.source :line line))
+  (return [(ife (in name macros) name (completion-label (py-name name) spellings))
+           for name in names]))
 
 (def merged-items [doc line view items]
   "lispython's own items (lispython-items, then each macro of the view under

@@ -645,6 +645,28 @@ def test_a_buffer_spelling_outside_the_hyphen_rule_wins(merged, backend_requests
         assert not {"ok-p", "_to-foo", "ok_p", "_to_foo"} & set(labels), source
     items = by_label(merged(defs + "(print ->f|)")[2])
     assert items["->foo"].filter_text.startswith("->f")
+    # ? is no trigger character, so a filterText of ok_p drops the item
+    # once the user types ok?.
+    items = by_label(merged(defs + "(print ok?|)")[2])
+    assert items["ok?"].filter_text == "ok?"
+
+
+@once
+def test_a_fallback_definition_and_the_backends_item_share_a_label(
+    merged, backend_requests
+):
+    # Defect: over a fallback view the buffer's definition (ok?) and the
+    # backend's item of its Python name (ok_p, which the buffer first
+    # writes as ok_p, so ok-p) are labelled by two rules: two items for one
+    # name.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="ok_p", kind=lsp.CompletionItemKind.Function),
+    ]
+    source = "(print ok_p)\n(def main []\n  (ok|\n(def ok? [] 1)\n"
+    same = [
+        item.label for item in merged(source)[2] if server.py_name(item.label) == "ok_p"
+    ]
+    assert same == ["ok-p"]
 
 
 @once
