@@ -1,11 +1,12 @@
 """The LSP's Python backend client (lispy.lsp.backend).
 
-The real-backend tests share one basedpyright process on one event loop in a
-background thread (a basedpyright start costs about a second and 400 MB). The
-others run a fake backend, a tiny pygls server whose hover answers with its
-pid, its copy of the document and the configuration the client gave it, and
-which publishes an Error on each undefined_name of a synced text, each on its
-own loop; none needs basedpyright installed.
+The real-backend tests share one process per installed backend on one event
+loop in a background thread (a basedpyright start costs about a second and
+400 MB), one backend at a time. The others run a fake backend, a tiny pygls
+server whose hover answers with its pid, its copy of the document and the
+configuration the client gave it, and which publishes an Error on each
+undefined_name of a synced text, each on its own loop; none needs a real
+backend installed.
 """
 
 import asyncio
@@ -29,6 +30,7 @@ from lsprotocol import types as lsp
 from pygls.lsp.client import LanguageClient
 
 import lispy  # noqa: F401  (registers the .lpy importer)
+from tests.lsp_backends import REAL_BACKENDS
 
 backend = importlib.import_module("lispy.lsp.backend")
 pv = importlib.import_module("lispy.lsp.python_view")
@@ -859,7 +861,7 @@ def test_lsp_honours_backend_off(tmp_path, fake_script, project):
 
 
 # ---------------------------------------------------------------------------
-# Real backend: basedpyright
+# Real backends
 # ---------------------------------------------------------------------------
 
 
@@ -879,11 +881,14 @@ def on_loop(event_loop, coroutine, timeout=30):
     return asyncio.run_coroutine_threadsafe(coroutine, event_loop).result(timeout)
 
 
-@pytest.fixture(scope="session")
-def real(loop, tmp_path_factory):
-    argv = backend.backend_argv("basedpyright")
+# Module-scoped and parametrized: pytest stops one backend's process before
+# it starts the next, and both before the session's real_backends (conftest).
+@pytest.fixture(scope="module", params=REAL_BACKENDS)
+def real(request, loop, tmp_path_factory):
+    name = request.param
+    argv = backend.backend_argv(name)
     if argv is None:
-        pytest.skip("basedpyright is not installed (the lsp extra)")
+        pytest.skip(f"{name} is not installed (its lsp extra)")
     root = tmp_path_factory.mktemp("real-project")
     (root / "main.lpy").write_text("(= y 1)\n")
     (root / "helper.lpy").write_text(
@@ -891,7 +896,7 @@ def real(loop, tmp_path_factory):
     )
     cache = tmp_path_factory.mktemp("real-cache")
     client = backend.BackendClient(
-        pv.view_root_for(str(root), cache_home=str(cache)), argv
+        pv.view_root_for(str(root), cache_home=str(cache)), argv, name=name
     )
     yield client, root
     process = client.process
@@ -900,7 +905,7 @@ def real(loop, tmp_path_factory):
 
 
 def real_hover(loop, real, source, word, nth=0):
-    """basedpyright's hover text on word in the view of source, sent as
+    """The real backend's hover text on word in the view of source, sent as
     main.lpy's text."""
     client, root = real
     uri = (root / "main.lpy").as_uri()
@@ -920,7 +925,7 @@ def test_real_backend_analyses_the_synced_text(loop, real):
     path_hover = real_hover(loop, real, "(import os)\n(= x os.path)", "path")
     assert "path: Module" in path_hover
     sep_hover = real_hover(loop, real, "(import os)\n(= x os.sep)", "sep")
-    assert "(variable) sep: LiteralString" in sep_hover
+    assert "sep: LiteralString" in sep_hover
 
 
 def test_real_backend_resolves_a_sibling_lpy_module(loop, real):

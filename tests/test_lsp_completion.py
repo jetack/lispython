@@ -1,6 +1,7 @@
-"""Completion through the real Python backend (basedpyright).
+"""Completion through the real Python backends (each installed one, pyrefly
+and basedpyright; lsp_backends.py).
 
-The tests share the session's basedpyright over one tmp project
+The tests share the session's backend over one tmp project
 (``real_backends``, ``lsp_buffer`` in conftest.py); each test points the
 server at it and gets a fresh view cache. ``|`` in a source marks the cursor.
 """
@@ -12,14 +13,11 @@ import pytest
 from lsprotocol import types as lsp
 
 import lispy  # noqa: F401  (registers the .lpy importer)
+from tests.lsp_backends import basedpyright_only, once
 
 server = importlib.import_module("lispy.lsp.server")
 backend = importlib.import_module("lispy.lsp.backend")
 
-pytestmark = pytest.mark.skipif(
-    backend.backend_argv("basedpyright") is None,
-    reason="basedpyright is not installed (the lsp extra)",
-)
 
 CLASS = (
     "(class A []\n"
@@ -146,9 +144,9 @@ def kinds_of(items, label):
 
 
 @pytest.fixture
-def idle(run_on_loop, make_backends, backend_project, tmp_path):
-    """A Backends of its own whose basedpyright has not started."""
-    backends = make_backends(tmp_path / "idle-cache", "basedpyright")
+def idle(run_on_loop, make_backends, real_backends, backend_project, tmp_path):
+    """A Backends of its own, of the session's backend, not started yet."""
+    backends = make_backends(tmp_path / "idle-cache", real_backends.name)
     yield backends, backends.available_client((backend_project / "main.lpy").as_uri())
     run_on_loop(backends.shutdown_all())
 
@@ -223,6 +221,7 @@ def assert_fallback_list(labels):
     assert "__class__" not in labels
 
 
+@once
 @pytest.mark.parametrize(
     "empty", [[], lsp.CompletionList(is_incomplete=False, items=[])], ids=repr
 )
@@ -236,6 +235,7 @@ def test_a_backend_with_no_items_gives_the_fallback_list(
     assert_fallback_list(labels)
 
 
+@once
 def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch):
     # Defect: an off backend still has a view compiled (the buffer's macros
     # run) for a request that cannot be answered.
@@ -246,6 +246,7 @@ def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch
     assert_fallback_list(labels)
 
 
+@once
 def test_a_buffer_that_does_not_compile_gives_the_fallback_list(
     complete, backend_requests
 ):
@@ -259,6 +260,7 @@ def test_a_buffer_that_does_not_compile_gives_the_fallback_list(
     assert "__class__" in labels and backend_requests.sent
 
 
+@once
 def test_an_edit_during_the_request_never_moves_the_answer(complete, backend_requests):
     # Defect: the handler reads the live document after its awaits, so an
     # edit made meanwhile (here: the buffer emptied) gives the old cursor
@@ -317,6 +319,7 @@ def test_a_lispython_form_wins_over_the_backends_name(merged, source, label):
     ]
 
 
+@basedpyright_only
 def test_python_keywords_are_dropped_but_the_constants_stay(merged):
     # Defects: Python syntax the backend offers (elif) is offered as if
     # lispython had it; or True, a Keyword item too, goes with it.
@@ -326,6 +329,7 @@ def test_python_keywords_are_dropped_but_the_constants_stay(merged):
     assert "True" in by_label(merged("(= x 1)\n(print Tr|)")[2])
 
 
+@once
 @pytest.mark.parametrize(
     "marked", ["(= my-x 1)\n(print my-|)", "(= my-x [])\nmy-x.co|"]
 )
@@ -365,6 +369,7 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
     assert not {"_to_", "_to_>", "__"} & labels
 
 
+@once
 def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
     # Defects: a defmacro of the buffer is not offered, is offered by its
     # Python name (my_mac), or beside the backend's item of that name.
@@ -403,6 +408,7 @@ AUTO_IMPORT = lsp.CompletionItem(
 )
 
 
+@once
 @pytest.mark.parametrize(
     "marked", ["(= my-x [])\n(print my-|)", "(= my-x [])\nmy-x.co|"]
 )
@@ -418,6 +424,7 @@ def test_an_auto_import_item_never_appears(merged, backend_requests, marked):
     assert "imported_name" not in labels
 
 
+@once
 def test_the_fallback_list_keeps_the_definitions_after_the_cursor(
     complete, off_backends
 ):

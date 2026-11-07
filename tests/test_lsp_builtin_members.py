@@ -1,4 +1,5 @@
-"""Hover and signature help through the real Python backend (basedpyright).
+"""Hover and signature help through the real Python backends (each
+installed one, pyrefly and basedpyright; lsp_backends.py).
 
 Acceptance tests for TASK-1021: ``x.sort``, ``(. x sort)`` and ``(.sort x)``
 on a list show ``list.sort``'s parameters, as pyright and jedi do for Python.
@@ -8,7 +9,7 @@ signature. The rest pin the route: lispython's own forms and macros answer
 locally, the backend's names take the buffer's spelling, and with no backend
 answer the local one stands.
 
-The tests share the session's basedpyright over one tmp project
+The tests share the session's backend over one tmp project
 (``real_backends``, ``lsp_buffer`` in conftest.py). ``|`` in a source marks
 the cursor; it is removed first.
 """
@@ -23,15 +24,11 @@ import pytest
 from lsprotocol import types as lsp
 
 import lispy  # noqa: F401  (registers the .lpy importer)
+from tests.lsp_backends import once
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
 backend = importlib.import_module("lispy.lsp.backend")
-
-pytestmark = pytest.mark.skipif(
-    backend.backend_argv("basedpyright") is None,
-    reason="basedpyright is not installed (the lsp extra)",
-)
 
 
 @pytest.fixture
@@ -189,10 +186,22 @@ def test_hover_on_a_stdlib_function_through_a_module_alias(hover):
     assert "copyfile" in text
 
 
-def test_signature_help_in_a_stdlib_call(signature_help):
+def test_signature_help_in_a_stdlib_call(signature_help, real_backends):
     result = signature_help(STDLIB + '(sh.copyfile "a" |)')
     assert_parameters(signature_labels(result)[0], COPYFILE)
-    assert result.signatures[0].active_parameter == 1 or result.active_parameter == 1
+    # pyrefly (1.4.1) gives a generic function's signature no parameters.
+    if real_backends.name == "basedpyright":
+        active = result.signatures[0].active_parameter
+        assert active == 1 or result.active_parameter == 1
+
+
+def parameter_texts(signature):
+    """Each parameter's label text, whether sent as a string or as offsets
+    into the signature's label."""
+    return [
+        label if isinstance(label, str) else signature.label[label[0] : label[1]]
+        for label in (parameter.label for parameter in signature.parameters)
+    ]
 
 
 def helper_parameters(backend_project):
@@ -219,10 +228,7 @@ def test_signature_help_in_a_user_py_module_call(signature_help, backend_project
     result = signature_help(HELPER + "(my-helper 1 |)")
     [signature] = result.signatures
     assert_parameters(signature.label, parameters)
-    labels = [
-        signature.label[start:end]
-        for start, end in (parameter.label for parameter in signature.parameters)
-    ]
+    labels = parameter_texts(signature)
     assert [label.split(":")[0].strip() for label in labels] == parameters
     assert signature.active_parameter == 1 or result.active_parameter == 1
 
@@ -246,18 +252,15 @@ def test_signature_help_shows_the_buffer_spelling(signature_help, label_offsets)
     # the backend's offsets, which point into the Python label and so off
     # by one into the relabelled one (my-arg: Any read as "y-arg: Any,");
     # or an editor that never advertised labelOffsetSupport is sent
-    # offsets it cannot read, and highlights no parameter.
+    # offsets it cannot read, and highlights no parameter.  basedpyright
+    # sends offsets (asked for them), pyrefly strings.
     result = signature_help(USER_FUNCTION + "(my-fn 1 |)", label_offsets=label_offsets)
     [signature] = result.signatures
     assert "my-arg" in signature.label and "ok?" in signature.label
     assert "my_arg" not in signature.label and "ok_p" not in signature.label
-    texts = []
-    for parameter in signature.parameters:
-        label = parameter.label
-        assert isinstance(label, str) is not label_offsets
-        if not isinstance(label, str):
-            label = signature.label[label[0] : label[1]]
-        texts.append(label.split(":")[0].strip())
+    if not label_offsets:
+        assert all(isinstance(p.label, str) for p in signature.parameters)
+    texts = [label.split(":")[0].strip() for label in parameter_texts(signature)]
     assert texts == ["ok?", "my-arg"]
     assert signature.active_parameter == 1 or result.active_parameter == 1
 
@@ -293,6 +296,7 @@ def assert_local_print(hover_result, signature_result):
     assert label.startswith("print") and label in text
 
 
+@once
 def test_backend_off_gives_the_local_answer(hover, signature_help, off_backends):
     # Defect: no backend answer leaves hover or signature help empty
     # instead of lispython's builtin documentation.
@@ -301,6 +305,7 @@ def test_backend_off_gives_the_local_answer(hover, signature_help, off_backends)
     )
 
 
+@once
 def test_a_buffer_that_does_not_compile_gives_the_local_answer(
     hover, signature_help, backend_requests
 ):
@@ -310,6 +315,7 @@ def test_a_buffer_that_does_not_compile_gives_the_local_answer(
     assert backend_requests.sent == []
 
 
+@once
 @pytest.mark.parametrize(
     "marked",
     [
@@ -330,6 +336,7 @@ def test_lispython_forms_never_reach_the_backend_on_hover(
     assert backend_requests.sent == []
 
 
+@once
 @pytest.mark.parametrize(
     "marked",
     [
@@ -358,6 +365,7 @@ def test_lispython_forms_never_reach_the_backend_on_signature_help(
     assert backend_requests.sent == []
 
 
+@once
 def test_a_call_inside_a_form_reaches_the_backend(signature_help, backend_requests):
     # The gate is the innermost open form's head only: a call typed inside
     # a macro's body is a call (the counterpart of the cases above).
@@ -365,6 +373,7 @@ def test_a_call_inside_a_form_reaches_the_backend(signature_help, backend_reques
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_SIGNATURE_HELP]
 
 
+@once
 def test_a_required_macro_answers_signature_help_before_the_backend(
     signature_help, backend_requests
 ):
@@ -378,14 +387,17 @@ def test_a_required_macro_answers_signature_help_before_the_backend(
     assert backend_requests.sent == []
 
 
+@once
 def test_a_headless_form_falls_back_to_the_enclosing_macro_usage(
     signature_help, backend_requests
 ):
     # Defect: with no backend answer for the headless innermost form ((g) |),
     # the enclosing macro's usage is dropped. The backend is asked first here
-    # (the view compiles), so the request must have been sent.
+    # (the view compiles), so the request must have been sent; its answer is
+    # none (pyrefly would answer for g, basedpyright does not).
     from lispy.form_docs import BUILTIN_MACROS
 
+    backend_requests.answer["value"] = None
     result = signature_help("(require lispy.macros *)\n(when x ((g) |))")
     assert backend_requests.sent == [lsp.TEXT_DOCUMENT_SIGNATURE_HELP]
     assert result is not None

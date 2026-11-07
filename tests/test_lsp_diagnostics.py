@@ -313,8 +313,8 @@ def fake_served(tmp_path, monkeypatch):
     return Editor((project / "main.lpy").as_uri()), backends
 
 
-def backend_diagnostics(diagnostics):
-    return [d for d in diagnostics if d.source == "basedpyright"]
+def backend_diagnostics(diagnostics, name="basedpyright"):
+    return [d for d in diagnostics if d.source == name]
 
 
 def test_backend_diagnostics_reach_the_buffer_and_a_compile_error_wins(fake_served):
@@ -729,20 +729,24 @@ def test_no_notice_where_the_preset_is_not_the_views(
 
 
 # ---------------------------------------------------------------------------
-# Real basedpyright
+# Real backends
 # ---------------------------------------------------------------------------
 
 
-def test_real_basedpyright_reports_on_the_lpy_word(
+# Each real backend's diagnostic on an undefined name, as (code, message);
+# None: its message is not pinned.
+UNDEFINED_NAME = {
+    "basedpyright": ("reportUndefinedVariable", '"undefined-name" is not defined'),
+    "pyrefly": ("unknown-name", None),
+}
+
+
+def test_a_real_backend_reports_on_the_lpy_word(
     run_on_loop, real_backends, backend_project, monkeypatch
 ):
-    # Defects, end to end: basedpyright's diagnostics never reach the
+    # Defects, end to end: the backend's diagnostics never reach the
     # buffer, land on generated or prelude code, or keep Python spelling.
-    if real_backends.available_client((backend_project / "main.lpy").as_uri()) is None:
-        pytest.skip("basedpyright is not installed (the lsp extra)")
-    argv = backend.backend_argv("basedpyright")
-    if argv is None:
-        pytest.skip("basedpyright is not installed (the lsp extra)")
+    name = real_backends.name
     monkeypatch.setattr(
         real_backends, "on_diagnostics", server.backend_diagnostics_arrived
     )
@@ -754,18 +758,21 @@ def test_real_basedpyright_reports_on_the_lpy_word(
         try:
             editor.open("(print undefined-name)\n")
             await until(
-                lambda: editor.published and backend_diagnostics(editor.published[-1]),
+                lambda: (
+                    editor.published and backend_diagnostics(editor.published[-1], name)
+                ),
                 timeout=30,
             )
-            return editor.published[-1]
+            return backend_diagnostics(editor.published[-1], name)
         finally:
             server.did_close(editor, SimpleNamespace(text_document=editor.document))
 
     [found] = run_on_loop(scenario())
-    assert found.source == "basedpyright"
-    assert found.code == "reportUndefinedVariable"
+    code, message = UNDEFINED_NAME[name]
+    assert found.code == code
     assert found.severity == lsp.DiagnosticSeverity.Error
-    assert found.message == '"undefined-name" is not defined'
+    if message is not None:
+        assert found.message == message
     assert (found.range.start.line, found.range.start.character) == (0, 7)
     assert (found.range.end.line, found.range.end.character) == (0, 21)
 
