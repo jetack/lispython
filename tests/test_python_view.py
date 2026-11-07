@@ -24,6 +24,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy.core import nodes, parser
+from lispy.core.importer import lpy_cache_path
 
 pv = importlib.import_module("lispy.lsp.python_view")
 server = importlib.import_module("lispy.lsp.server")
@@ -1393,14 +1394,14 @@ class TestMacroModules:
         assert "yy = 2 * 2 * 2" in text()
 
     def test_a_same_size_edit_in_the_same_second_is_seen(self, package, monkeypatch):
-        # The pyc keeps the source's mtime in whole seconds plus its size, so
-        # it would pass for the edited source.
+        # A pyc keeps the source's mtime in whole seconds plus its size, so
+        # it would pass for the edited source; the .lpy cache must not.
         monkeypatch.setattr(sys, "dont_write_bytecode", False)
         mac = package.pkg / "mac.lpy"
         second = (int(time.time()) - 10) * 10**9
         os.utime(mac, ns=(second + 100, second + 100))
         assert self.view(package).text.endswith("yy = 2 + 2")
-        assert os.path.exists(importlib.util.cache_from_source(str(mac)))
+        assert os.path.exists(lpy_cache_path(str(mac)))
         minus = TWICE.replace("(+ ", "(- ")
         assert len(minus) == len(TWICE)
         mac.write_text(minus)
@@ -1481,7 +1482,7 @@ class TestMacroModules:
         assert "zz = 3 + 3" in shadow.read_text()
 
     def test_a_macro_a_macro_module_required_is_seen(self, package, monkeypatch):
-        # mac's own pyc holds what base's macro expanded to when mac was
+        # mac's own cache holds what base's macro expanded to when mac was
         # compiled, so an edit to base reaches mac only through a new compile
         # of mac.
         monkeypatch.setattr(sys, "dont_write_bytecode", False)
@@ -1490,8 +1491,7 @@ class TestMacroModules:
             "(require .base *)\n(defmacro twice [x] (return (bump 10)))"
         )
         assert self.view(package).text.endswith("yy = 11")
-        mac_pyc = importlib.util.cache_from_source(str(package.pkg / "mac.lpy"))
-        assert os.path.exists(mac_pyc)
+        assert os.path.exists(lpy_cache_path(str(package.pkg / "mac.lpy")))
         (package.pkg / "base.lpy").write_text("(defmacro bump [x] (return `(* ~x 30)))")
         assert self.view(package).text.endswith("yy = 300")
 

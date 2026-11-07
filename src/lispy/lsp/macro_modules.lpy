@@ -171,12 +171,12 @@
             (.wait _CONDITION remaining)
             (continue)))
     ;; A pyc keeps its source's mtime in whole seconds and its size, so an
-    ;; edit of the same size within that second would load the old pyc.  An
-    ;; .lpy's pyc also bakes in the expansions of the macros it required, and
-    ;; does not record them, so every tracked .lpy loses its pyc (all are
-    ;; imported anew anyway); a .py's bytecode depends on its text alone.
-    (for [path _] in (list (.values _tracked))
-      (if (or (.endswith path ".lpy") (in path changed))
+    ;; edit of the same size within that second would load the old pyc: a
+    ;; changed .py loses its pyc.  An .lpy's cache records its stamps at
+    ;; nanoseconds and every file its macros came from (core/importer.py), so
+    ;; it validates itself.
+    (for path in changed
+      (if (.endswith path ".py")
           (_remove-bytecode path)))
     ;; Every tracked module goes, not just the changed one: the import graph
     ;; is unknown, and a module importing the changed one holds its old

@@ -225,7 +225,7 @@ def test_lispy_macros_compiles_cold(tmp_path):
         PYTHONPYCACHEPREFIX=str(tmp_path / "pycache"),
     )
     assert (r.returncode, r.stdout) == (0, "True\n"), r.stderr
-    assert list((tmp_path / "pycache").rglob("sugar.*.pyc"))
+    assert list((tmp_path / "pycache").rglob("sugar.*.lpyc"))
 
 
 # --- nREPL: one scope per file ----------------------------------------------
