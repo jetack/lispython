@@ -5,6 +5,7 @@
 
 (from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.nodes *)
+(from lispy.core.builtins [__all__ as MACRO-SCOPE-NAMES])
 
 ;; The generated code reaches every module it needs through __import__, never
 ;; an import statement, so it binds no global of the module it runs in: a
@@ -23,26 +24,41 @@
   (return `(~(builtin "__import__") "lispy.core.macro_table"
                                      :fromlist ["MacroTable"])))
 
+(def macro-scope []
+  "The generated code's form for the {name: value} of the names a defmacro
+   body sees (lispy.core.builtins.__all__)."
+  (return `(.macro-scope (~(builtin "__import__") "lispy.core.builtins"
+                                                  :fromlist ["macro_scope"]))))
+
 (def defmacro-transform [sexp]
   (= [op macroname *body] sexp.list)
   (= macroname (str macroname))
-  ;; The temp def is a Python name: a macro named ->> or ++ gets the bare
-  ;; prefix (it is deleted right after registering, so names never clash).
+  ;; The generated defs are Python names: a macro named ->> or ++ gets the
+  ;; bare prefix (each is deleted or local, so names never clash).
   (= newname (Symbol (+ "___defmacro_temp___" macroname)))
   (if (not (identifier-p newname.name))
       (= newname (Symbol "___defmacro_temp___")))
-  ;; The runtime table is a MacroTable too, so the module's code registers by
-  ;; name as the compiler does (why: core/macro_table.py).  The module is
-  ;; reached by attribute, never bound in the module: a binding deleted after
-  ;; use is missing meanwhile for code running in the same scope.  Only the
-  ;; parameter list and body forms are the user's; they still expand.
+  (= scopename (Symbol (+ "___defmacro_scope___" macroname)))
+  (if (not (identifier-p scopename.name))
+      (= scopename (Symbol "___defmacro_scope___")))
+  ;; The body is defined inside a function whose keyword-only parameters are
+  ;; the macro tools (MACRO-SCOPE-NAMES, lispy.core.builtins), so it and the
+  ;; node-class calls its quasiquotes compile to read them as closure cells:
+  ;; registering a macro binds none of them in the user's module, where they
+  ;; would overwrite the user's own Paren or gensym.  The runtime table is a
+  ;; MacroTable too, so the module's code registers by name as the compiler
+  ;; does (why: core/macro_table.py).  Modules are reached by attribute,
+  ;; never bound in the module: a binding deleted after use is missing
+  ;; meanwhile for code running in the same scope.  Only the parameter list
+  ;; and body forms are the user's; they still expand.
+  (= params [(Symbol name) for name in MACRO-SCOPE-NAMES])
   (return (mark-compiler-forms
-            `(do (from lispy.core.nodes *)
-                 (from lispy.core.builtins *)
-                 (def ~newname ~@body)
+            `(do (def ~scopename [* ~@params]
+                   (def ~newname ~@body)
+                   (return ~newname))
                  (= (sub (.scope-table ~(macro-table) (~(builtin "globals"))) ~macroname)
-                    ~newname)
-                 (del ~newname))
+                    (~scopename **~(macro-scope)))
+                 (del ~scopename))
             body)))
 
 (= REQUIRE-QUALIFIED "qualified")

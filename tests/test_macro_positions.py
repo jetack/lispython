@@ -104,6 +104,9 @@ def test_threaded_symbol_keeps_its_own_position(scope):
 
 
 def define(src, scope):
+    # A module-level quasiquote calls the node classes by name, which a
+    # defmacro never binds in the module.
+    src = "(from lispy.core.builtins *)\n" + src
     stl = macroexpand_then_compile(parse(src), scope)
     exec(compile(ast.Module(body=stl, type_ignores=[]), "<defs>", "exec"), scope)
 

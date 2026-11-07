@@ -1,4 +1,5 @@
 WARNING = "This script should be edited in .lpy file, not translated .py file."
+from lispy.core.builtins import __all__ as MACRO_SCOPE_NAMES
 from lispy.core.compiler.literal import identifier_p
 from lispy.core.nodes import *
 
@@ -29,18 +30,40 @@ def macro_table():
     )
 
 
+def macro_scope():
+    """The generated code's form for the {name: value} of the names a defmacro
+    body sees (lispy.core.builtins.__all__)."""
+    return Paren(
+        Symbol(".macro-scope"),
+        Paren(
+            builtin("__import__"),
+            String('"lispy.core.builtins"'),
+            Keyword(Symbol("fromlist")),
+            Bracket(String('"macro_scope"')),
+        ),
+    )
+
+
 def defmacro_transform(sexp):
     [op, macroname, *body] = sexp.list
     macroname = str(macroname)
     newname = Symbol("___defmacro_temp___" + macroname)
     if not identifier_p(newname.name):
         newname = Symbol("___defmacro_temp___")
+    scopename = Symbol("___defmacro_scope___" + macroname)
+    if not identifier_p(scopename.name):
+        scopename = Symbol("___defmacro_scope___")
+    params = [Symbol(name) for name in MACRO_SCOPE_NAMES]
     return mark_compiler_forms(
         Paren(
             Symbol("do"),
-            Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
-            Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
-            Paren(Symbol("def"), newname, *body),
+            Paren(
+                Symbol("def"),
+                scopename,
+                Bracket(Symbol("*"), *params),
+                Paren(Symbol("def"), newname, *body),
+                Paren(Symbol("return"), newname),
+            ),
             Paren(
                 Symbol("="),
                 Paren(
@@ -50,9 +73,9 @@ def defmacro_transform(sexp):
                     ),
                     macroname,
                 ),
-                newname,
+                Paren(scopename, DoubleStarred(macro_scope())),
             ),
-            Paren(Symbol("del"), newname),
+            Paren(Symbol("del"), scopename),
         ),
         body,
     )

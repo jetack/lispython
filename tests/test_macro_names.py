@@ -153,8 +153,7 @@ OWN_PART_NAMES = [
         f"(defmacro {head} [*xs] (return 5))"
         for head in ["lambda", "sub", "do", "def", "=", "del", "from"]
     ],
-    # A defmacro'd from imports the node classes before it is a macro; a
-    # required one leaves a scope that never imported them.
+    # A required head macro is active before the module's first defmacro.
     "(require nm-heads [from])",
 ]
 
@@ -187,6 +186,59 @@ def test_defmacro_and_require_survive_user_names_of_their_own_parts(
     table = getattr(module, "__macro_namespace")
     keys = ["foo", "uses_foo", "six", "bar", "my_mac", "nm_mod.my_mac"]
     assert all(key in table for key in keys)
+
+
+def test_a_defmacro_binds_no_module_global(import_dir):
+    # The body sees the macro tools as closure cells (defmacro-transform), so
+    # the module keeps its own Paren and gensym and gains no name it did not
+    # write.
+    (import_dir / "nm_own_tools.lpy").write_text(
+        '(= Paren 5)\n(= gensym "mine")\n'
+        "(defmacro m [] (return (String (repr (str (gensym))))))\n(= v (m))\n"
+    )
+    module = importlib.import_module("nm_own_tools")
+    assert (module.Paren, module.gensym) == (5, "mine")
+    assert module.v.startswith("__gensym_")
+    names = {name for name in vars(module) if not name.startswith("__")}
+    assert names == {"Paren", "gensym", "v"}
+    assert not [name for name in vars(module) if name.startswith("___defmacro")]
+
+
+def test_a_required_macro_quasiquotes_past_its_modules_later_bindings(import_dir):
+    # The macro runs with its defining module's globals, rebound after the
+    # defmacro; its quasiquote's Paren/Symbol calls and gensym still reach
+    # the node classes.
+    (import_dir / "nm_rebinds.lpy").write_text(
+        "(defmacro plus-one [x]\n"
+        '  (= g (gensym "t"))\n'
+        "  (return `(do (= ~g ~x) (= out (+ ~g 1)))))\n"
+        "(= Paren 5)\n(= Symbol None)\n(= gensym None)\n"
+    )
+    (import_dir / "nm_rebinds_user.lpy").write_text(
+        "(require nm-rebinds [plus-one])\n(plus-one 41)\n"
+    )
+    assert importlib.import_module("nm_rebinds_user").out == 42
+
+
+def test_every_class_a_quasiquote_calls_is_a_macro_tool():
+    # A quasiquote compiles to calls of node classes by their classname; a
+    # name missing from the macro tools is a NameError in a defmacro body.
+    from pathlib import Path
+
+    from lispy.core import builtins
+
+    source = Path(builtins.__file__).with_name("nodes.py").read_text("utf-8")
+    classnames = {
+        node.value.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Attribute)
+        and node.targets[0].attr == "classname"
+        and isinstance(node.value, ast.Constant)
+    }
+    assert "Paren" in classnames and "UnquoteSplice" in classnames
+    assert classnames <= set(builtins.__all__), classnames - set(builtins.__all__)
+    assert set(builtins.macro_scope()) == set(builtins.__all__)
 
 
 @pytest.mark.parametrize("collection", ["[defmacro foo [x] x]", "{defmacro foo [x] x}"])

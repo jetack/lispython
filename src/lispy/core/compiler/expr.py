@@ -428,12 +428,13 @@ def gen_exp_compile(sexp):
     )
 
 
-def param_name(arg):
+def param_name(arg, checked=True):
     """The name a parameter binds: the symbol itself, or the one inside its
-    ``:name`` (default), ``*args`` or ``**kwargs`` wrapper."""
+    ``:name`` (default), ``*args`` or ``**kwargs`` wrapper. ``checked``
+    refuses one that shadows an active macro (binding_name)."""
     if isinstance(arg, (Keyword, Starred, DoubleStarred)):
         arg = arg.value
-    return binding_name(arg)
+    return binding_name(arg) if checked else symbol_name(arg)
 
 
 def def_args_parse(sexp, annotated=True):
@@ -462,8 +463,14 @@ def def_args_parse(sexp, annotated=True):
     slash = None
     star = None
 
+    # The compiler's own parameter list (defmacro's closure over the macro
+    # tools, Expression.compiler_form) may bind a name a user macro has, such
+    # as String or gensym: a (String ...) in the user's body still expands
+    # the macro, as it would with no such parameter.
+    checked = not sexp.compiler_form
+
     def param(arg):
-        name = param_name(arg)
+        name = param_name(arg, checked)
         node = ast.arg(arg=name, **arg.position_info)
         if len(q) and isinstance(q[0], Annotation):
             if not annotated:

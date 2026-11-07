@@ -35,6 +35,8 @@ Just change `def` in function definition to `defmacro`. And macros usually retur
 (defmacro name [args*]
   body*)
 ```
+A `defmacro` body sees the node classes (`Paren`, `Bracket`, `Brace`, `Symbol`, `String`, `Constant`, `Keyword`, `Quote`, ... every class a quasiquote builds) and the helpers `gensym` and `replace_symbol` lexically: defining a macro binds none of them in the module, so a module's own `Paren` or `gensym` stays its own. A module-level helper function or quasiquote that needs them imports the same names with `(from lispy.core.builtins *)`.
+
 ### Macro Example
 ```lispython
 (defmacro unless [test *body]
@@ -259,7 +261,7 @@ n -= 1
 ```
 
 ## gensym
-`gensym` generates unique symbols to avoid variable name collisions in macros. It is automatically available inside `defmacro` bodies.
+`gensym` generates unique symbols to avoid variable name collisions in macros. A `defmacro` body sees it without an import ([Macro Definition](#macro-definition)); elsewhere, import it with `(from lispy.core.builtins *)`.
 
 ```lispython
 (gensym)          ;; => Symbol("__gensym_0")
