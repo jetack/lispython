@@ -30,7 +30,7 @@
                        OWN-NAME-TAGS SPECIAL-FORM-DOCS SPECIAL-FORM-TAG
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
-                             ViewCache compile-buffer
+                             ViewCache compile-buffer glued-base
                              lpy-diagnostic-range lpy-range module-names name-key
                              name-spelling-p open-form-closers partial-span py-name
                              pyrefly-fallback source-lines source-prefix
@@ -2045,7 +2045,8 @@
   (= taken (set [(name-key item.label) for item in merged]))
   ;; view.macros holds name-keys, as taken does.
   (for name in (sorted view.macros)
-    ;; A qualified macro (module.name) is typed as an attribute.
+    ;; A qualified macro (module.name) is typed as an attribute
+    ;; (qualified-macro-items).
     (if (and (not-in "." name) (not-in name taken))
         (do (= label (.get spellings name name))
             (.add taken name)
@@ -2061,6 +2062,28 @@
         (do (.add taken name)
             (.append merged item))))
   (return merged))
+
+(def qualified-macro-items [doc line col view spellings]
+  "The macros of view a (require mod) registered for the base written glued
+   to the dot before the word at the 1-based line and code-point col
+   (glued-base: mod.|, a.b.ma|; never (. mod |), since such a macro is
+   called only as mod.name), as own items labelled as the buffer spells
+   each name (spellings, buffer-spellings').  The require registers them as
+   mod.name keys of the macro table, and no backend knows them: it never
+   binds mod at runtime."
+  (= text (line-text doc.source line))
+  (= base (glued-base text (sub (partial-span text (min col (len text))) 0)))
+  (if (is base None)
+      (return []))
+  (= prefix (+ (name-key base) "."))
+  (= items [])
+  ;; view.macros holds name-keys, so a key of a.b.c is never one of a's.
+  (for key in (sorted view.macros)
+    (if (.startswith key prefix)
+        (do (= name (sub key [: (len prefix) None]))
+            (if (and name (not-in "." name))
+                (.append items (own-item (.get spellings name name) *_MACRO-STYLE))))))
+  (return items))
 
 ;; Seconds a completion off an attribute waits for a backend already
 ;; running: its answer only refines the local list, so a slow backend never
@@ -2149,8 +2172,10 @@
    gives none (no backend, a buffer with no Python view, no items), and
    local-completion is the answer (empty at an attribute,
    attribute-context-p).  doc is a snapshot (document-snapshot).
-   On an attribute the backend's items alone answer, and the request may
-   start the backend; elsewhere lispython's own items merged with the
+   On an attribute the backend's items answer, after the qualified macros
+   of its base (qualified-macro-items, winning by name-key), which answer
+   alone when the backend gives no items; the request may start the
+   backend.  Elsewhere lispython's own items merged with the
    backend's (merged-items) do, from an already running backend within
    MERGE-TIMEOUT, and a backend not yet running is started without
    waiting for it (start-soon)."
@@ -2164,14 +2189,19 @@
           (return None)))
   (= [view items incomplete] (await (backend-answer client doc line col
                                                     (ife attribute None MERGE-TIMEOUT))))
-  (if (not items)
+  (if (is view None)
       (return None))
   (= spellings (buffer-spellings doc.source))
   (= found (backend-items doc line col items insert-replace spellings))
-  (if (not found)
-      (return None))
-  (if (not view.attribute)
-      (= found (merged-items doc line view found spellings)))
+  (= macros (qualified-macro-items doc line col view spellings))
+  (cond macros
+        (do (= taken (set [(name-key item.label) for item in macros]))
+            (= found (+ macros [item for item in found
+                                if (not-in (name-key item.label) taken)])))
+        (not found)
+        (return None)
+        (not view.attribute)
+        (= found (merged-items doc line view found spellings)))
   (return (lsp.CompletionList :is-incomplete incomplete :items found)))
 
 (def document-snapshot [doc]
