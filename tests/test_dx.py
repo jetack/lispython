@@ -5,6 +5,7 @@ import asyncio
 import functools
 import importlib
 import json
+import subprocess
 import sys
 import types
 from types import SimpleNamespace
@@ -463,6 +464,31 @@ def wire_items(prefix, scope):
     )
     assert [item["label"] for item in reply["items"]] == reply["completions"]
     return {item["label"]: item for item in reply["items"]}
+
+
+@pytest.mark.parametrize(
+    "name", ["FUNCTION", "VARIABLE", "CLASS", "KEYWORD"], ids=str.lower
+)
+def test_kind_constants_are_lsp_numbers(name):
+    # form_docs keeps the LSP numbers as ints; this is the one place a typo'd
+    # number is caught against the spec's enum.
+    from lsprotocol.types import CompletionItemKind
+
+    from lispy import form_docs
+
+    assert getattr(form_docs, f"{name}_KIND") == getattr(
+        CompletionItemKind, name.capitalize()
+    )
+
+
+def test_import_lispy_does_not_load_lsprotocol():
+    # Every lpy/l2py run imports lispy; the LSP's protocol types cost more than
+    # the rest of the import together.
+    code = "import lispy, sys; print('lsprotocol.types' in sys.modules)"
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False"
 
 
 # The items wire shape is a contract with lpy-mode and vsc-lispy, which read

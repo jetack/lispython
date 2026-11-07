@@ -1723,12 +1723,13 @@
 ;; ---------------------------------------------------------------------------
 
 ;; The (tag, kind) of a macro, the one home for built-in and view macros alike.
-(= _MACRO-STYLE (, MACRO-TAG (sub OWN-TAG-KINDS MACRO-TAG)))
+(= _MACRO-STYLE
+   (, MACRO-TAG (lsp.CompletionItemKind (sub OWN-TAG-KINDS MACRO-TAG))))
 
 ;; lispython's own names as (names, tag, kind) rows, from OWN-NAME-TAGS and
 ;; OWN-TAG-KINDS.
 (= _LPY-OWN-TAGS
-   [(, names tag (sub OWN-TAG-KINDS tag)) for [names tag] in OWN-NAME-TAGS])
+   [(, names tag (lsp.CompletionItemKind (sub OWN-TAG-KINDS tag))) for [names tag] in OWN-NAME-TAGS])
 
 (def own-item [label tag kind]
   "One of lispython's own completion items (the one home of their shape):
