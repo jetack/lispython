@@ -374,6 +374,18 @@ def macro_expansion_nodes(expansion, call):
             container[key] = memo[id(value)]
             continue
         if isinstance(value, Node):
+            if isinstance(value, Literal) and not isinstance(
+                value.__dict__.get("value"), str
+            ):
+                # An atom's value is its token text, read as a str by every
+                # name lookup and literal compile; only a macro can build one
+                # around anything else ((String 3)), so this is its one check.
+                raise LispyCompileError(
+                    f"macro {call.op} returned a {type(value).__name__} holding"
+                    f" a {type(value.__dict__.get('value')).__name__} in its"
+                    " expansion; an atom's text must be a str",
+                    call,
+                )
             copied = value.__class__.__new__(value.__class__)
             attrs = copied.__dict__
             attrs.update(value.__dict__)

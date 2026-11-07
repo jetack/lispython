@@ -278,9 +278,6 @@ def string_literal_value(prefix, body, node):
 def string_node_value(string):
     """Value of a String node (its token text), or a LispyCompileError at it."""
     token = string.value
-    if not isinstance(token, str):
-        # A macro may build a String around any value, e.g. (String 3).
-        raise LispyCompileError(f"invalid string literal {token!r}", string)
     prefix = re.match("[A-Za-z]*", token).group()
     rest = token[len(prefix) :]
     quote = next((q for q in _QUOTES if rest.startswith(q) and rest.endswith(q)), None)

@@ -708,11 +708,26 @@ class TestMacroBuiltFields:
         assert info.value.msg.startswith(msg)
         assert info.value.lineno == 3
 
-    def test_non_str_string_refused(self):
-        # Any String compile site: a macro may wrap a non-str in String.
+    @pytest.mark.parametrize(
+        "src",
+        [
+            macro_field_src("f-string", tail="(String 3)"),
+            # Slot 1 is read by the form dispatch (atom_text) before any
+            # f-string code runs.
+            '\n(defmacro m [] (return (Paren (Symbol "f-string") (String 3))))'
+            "\n(= r (m))",
+            '\n(defmacro m [] (return (Paren (Symbol "print") (Symbol 3))))\n(= r (m))',
+            "\n(defmacro m [] (return (Paren (Symbol 3))))\n(= r (m))",
+            '\n(defmacro m [] (return (Paren (Symbol "print") (Constant None))))'
+            "\n(= r (m))",
+        ],
+    )
+    def test_non_str_atom_refused(self, src):
+        # A macro may build an atom around any value: refused at the call,
+        # never a TypeError wherever the compiler first reads its text.
         with pytest.raises(LispyCompileError) as info:
-            compile_lpy(macro_field_src("f-string", tail="(String 3)"))
-        assert info.value.msg.startswith("invalid string literal 3")
+            compile_lpy(src)
+        assert "an atom's text must be a str" in info.value.msg
         assert info.value.lineno == 3
 
     @pytest.mark.parametrize("head", ["f-string", "t-string"])
