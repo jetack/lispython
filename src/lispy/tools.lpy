@@ -530,9 +530,12 @@
   clients send file, line and column with every region.
   A compiled eval records each name its code spells other than by a
   hyphenated spelling (ok? for ok_p) in the scope's spellings
-  (nrepl-scope-spellings), which completion labels by: a whole-file eval
-  replaces the record, as it is the whole buffer; any other eval updates
-  it, the latest code winning per name as its binding does.
+  (nrepl-scope-spellings), which completion labels by.  A whole-file eval
+  replaces the record, as it is the whole buffer; any other eval only adds
+  such spellings, so a later (def ok-p ...) wins the binding but not the
+  label.  Only a load-file clears the record: a region eval renaming ok? to
+  ok-p keeps the label ok? until the next load-file, since the nREPL sees
+  only the code sent, never the buffer the rename left behind.
   Raises ValueError for an invalid filename, line or column; every other
   failure is the result's error."
   ;; Only a line the request sent as 1 is the file's top: a file eval with
@@ -571,9 +574,9 @@
       (= tree (parse padded))
       ;; Read before compiling: the spellings are the source's, never a
       ;; macro expansion's.  Only a spelling that is no hyphenated spelling
-      ;; of its name is kept, the only kind completion-label uses, so a
-      ;; later (ok-p) never erases the ok? the code defined, which the LSP's
-      ;; first-spelling rule keeps.
+      ;; of its name is kept, the only kind completion-label uses, so the
+      ;; record prefers the code spelling ok? to ok-p in whichever order the
+      ;; evals wrote them, and an (ok-p) in a later eval never erases it.
       (= spelled {name spelling for [name spelling] in (.items (name-spellings tree))
                   if (!= (name-key spelling) name)})
       (= stl (compile-unit tree scope :start start))
@@ -675,10 +678,11 @@
   (return (sub (_nrepl-scope-entry scope) 1)))
 
 (def nrepl-scope-spellings [scope]
-  "Python name -> how the code evaluated in scope spells it (name-spellings,
-   recorded by nrepl-eval), which completion labels the name by
-   (completion-label, the LSP's rule over its buffer).  Read and written
-   only under nrepl-scope-lock."
+  "Python name -> the code spelling evaluated in scope for it, when that is
+   no hyphenated spelling of the name (ok? for ok_p, ->foo for _to_foo: the
+   part of name-spellings' map nrepl-eval records), which completion labels
+   the name by (completion-label, the LSP's rule over its buffer).  Read
+   and written only under nrepl-scope-lock."
   (return (sub (_nrepl-scope-entry scope) 2)))
 
 (= NREPL-NS-FIELD "ns")  ; the request field naming an eval/complete/macroexpand scope
@@ -843,8 +847,10 @@
    its code spelling (completion-label), hyphen spelling and Python name
    that starts with word, since an nREPL item carries no filterText and the
    client keeps only labels starting with the typed word (_to finds _to_foo,
-   whose code spelling ->foo it would drop); the code spelling when none
-   does."
+   whose code spelling ->foo it would drop).  When none does, the code
+   spelling, which the client then drops: a name matched only through its
+   Python name, such as _to_bar at the typed -> (py-name _to), has no
+   spelling starting with ->."
   (= label (completion-label name spellings))
   (for candidate in [label (hyphen-spelling name) (name-key name)]
     (if (.startswith candidate word)
