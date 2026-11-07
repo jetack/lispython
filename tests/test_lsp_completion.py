@@ -383,6 +383,29 @@ def test_required_macros_are_never_offered_in_a_string_or_comment(
     assert items[2] == []
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        CLASS.format("self.|"),
+        "(require lpy-macs)\n(import os)\n(os.path.|)",
+        "(require lpy-macs [twice])\n(lpy-macs.|)",
+        "(require lpy-macs *)\n(lpy-macs.|)",
+    ],
+    ids=["no require", "another module", "named", "star"],
+)
+def test_no_backend_compiles_nothing_for_a_base_no_require_qualifies(
+    off_complete, monkeypatch, source
+):
+    # Defect: with no backend, every keystroke after a dot compiles a cursor
+    # view (the buffer's macros, a thread, up to REQUEST-TIMEOUT the editor
+    # waits on), though only a base a bare (require mod) names can have
+    # qualified macros to offer.
+    views = []
+    monkeypatch.setattr(server, "cursor_view", lambda *args: views.append(args))
+    assert off_complete(source)[2] == []
+    assert views == []
+
+
 @pytest.mark.parametrize("access", ["(nope.|)", "(. lpy-macs |)"])
 def test_no_backend_offers_nothing_after_another_base(off_complete, access):
     # Defects: with no backend, the qualified macros are offered after any
@@ -434,9 +457,9 @@ def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch
     labels = set(by_label(complete(CLASS.format("(pri|)"), off_backends)[2]))
     assert views == []
     assert_fallback_list(labels)
-    # An attribute gets nothing: only the backend knows self's members (a
-    # glued base is compiled for, since it may name a required module).
+    # An attribute gets nothing: only the backend knows self's members.
     assert complete(CLASS.format("self.|"), off_backends)[2] == []
+    assert views == []
 
 
 @once
