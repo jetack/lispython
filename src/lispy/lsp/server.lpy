@@ -1721,12 +1721,15 @@
 ;; Completion
 ;; ---------------------------------------------------------------------------
 
-;; Callable names beyond the special forms: the built-in macros
-;; (BUILTIN-MACROS, never a hand list) tagged "macro", and `gensym`, a function
-;; that exists only inside defmacro bodies, tagged "function".
+;; The (tag, kind) of a macro, the one home for built-in and view macros alike.
+(= _MACRO-STYLE (, "macro" lsp.CompletionItemKind.Function))
+
+;; lispython's own names as (names, tag, kind) rows: the special forms, the
+;; built-in macros (BUILTIN-MACROS, never a hand list), and `gensym`, a
+;; function that exists only inside defmacro bodies.
 (= _LPY-OWN-TAGS
    [(, SPECIAL-FORM-DOCS "special form" lsp.CompletionItemKind.Keyword)
-    (, BUILTIN-MACROS "macro" lsp.CompletionItemKind.Function)
+    (, BUILTIN-MACROS *_MACRO-STYLE)
     (, ["gensym"] "function" lsp.CompletionItemKind.Function)])
 
 (def own-item [label tag kind]
@@ -2038,7 +2041,7 @@
     (if (and (not-in "." name) (not-in name taken))
         (do (= label (.get spellings name name))
             (.add taken name)
-            (.append merged (own-item label "macro" lsp.CompletionItemKind.Function)))))
+            (.append merged (own-item label *_MACRO-STYLE)))))
   (= rest (list items))
   (if view.fallback
       (.extend rest [(lsp.CompletionItem :label name

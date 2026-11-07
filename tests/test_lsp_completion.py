@@ -368,6 +368,17 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
 
 
 @once
+def test_a_view_macro_is_styled_as_a_built_in_macro(merged):
+    # Defect: the tag or kind of a view macro drifts from a built-in's.
+    items = by_label(merged("(defmacro my-mac [x] x)\n(print my|)")[2])
+
+    def style(label):
+        return (items[label].kind, items[label].label_details.description)
+
+    assert style("my-mac") == style("->")
+
+
+@once
 def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
     # Defects: a defmacro of the buffer is not offered, is offered by its
     # Python name (my_mac), or beside the backend's item of that name.
