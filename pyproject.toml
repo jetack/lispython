@@ -44,9 +44,11 @@ dev = [
     "ruff>=0.8.0",
     "toml>=0.10.2",
 ]
-# The LSP's Python backend (lispy.lsp.backend): basedpyright, with its own Node.
+# The LSP's Python backends (lispy.lsp.backend): basedpyright, with its own Node,
+# the default; pyrefly, the second backend, selected by the backend setting.
 lsp = [
     "basedpyright>=1.40",
+    "pyrefly>=1.4",
 ]
 docs = [
     "mkdocs-material>=9.6.14",

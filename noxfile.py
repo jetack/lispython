@@ -11,7 +11,7 @@ PYTHONS = ["3.11", "3.12", "3.13", "3.14", "3.15"]
 
 @nox.session(python=PYTHONS)
 def tests(session):
-    # The lsp extra (basedpyright), so the real-backend tests run too.
+    # The lsp extra (basedpyright, pyrefly), so the real-backend tests run too.
     session.install(".[lsp,dev]")
     session.run("pytest", *session.posargs)
 
