@@ -99,12 +99,37 @@ def assert_refused(src, msg, at):
         ("(def f [+] 1)", operator("+"), "+"),
         ("(import +)", operator("+"), "+"),
         ("(match x (case + 1))", operator("+"), "+"),
+        # An operator whose mangled text is a name (``-`` is ``_``) is still
+        # an operator, in every slot and dot-part.
+        ("-", operator("-"), "-"),
+        ("(= - 3)", operator("-"), "-"),
+        ("(print -)", operator("-"), "-"),
+        ("(reduce - xs)", operator("-"), "-"),
+        ("(-)", operator("-"), "-"),
+        ("(def f [-] 1)", operator("-"), "-"),
+        ("(for - in xs 1)", operator("-"), "-"),
+        ("(import -)", operator("-"), "-"),
+        ("(import a.-)", operator("-"), "a.-"),
+        ("(from a [-])", operator("-"), "-"),
+        ("(. a -)", operator("-"), "-"),
+        ("a.-", operator("-"), "a.-"),
+        ("(= a.- 1)", operator("-"), "a.-"),
+        ("(.- x)", operator("-"), ".-"),
+        ("(f :- 1)", operator("-"), "-"),
+        ("(match x (case - 1))", operator("-"), "-"),
+        # A dotted symbol's first part at fault is reported, by its first
+        # broken rule: an earlier part's keyword or bad name beats a later
+        # part's operator.
+        ("a.if.-", KEYWORD, "a.if.-"),
+        ("(import a.if.-)", KEYWORD, "a.if.-"),
+        ("a.b!.-", invalid("a.b!.-"), "a.b!.-"),
+        ("a.-.if", operator("-"), "a.-.if"),
         # Symbols that are no identifier.
         ("a.", invalid("a."), "a."),
         ("foo!", invalid("foo!"), "foo!"),
         ("(= foo! 1)", invalid("foo!"), "foo!"),
         ("(. a b.c)", invalid("b.c"), "b.c"),
-        ("(.+ x)", invalid(".+"), ".+"),
+        ("(.+ x)", operator("+"), ".+"),
         ("(.a.b x)", invalid(".a.b"), ".a.b"),
         ("(match x (case a. 1))", "pattern expected, got a....", "a."),
         ("(try 1 (except [E as +] 1))", "(except ...) expects one name...", "as"),
@@ -142,6 +167,33 @@ def assert_refused(src, msg, at):
 )
 def test_no_python_name_is_refused_at_the_symbol(src, msg, at):
     assert_refused(src, msg, at)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "(def {} [] 1)",
+        "(class {} [] 1)",
+        "(global {})",
+        "(try 1 (except [E as {}] 1))",
+        "(match x (case [*{}] 1))",
+        "(match x (case 1 as {} 1))",
+        "(match x (case (P :{} 1) 1))",
+        "(match x (case a.{} 1))",
+        "(match x (case ({}) 1))",
+        "(match x (case {{a.{} 1}} 1))",
+    ],
+)
+def test_minus_fails_a_name_shape_as_plus_does(template):
+    """``-`` mangles to the identifier ``_``, but a slot's own shape check
+    refuses it with the message it gives ``+``, at the same place."""
+    errors = []
+    for op in "+-":
+        with pytest.raises(LispyCompileError) as info:
+            src_to_python_org(template.format(op))
+        err = info.value
+        errors.append((err.msg.replace(op, "OP"), err.offset, err.end_offset))
+    assert errors[0] == errors[1]
 
 
 needs_312 = pytest.mark.skipif(sys.version_info < (3, 12), reason="type params: 3.12+")
@@ -200,11 +252,9 @@ def test_type_parameter_names(src, msg, at):
         ("(def is-not [a b] 1)", "def is_not(a, b):\n    1"),
         ("(def not-in [a b] 1)", "def not_in(a, b):\n    1"),
         ("(f :is-not 1 :not-in 2)", "f(is_not=1, not_in=2)"),
-        ("(for - in xs 1)", "for _ in xs:\n    1"),
-        ("(import -)", "import _"),
-        ("(def - [] 1)", "def _():\n    1"),
-        ("(. a -)", "a._"),
-        ("(f -)", "f(_)"),
+        # The operator itself still compiles as the operator.
+        ("(- a b)", "a - b"),
+        ("(- 3)", "-3"),
     ],
 )
 def test_python_names_still_compile(src, python):
