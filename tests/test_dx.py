@@ -430,7 +430,6 @@ def test_completion_kinds(scope, prefix, name, kind):
 
 
 def test_completion_never_offers_reader_syntax_doc_keys(scope):
-    # f-string, ' ` ~@ are documented names, not heads one can type.
     doc_only = {"f-string", "'", "`", "~@"}
     for prefix in ["", "f-", "'", "`", "~"]:
         assert not doc_only & set(complete(prefix, scope)), prefix
