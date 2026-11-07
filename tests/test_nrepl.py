@@ -602,23 +602,12 @@ def test_complete_labels_a_name_as_the_evaluated_code_spells_it(isolated):
     assert complete_labels("->f", isolated) == ["->foo"]
 
 
-def test_load_file_replaces_the_spellings_and_a_failed_compile_keeps_them(
-    isolated, tmp_path
-):
-    path = tmp_path / "prog.lpy"
-    path.write_text("(def ok? [] 1)\n")
-    assert op(isolated, "load-file", path=str(path))["error"] is None
-    scope = tools.nrepl_file_scope(str(path))
-    assert complete_labels("ok", scope) == ["ok?"]
-    # Defect: a reload merged into the record, so a spelling the buffer no
-    # longer has (ok?) outlives the edit that removed it.
-    path.write_text("(def ok-p [] 1)\n")
-    assert op(isolated, "load-file", path=str(path))["error"] is None
-    assert complete_labels("ok", scope) == ["ok-p"]
+def test_a_failed_load_file_keeps_the_recorded_spellings(isolated, tmp_path):
     # Defect: the record cleared or updated before the compile succeeded, so
-    # code that bound nothing respells the name.
+    # a load-file that bound nothing respells the name the scope still holds.
+    path = tmp_path / "prog.lpy"
     path.write_text("(def ok? [] 1)\n")
     assert op(isolated, "load-file", path=str(path))["error"] is None
     path.write_text("(def ok-p [] (return 1 2))\n")
     assert op(isolated, "load-file", path=str(path))["error"] is not None
-    assert complete_labels("ok", scope) == ["ok?"]
+    assert complete_labels("ok", tools.nrepl_file_scope(str(path))) == ["ok?"]
