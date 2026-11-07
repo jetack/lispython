@@ -184,9 +184,21 @@ def test_a_lettered_form_name_off_a_head_is_a_name(lexer, name):
     assert kind_of(lexer, f"({name} a b c)", name) is Keyword
 
 
-def test_python_keywords_and_operator_forms_colour_anywhere(lexer):
+def test_a_form_no_name_can_bind_colours_anywhere(lexer):
     assert kind_of(lexer, "[x for x in xs]", "for") is Keyword
     assert kind_of(lexer, "(reduce + xs)", "+") is Operator
+    # Defect: a lettered form that spells a Python name colours only at a
+    # head, though the compiler reads async-for as the clause off a head.
+    assert kind_of(lexer, "[x async-for x in xs]", "async-for") is Keyword
+
+
+@pytest.mark.parametrize(
+    "src, name", [("( ife a b c)", "ife"), ("(\n  match x\n  (case 1 2))", "match")]
+)
+def test_a_head_after_blanks_is_a_head(lexer, src, name):
+    # Defect: only the character right before the token is read, so a head
+    # after a space or a line break is no head.
+    assert kind_of(lexer, src, name) is Keyword
 
 
 def lispython_fences(docs_main):

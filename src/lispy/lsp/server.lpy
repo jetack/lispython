@@ -26,7 +26,7 @@
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
-(from lispy.form-docs [BUILTIN-MACROS BUILTIN-MACRO-MODULES MACRO-TAG
+(from lispy.form-docs [BINDABLE-FORMS BUILTIN-MACROS BUILTIN-MACRO-MODULES MACRO-TAG
                        OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
@@ -1103,23 +1103,34 @@
     (return node))
   (return None))
 
-(def form-head-p [nodes target]
-  "True when node target is the head (first element) of the Paren that holds
-   it in nodes, a parsed tree: only there is a special-form name the form
-   (form_docs SPECIAL-FORMS); anywhere else it is a name."
+(def form-heads [nodes]
+  "The ids of every form head in nodes, a parsed tree: the first element of
+   each Paren, the one place the compiler dispatches a special form.  Valid
+   while the tree lives."
+  (= heads (set))
   (= pending [nodes])
   (while pending
     (for node in (.pop pending)
       (cond (isinstance node Expression)
-            (do (for [i child] in (enumerate node.list)
-                  (if (is child target)
-                      (return (and (== i 0) (isinstance node Paren)))))
+            (do (if (and (isinstance node Paren) (> (len node.list) 0))
+                    (.add heads (id (sub node.list 0))))
                 (.append pending node.list))
-            (isinstance node (, Wrapper MetaIndicator))
+            (and (isinstance node (, Wrapper MetaIndicator)) (is-not node.value None))
             (.append pending [node.value])
             (isinstance node GluedHead)
             (.append pending [node.head node.params]))))
-  (return False))
+  (return heads))
+
+(def form-at-p [nodes target]
+  "True when Symbol target in nodes, a parsed tree, stands for its special
+   form (SPECIAL-FORM-DOCS): a name a user can bind (BINDABLE-FORMS) only at
+   a form head (form-heads), where the compiler reads it as the form; every
+   other special form wherever it stands."
+  (= name target.value)
+  (if (not-in name SPECIAL-FORM-DOCS)
+      (return False))
+  (return (or (not-in name BINDABLE-FORMS)
+              (in (id target) (form-heads nodes)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition index
@@ -1216,17 +1227,18 @@
 ;; References
 ;; ---------------------------------------------------------------------------
 
-(def collect-references [nodes name uri]
+(def collect-references [nodes name uri :among None]
   "The Location of every Symbol in nodes that stands for the same name as
    name (name-key: my-x and my_x are one name, - and _ are not), in source
-   order."
+   order; with among, a set of node ids (form-heads), only those Symbols."
   (= target (name-key name))
   (= refs [])
   (= stack (list (reversed nodes)))
   (while stack
     (= node (.pop stack))
     (cond (isinstance node Symbol)
-          (if (== (name-key node.value) target)
+          (if (and (== (name-key node.value) target)
+                   (or (is among None) (in (id node) among)))
               (.append refs (lsp.Location :uri uri :range (node-range node))))
           (isinstance node Expression)
           (.extend stack (reversed node.list))
@@ -1317,14 +1329,13 @@
 
 (def form-hover [tree target :view None]
   "lispython's own hover of Symbol target, or None: the alias doc on the
-   type of a type alias, else a special form's doc at a form head
-   (form-head-p), else the docstring of
-   one of the buffer's built-in macros (builtin-macro-doc, over view, the
+   type of a type alias, else the doc of the special form target stands for
+   (form-at-p), else the docstring of one of the buffer's built-in macros (builtin-macro-doc, over view, the
    buffer's full view, when there is one).  It answers before any backend,
    which knows no lispython form."
   (if (and (== target.value "type") (alias-keyword-p tree target))
       (return (markdown-hover TYPE-ALIAS-DOC target)))
-  (= doc-text (or (and (form-head-p tree target) (.get SPECIAL-FORM-DOCS target.value))
+  (= doc-text (or (and (form-at-p tree target) (.get SPECIAL-FORM-DOCS target.value))
                   (builtin-macro-doc tree target.value :view view)))
   (if doc-text
       (return (markdown-hover doc-text target)))
@@ -1379,7 +1390,7 @@
       (return None))
   (= [doc tree line col target] found)
   (= name target.value)
-  (if (and (in name SPECIAL-FORM-DOCS) (form-head-p tree target))
+  (if (form-at-p tree target)
       (return None))
   ;; Every Python name goes to the backend, the buffer's own bindings too:
   ;; it knows scopes (a function's local never answers for a global of the
@@ -2864,8 +2875,13 @@
   (if (is found None)
       (return None))
   (= [doc tree line col target] found)
-  (if (and (in target.value SPECIAL-FORM-DOCS) (form-head-p tree target))
-      (return (collect-references tree target.value doc.uri)))
+  ;; A form a user can bind counts only its form heads: its other uses are
+  ;; the name.
+  (if (form-at-p tree target)
+      (return (collect-references tree target.value doc.uri
+                                  :among (ife (in target.value BINDABLE-FORMS)
+                                              (form-heads tree)
+                                              None))))
   ;; A local binding goes to the backend too: its uses in other .lpy files
   ;; are what references across files are for.  Its answer, once given, is
   ;; final (as in definition); a macro is never asked (location-request).

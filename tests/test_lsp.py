@@ -212,6 +212,24 @@ def test_a_special_form_at_its_head_keeps_the_form_hover(source, character, name
     assert hover.contents.value == server.SPECIAL_FORM_DOCS[name]
 
 
+@pytest.mark.parametrize(
+    "source, character, name",
+    [
+        ("[x for x in xs if x]", 4, "for"),
+        ("[x for x in xs if x]", 16, "if"),
+        ("(for x in xs (print x))", 8, "in"),
+        ("(def f [a * b] 1)", 10, "*"),
+        ("[x async-for x in xs]", 5, "async-for"),
+    ],
+    ids=["for clause", "if clause", "for's in", "star marker", "async-for clause"],
+)
+def test_a_form_no_name_can_bind_keeps_its_hover_off_a_head(source, character, name):
+    # Defect: every special form answers only at a form head, so a keyword
+    # or a clause keyword the compiler reads as the form anywhere loses it.
+    hover = run_hover(ls_with(source), position(0, character))
+    assert hover.contents.value == server.SPECIAL_FORM_DOCS[name]
+
+
 def test_type_call_is_not_a_definition():
     ls = ls_with(CALLS)
     assert server.document_symbol(ls, position(0, 0)) == []

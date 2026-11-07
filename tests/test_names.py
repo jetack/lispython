@@ -15,6 +15,7 @@ import lispy.core.compiler.expr as expr_module
 import lispy.core.compiler.features as features_module
 import lispy.core.compiler.stmt as stmt_module
 import lispy.core.compiler.utils as compiler_utils_module
+from lispy import form_docs
 from lispy.core.errors import LispyCompileError, compile_errors
 from lispy.core.macro import macroexpand_then_compile
 from lispy.tools import parse, src_to_python_org
@@ -299,3 +300,20 @@ def test_cpython_refusals_pass_through_at_the_lpy_line(src, python):
     assert isinstance(err.__cause__, SyntaxError)
     assert err.msg == cpython_message(python)
     assert (err.filename, err.lineno, err.text) == ("m.lpy", 2, "  " + src)
+
+
+def _binds_as_a_name(name):
+    try:
+        src_to_python_org(f"(= {name} 3)\n(print {name})")
+    except SyntaxError:
+        return False
+    return True
+
+
+def test_bindable_forms_are_the_special_forms_the_compiler_binds():
+    """form_docs.BINDABLE_FORMS, which the LSP and the highlighter read as
+    "the form only at a form head", is exactly the special-form names the
+    compiler binds and then reads back as that name, off a head."""
+    assert {
+        name for name in form_docs.SPECIAL_FORMS if _binds_as_a_name(name)
+    } == form_docs.BINDABLE_FORMS

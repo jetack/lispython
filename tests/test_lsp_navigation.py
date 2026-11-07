@@ -285,11 +285,13 @@ def test_a_bound_special_form_name_reaches_the_backend(
 
 @once
 def test_a_special_form_at_its_head_gets_the_local_answers(navigate, backend_requests):
-    marked = "(= ife 3)\n(i|fe a b c)"
+    # Defect: the references of the form at a head list the name the buffer
+    # bound too (the ife of line 0 and the use on line 2), which is no form.
+    marked = "(= ife 3)\n(i|fe a b c)\n(print ife)\n(ife d e f)"
     assert navigate(server.definition, marked) is None
     assert spans(navigate(server.references, marked)) == [
-        ("main.lpy", 0, 3, 0, 6),
         ("main.lpy", 1, 1, 1, 4),
+        ("main.lpy", 3, 1, 3, 4),
     ]
     assert backend_requests.sent == []
 

@@ -10,9 +10,10 @@ Nothing here restates the language. Token boundaries are the reader's own
 patterns (``_token_patterns`` in ``lispy.core.parser``, numbers and string
 prefixes included); the form names come from ``lispy.form_docs`` (special
 forms, the ``type`` alias, built-in macros), and the Python names from
-``keyword`` and ``builtins``. A lettered special form that is no Python keyword
-(``ife``, ``f-string``, ``match``) colours as a form only at a form head, where
-the compiler dispatches it; elsewhere it is the name it binds.
+``keyword`` and ``builtins``. A special form a user can bind
+(``form_docs.BINDABLE_FORMS``: ``ife``, ``f-string``, ``match``) colours as a
+form only at a form head, where the compiler dispatches it; elsewhere it is the
+name it binds.
 
 Only Pygments (through the entry point) and the tests import this module, so
 Pygments is not a runtime dependency. Loading it imports ``lispy``, which
@@ -53,12 +54,8 @@ _MACROS = frozenset(form_docs.BUILTIN_MACROS)
 # The soft keywords lispython reads (match, case, type) are its forms;
 # keyword.softkwlist would add one per Python release that lispython lacks.
 _KEYWORDS = frozenset(form_docs.ALL_FORMS) - _MACROS | frozenset(keyword.kwlist)
-# The lettered forms a Python name can spell: a form only right after "(".
-_HEAD_ONLY = frozenset(
-    name
-    for name in _KEYWORDS - frozenset(keyword.kwlist)
-    if any(c.isalpha() for c in name)
-)
+# A form only at a form head; type is the builtin elsewhere.
+_HEAD_ONLY = form_docs.BINDABLE_FORMS | {"type"}
 _CONSTANTS = frozenset(special_literals)
 _BUILTINS = {
     name: Name.Exception
@@ -109,7 +106,11 @@ def _symbol_tokens(text, start, after_paren):
 
 def _symbol(lexer, match):
     start = match.start()
-    after_paren = start > 0 and match.string[start - 1] == "("
+    # A head: the first token after "(", blanks and line breaks between.
+    before = start - 1
+    while before >= 0 and match.string[before] in " \t\r\n\f":
+        before -= 1
+    after_paren = before >= 0 and match.string[before] == "("
     yield from _symbol_tokens(match.group(), start, after_paren)
 
 
