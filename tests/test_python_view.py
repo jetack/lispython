@@ -604,6 +604,51 @@ class TestShadows:
         pv.write_shadows(str(project), str(root))
         assert os.readlink(root / "pkg") == str(project / "pkg")
 
+    def test_a_package_of_failing_lpy_keeps_its_directory_link(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: every sweep made the view directory real before it knew a
+        # shadow would be written, so a package whose .lpy all fail to
+        # compile lost its link, stood as an empty directory while compiling,
+        # and was linked again afterwards.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "top.lpy", "(= t 1)")
+        self.write(project / "pkg" / "__init__.py", "")
+        self.write(project / "pkg" / "a.py", "a = 1")
+        self.write(project / "pkg" / "bad.lpy", "(= x")
+        pv.write_shadows(str(project), str(root))
+        assert os.readlink(root / "pkg") == str(project / "pkg")
+
+        seen = []
+        compile_buffer = pv.compile_buffer
+
+        def watching(*args, **kwargs):
+            seen.append(os.path.islink(root / "pkg"))
+            return compile_buffer(*args, **kwargs)
+
+        monkeypatch.setattr(pv, "compile_buffer", watching)
+        pv.write_shadows(str(project), str(root), manifest=pv.ShadowManifest())
+        assert seen == [True, True]  # bad.lpy, top.lpy
+        assert os.readlink(root / "pkg") == str(project / "pkg")
+
+    def test_a_cached_shadow_under_a_directory_link_is_not_kept(self, tmp_path):
+        # Defect: a shadow path that lies under a link into the project is
+        # taken for the shadow itself, since the project's file there is a
+        # regular file.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "pkg" / "__init__.py", "")
+        self.write(project / "pkg" / "m.lpy", "(= m 1)")
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        self.write(project / "pkg" / "m.py", "real = 1")
+        shutil.rmtree(root / "pkg")
+        (root / "pkg").symlink_to(project / "pkg")
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        shadow = root / "pkg" / "m.py"
+        assert not (root / "pkg").is_symlink() and not shadow.is_symlink()
+        assert shadow.read_text() == "m = 1"
+        assert (project / "pkg" / "m.py").read_text() == "real = 1"
+
     def test_sweep_follows_no_directory_link_and_skips_environments(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
         self.write(project / "top.lpy", "(= a 1)")

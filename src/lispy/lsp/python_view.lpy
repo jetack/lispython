@@ -1047,12 +1047,26 @@
 (def _regular-file-p [path]
   (return (and (not (osp.islink path)) (osp.isfile path))))
 
+(def _shadow-file-p [root path]
+  "Whether path is a regular file under root that no link leads to: every
+   directory of it below root is real, since a link there is a project
+   directory and the file in it the project's own."
+  (= current root)
+  (= rel (osp.relpath (osp.dirname path) root))
+  (if (!= rel os.curdir)
+      (for part in (.split rel os.sep)
+        (= current (osp.join current part))
+        (if (osp.islink current)
+            (return False))))
+  (return (_regular-file-p path)))
+
 (def _real-view-dir [root directory]
   "Make directory, under root, a real directory: a symlink or file standing
    for one of its components below root (a package overlay linked a
    directory that now holds .lpy) is removed first, since a shadow written
-   under it would land in the project itself.  OSError when directory
-   leaves root (_check-in-root)."
+   under it would land in the project itself.  Called only where a shadow is
+   about to be written, so a directory link stays while nothing is.  OSError
+   when directory leaves root (_check-in-root)."
   (= current root)
   (= rel (osp.relpath directory root))
   (if (!= rel os.curdir)
@@ -1344,18 +1358,12 @@
     (= names (module-names lpy-path))
     (= (sub names-of lpy-path) names)
     (try
-      (_real-view-dir root (osp.dirname shadow))
-      (except [OSError as e]
-        (.pop manifest.sources lpy-path None)
-        (.warning logger "lispython view: no shadow for %s: %s" lpy-path e)
-        (continue)))
-    (try
       (= st (os.stat lpy-path))
       (= stamp (, st.st_mtime_ns st.st_size))
       (= known (.get manifest.sources lpy-path))
       (if (and (is-not known None) (== (sub known 0) stamp) (== (sub known 1) names)
                (is-not macro-epoch None) (== (sub known 3) macro-epoch)
-               (or (not (sub known 2)) (_regular-file-p shadow)))
+               (or (not (sub known 2)) (_shadow-file-p root shadow)))
           (do (if (sub known 2)
                   (= (sub shadows shadow) lpy-path))
               (continue)))
@@ -1367,7 +1375,7 @@
       ;; which was its text when it last could be.
       (except [OSError as e]
         (.warning logger "lispython view: cannot read %s: %s" lpy-path e)
-        (if (and (not (isinstance e FileNotFoundError)) (_regular-file-p shadow))
+        (if (and (not (isinstance e FileNotFoundError)) (_shadow-file-p root shadow))
             (= (sub shadows shadow) lpy-path))
         (continue))
       (except [ValueError as e]
@@ -1378,7 +1386,8 @@
                                   :import-root (sub names 2)))
       (= view compiled.view)
       (if (is-not view None)
-          (do (if (_write-if-changed root shadow view.text)
+          (do (_real-view-dir root (osp.dirname shadow))
+              (if (_write-if-changed root shadow view.text)
                   (.append written shadow))
               (= (sub shadows shadow) lpy-path)))
       (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
