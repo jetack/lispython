@@ -302,6 +302,9 @@ def seed_prelude(scope):
         import lispy.macros
 
         prelude = dict(getattr(lispy.macros, "__macro_namespace"))
+    # A plain dict cannot carry the record, so it is copied: a macro that
+    # running code registers in the old dict during this swap is lost, which
+    # only a user rebinding the table of a live scope can reach.
     namespace = MacroTable(scope.get("__macro_namespace") or (), prelude)
     scope["__macro_namespace"] = namespace
     for name, macro in prelude.items():

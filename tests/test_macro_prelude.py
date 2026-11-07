@@ -383,7 +383,7 @@ def test_a_scope_whose_table_is_dropped_is_seeded_again():
     scope = {}
     compile_unit(parse("(= a 1)"), scope)
     del scope["__macro_namespace"]
-    compile_unit(parse("(= b 1)"), scope)
+    compile_unit(parse("(= b 1)"), scope, start=UnitStart.CONTINUE)
     assert "inc" in scope["__macro_namespace"]
 
 
