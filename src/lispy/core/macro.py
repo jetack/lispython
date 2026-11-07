@@ -364,6 +364,16 @@ def _opt_out_form_p(form):
     )
 
 
+def prelude_opted_out(forms):
+    """Whether the unit forms (a list of top-level forms, as parse returns,
+    strict or partial) opts out of the prelude: its first form after one
+    docstring is ``(require lispy.macros ...)``, so the unit gets only that
+    require's selection of the built-in macros, not the prelude. The one
+    home of the rule: compilation (_start_unit) and the LSP's built-in
+    macro docs both ask it."""
+    return _opt_out_form_p(_first_form(forms))
+
+
 def _start_unit(scope, forms, start):
     """Reshape scope's macro table, in place, for a unit starting as start
     says (UnitStart)."""
@@ -381,7 +391,7 @@ def _start_unit(scope, forms, start):
             if key in namespace and namespace[key] is prelude.get(key):
                 del namespace[key]
     seeded = namespace.seeded = set()
-    if not _opt_out_form_p(first):
+    if not prelude_opted_out(forms):
         for key, macro in prelude.items():
             if key not in namespace:
                 namespace[key] = macro
