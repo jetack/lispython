@@ -579,7 +579,9 @@ def check_interpolated_parts(sexp):
     at odd ones; a typed or macro-built ``(f-string ...)`` head need not.
     """
     for [k, part] in enumerate(sexp.operands):
-        if k % 2 == 0 and not isinstance(part, String):
+        if k % 2 == 0 and not (
+            isinstance(part, String) and isinstance(string_node_value(part), str)
+        ):
             raise LispyCompileError(
                 f"{atom_text(sexp.op)}: part {k + 1} must be a string literal", part
             )

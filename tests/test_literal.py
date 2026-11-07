@@ -624,6 +624,7 @@ class TestTypedInterpolatedHeads:
             ),
             ('(f-string "a" "b")', "f-string: part 2 must be a replacement field", 17),
             ("(f-string 5)", "f-string: part 1 must be a string literal", 13),
+            ('(f-string b"a")', "f-string: part 1 must be a string literal", 13),
         ],
     )
     def test_refused(self, src, msg, col):
@@ -631,6 +632,13 @@ class TestTypedInterpolatedHeads:
             compile_lpy("\n  " + src)
         assert info.value.msg.startswith(msg)
         assert (info.value.lineno, info.value.offset) == (2, col)
+
+    def test_macro_built_bytes_part_refused(self):
+        src = '(defmacro mk [s] (return `(f-string ~s)))\n(= a (mk b"x"))'
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(src)
+        assert info.value.msg.startswith("f-string: part 1 must be a string literal")
+        assert (info.value.lineno, info.value.offset) == (2, 6)
 
     @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings need 3.14")
     def test_t_string_refused(self):
