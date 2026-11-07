@@ -5,8 +5,15 @@ import warnings
 
 import pytest
 
+from lispy.core.compiler.literal import (
+    hyphen_spelling,
+    hyphenated_name_p,
+    identifier_p,
+    name_key,
+)
 from lispy.core.errors import LispyCompileError, compile_errors
 from lispy.core.macro import macroexpand_then_compile
+from lispy.core.nodes import Symbol
 from lispy.tools import parse, src_to_python_org
 
 from .utils import stmt_to_dump
@@ -533,3 +540,71 @@ class TestPlainStringExtent:
             compile_lpy(lpy)
         assert info.value.msg == f"unterminated {kind} literal (detected at line 1)"
         assert (info.value.lineno, info.value.offset) == (1, 6)
+
+
+class TestHyphenSpelling:
+    """hyphen_spelling, the spelling completion offers for a Python name."""
+
+    EDGE_NAMES = [
+        "__init__",
+        "_x",
+        "class_",
+        "x_",
+        "a__b",
+        "_private_helper",
+        "__a_b__",
+        "MAX_SIZE",
+        "x_1",
+        "é_x",
+    ]
+
+    @staticmethod
+    def real_names():
+        import builtins
+        import collections
+        import heapq
+        import os
+
+        names = set(dir(builtins)) | set(dir(heapq)) | set(dir(collections))
+        names |= set(dir(os))
+        return sorted(
+            n for n in names | set(TestHyphenSpelling.EDGE_NAMES) if identifier_p(n)
+        )
+
+    def test_the_spelling_compiles_back_to_the_name(self):
+        # Defect: an offered spelling that is not the name it was offered
+        # for (a__b offered as a--b, which name_key, the LSP's and the macro
+        # clash check's name identity, reads as another name), so accepting
+        # a completion binds or calls something else.
+        names = self.real_names()
+        spellings = [hyphen_spelling(n) for n in names]
+        for name, spelled in zip(names, spellings):
+            assert name_key(spelled) == name, spelled
+            assert Symbol(spelled).name == name, spelled
+            assert hyphenated_name_p(spelled), spelled
+        source = "\n".join(f"(= {s} 1)" for s in spellings)
+        assert src_to_python_org(source) == "\n".join(f"{n} = 1" for n in names)
+
+    @pytest.mark.parametrize(
+        "text", ["__init__", "_x", "class_", "x_", "a__b", "sep=", "->", "my-x", "_"]
+    )
+    def test_never_converted(self, text):
+        # Defects: a dunder offered as --init--, an edge or doubled
+        # underscore turned into a hyphen (no hyphenated name, so another
+        # name), or an operator or already hyphenated text rewritten.
+        assert hyphen_spelling(text) == text
+
+    @pytest.mark.parametrize(
+        "name, spelled",
+        [
+            ("move_to_end", "move-to-end"),
+            ("_private_helper", "_private-helper"),
+            ("__a_b__", "__a-b__"),
+            ("mod.my_mac", "mod.my-mac"),
+            ("mod.->", "mod.->"),
+        ],
+    )
+    def test_interior_underscores_become_hyphens(self, name, spelled):
+        # Defect: a name offered in its Python spelling (move_to_end), or a
+        # dotted name converted as one part.
+        assert hyphen_spelling(name) == spelled

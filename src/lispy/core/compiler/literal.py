@@ -436,6 +436,27 @@ def name_key(text):
     )
 
 
+# An underscore with a letter or digit on each side: the only ones a hyphen
+# spells, since a leading, trailing or doubled hyphen is no hyphenated name.
+_WORD_UNDERSCORE = re.compile(r"(?<=[^\W_])_(?=[^\W_])")
+
+
+def hyphen_spelling(text):
+    """How lispython spells the name ``text``: each ``.``-separated part that
+    is a Python name (identifier_p) with every ``_`` between two letters or
+    digits written ``-`` (``move_to_end`` is ``move-to-end``,
+    ``_private_helper`` is ``_private-helper``); any other part, and every
+    leading, trailing or doubled ``_`` (``__init__``, ``class_``, ``a__b``),
+    as written.  The one home of the default spelling completion offers (the
+    LSP and the nREPL).  For every identifier part ``n`` the spelling is
+    ``hyphenated_name_p``, ``name_key(hyphen_spelling(n)) == n`` and
+    ``Symbol(hyphen_spelling(n)).name == n``: it compiles back to ``n``."""
+    return ".".join(
+        _WORD_UNDERSCORE.sub("-", part) if identifier_p(part) else part
+        for part in text.split(".")
+    )
+
+
 def plain_name_p(sexp):
     """Whether ``sexp`` is shaped as a name: a symbol whose mangled text
     passes identifier_p (so no dot). A shape test for sites with their own
