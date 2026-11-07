@@ -14,6 +14,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from lsprotocol import types as lsp
 
 import lispy.macros
 from lispy import form_docs
@@ -292,6 +293,28 @@ class TestRequireSelection:
         tree = parse("(require lispy.macros)\n(cond)")
         assert server.builtin_macro_doc(tree, "cond") is None
         assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
+
+
+@pytest.mark.parametrize("label_details", [True, False])
+def test_local_completion_tags_special_forms_for_a_client_that_draws_labels(
+    label_details,
+):
+    # Defects: the no-backend path drops labelDetails, or ignores the gate.
+    ls = ls_with("(i")
+    ls.client_capabilities = lsp.ClientCapabilities(
+        text_document=lsp.TextDocumentClientCapabilities(
+            completion=lsp.CompletionClientCapabilities(
+                completion_item=lsp.ClientCompletionItemOptions(
+                    label_details_support=label_details
+                )
+            )
+        )
+    )
+    items = {i.label: i for i in run_completion(ls, position(0, 2)).items}
+    details = items["ife"].label_details
+    assert (details.description if details else None) == (
+        "special form" if label_details else None
+    )
 
 
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():

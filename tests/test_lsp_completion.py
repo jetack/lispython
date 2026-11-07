@@ -28,12 +28,13 @@ CLASS = (
 )
 
 
-def capabilities(insert_replace):
+def capabilities(insert_replace, label_details=False):
     return lsp.ClientCapabilities(
         text_document=lsp.TextDocumentClientCapabilities(
             completion=lsp.CompletionClientCapabilities(
                 completion_item=lsp.ClientCompletionItemOptions(
-                    insert_replace_support=insert_replace
+                    insert_replace_support=insert_replace,
+                    label_details_support=label_details,
                 )
             )
         )
@@ -44,9 +45,11 @@ def capabilities(insert_replace):
 def complete(lsp_buffer, run_on_loop, real_backends):
     """complete(source) -> (line, character, items) at the | of source."""
 
-    def run(source, backends=real_backends, insert_replace=True):
+    def run(source, backends=real_backends, insert_replace=True, label_details=False):
         ls, uri, position = lsp_buffer(
-            source, backends, client_capabilities=capabilities(insert_replace)
+            source,
+            backends,
+            client_capabilities=capabilities(insert_replace, label_details),
         )
         run.document = lsp_buffer.document
         params = lsp.CompletionParams(
@@ -383,6 +386,41 @@ def test_a_buffer_macro_wins_over_the_backends_name(merged, backend_requests):
         ("my-mac", lsp.CompletionItemKind.Keyword, "macro")
     ]
     assert "my-var" in by_label(items)  # the backend's other item stays
+
+
+@pytest.mark.parametrize("label_details", [True, False])
+def test_own_items_carry_label_details_only_for_a_client_that_draws_them(
+    merged, backend_requests, label_details
+):
+    # Defects: labelDetails.description is dropped from a special form or a
+    # buffer macro, or sent to a client that did not advertise
+    # labelDetailsSupport.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="my_var", kind=lsp.CompletionItemKind.Variable)
+    ]
+    source = "(defmacro my-mac [x] x)\n(my|)"
+    items = by_label(merged(source, label_details=label_details)[2])
+    for label, detail in [("ife", "special form"), ("my-mac", "macro")]:
+        assert items[label].detail == detail
+        details = items[label].label_details
+        assert (details.description if details else None) == (
+            detail if label_details else None
+        )
+
+
+def test_a_backend_items_label_details_pass_through(merged, backend_requests):
+    # Defect: the backend's own labelDetails (signature, type) is dropped or
+    # overwritten when own items gain theirs.
+    sent = lsp.CompletionItemLabelDetails(detail="(x)", description="int")
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(
+            label="my_var",
+            kind=lsp.CompletionItemKind.Variable,
+            label_details=sent,
+        )
+    ]
+    items = by_label(merged("(= my-var 1)\n(print my|)", label_details=True)[2])
+    assert items["my-var"].label_details == sent
 
 
 def test_a_fallback_view_keeps_the_definitions_after_the_cursor(merged):
