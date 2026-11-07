@@ -61,11 +61,6 @@
    one Python name."
   (return (. (Symbol text) name)))
 
-(def name-spelling-p [part]
-  "Whether part spells a Python name: its py-name is an identifier and it
-   holds a letter or digit, so an operator such as - (py-name _) is none."
-  (return (and (identifier-p (py-name part)) (any (map str.isalnum part)))))
-
 ;; name-key (from compiler/literal.py) is how the LSP compares identifiers
 ;; (references, completion, macro heads): the compiler's own name identity,
 ;; so the LSP and the macro clash check agree on which spellings are one name

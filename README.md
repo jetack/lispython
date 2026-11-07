@@ -87,7 +87,7 @@ The server accepts newline-delimited JSON over TCP and supports:
 - `eval` — evaluate LisPython code, return value/stdout/error
 - `load-file` — load a `.lpy` file into the session
 - `macroexpand` — expand macros and return the result
-- `complete` — prefix and dot-completion from the live scope. `items` lists one LSP-shaped item per name, in `completions` order: `{"label": name, "kind": n}`, `n` the LSP CompletionItemKind number (Class 7, Function 3, Variable 6, Keyword 14), plus `"labelDetails": {"description": tag}` only for a name lispython tags (`special form` with Keyword, `macro` and `function` with Function), as the LSP server sends them. `completions` is the bare name list; there is no `kinds` map.
+- `complete` — prefix and dot-completion from the live scope. `items` lists one LSP-shaped item per name, in `completions` order: `{"label": label, "kind": n}`, `n` the LSP CompletionItemKind number (Class 7, Function 3, Variable 6, Keyword 14), plus `"labelDetails": {"description": tag}` only for a name lispython tags (`special form` with Keyword, `macro` and `function` with Function), as the LSP server sends them. A label is spelled as the LSP labels it (`ok?` when the evaluated code wrote that, else `my-name`) and is only the part after the prefix's last `.` (`heapq.nl` offers `nlargest`); `word` is the typed text every label replaces (`nl`; the whole prefix when it has no `.`), so a client replaces that many characters before the cursor. `completions` is the full name list (`heapq.nlargest`), one per item in the same order; there is no `kinds` map.
 - `docs` — signature and docstring for a symbol
 - `annotate` — type tag (function/class/module/macro)
 

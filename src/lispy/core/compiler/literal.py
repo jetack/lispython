@@ -7,7 +7,15 @@ import tokenize
 
 from lispy.core.compiler.features import require
 from lispy.core.errors import LispyCompileError, compile_warning, filtered_warnings
-from lispy.core.nodes import GluedHead, Node, Symbol, atom_text
+from lispy.core.nodes import (
+    Expression,
+    GluedHead,
+    MetaIndicator,
+    Node,
+    Symbol,
+    Wrapper,
+    atom_text,
+)
 from lispy.core.utils import binop_dict, boolop_dict, compare_dict, unaryop_dict
 
 SPECIAL_CONSTANTS = ("True", "False", "None", "...")
@@ -476,6 +484,51 @@ def hyphen_spelling(text):
         _WORD_UNDERSCORE.sub("-", part) if identifier_p(part) else part
         for part in text.split(".")
     )
+
+
+def name_spelling_p(part):
+    """Whether ``part`` (one ``.``-part of a symbol) spells a Python name: its
+    Python name is an identifier and it holds a letter or digit, so an
+    operator such as ``-`` (Python name ``_``) is none."""
+    return identifier_p(Symbol(part).name) and any(map(str.isalnum, part))
+
+
+def name_spellings(nodes):
+    """Python name -> the first spelling of it in ``nodes`` in source order:
+    every Symbol counts, a dotted one (``a.my-b``) by each of its parts, each
+    only when it spells a name (name_spelling_p).  Iterative, so a deeply
+    nested tree costs no Python frame per level.  completion_label reads the
+    map; the LSP builds it from the buffer, the nREPL from evaluated code."""
+    spellings = {}
+    stack = list(reversed(nodes))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Symbol):
+            for part in node.value.split("."):
+                if name_spelling_p(part):
+                    spellings.setdefault(Symbol(part).name, part)
+        elif isinstance(node, Expression):
+            stack.extend(reversed(node.list))
+        elif isinstance(node, (Wrapper, MetaIndicator)):
+            if node.value is not None:
+                stack.append(node.value)
+        elif isinstance(node, GluedHead):
+            stack.extend([node.params, node.head])
+    return spellings
+
+
+def completion_label(name, spellings):
+    """The completion label of Python name ``name``: the spelling the code
+    uses (``spellings``, name_spellings' map) when that is no hyphenated
+    spelling of ``name`` (``ok?`` for ``ok_p``, ``->foo`` for ``_to_foo``:
+    name_key keeps it apart from ``name``), else hyphen_spelling, so a plain
+    ``my_x`` in the code never wins over ``my-x``.  The one rule of both the
+    LSP and the nREPL, so an editor merging their answers sees one label per
+    name."""
+    spelled = spellings.get(name)
+    if spelled is not None and name_key(spelled) != name:
+        return spelled
+    return hyphen_spelling(name)
 
 
 def plain_name_p(sexp):
