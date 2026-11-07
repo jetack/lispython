@@ -3,6 +3,16 @@ from lispy.core.compiler.literal import identifier_p
 from lispy.core.nodes import *
 
 
+def macro_table():
+    """The generated code's form for the module lispy.core.macro_table."""
+    return Paren(
+        Symbol("__import__"),
+        String('"lispy.core.macro_table"'),
+        Keyword(Symbol("fromlist")),
+        Bracket(String('"MacroTable"')),
+    )
+
+
 def defmacro_transform(sexp):
     [op, macroname, *body] = sexp.list
     macroname = str(macroname)
@@ -18,12 +28,7 @@ def defmacro_transform(sexp):
             Symbol("="),
             Paren(
                 Symbol("sub"),
-                Paren(
-                    Symbol(".setdefault"),
-                    Paren(Symbol("globals")),
-                    String('"__macro_namespace"'),
-                    Brace(),
-                ),
+                Paren(Symbol(".scope-table"), macro_table(), Paren(Symbol("globals"))),
                 macroname,
             ),
             newname,
@@ -57,81 +62,28 @@ def require_transform(sexp):
     is_relative = module_name_str.startswith(".")
     import_call = (
         Paren(
-            Symbol("importlib.import-module"),
+            Symbol(".import-module"),
+            Paren(Symbol("__import__"), String('"importlib"')),
             module_name_str,
             Keyword(Symbol("package")),
             Symbol("__package__"),
         )
         if is_relative
-        else Paren(Symbol("importlib.import-module"), module_name_str)
+        else Paren(
+            Symbol(".import-module"),
+            Paren(Symbol("__import__"), String('"importlib"')),
+            module_name_str,
+        )
     )
+    prefix = str(module_name) + "." if kind == REQUIRE_QUALIFIED else ""
+    selected = names if kind == REQUIRE_NAMED else Constant("None")
     return Paren(
-        Symbol("do"),
-        Paren(Symbol("import"), Symbol("importlib")),
-        Paren(
-            Symbol("="),
-            Symbol("___imported-macros"),
-            Paren(
-                Symbol("getattr"), import_call, String('"__macro_namespace"'), Brace()
-            ),
-        ),
-        Paren(
-            Symbol("for"),
-            Bracket(Symbol("___k"), Symbol("___v")),
-            Symbol("in"),
-            Paren(
-                Symbol(".items"), Paren(Symbol(".copy"), Symbol("___imported-macros"))
-            ),
-            Paren(
-                Symbol("="),
-                Paren(
-                    Symbol("sub"),
-                    Paren(
-                        Symbol(".setdefault"),
-                        Paren(Symbol("globals")),
-                        String('"__macro_namespace"'),
-                        Brace(),
-                    ),
-                    Paren(Symbol("+"), str(module_name), String('"."'), Symbol("___k")),
-                ),
-                Symbol("___v"),
-            ),
-        )
-        if kind == REQUIRE_QUALIFIED
-        else Paren(
-            Symbol(".update"),
-            Paren(
-                Symbol(".setdefault"),
-                Paren(Symbol("globals")),
-                String('"__macro_namespace"'),
-                Brace(),
-            ),
-            Symbol("___imported-macros"),
-        )
-        if kind == REQUIRE_ALL
-        else Paren(
-            Symbol("for"),
-            Symbol("___mac-name"),
-            Symbol("in"),
-            names,
-            Paren(
-                Symbol("="),
-                Paren(
-                    Symbol("sub"),
-                    Paren(
-                        Symbol(".setdefault"),
-                        Paren(Symbol("globals")),
-                        String('"__macro_namespace"'),
-                        Brace(),
-                    ),
-                    Symbol("___mac-name"),
-                ),
-                Paren(
-                    Symbol("sub"), Symbol("___imported-macros"), Symbol("___mac-name")
-                ),
-            ),
-        ),
-        Paren(Symbol("del"), Symbol("___imported-macros")),
+        Symbol(".register-required"),
+        macro_table(),
+        Paren(Symbol("globals")),
+        import_call,
+        prefix,
+        selected,
     )
 
 

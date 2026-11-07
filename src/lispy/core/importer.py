@@ -403,11 +403,12 @@ def _tag_module(loader, fullname, record):
     the stamps it already holds.
 
     The tag is the union of the new record and the module's previous tag:
-    defmacro registers into globals().setdefault("__macro_namespace", {}), so
-    a reload (a successful one, or one whose exec fails partway) leaves the
-    earlier code's macros in the module, and a module requiring it may expand
-    them.  A record holding two stamps of one path never validates again,
-    which costs one recompile in the next process, never a stale load."""
+    defmacro registers into the module's existing table (scope_table in
+    core/macro_table.py), so a reload (a successful one, or one whose exec
+    fails partway) leaves the earlier code's macros in the module, and a
+    module requiring it may expand them.  A record holding two stamps of one
+    path never validates again, which costs one recompile in the next
+    process, never a stale load."""
     module = sys.modules.get(fullname)
     if getattr(getattr(module, "__spec__", None), "loader", None) is not loader:
         return

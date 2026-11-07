@@ -30,6 +30,7 @@
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
 (from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
+(from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.utils [compile-nesting-errors])
 (from lispy.core.unparse [unparse])
 (from lispy.core.errors [LispyCompileError attach-source compile-errors
@@ -64,7 +65,7 @@
   (return {"__builtins__" __builtins__
            "__name__" "__main__"
            "__package__" MAIN-PACKAGE
-           "__macro_namespace" {}}))
+           "__macro_namespace" (MacroTable)}))
 
 (= SCOPE (main-scope))
 
@@ -130,7 +131,7 @@
   (if fresh-scope
       (do (= scope {"__builtins__" __builtins__
                     "__package__" package
-                    "__macro_namespace" {}})
+                    "__macro_namespace" (MacroTable)})
           (if (is-not name None)
               (= (sub scope "__name__") name)))
       (= scope (main-scope)))
@@ -621,7 +622,7 @@
                       "__name__" "__main__"
                       "__package__" (.join "." parts)
                       "__file__" path
-                      "__macro_namespace" {}})
+                      "__macro_namespace" (MacroTable)})
             (seed-prelude scope)
             (= (sub _NREPL-FILE-SCOPES key) scope))))
   (return scope))
@@ -854,10 +855,9 @@
   "Return documentation for a symbol."
   (try
     (= obj (_resolve-obj symbol scope))
-    ;; Check macros
+    ;; Check macros, by any spelling of the name (find-macro)
     (if (is obj None)
-        (do (= macros (.get scope "__macro_namespace" {}))
-            (= obj (.get macros (_mangle symbol)))))
+        (= obj (find-macro (.get scope "__macro_namespace") symbol)))
     (if (is obj None)
         (return {"op" "docs-result" "docs" None "error" None}))
     ;; Build docs string
@@ -898,20 +898,22 @@
   "Return type annotation for a symbol."
   (try
     (= obj (_resolve-obj symbol scope))
+    (= macro None)
     (if (is obj None)
-        (do (= macros (.get scope "__macro_namespace" {}))
-            (= obj (.get macros (_mangle symbol)))))
+        (do (= macro (find-macro (.get scope "__macro_namespace") symbol))
+            (= obj macro)))
     (if (is obj None)
         (return {"op" "annotate-result" "annotation" "unknown"}))
     (= klass (. (type obj) __name__))
-    (cond (in klass ["function" "builtin_function_or_method"])
+    ;; A macro is a function too: the macro check comes first.
+    (cond (is-not macro None)
+          (= annotation "macro")
+          (in klass ["function" "builtin_function_or_method"])
           (= annotation "function")
           (== klass "type")
           (= annotation "class")
           (== klass "module")
           (= annotation "module")
-          (in symbol (.get scope "__macro_namespace" {}))
-          (= annotation "macro")
           True
           (= annotation "instance"))
     (return {"op" "annotate-result"

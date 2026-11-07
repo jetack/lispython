@@ -69,6 +69,18 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A macro is called by either spelling of its name, as every other name is:
+  after `(defmacro my_mac ...)`, `(my-mac ...)` expands it too, and the reverse;
+  qualified names likewise (`mod.my-mac` is `mod.my_mac`), and so does a
+  `(require mod [my-mac])` selection. Spellings such as `->`, `ok?` or `x-`
+  stay only themselves.
+- Defining a macro under the other spelling of an existing macro's name
+  redefines it (the last definition wins), at compile time and in the
+  module's runtime macro table that requirers read. It used to keep both as
+  separate macros.
+- nREPL: `annotate` answers `<macro name>` for a macro (it used to answer
+  `<function name>`), and `docs`/`annotate` find a macro whose name has a
+  hyphen (they used to miss it).
 - nREPL: the `complete` reply no longer carries the `kinds` map. `items` is
   the only kind channel; `completions` (the bare names) stays.
 - LSP: opening a `.lpy` file starts the Python backend while diagnostics are

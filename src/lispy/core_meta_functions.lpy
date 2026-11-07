@@ -6,6 +6,15 @@
 (from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.nodes *)
 
+;; The generated code reaches every module it needs through __import__, never
+;; an import statement, so it binds no global of the module it runs in: a
+;; user's own importlib stays theirs, and a macro named importlib does not
+;; clash with the next defmacro.  Fresh nodes per use, since compiling may
+;; change a node in place.
+(def macro-table []
+  "The generated code's form for the module lispy.core.macro_table."
+  (return `(__import__ "lispy.core.macro_table" :fromlist ["MacroTable"])))
+
 (def defmacro-transform [sexp]
   (= [op macroname *body] sexp.list)
   (= macroname (str macroname))
@@ -14,11 +23,14 @@
   (= newname (Symbol (+ "___defmacro_temp___" macroname)))
   (if (not (identifier-p newname.name))
       (= newname (Symbol "___defmacro_temp___")))
+  ;; The runtime table is a MacroTable too, so the module's code registers by
+  ;; name as the compiler does (why: core/macro_table.py).  The module is
+  ;; reached by attribute, never bound in the module: a binding deleted after
+  ;; use is missing meanwhile for code running in the same scope.
   (return `(do (from lispy.core.nodes *)
                (from lispy.core.builtins *)
                (def ~newname ~@body)
-               (= (sub (.setdefault (globals) "__macro_namespace" {})
-                       ~macroname)
+               (= (sub (.scope-table ~(macro-table) (globals)) ~macroname)
                   ~newname)
                (del ~newname))))
 
@@ -43,34 +55,19 @@
   (= [kind names] (require-selection optional))
   (= module-name-str (.replace (str module-name) "-" "_"))
   (= is-relative (.startswith module-name-str "."))
+  ;; The import runs in the emitted code itself, whose filename
+  ;; (REQUIRE_FILENAME) tells the LSP a require asked for it.
   (= import-call (ife is-relative
-                      `(importlib.import-module ~module-name-str :package __package__)
-                      `(importlib.import-module ~module-name-str)))
-  ;; The emitted code compiles in the requiring module, where binding a name
-  ;; that is a macro there is an error: its own names are ___-prefixed so a
-  ;; user macro named k or v cannot break the require.
+                      `(.import-module (__import__ "importlib") ~module-name-str
+                                       :package __package__)
+                      `(.import-module (__import__ "importlib") ~module-name-str)))
+  ;; One call registers the selection (register-required in
+  ;; core/macro_table.py), so the emitted code binds no name in the requiring
+  ;; module, where binding a name that is a macro there would be an error.
+  (= prefix (ife (== kind REQUIRE-QUALIFIED) (+ (str module-name) ".") ""))
+  (= selected (ife (== kind REQUIRE-NAMED) names `None))
   (return
-    `(do (import importlib)
-         (= ___imported-macros
-            (getattr ~import-call
-                     "__macro_namespace"
-                     {}))
-         ~(conde (== kind REQUIRE-QUALIFIED)
-                 `(for [___k ___v] in (.items (.copy ___imported-macros))
-                    (= (sub (.setdefault (globals) "__macro_namespace" {})
-                            (+ ~(str module-name) "." ___k))
-                       ___v))
-                 (== kind REQUIRE-ALL)
-                 `(.update (.setdefault (globals) "__macro_namespace" {}) ___imported-macros)
-
-                 ;; else: an empty list loops over nothing
-                 `(for ___mac-name in ~names
-                    (= (sub (.setdefault (globals) "__macro_namespace" {})
-                            ___mac-name)
-                       (sub ___imported-macros ___mac-name)))
-                 )
-         ;; (del importlib)
-         (del ___imported-macros))))
+    `(.register-required ~(macro-table) (globals) ~import-call ~prefix ~selected)))
 
 (when (== __name__ "__main__")
   (import os.path as osp)

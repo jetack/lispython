@@ -108,8 +108,8 @@ def test_plumbing_maps_nowhere():
     # defmacro's generated statements, the module's start) is moved onto
     # line 1 or some form rather than dropped.
     src = "(require lispy.macros [when])\n(when True (print 1))"
-    assert mapped(src, "___imported_macros", nth=1) is None
-    assert mapped(src, "___imported_macros", nth=1, tagged=True) is None
+    assert mapped(src, "register_required") is None
+    assert mapped(src, "register_required", tagged=True) is None
     src = "(defmacro twice [a] (return `(do ~a ~a)))\n(twice (print 1))"
     assert mapped(src, "___defmacro_temp___twice") is None
     view = pv.compile_view(src)
