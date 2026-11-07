@@ -1745,6 +1745,40 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert self.view(package).text.endswith("yy = 2 * 2 * 2")
 
+    def test_a_second_instances_compile_holds_the_first_instances_drop(
+        self, package, monkeypatch
+    ):
+        # Defect: each instance keeps its own condition and compile count, so
+        # the first drops modules while a compile of the second imports them.
+        assert self.view(package).text.endswith("yy = 2 + 2")
+        monkeypatch.delitem(sys.modules, "lispy.lsp.macro_modules")
+        second = importlib.import_module("lispy.lsp.macro_modules")
+        assert second is not mm
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            with second.fresh_modules(None):
+                entered.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        dropper = threading.Thread(target=lambda: self.view(package), daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(10)
+            (package.pkg / "mac.lpy").write_text(THRICE)
+            dropper.start()
+            dropper.join(0.5)
+            assert dropper.is_alive()
+            release.set()
+            dropper.join(10)
+            assert not dropper.is_alive()
+        finally:
+            release.set()
+            holder.join(10)
+            if dropper.ident is not None:
+                dropper.join(10)
+
     def test_lispython_own_modules_are_never_tracked(self, tmp_path):
         root = os.path.realpath(tmp_path)
         path = os.path.join(root, "m.py")
