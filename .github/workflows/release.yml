@@ -21,7 +21,7 @@ permissions: {}
 
 jobs:
   test:
-    name: Test (Python ${{ matrix.python }}) # hq:test-gate
+    name: Test # hq:test-gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
