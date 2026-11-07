@@ -30,7 +30,7 @@
                        OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
-                             ViewCache compile-buffer glued-base
+                             ViewCache compile-buffer glued-base hyphen-spelling
                              lpy-diagnostic-range lpy-range module-names name-key
                              name-spelling-p open-form-closers partial-span py-name
                              pyrefly-fallback source-lines source-prefix
@@ -1699,28 +1699,18 @@
       (return (lsp.InsertReplaceEdit :new-text new-text :insert insert :replace replace)))
   (return (lsp.TextEdit :range insert :new-text new-text)))
 
-(def hyphen-spelling [name]
-  "name with each _ between two alphanumerics written -, or None when that
-   spelling does not stand for name again (py-name)."
-  (= spelled (re.sub "(?<=[^\\W_])_(?=[^\\W_])" "-" name))
-  (return (ife (== (py-name spelled) name) spelled None)))
-
-;; filterText decides whether the client keeps an item while the user types.
-;; `-` is a completion trigger character, so the client asks again right
-;; after one and filters that answer by the word typed so far, hyphen
-;; included; `_` is not, so after a `_` the client filters the answer it
-;; already holds.  So an item carries the spelling being typed: the hyphen
-;; spelling once the typed word holds a `-` (my-|), else the Python name,
-;; which also matches what a user typing `_` spells (my_|).
+;; filterText decides whether the client keeps an item while the user types
+;; (VS Code and eglot's flex matching read it, not the label).  `-` is a
+;; completion trigger character, so the client asks again right after one
+;; and filters that answer by the word typed so far, hyphen included; `_` is
+;; not, so after a `_` the client filters the answer it already holds.  So
+;; an item carries the spelling being typed: its label, the hyphen spelling
+;; (hyphen-spelling), once the typed word holds a `-` (my-|), else the
+;; Python name, which also matches what a user typing `_` spells (my_|).
 (def filter-text [label name typed]
-  "The filterText of a completion item labelled label for Python name name,
-   when typed is the word typed so far."
-  (if (not-in "-" typed)
-      (return name))
-  (if (in "-" label)
-      (return label))
-  (= spelled (hyphen-spelling name))
-  (return (ife (is spelled None) label spelled)))
+  "The filterText of a completion item labelled label (the hyphen spelling)
+   for Python name name, when typed is the word typed so far."
+  (return (ife (in "-" typed) label name)))
 
 (def client-capability-p [ls path]
   "Whether the client advertises the capability at path (attribute names
@@ -1788,18 +1778,19 @@
 (def general-items [doc :line None]
   "The completion items offered with no Python backend's answer:
    lispython's own (lispython-items), the Python builtins (builtin-names),
-   then the buffer's definitions (collect-definitions), each name once."
+   then the buffer's definitions (collect-definitions), each name once
+   (name-key) and labelled by its hyphen spelling (hyphen-spelling)."
   (= items (lispython-items))
-  (= seen (set [item.label for item in items]))
-  (for [name kind] in (builtin-names)
-    (if (not-in name seen)
-        (do (.add seen name)
-            (.append items (lsp.CompletionItem :label name :kind kind)))))
-  (for name in (buffer-definition-names doc line)
-    (if (not-in name seen)
-        (do (.add seen name)
-            (.append items (lsp.CompletionItem :label name
-                                               :kind lsp.CompletionItemKind.Variable)))))
+  (= seen (set [(name-key item.label) for item in items]))
+  (for [name kind] in [*(builtin-names)
+                       *[(, name lsp.CompletionItemKind.Variable)
+                         for name in (buffer-definition-names doc line)]]
+    ;; Labelled by the hyphen spelling, one item per name (name-key), so
+    ;; a buffer's my_x and my-x are one item.
+    (= label (hyphen-spelling name))
+    (if (not-in (name-key label) seen)
+        (do (.add seen (name-key label))
+            (.append items (lsp.CompletionItem :label label :kind kind)))))
   (return items))
 
 (def local-completion [doc :line None :col None]
@@ -2002,11 +1993,11 @@
   (return (and (== item.kind lsp.CompletionItemKind.Keyword)
                (not-in item.label (vars builtins)))))
 
-(def backend-items [doc line col items insert-replace spellings]
-  "The backend's completion items as the buffer's: labelled by the
-   buffer's own spelling of each Python name (spellings, buffer-spellings'
-   map; none: the backend's name), with filterText and edit over the .lpy
-   word at the cursor.  What is positioned in or tied to the generated code
+(def backend-items [doc line col items insert-replace]
+  "The backend's completion items as the buffer's: labelled by the hyphen
+   spelling of each Python name (hyphen-spelling: move-to-end, never
+   move_to_end, whatever the buffer writes), with filterText and edit over
+   the .lpy word at the cursor.  What is positioned in or tied to the generated code
    (text_edit, insert_text, command, data) is dropped: it would land on
    lines the user never wrote.  So is an item with additional_text_edits
    (an auto-import of a symbol the buffer never binds), and a Python
@@ -2018,7 +2009,7 @@
     (if (or (python-syntax-p item) item.additional-text-edits)
         (continue))
     (= name item.label)
-    (= label (.get spellings name name))
+    (= label (hyphen-spelling name))
     (.append result
       (lsp.CompletionItem
         :label label
@@ -2059,7 +2050,8 @@
 
 (def merged-items [doc line view items]
   "lispython's own items (lispython-items, then each macro of the view under
-   the spelling it was registered as, view.macros) followed by items, the
+   the hyphen spelling of the name it was registered as, view.macros)
+   followed by items, the
    backend's (backend-items), whose name (name-key) none of them has: a
    special form or macro wins over whatever the backend offers by that
    name.  Over a fallback view (only the text before the cursor compiled)
@@ -2072,12 +2064,12 @@
     ;; A qualified macro (module.name) is typed as an attribute
     ;; (qualified-macro-items).
     (if (and (not-in "." name) (not-in name taken))
-        (do (= label (sub view.macros name))
+        (do (= label (hyphen-spelling (sub view.macros name)))
             (.add taken name)
             (.append merged (own-item label *_MACRO-STYLE)))))
   (= rest (list items))
   (if view.fallback
-      (.extend rest [(lsp.CompletionItem :label name
+      (.extend rest [(lsp.CompletionItem :label (hyphen-spelling name)
                                          :kind lsp.CompletionItemKind.Variable)
                      for name in (buffer-definition-names doc line)]))
   (for item in rest
@@ -2091,8 +2083,9 @@
   "The macros of view a (require mod) registered for the base written glued
    to the dot before the word at the 1-based line and code-point col
    (glued-base: mod.|, a.b.ma|; never (. mod |), since such a macro is
-   called only as mod.name), as own items labelled by the spelling each was
-   registered under (view.macros: my-mac, never its name-key my_mac).  The
+   called only as mod.name), as own items labelled by the hyphen spelling
+   of the name each was registered under (view.macros, hyphen-spelling:
+   my-mac, whether defined as my-mac or my_mac).  The
    require registers them as mod.name keys of the macro table, and no
    backend knows them: it never binds mod at runtime."
   (= text (line-text doc.source line))
@@ -2108,8 +2101,9 @@
             (if (and name (not-in "." name))
                 ;; name-key only turns a part's - into _, so the spelling's
                 ;; base prefix is as long as the key's.
-                (.append items (own-item (sub (sub view.macros key)
-                                              [: (len prefix) None])
+                (.append items (own-item (hyphen-spelling
+                                           (sub (sub view.macros key)
+                                                [: (len prefix) None]))
                                          *_MACRO-STYLE))))))
   (return items))
 
@@ -2219,8 +2213,7 @@
                                                     (ife attribute None MERGE-TIMEOUT))))
   (if (is view None)
       (return None))
-  (= spellings (buffer-spellings doc.source))
-  (= found (backend-items doc line col items insert-replace spellings))
+  (= found (backend-items doc line col items insert-replace))
   (= macros (qualified-macro-items doc line col view))
   (cond macros
         (do (= taken (set [(name-key item.label) for item in macros]))

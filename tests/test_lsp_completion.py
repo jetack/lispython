@@ -76,27 +76,39 @@ def test_members_take_the_buffer_spelling(complete):
 
 
 @pytest.mark.parametrize(
-    "source, label, typed_filter",
+    "source, name",
     [
-        (
-            "(class A [Exception]\n  (def f [self]\n    self.with-|))",
-            "with_traceback",
-            "with-traceback",
-        ),
+        ("(class A [Exception]\n  (def f [self]\n    self.{}|))", "with_traceback"),
         (
             "(from collections [OrderedDict])\n"
-            "(class A [OrderedDict]\n  (def f [self]\n    self.move-|))",
+            "(class A [OrderedDict]\n  (def f [self]\n    self.{}|))",
             "move_to_end",
-            "move-to-end",
         ),
     ],
     ids=["builtin base", "imported base"],
 )
-def test_a_member_never_spelled_in_the_buffer(complete, source, label, typed_filter):
-    # Defect: a hyphen typed toward a member the buffer never spells drops
-    # it, since the client filters with-  against with_traceback.
-    items = by_label(complete(source)[2])
-    assert items[label].filter_text == typed_filter
+def test_a_member_never_spelled_in_the_buffer(complete, source, name):
+    # Defects: a member the buffer never spells is offered in its Python
+    # spelling (with_traceback), beside or instead of the hyphen spelling,
+    # or accepting it inserts the Python spelling; the filterText drops the
+    # item once a hyphen is typed (the client filters with- against
+    # with_traceback), or drops it while the user types its _ spelling.
+    label = name.replace("_", "-")
+    stem = name.split("_")[0]
+    # with alone is a keyword the view cannot compile as an attribute, so
+    # the word typed with no hyphen holds its first _ (with_|).
+    for typed, filter_text in [(stem + "_", name), (stem + "-", label)]:
+        items = by_label(complete(source.format(typed))[2])
+        assert label in items and name not in items
+        assert items[label].text_edit.new_text == label
+        assert items[label].filter_text == filter_text
+
+
+def test_the_buffers_underscore_spelling_never_wins(complete):
+    # Defect: the buffer's own _ spelling of a name (os.get_terminal_size)
+    # overrides the hyphen spelling completion offers by default.
+    items = by_label(complete("(import os)\n(os.get_terminal_size)\n(os.get|)")[2])
+    assert "get-terminal-size" in items and "get_terminal_size" not in items
 
 
 @pytest.mark.parametrize("source", ["osp.jo|in", "(. osp jo|in)"])
@@ -269,8 +281,8 @@ def test_a_required_macro_wins_over_the_backends_name(complete, backend_requests
         lsp.CompletionItem(label="my_attr", kind=lsp.CompletionItemKind.Variable),
     ]
     items = complete("(require lpy-macs)\n(lpy-macs.|)")[2]
-    assert macro_style([i for i in items if i.label != "my_attr"]) == LPY_MACS
-    assert "my_attr" in by_label(items)
+    assert macro_style([i for i in items if i.label != "my-attr"]) == LPY_MACS
+    assert "my-attr" in by_label(items)
 
 
 @once
@@ -476,6 +488,15 @@ def test_a_required_macro_is_offered_as_it_was_defined(merged, selection):
     # (my_mac), not the spelling it was defined and required as (my-mac).
     items = by_label(merged(f"(require macmod {selection})\n(print my|)")[2])
     assert "my-mac" in items and "my_mac" not in items
+
+
+@once
+def test_a_macro_defined_with_underscores_is_offered_hyphenated(merged):
+    # Defect: a macro keeps the _ spelling it was registered under (my_mac)
+    # instead of the hyphen spelling every other name is offered in.
+    items = by_label(merged("(defmacro my_mac [x] x)\n(print my|)")[2])
+    assert "my-mac" in items and "my_mac" not in items
+    assert items["my-mac"].label_details.description == "macro"
 
 
 @once

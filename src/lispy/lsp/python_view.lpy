@@ -41,7 +41,7 @@
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
-(from lispy.core.compiler.literal [identifier-p name-key])
+(from lispy.core.compiler.literal [hyphen-spelling identifier-p name-key])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
@@ -70,7 +70,9 @@
 ;; (references, completion, macro heads): the compiler's own name identity,
 ;; so the LSP and the macro clash check agree on which spellings are one name
 ;; (my-x and my_x are; -> and _to_, ok? and ok_p are not).  Re-exported here
-;; for the server.
+;; for the server.  hyphen-spelling (from compiler/literal.py too) is the
+;; spelling completion offers for a Python name (move_to_end as
+;; move-to-end), the nREPL's as well.
 
 (def source-prefix [source line col]
   "The text of source before the 1-based line and code-point column."
