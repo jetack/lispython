@@ -1423,9 +1423,13 @@ class CountingPattern:
 
 
 class CountingSource(str):
-    """A source string that tallies the characters its scanning methods were
-    handed: the span ``[start, end)`` clamped as a slice is, plus one per call
-    (``startswith``/``endswith`` read only the prefix, so cost one per call).
+    """A source string that tallies the characters its scanning methods read,
+    plus one per call, within the span ``[start, end)`` clamped as a slice is:
+    ``count`` reads the whole span; ``find``/``index`` read up to the end of
+    a match, ``rfind``/``rindex`` back from the end to its start, and either
+    reads the whole span on a miss (an unbounded ``find`` that hits early is
+    not charged the rest of the source). ``startswith``/``endswith`` read only
+    the prefix, so cost one per call.
     """
 
     def __new__(cls, text, tally):
@@ -1434,10 +1438,22 @@ class CountingSource(str):
         return self
 
     def _scan(self, name, args):
+        sub = args[0]
         start, end = (list(args) + [None, None])[1:3]
         start, end = slice(start, end).indices(len(self))[:2]
-        self._tally[0] += max(end - start, 0) + 1
-        return getattr(super(), name)(*args)
+        span = max(end - start, 0)
+        result = -1  # index/rindex raise on a miss
+        try:
+            result = getattr(super(), name)(*args)
+        finally:
+            if name == "count" or result == -1:
+                read = span
+            elif name in ("find", "index"):
+                read = result - start + len(sub)
+            else:
+                read = end - result
+            self._tally[0] += read + 1
+        return result
 
     def count(self, *args):
         return self._scan("count", args)
@@ -1606,25 +1622,27 @@ def test_a_long_token_in_a_field_lexes_in_constant_memory(src):
 
 @pytest.mark.usefixtures("time_bound")
 def test_a_literal_with_many_fields_costs_what_as_many_literals_do():
-    # Positions come from line starts found once; counting lines from the
-    # literal's start for every piece made one literal quadratic, in
-    # str.count, which only the string-chars dimension sees. One over
-    # separate measures 0.50-0.67 unmutated; the per-piece count measures
-    # 570x (regex chars and python lines barely move), so 1.5 catches it. The
-    # absolute bound catches a count from the source start, which slows every
-    # literal alike and so leaves the ratio alone.
-    fields = 2000
-    one = 'f"""' + "{x}\n" * fields + '"""'
-    separate = "\n".join(['f"{x}"'] * fields)
-    for src in (one, separate):
-        string_chars = parse_work(src)[1]
-        assert string_chars <= len(src), (string_chars, len(src))
-    for name, got, want in zip(
-        ("regex chars", "string chars", "python lines"),
-        parse_work(one),
-        parse_work(separate),
-    ):
+    # Positions come from line starts found once, so parse work is linear in
+    # the fields. One literal over as many separate ones measures 0.50-0.64
+    # per dimension: the 1.5 bound catches work per literal, such as counting
+    # lines from the literal's start for every piece. Twice the fields
+    # measures 2.00x the work per dimension: the 2.3 bound catches work per
+    # position, such as counting lines from the source's start (with str.count
+    # or a line-break regex), which slows every literal alike and so leaves
+    # the ratio alone. Invisible to both: a scan of a slice or copy of the
+    # source (``src[:i].count("\n")``), plain str work in C that no dimension
+    # counts.
+    def one_literal(fields):
+        return 'f"""' + "{x}\n" * fields + '"""'
+
+    fields = 1000
+    names = ("regex chars", "string chars", "python lines")
+    one = parse_work(one_literal(fields))
+    separate = parse_work("\n".join(['f"{x}"'] * fields))
+    for name, got, want in zip(names, one, separate):
         assert got <= 1.5 * want, (name, got, want)
+    for name, small, large in zip(names, one, parse_work(one_literal(2 * fields))):
+        assert large <= 2.3 * small, (name, small, large)
 
 
 @pytest.mark.usefixtures("time_bound")
