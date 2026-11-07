@@ -454,9 +454,10 @@
   (async-def _ensure-started [self deadline]
     "True once a backend process runs, waiting for its start until deadline
      (the loop's clock).  The start is a task of its own, awaited without
-     cancelling it (`_await-until`): a request that is cancelled (the editor's $/cancelRequest) or runs out
-     of time stops waiting, never the start, which a later request finds
-     done.  Only a start that fails or a process that exits uses up a spawn."
+     cancelling it (`_await-until`): a request that is cancelled (the
+     editor's $/cancelRequest) or runs out of time stops waiting, never the
+     start, which a later request finds done.  Only a start that fails or a
+     process that exits uses up a spawn."
     (if self.running
         (return True))
     (= task (._start-task self))
@@ -554,7 +555,9 @@
     ;; that is discarding, and the client this call took off self would then
     ;; keep its pygls tasks with nobody left to stop them.  shutdown waits
     ;; for every one left (_cleanups, which also keeps them referenced: the
-    ;; loop holds tasks only weakly).
+    ;; loop holds tasks only weakly).  The shield is safe from 3.14+'s
+    ;; "exception in shielded future" ERROR log only because _reap never
+    ;; raises (it catches every Exception): keep it so.
     (= cleanup (asyncio.create-task (_reap client process drain)))
     (.add self._cleanups cleanup)
     (.add-done-callback cleanup self._cleanups.discard)
