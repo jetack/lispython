@@ -10,6 +10,7 @@ import runpy
 import sys
 import threading
 import types
+import weakref
 
 from lispy.core.compiler.utils import compile_nesting_errors
 from lispy.core.errors import compile_errors
@@ -133,17 +134,24 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
 #
 # A module's dependencies are
 #  - its own source;
-#  - the file of every macro in its macro table at the end of the compile
-#    (its function's __module__), wherever it lives, with that module's own
-#    record (_RECORDS, filled whenever an .lpy is compiled or loaded from its
-#    cache in this process), so a require is followed transitively even when
-#    the macro module was imported before this compile began;
+#  - for every macro in its macro table at the end of the compile, the
+#    record of the code loaded into the module object its function's
+#    __module__ names (_MODULE_RECORDS), wherever it lives: that is the code
+#    whose expansions this module baked in, so a require is followed
+#    transitively even when the macro module was imported before this
+#    compile began, and a failed reload, which leaves the old module in
+#    sys.modules, still names the old code.  An untagged module (exec'd
+#    before it was put in sys.modules, or imported before this importer was
+#    installed) falls back to its file: its record (_RECORDS), its read stamp
+#    (_READ_STAMPS), or its stamp now;
 #  - every .py/.lpy source read while it compiled (a thread-local window
 #    around the compile, fed by path_stats, which SourceFileLoader.get_code
 #    calls before it reads a source), outside the standard library,
 #    site-packages and lispython itself (the version in the header covers
 #    lispython): this catches a module a macro imports as it expands.
 #    A nested .lpy import merges its whole record into every enclosing window.
+# Entries are distinct (real path, st_mtime_ns, st_size) triples, so one path
+# may appear with two stamps; such a record never validates again.
 #
 # Accepted gap: a helper H that a macro module B imports at top level, where H
 # was already in sys.modules before B (and the requiring module) compiled,
@@ -155,13 +163,18 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
 _CACHE_MAGIC = b"LPYC"
 _LOCAL = threading.local()
 # Real path of an .lpy to the record of the code this process loaded or last
-# compiled from it; none while its latest compile failed.
+# compiled from it; none while its latest compile failed.  Per file: read by
+# lpy_record (the LSP) and the untagged fallback of _dependencies.
 _RECORDS = {}
 # Path as the loader stat'ed it (a module's __file__) to (st_mtime_ns,
-# st_size), as of its latest load: a macro module with no record (a .py) is
-# stamped as it was read, never as it is when a requiring module's compile
-# ends.  Keyed by the path as given, so an import costs one stat, no realpath.
+# st_size), as of its latest read: how a .py's read stamp reaches its module's
+# tag, and the untagged fallback.  Keyed by the path as given, so an import
+# costs one stat, no realpath.
 _READ_STAMPS = {}
+# Module object to the record of the code its loader's get_code returned for
+# it (_tag_module): what a requiring module's record takes for a macro module.
+# A side table, never a key in the module's dict (its globals are the user's).
+_MODULE_RECORDS = weakref.WeakKeyDictionary()
 _cache_header = None
 _TEMP_ATTEMPTS = 3
 _excluded_dirs = None
@@ -234,8 +247,8 @@ def _excluded(real):
 
 
 def _windows():
-    """This thread's open compile windows, innermost last: each a dict of
-    real path to (st_mtime_ns, st_size)."""
+    """This thread's open compile windows, innermost last: each a dict whose
+    keys, in insertion order, are (real path, st_mtime_ns, st_size)."""
     windows = getattr(_LOCAL, "windows", None)
     if windows is None:
         windows = _LOCAL.windows = []
@@ -246,11 +259,11 @@ def _record_into_windows(entries, *, filtered):
     windows = getattr(_LOCAL, "windows", None)
     if not windows:
         return
-    for real, mtime, size in entries:
-        if filtered and _excluded(real):
+    for entry in entries:
+        if filtered and _excluded(entry[0]):
             continue
         for window in windows:
-            window.setdefault(real, (mtime, size))
+            window.setdefault(tuple(entry))
 
 
 def _lpy_path_stats(self, path):
@@ -334,43 +347,88 @@ def _write_cache(cache_path, deps, code, source_path):
         pass
 
 
+def _module_record(module):
+    """The record of the code loaded into module (its tag), else, for an
+    untagged module, of its file; None when there is none."""
+    try:
+        record = _MODULE_RECORDS.get(module)
+    except TypeError:  # not weak-referenceable
+        record = None
+    if record is not None:
+        return record
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, str):
+        return None
+    real = osp.realpath(module_file)
+    record = _RECORDS.get(real)
+    if record is not None:
+        return record
+    stamp = _READ_STAMPS.get(module_file)
+    if stamp is not None:
+        return ((real, *stamp),)
+    try:
+        return (_stamp(real),)
+    except OSError:
+        return None
+
+
 def _dependencies(own, window, scope, fullname):
     """The flat record of a module just compiled: own (its source's stamp)
     first, then its macros' modules with their records, then the window's
-    reads, each path once."""
-    deps = {own[0]: own[1:]}
+    reads, each triple once."""
+    deps = {own: None}
+    covered = set()
     namespace = scope.get("__macro_namespace") or {}
     for macro in list(namespace.values()):
         module_name = getattr(macro, "__module__", None)
         if not isinstance(module_name, str) or module_name == fullname:
             continue
-        module_file = getattr(sys.modules.get(module_name), "__file__", None)
-        if not isinstance(module_file, str):
+        module = sys.modules.get(module_name)
+        if module is None or id(module) in covered:
             continue
-        real = osp.realpath(module_file)
-        if real in deps:
-            continue
-        record = _RECORDS.get(real)
-        if record is None:
-            stamp = _READ_STAMPS.get(module_file)
-            if stamp is not None:
-                record = ((real, *stamp),)
-            else:
-                try:
-                    record = (_stamp(real),)
-                except OSError:
-                    continue
-        for dep_real, mtime, size in record:
-            deps.setdefault(dep_real, (mtime, size))
-    for real, stamp in window.items():
-        deps.setdefault(real, stamp)
-    return tuple((real, *stamp) for real, stamp in deps.items())
+        covered.add(id(module))
+        for dep in _module_record(module) or ():
+            deps.setdefault(tuple(dep))
+    for dep in window:
+        deps.setdefault(dep)
+    return tuple(deps)
+
+
+def _tag_module(loader, fullname, record):
+    """Tag the module that will run the code loader.get_code is returning
+    with record: the module in sys.modules whose spec names this very
+    loader, as importlib's load and reload run it.  A caller with another
+    loader (a fresh find_spec, module_from_spec) tags nothing; runpy -m of
+    an already imported module reuses its spec, so it tags that module with
+    the stamps it already holds.
+
+    The tag is the union of the new record and the module's previous tag:
+    defmacro registers into globals().setdefault("__macro_namespace", {}), so
+    a reload (a successful one, or one whose exec fails partway) leaves the
+    earlier code's macros in the module, and a module requiring it may expand
+    them.  A record holding two stamps of one path never validates again,
+    which costs one recompile in the next process, never a stale load."""
+    module = sys.modules.get(fullname)
+    if getattr(getattr(module, "__spec__", None), "loader", None) is not loader:
+        return
+    try:
+        previous = _MODULE_RECORDS.get(module, ())
+        merged = dict.fromkeys(tuple(dep) for dep in record)
+        merged.update((tuple(dep), None) for dep in previous if dep not in merged)
+        _MODULE_RECORDS[module] = tuple(merged)
+    except TypeError:  # not weak-referenceable
+        pass
 
 
 def _lpy_get_code(self, fullname):
     source_path = self.get_filename(fullname)
     if not _is_lpy_file(source_path):
-        return _org_get_code(self, fullname)
+        code = _org_get_code(self, fullname)
+        # The original get_code ran path_stats on source_path (the read stamp).
+        stamp = _READ_STAMPS.get(source_path)
+        if stamp is not None:
+            _tag_module(self, fullname, ((osp.realpath(source_path), *stamp),))
+        return code
     try:
         # Called as SourceLoader.get_code calls it: path_stats is where a
         # source read is observed (the windows above, the LSP's tracking).
@@ -388,6 +446,7 @@ def _lpy_get_code(self, fullname):
             code, deps = cached
             _RECORDS[own[0]] = deps
             _record_into_windows(deps, filtered=False)
+            _tag_module(self, fullname, deps)
             return code
     # The record of the code loaded before goes now: if this compile fails, no
     # record may describe code that is no longer what the file holds.
@@ -406,6 +465,7 @@ def _lpy_get_code(self, fullname):
     deps = _dependencies(own, window, scope, fullname)
     _RECORDS[own[0]] = deps
     _record_into_windows(deps, filtered=False)
+    _tag_module(self, fullname, deps)
     if cache_path is not None and not sys.dont_write_bytecode:
         _write_cache(cache_path, deps, code, source_path)
     return code
