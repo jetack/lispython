@@ -38,7 +38,7 @@ def modules(tmp_path):
     def write(name, text):
         (directory / name).write_text(text)
 
-    def run(module="a", before="", check=True):
+    def run(module="a", before=""):
         proc = subprocess.run(
             [sys.executable, "-c", before + RUN, module],
             env=env,
@@ -47,8 +47,6 @@ def modules(tmp_path):
             text=True,
             timeout=120,
         )
-        if not check:
-            return proc
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout.strip().splitlines()[-1])
         out["stderr"] = proc.stderr

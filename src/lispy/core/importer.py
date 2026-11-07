@@ -396,9 +396,11 @@ def _dependencies(own, window, scope, fullname):
 
 def _tag_module(loader, fullname, record):
     """Tag the module that will run the code loader.get_code is returning
-    with record.  Only importlib's load and reload run get_code for the
-    module in sys.modules whose spec names this very loader; any other
-    caller (runpy -m, a fresh module_from_spec) tags nothing.
+    with record: the module in sys.modules whose spec names this very
+    loader, as importlib's load and reload run it.  A caller with another
+    loader (a fresh find_spec, module_from_spec) tags nothing; runpy -m of
+    an already imported module reuses its spec, so it tags that module with
+    the stamps it already holds.
 
     The tag is the union of the new record and the module's previous tag:
     defmacro registers into globals().setdefault("__macro_namespace", {}), so
