@@ -38,7 +38,9 @@
 ;; and its answer (a first basedpyright completion takes about 0.9 s); the
 ;; start's initialize handshake gives up after START-TIMEOUT.  Shutdown gives
 ;; a backend SHUTDOWN-TIMEOUT to answer shutdown and exit, then kills it and
-;; waits KILL-TIMEOUT for the process and as long for pygls' client tasks.
+;; reaps it: _reap waits up to KILL-TIMEOUT each for the process, its stderr
+;; drain and pygls' client tasks.  A start cancelled mid-discard reaps once
+;; more before the final discard, so the worst case is about 5 s.
 (= REQUEST-TIMEOUT 10)
 (= START-TIMEOUT 30)
 (= SHUTDOWN-TIMEOUT 2)
@@ -792,8 +794,9 @@
   (async-def shutdown [self]
     "Stop the backend for good: cancel a start in progress, send shutdown
      and exit and wait for the process to end, all within SHUTDOWN-TIMEOUT,
-     then kill it if it still runs (KILL-TIMEOUT more at most).  No request
-     spawns one afterwards."
+     then kill and reap it (_reap: up to three KILL-TIMEOUT waits; a start
+     cancelled mid-discard reaps once more, so about 5 s in the worst case).
+     No request spawns one afterwards."
     (= self.state "closed")
     (= deadline (+ (.time (asyncio.get-running-loop)) SHUTDOWN-TIMEOUT))
     (= starting self._starting)
