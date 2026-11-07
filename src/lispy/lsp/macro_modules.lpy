@@ -18,15 +18,21 @@
 (import time)
 
 (import lispy)
+(from lispy.core.importer [lpy-cache-path lpy-record])
 
 (= logger (logging.getLogger __name__))
 
-;; One condition guards _tracked, _dirs, _active and _epoch.  _tracked maps a
-;; module name to (path, (st_mtime_ns, st_size)): its file as it was stat'ed
-;; just before it was read.  _dirs maps a directory searched for a module no
-;; finder found to its st_mtime_ns when searched.
+;; One condition guards _tracked, _dep-files, _dirs, _active and _epoch.
+;; _tracked maps a module name to (path, (st_mtime_ns, st_size)): its file as
+;; it was stat'ed just before it was read.  _dep-files maps each file under
+;; the import root in the cache record of a tracked .lpy (lpy-record) to its
+;; recorded stamp: a module loaded from its cache reads none of the files its
+;; compile read (a module a macro imported as it expanded), so no window sees
+;; them.  _dirs maps a directory searched for a module no finder found to its
+;; st_mtime_ns when searched.
 (= _CONDITION (threading.Condition))
 (= _tracked {})
+(= _dep-files {})
 (= _dirs {})
 (= _active 0)
 (= _epoch 0)
@@ -121,7 +127,7 @@
    failed is in none, and stays tracked until its file changes.  Under
    _CONDITION."
   (= changed [])
-  (for [path stamp] in (list (.values _tracked))
+  (for [path stamp] in (+ (list (.values _tracked)) (list (.items _dep-files)))
     (try
       (if (!= (_stamp path) stamp)
           (.append changed path))
@@ -138,10 +144,14 @@
   (return (, changed False)))
 
 (def _remove-bytecode [path]
-  "Remove path's cached bytecode, if any; a failure other than its absence
-   is logged."
+  "Remove path's cached bytecode (an .lpy's lispython cache, a .py's pyc),
+   if any; a failure other than its absence is logged."
   (try
-    (os.remove (importlib.util.cache-from-source path))
+    (= cache (ife (.endswith path ".lpy")
+                  (lpy-cache-path path)
+                  (importlib.util.cache-from-source path)))
+    (if (is-not cache None)
+        (os.remove cache))
     (except [(, FileNotFoundError NotImplementedError ValueError)]
       (pass))
     (except [OSError as e]
@@ -171,12 +181,17 @@
             (.wait _CONDITION remaining)
             (continue)))
     ;; A pyc keeps its source's mtime in whole seconds and its size, so an
-    ;; edit of the same size within that second would load the old pyc.  An
-    ;; .lpy's pyc also bakes in the expansions of the macros it required, and
-    ;; does not record them, so every tracked .lpy loses its pyc (all are
-    ;; imported anew anyway); a .py's bytecode depends on its text alone.
+    ;; edit of the same size within that second would load the old pyc: a
+    ;; changed .py loses its pyc.  Every tracked .lpy loses its cache too,
+    ;; though its record validates itself (core/importer.py): this process
+    ;; keeps modules across edits, so a helper a macro module imported at
+    ;; top level can be in no record (the importer's accepted gap), and the
+    ;; next compile must read and track everything anew.
+    (for path in changed
+      (if (.endswith path ".py")
+          (_remove-bytecode path)))
     (for [path _] in (list (.values _tracked))
-      (if (or (.endswith path ".lpy") (in path changed))
+      (if (.endswith path ".lpy")
           (_remove-bytecode path)))
     ;; Every tracked module goes, not just the changed one: the import graph
     ;; is unknown, and a module importing the changed one holds its old
@@ -184,6 +199,7 @@
     (for name in (list _tracked)
       (.pop sys.modules name None))
     (.clear _tracked)
+    (.clear _dep-files)
     (.clear _dirs)
     (importlib.invalidate-caches)
     (+= _epoch 1)
@@ -215,12 +231,24 @@
       (return False))
   (return (_under-root-p (osp.realpath path) root)))
 
+(def _track-record [path root]
+  "Track the files under root in the cache record of the .lpy at path, the
+   record of the code loaded from it (none while its latest compile failed,
+   so a broken file is tracked by its own stamp alone).  Under _CONDITION."
+  (= record (lpy-record path))
+  (if (is record None)
+      (return))
+  (for [real mtime size] in record
+    (if (_under-root-p real root)
+        (.setdefault _dep-files real (, mtime size)))))
+
 (deco contextlib.contextmanager
   (def fresh-modules [import-root]
     "Wrap one compile: first drop every tracked module once one is stale
      (_drop-stale), then track every .py or .lpy source the
      compile reads under import-root (nothing for None, _trackable-p) by the
-     stamp its file had when read, and every directory under it searched for
+     stamp its file had when read, the files under it in each such .lpy's
+     cache record (_track-record), and every directory under it searched for
      a module no finder found by its mtime."
     (global _active)
     (= reads [])
@@ -246,7 +274,9 @@
                                 (= (sub _dirs directory) stamp)))
 
                         (_trackable-p name path root)
-                        (= (sub _tracked name) (, path stamp))))))
+                        (do (= (sub _tracked name) (, path stamp))
+                            (if (.endswith path ".lpy")
+                                (_track-record path root)))))))
             (finally
               (-= _active 1)
               (.notify-all _CONDITION))))))))

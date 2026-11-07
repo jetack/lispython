@@ -4,6 +4,7 @@ Expected positions are read off the source and generated text with
 ``locate``, so every assertion names the word it lands on.
 """
 
+import contextlib
 import hashlib
 import importlib
 import json
@@ -24,6 +25,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy.core import nodes, parser
+from lispy.core.importer import lpy_cache_path
 
 pv = importlib.import_module("lispy.lsp.python_view")
 server = importlib.import_module("lispy.lsp.server")
@@ -1393,14 +1395,14 @@ class TestMacroModules:
         assert "yy = 2 * 2 * 2" in text()
 
     def test_a_same_size_edit_in_the_same_second_is_seen(self, package, monkeypatch):
-        # The pyc keeps the source's mtime in whole seconds plus its size, so
-        # it would pass for the edited source.
+        # A pyc keeps the source's mtime in whole seconds plus its size, so
+        # it would pass for the edited source; the .lpy cache must not.
         monkeypatch.setattr(sys, "dont_write_bytecode", False)
         mac = package.pkg / "mac.lpy"
         second = (int(time.time()) - 10) * 10**9
         os.utime(mac, ns=(second + 100, second + 100))
         assert self.view(package).text.endswith("yy = 2 + 2")
-        assert os.path.exists(importlib.util.cache_from_source(str(mac)))
+        assert os.path.exists(lpy_cache_path(str(mac)))
         minus = TWICE.replace("(+ ", "(- ")
         assert len(minus) == len(TWICE)
         mac.write_text(minus)
@@ -1481,7 +1483,7 @@ class TestMacroModules:
         assert "zz = 3 + 3" in shadow.read_text()
 
     def test_a_macro_a_macro_module_required_is_seen(self, package, monkeypatch):
-        # mac's own pyc holds what base's macro expanded to when mac was
+        # mac's own cache holds what base's macro expanded to when mac was
         # compiled, so an edit to base reaches mac only through a new compile
         # of mac.
         monkeypatch.setattr(sys, "dont_write_bytecode", False)
@@ -1490,10 +1492,94 @@ class TestMacroModules:
             "(require .base *)\n(defmacro twice [x] (return (bump 10)))"
         )
         assert self.view(package).text.endswith("yy = 11")
-        mac_pyc = importlib.util.cache_from_source(str(package.pkg / "mac.lpy"))
-        assert os.path.exists(mac_pyc)
+        assert os.path.exists(lpy_cache_path(str(package.pkg / "mac.lpy")))
         (package.pkg / "base.lpy").write_text("(defmacro bump [x] (return `(* ~x 30)))")
         assert self.view(package).text.endswith("yy = 300")
+
+    def expansion_helper(self, package):
+        # mac's V comes from b's macro, which imports h only as it expands:
+        # h is read when mac compiles, never when mac loads from its cache.
+        (package.pkg / "h.py").write_text("VALUE = 1\n")
+        (package.pkg / "b.lpy").write_text(
+            "(defmacro val [] (import importlib)"
+            f' (return (. (importlib.import-module "{package.name}.h") VALUE)))'
+        )
+        (package.pkg / "mac.lpy").write_text(
+            "(require .b *)\n(= V (val))\n(defmacro twice [x] (return V))"
+        )
+
+    def test_a_module_read_by_a_cached_modules_compile_is_seen(
+        self, package, monkeypatch
+    ):
+        # After a drop, mac loads from its cache, so only its record names h.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        self.expansion_helper(package)
+        assert self.view(package).text.endswith("yy = 1")
+        init = package.pkg / "__init__.py"
+        st = os.stat(init)
+        os.utime(init, ns=(st.st_atime_ns, st.st_mtime_ns + 10**6))
+        assert self.view(package).text.endswith("yy = 1")
+        (package.pkg / "h.py").write_text("VALUE = 99\n")
+        assert self.view(package).text.endswith("yy = 99")
+
+    def test_a_server_starting_on_a_warm_cache_sees_its_record(
+        self, package, monkeypatch
+    ):
+        # Another process compiled mac, so this one loads it from its cache
+        # and never reads h.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        self.expansion_helper(package)
+        env = dict(os.environ)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        env["PYTHONPATH"] = str(package.root)
+        subprocess.run(
+            [sys.executable, "-c", f"import lispy, {package.name}.mac"],
+            env=env,
+            check=True,
+            timeout=120,
+        )
+        assert os.path.exists(lpy_cache_path(str(package.pkg / "mac.lpy")))
+        assert self.view(package).text.endswith("yy = 1")
+        (package.pkg / "h.py").write_text("VALUE = 99\n")
+        assert self.view(package).text.endswith("yy = 99")
+
+    def test_a_broken_macro_module_keeps_the_environment_settled(
+        self, package, monkeypatch
+    ):
+        # While mac fails to compile, its file alone is tracked: nothing is
+        # stale until it changes again.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        assert self.view(package).text.endswith("yy = 2 + 2")
+        (package.pkg / "mac.lpy").write_text("(defmacro twice [x]")
+        with contextlib.suppress(Exception):
+            self.view(package)
+        epoch = mm.epoch()
+        for _ in range(3):
+            with contextlib.suppress(Exception):
+                self.view(package)
+            assert mm.epoch() == epoch
+
+    def test_a_helper_a_macro_module_imported_before_is_seen(
+        self, package, monkeypatch
+    ):
+        # b imports h at top level, after b's own compile, so h is in no
+        # record: mac compiles while b is loaded, and only the drop's removal
+        # of mac's cache makes the next view compile mac again.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        (package.pkg / "h.py").write_text("VALUE = 1\n")
+        (package.pkg / "b.lpy").write_text(
+            f"(import {package.name}.h as h)\n(defmacro val [] (return h.VALUE))"
+        )
+        (package.pkg / "mac.lpy").write_text(
+            "(require .b *)\n(defmacro twice [x] (return (val)))"
+        )
+        kwargs = dict(package=package.name, import_root=str(package.root))
+        pv.compile_view(
+            "(require .b *)\n(= zz (val))", name=package.name + ".other", **kwargs
+        )
+        assert self.view(package).text.endswith("yy = 1")
+        (package.pkg / "h.py").write_text("VALUE = 77\n")
+        assert self.view(package).text.endswith("yy = 77")
 
     def test_a_second_instance_of_the_module_installs_nothing(
         self, package, monkeypatch
