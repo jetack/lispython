@@ -202,7 +202,7 @@ def _table_sections():
         (form_docs.MACRO_SYSTEM, "Macro system"),
         (
             form_docs.BUILTIN_MACRO,
-            "Built-in macros",
+            "Built-in macro index",
             form_docs.BUILTIN_MACROS_NOTE,
         ),
     )
@@ -210,7 +210,7 @@ def _table_sections():
 
 def form_index_markdown(page=REFERENCE_PAGE, docs_dir=DOCS_DIR):
     """The form reference as markdown: a table per section (statements,
-    expressions, macro system, built-in macros), a row per form in the
+    expressions, macro system, built-in macro index), a row per form in the
     order the hand-written pages document them, each form linked to its
     section there."""
     out = []
