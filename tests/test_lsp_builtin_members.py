@@ -6,7 +6,7 @@ on a list show ``list.sort``'s parameters, as pyright and jedi do for Python.
 Expected parameters are read from CPython (``inspect.signature``), never from
 the server, so the tests hold for any backend that reports the real
 signature. The rest pin the route: lispython's own forms and macros answer
-locally, the backend's names take the buffer's spelling, and with no backend
+locally, the backend's names take completion's spelling, and with no backend
 answer the local one stands.
 
 The tests share the session's backend over one tmp project
@@ -24,6 +24,7 @@ import pytest
 from lsprotocol import types as lsp
 
 import lispy  # noqa: F401  (registers the .lpy importer)
+from lispy.core.compiler.literal import hyphen_spelling
 from tests.lsp_backends import once
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
@@ -167,9 +168,11 @@ def test_another_type_and_method(signature_help):
 
 
 def assert_parameters(text, names):
+    """text shows each Python parameter name in names as completion spells
+    it (follow_symlinks as follow-symlinks)."""
     assert text is not None
     for name in names:
-        assert re.search(rf"\b{name}\b", text), (name, text)
+        assert re.search(rf"\b{hyphen_spelling(name)}\b", text), (name, text)
 
 
 # shutil.copyfile: its runtime parameters are the stub's too (os.path.join's
@@ -275,6 +278,63 @@ def test_markdown_prose_is_never_relabelled():
     )
 
 
+def test_every_name_takes_the_completion_spelling_and_strings_stay():
+    # Defects: a name the buffer never wrote keeps its Python spelling
+    # (my_x, _T_co), unlike the completion item that offered it; a string
+    # literal's text is relabelled (Literal["a_b"] read as "a-b", a value the
+    # library does not take); or an offset past a buffer spelling of another
+    # length (ok? for ok_p) lands one character off.
+    text = "def f(my_x: Literal[\"a_b\"], ok_p: _T_co = 'c\\'d_e') -> my_x"
+    new, mapped = server.python_to_buffer(text, {"ok_p": "ok?"})
+    assert new == "def f(my-x: Literal[\"a_b\"], ok?: _T-co = 'c\\'d_e') -> my-x"
+    spelled = {
+        '"a_b"': '"a_b"',
+        "ok_p": "ok?",
+        "_T_co": "_T-co",
+        "'c\\'d_e'": "'c\\'d_e'",
+        "-> my_x": "-> my-x",
+    }
+    for old, expected in spelled.items():
+        start = text.index(old)
+        assert new[mapped(start) : mapped(start + len(old))] == expected
+
+
+JSON_DUMPS = "(import json)\n"
+
+
+def test_hover_spells_a_library_name_as_completion_does(hover):
+    # Defect: a parameter the buffer never wrote shows its Python spelling
+    # (ensure_ascii) though completion offers it as ensure-ascii, so the
+    # hover shows a spelling the user does not type; or the docstring after
+    # the code block is relabelled, though it is the library's prose.
+    text = hover_text(hover(JSON_DUMPS + "(json.dum|ps 1)"))
+    code, _, prose = text.partition("\n```")
+    assert "ensure-ascii" in code and "check-circular" in code
+    assert "ensure_ascii" not in code and "check_circular" not in code
+    assert "ensure-ascii" not in prose
+    assert re.search(r"ensure\\?_ascii", prose), prose
+
+
+@pytest.mark.parametrize("label_offsets", [True, False], ids=["offsets", "strings"])
+def test_signature_help_spells_a_library_name_as_completion_does(
+    signature_help, label_offsets
+):
+    # Defect: the label and parameters show ensure_ascii, a spelling the
+    # user never types, though completion offers ensure-ascii.  An exact
+    # parameter text also fails if an offset label no longer covers exactly
+    # its parameter in the relabelled label.
+    result = signature_help(
+        JSON_DUMPS + "(json.dumps 1 |)", label_offsets=label_offsets
+    )
+    texts = [t for s in result.signatures for t in parameter_texts(s)]
+    assert "ensure-ascii: bool = True" in texts
+    assert "check-circular: bool = True" in texts
+    names = [t.split(":")[0].split("=")[0].strip().lstrip("*") for t in texts]
+    assert "ensure-ascii" in names and "sort-keys" in names
+    assert not [name for name in names if "_" in name.strip("_")], names
+    assert not [s.label for s in result.signatures if "ensure_ascii" in s.label]
+
+
 def test_the_hover_range_is_the_lpy_word(hover):
     # Defect: the backend's range is passed on: it lies in the generated
     # Python (sort is at columns 8-12 of `print(x.sort)`), so the client
@@ -303,6 +363,19 @@ def test_backend_off_gives_the_local_answer(hover, signature_help, off_backends)
     assert_local_print(
         hover("(pri|nt 1)", off_backends), signature_help("(print |)", off_backends)
     )
+
+
+@once
+def test_the_local_builtin_answer_spells_names_as_completion_does(
+    hover, signature_help, off_backends
+):
+    # Defect: with no backend, the builtin signature keeps inspect's Python
+    # spelling (class_or_tuple) where a backend's answer shows
+    # class-or-tuple.
+    text = hover_text(hover("(isinst|ance 1 int)", off_backends))
+    [label] = signature_labels(signature_help("(isinstance |)", off_backends))
+    for shown in (text, label):
+        assert "class-or-tuple" in shown and "class_or_tuple" not in shown
 
 
 @once

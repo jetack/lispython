@@ -1350,11 +1350,13 @@
 
 (def builtin-hover [target]
   "The builtin-info hover of Symbol target, or None: the answer when no
-   backend gives one."
+   backend gives one.  Its signature is spelled as a backend's is
+   (python-to-buffer: class-or-tuple), its docstring kept as it is."
   (= info (builtin-info (py-name target.value)))
   (if (is info None)
       (return None))
   (= [signature doc] info)
+  (= signature (sub (python-to-buffer signature {}) 0))
   (= hover-md f"```python\n{signature}\n```\n\n*(Python builtin)*")
   (if doc
       (+= hover-md f"\n\n{doc}"))
@@ -1560,7 +1562,8 @@
 
 (def builtin-signature-help [func-name]
   "The builtin-info SignatureHelp of a call of func-name, or None: the
-   answer when neither lispython nor a backend gives one."
+   answer when neither lispython nor a backend gives one, its label spelled
+   as a backend's is (python-to-buffer)."
   (if (is func-name None)
       (return None))
   (= info (builtin-info (py-name func-name)))
@@ -1569,7 +1572,7 @@
   (= [signature doc-str] info)
   (return (lsp.SignatureHelp
             :signatures [(lsp.SignatureInformation
-                           :label signature
+                           :label (sub (python-to-buffer signature {}) 0)
                            :documentation (ife doc-str
                                               (lsp.MarkupContent
                                                 :kind lsp.MarkupKind.Markdown
@@ -2276,24 +2279,29 @@
 ;; Hover and signature help through the Python backend
 ;; ---------------------------------------------------------------------------
 
-;; A Python identifier in a backend's text: a word that starts with no digit
-;; (the e5 of 1e5 is none).
-(= _PY-IDENTIFIER (re.compile "(?<!\\w)[^\\W\\d]\\w*"))
+;; One scan of a backend's Python text: a quoted string literal (group 1,
+;; "..." or '...' with backslash escapes, kept as it is: Literal["a_b"] and
+;; a default = 'a_b' are values, not names), or a Python identifier, a word
+;; that starts with no digit (the e5 of 1e5, the _000 of 1_000 are none).
+(= _PY-TEXT (re.compile "(\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*')|(?<!\\w)[^\\W\\d]\\w*"))
 
 (def python-to-buffer [text spellings]
-  "(new-text, mapped): text with each Python identifier the buffer spells
-   otherwise (spellings is buffer-spellings', keyed by Python name) written
-   as the buffer does (my_x as my-x), and a function taking an offset into
-   text to the same place in new-text.  A name the buffer never spells
-   stays as it is."
+  "(new-text, mapped): text with every Python identifier outside a string
+   literal written as completion labels it (completion-label over
+   spellings, buffer-spellings' map keyed by Python name: ensure_ascii as
+   ensure-ascii, _T_co as _T-co, the buffer's ok? for ok_p), and a
+   function taking an offset into text to the same place in new-text.
+   String literals keep the library's text."
   (= pieces [])
   ;; (old start, old end, new start, new end) of each replaced name
   (= edits [])
   (= done 0)
   (= shift 0)
-  (for m in (.finditer _PY-IDENTIFIER text)
-    (= spelled (.get spellings (.group m)))
-    (if (or (is spelled None) (== spelled (.group m)))
+  (for m in (.finditer _PY-TEXT text)
+    (if (is-not (.group m 1) None)
+        (continue))
+    (= spelled (completion-label (.group m) spellings))
+    (if (== spelled (.group m))
         (continue))
     (.append pieces (sub text [: done (.start m)]))
     (.append pieces spelled)
@@ -2316,8 +2324,9 @@
 
 (def markdown-to-buffer [text spellings]
   "Markdown text with python-to-buffer applied inside its fenced code blocks
-   only: the prose around them (a docstring) is the library's words, where
-   a name the buffer happens to spell may be an ordinary word."
+   only: the prose around them (a docstring, its inline code spans
+   included) is the library's words, written in Python, where a name may
+   be an ordinary word."
   (= lines (.split text "\n"))
   (= fenced False)
   (for i in (range (len lines))
