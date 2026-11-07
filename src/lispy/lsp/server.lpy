@@ -1103,6 +1103,24 @@
     (return node))
   (return None))
 
+(def form-head-p [nodes target]
+  "True when node target is the head (first element) of the Paren that holds
+   it in nodes, a parsed tree: only there is a special-form name the form
+   (form_docs SPECIAL-FORMS); anywhere else it is a name."
+  (= pending [nodes])
+  (while pending
+    (for node in (.pop pending)
+      (cond (isinstance node Expression)
+            (do (for [i child] in (enumerate node.list)
+                  (if (is child target)
+                      (return (and (== i 0) (isinstance node Paren)))))
+                (.append pending node.list))
+            (isinstance node (, Wrapper MetaIndicator))
+            (.append pending [node.value])
+            (isinstance node GluedHead)
+            (.append pending [node.head node.params]))))
+  (return False))
+
 ;; ---------------------------------------------------------------------------
 ;; Definition index
 ;; ---------------------------------------------------------------------------
@@ -1299,13 +1317,14 @@
 
 (def form-hover [tree target :view None]
   "lispython's own hover of Symbol target, or None: the alias doc on the
-   type of a type alias, else a special form's doc, else the docstring of
+   type of a type alias, else a special form's doc at a form head
+   (form-head-p), else the docstring of
    one of the buffer's built-in macros (builtin-macro-doc, over view, the
    buffer's full view, when there is one).  It answers before any backend,
    which knows no lispython form."
   (if (and (== target.value "type") (alias-keyword-p tree target))
       (return (markdown-hover TYPE-ALIAS-DOC target)))
-  (= doc-text (or (.get SPECIAL-FORM-DOCS target.value)
+  (= doc-text (or (and (form-head-p tree target) (.get SPECIAL-FORM-DOCS target.value))
                   (builtin-macro-doc tree target.value :view view)))
   (if doc-text
       (return (markdown-hover doc-text target)))
@@ -1360,7 +1379,7 @@
       (return None))
   (= [doc tree line col target] found)
   (= name target.value)
-  (if (in name SPECIAL-FORM-DOCS)
+  (if (and (in name SPECIAL-FORM-DOCS) (form-head-p tree target))
       (return None))
   ;; Every Python name goes to the backend, the buffer's own bindings too:
   ;; it knows scopes (a function's local never answers for a global of the
@@ -2845,7 +2864,7 @@
   (if (is found None)
       (return None))
   (= [doc tree line col target] found)
-  (if (in target.value SPECIAL-FORM-DOCS)
+  (if (and (in target.value SPECIAL-FORM-DOCS) (form-head-p tree target))
       (return (collect-references tree target.value doc.uri)))
   ;; A local binding goes to the backend too: its uses in other .lpy files
   ;; are what references across files are for.  Its answer, once given, is

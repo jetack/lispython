@@ -193,6 +193,25 @@ def test_type_call_keeps_the_builtin_hover():
     assert "Python builtin" in hover.contents.value
 
 
+@pytest.mark.parametrize("name", ["f-string", "ife"])
+def test_a_bound_special_form_name_has_no_form_hover(name):
+    # Defect: the form's doc answers for a name the buffer bound, which the
+    # compiler reads as the form only at a form head.
+    source = f"(= {name} 3)\n(print {name})"
+    assert run_hover(ls_with(source), position(0, 4)) is None
+    assert run_hover(ls_with(source), position(1, 8)) is None
+
+
+@pytest.mark.parametrize(
+    "source, character, name",
+    [('(print f"ab{x}")', 8, "f-string"), ("(ife a b c)", 2, "ife")],
+    ids=["f-literal", "ife head"],
+)
+def test_a_special_form_at_its_head_keeps_the_form_hover(source, character, name):
+    hover = run_hover(ls_with(source), position(0, character))
+    assert hover.contents.value == server.SPECIAL_FORM_DOCS[name]
+
+
 def test_type_call_is_not_a_definition():
     ls = ls_with(CALLS)
     assert server.document_symbol(ls, position(0, 0)) == []

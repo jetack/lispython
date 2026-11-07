@@ -176,6 +176,19 @@ def test_derived_form_names(lexer):
             assert kind_of(lexer, f"({name} x)", name) is Keyword, name
 
 
+@pytest.mark.parametrize("name", ["f-string", "ife", "match"])
+def test_a_lettered_form_name_off_a_head_is_a_name(lexer, name):
+    # Defect: the form colours wherever its name stands, though the compiler
+    # reads it as the form only at a form head and binds it elsewhere.
+    assert kind_of(lexer, f"(= {name} 3)", name) is Name
+    assert kind_of(lexer, f"({name} a b c)", name) is Keyword
+
+
+def test_python_keywords_and_operator_forms_colour_anywhere(lexer):
+    assert kind_of(lexer, "[x for x in xs]", "for") is Keyword
+    assert kind_of(lexer, "(reduce + xs)", "+") is Operator
+
+
 def lispython_fences(docs_main):
     """The text of every ```lispython fence on the docs pages, and the usage
     block docs/main.py generates for every built-in macro."""

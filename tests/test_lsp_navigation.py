@@ -265,6 +265,35 @@ def test_a_macro_gets_the_local_answers(navigate, backend_requests):
     assert backend_requests.sent == []
 
 
+@once
+@pytest.mark.parametrize("name", ["f-string", "ife"])
+@pytest.mark.parametrize("handler", [server.definition, server.references])
+def test_a_bound_special_form_name_reaches_the_backend(
+    navigate, backend_requests, handler, name
+):
+    # Defect: a special-form name is the form wherever it stands, so a name
+    # the buffer bound (the form only at a form head, as the compiler reads
+    # it) gets no definition and only the by-name references.
+    backend_requests.answer["value"] = []
+    assert navigate(handler, f"(= {name} 3)\n(print {name[0]}|{name[1:]})") == []
+    assert backend_requests.sent == [
+        lsp.TEXT_DOCUMENT_DEFINITION
+        if handler is server.definition
+        else lsp.TEXT_DOCUMENT_REFERENCES
+    ]
+
+
+@once
+def test_a_special_form_at_its_head_gets_the_local_answers(navigate, backend_requests):
+    marked = "(= ife 3)\n(i|fe a b c)"
+    assert navigate(server.definition, marked) is None
+    assert spans(navigate(server.references, marked)) == [
+        ("main.lpy", 0, 3, 0, 6),
+        ("main.lpy", 1, 1, 1, 4),
+    ]
+    assert backend_requests.sent == []
+
+
 def checked_definition(real_backends):
     """The requests a definition answer that maps nowhere takes: a backend
     whose definition walks up (basedpyright) has it checked against the

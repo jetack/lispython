@@ -10,10 +10,14 @@ Nothing here restates the language. Token boundaries are the reader's own
 patterns (``_token_patterns`` in ``lispy.core.parser``, numbers and string
 prefixes included); the form names come from ``lispy.form_docs`` (special
 forms, the ``type`` alias, built-in macros), and the Python names from
-``keyword`` and ``builtins``. Only Pygments (through the entry point) and the
-tests import this module, so Pygments is not a runtime dependency. Loading it
-imports ``lispy``, which installs the ``.lpy`` import hook process-wide, and
-Pygments loads every plugin lexer on a filename lookup or ``guess_lexer``.
+``keyword`` and ``builtins``. A lettered special form that is no Python keyword
+(``ife``, ``f-string``, ``match``) colours as a form only at a form head, where
+the compiler dispatches it; elsewhere it is the name it binds.
+
+Only Pygments (through the entry point) and the tests import this module, so
+Pygments is not a runtime dependency. Loading it imports ``lispy``, which
+installs the ``.lpy`` import hook process-wide, and Pygments loads every plugin
+lexer on a filename lookup or ``guess_lexer``.
 """
 
 import builtins
@@ -49,6 +53,12 @@ _MACROS = frozenset(form_docs.BUILTIN_MACROS)
 # The soft keywords lispython reads (match, case, type) are its forms;
 # keyword.softkwlist would add one per Python release that lispython lacks.
 _KEYWORDS = frozenset(form_docs.ALL_FORMS) - _MACROS | frozenset(keyword.kwlist)
+# The lettered forms a Python name can spell: a form only right after "(".
+_HEAD_ONLY = frozenset(
+    name
+    for name in _KEYWORDS - frozenset(keyword.kwlist)
+    if any(c.isalpha() for c in name)
+)
 _CONSTANTS = frozenset(special_literals)
 _BUILTINS = {
     name: Name.Exception
@@ -67,7 +77,7 @@ def _symbol_tokens(text, start, after_paren):
         if text in _CONSTANTS:
             yield start, Keyword.Constant, text
             return
-        if text in _KEYWORDS:
+        if text in _KEYWORDS and (after_paren or text not in _HEAD_ONLY):
             kind = Keyword if any(c.isalpha() for c in text) else Operator
             yield start, kind, text
             return

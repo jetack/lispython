@@ -186,6 +186,10 @@ this module only reads them."""
 (refuse-undocumented STATEMENT-HEADS HEAD-FORMS)
 
 ;; Everything hover and the docs document under a special-form name.
+;; A special-form name is the form only at a form head, where the compiler
+;; dispatches it; elsewhere it is a name it binds (`(= ife 3)`), so its
+;; readers ask for a head: form-head-p (lsp/server.lpy), after_paren in
+;; highlight.py.
 (= SPECIAL-FORMS {**HEAD-FORMS **READER-SYNTAX-DOCS})
 
 ;; Not in SPECIAL-FORMS: `type` is also the builtin, so the LSP shows this only
