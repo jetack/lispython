@@ -648,7 +648,16 @@
 
 (def _nrepl-request-scope [msg fields scope]
   "The scope a request runs in: the file scope of the first of fields (tried
-   in order) whose value is a string path, else the session scope."
+   in order) whose value is a string path, else the session scope.  The one
+   home of the ns rule: a present, non-null ns must be an absolute path
+   (standard clients send namespace names, which would otherwise become
+   <cwd>/name), checked even when an earlier field wins; ValueError if not."
+  (if (in "ns" fields)
+      (do (= ns (.get msg "ns"))
+          (if (and (is-not ns None)
+                   (not (and (isinstance ns str) (osp.isabs ns))))
+              (raise (ValueError
+                       (+ "ns must be an absolute file path, got " (repr ns)))))))
   (for field in fields
     (= path (.get msg field))
     (if (isinstance path str)

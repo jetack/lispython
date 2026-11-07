@@ -229,8 +229,12 @@ def isolated(monkeypatch):
     return scope
 
 
+def op(scope, name, **msg):
+    return tools._nrepl_dispatch({"op": name, **msg}, scope)
+
+
 def dispatch(scope, **msg):
-    return tools._nrepl_dispatch({"op": "eval", **msg}, scope)
+    return op(scope, "eval", **msg)
 
 
 UPDATE = "(def update [xs]\n  (return (sub xs [0])))"
@@ -413,10 +417,6 @@ def test_null_position_fields_take_the_defaults():
 # --- ns picks the scope only -------------------------------------------------
 
 
-def op(scope, name, **msg):
-    return tools._nrepl_dispatch({"op": name, **msg}, scope)
-
-
 def test_eval_ns_runs_in_that_files_scope_without_naming_it(isolated, tmp_path):
     path = tmp_path / "prog.lpy"
     path.write_text("(= on-disk 1)\n")
@@ -462,3 +462,32 @@ def test_macroexpand_ns_expands_a_macro_of_that_files_scope(isolated, tmp_path):
     assert reply["error"] is None
     assert "nsmac" not in reply["expansion"]
     assert op(isolated, "macroexpand", code="(nsmac 5)")["expansion"] == "(nsmac 5)"
+
+
+@pytest.mark.parametrize("name", ["eval", "complete", "macroexpand"])
+@pytest.mark.parametrize("ns", [5, [], "", "user"])
+@pytest.mark.parametrize("file", [None, "/tmp/some-file.lpy"])
+def test_invalid_ns_replies_with_error_and_keeps_serving(name, ns, file):
+    msg = {"code": "1", "prefix": "a", "ns": ns}
+    if file:
+        msg["file"] = file  # file wins the scope, but a bad ns is still refused
+    replies = serve([line(op=name, id=7, **msg) + line(op="ping", id=8)])
+    assert replies == [
+        {
+            "op": "error",
+            "error": f"ValueError: ns must be an absolute file path, got {ns!r}",
+            "id": 7,
+        },
+        {"op": "pong", "id": 8},
+    ]
+
+
+def test_ns_eval_at_line_one_never_re_derives_the_prelude(isolated, tmp_path):
+    ns = str(tmp_path / "prog.lpy")
+    first = dispatch(isolated, code="(require lispy.macros [])", file=ns, line=1)
+    assert first["error"] is None
+    probe = "(when True 1)"
+    assert op(isolated, "macroexpand", code=probe, ns=ns)["expansion"] == probe
+    assert dispatch(isolated, code="(+ 1 2)", ns=ns, line=1, column=1)["error"] is None
+    # still absent: the ns eval at line 1 was not a TOP start
+    assert op(isolated, "macroexpand", code=probe, ns=ns)["expansion"] == probe
