@@ -605,12 +605,15 @@
    published counts its publishes, so an older one finishing last never
    replaces a newer; ignores memoises the buffer's suppression-comments of
    the backend's tool for every publish of the run.  refresh: the run was
-   started by refresh-outdated, so it starts no refresh itself."
-  (def __init__ [self ls doc :recompile False :refresh False]
+   started by refresh-outdated or finish-run, so it starts no refresh
+   itself.  rerun: finish-run started it for a compile older than the
+   refresh target, so it is never rerun again."
+  (def __init__ [self ls doc :recompile False :refresh False :rerun False]
     (= self.ls ls)
     (= self.doc doc)
     (= self.recompile recompile)
     (= self.refresh refresh)
+    (= self.rerun rerun)
     (= self.compiled False)
     (= self.epoch None)
     (= self.superseded (asyncio.Event))
@@ -651,7 +654,8 @@
   (if (and (not (.cancelled task)) (is-not (.exception task) None))
       (.error logger "lispython LSP: diagnostics failed" :exc-info (.exception task))))
 
-(def publish-diagnostics [ls uri :opened False :recompile False :refresh False]
+(def publish-diagnostics [ls uri :opened False :recompile False :refresh False
+                          :rerun False]
   "Publish document uri's diagnostics as it is now, from tasks of the loop
    (the handlers that call this are synchronous): the change becomes the
    document's latest run, which compile-latest compiles unless a newer
@@ -659,16 +663,18 @@
    which starts its backend now (Backends.document-opened, never waiting),
    so a change before the open's compile cannot skip the start.
    recompile: compile again even at a cached version (a save: the macros
-   may read what changed on disk).  refresh: DiagnosticRun's.  A run
-   replaced before its compile began hands on its own: the new run
-   recompiles if either does, and is a refresh run only if both are, so a
-   refresh never drops a pending change's refresh or a save's recompile."
+   may read what changed on disk).  refresh, rerun: DiagnosticRun's.  A
+   run replaced before its compile began hands on its own: the new run
+   recompiles if either does, and is a refresh run, or a rerun, only if
+   both are, so a refresh never drops a pending change's refresh or a
+   save's recompile, and a change clears a pending rerun."
   (= doc (document-snapshot (.get-text-document ls.workspace uri)))
   (= prev (.get DIAGNOSTIC-RUNS uri))
   (if (and (is-not prev None) (not prev.compiled))
       (do (= recompile (or recompile prev.recompile))
-          (= refresh (and refresh prev.refresh))))
-  (= run (DiagnosticRun ls doc :recompile recompile :refresh refresh))
+          (= refresh (and refresh prev.refresh))
+          (= rerun (and rerun prev.rerun))))
+  (= run (DiagnosticRun ls doc :recompile recompile :refresh refresh :rerun rerun))
   (_supersede prev)
   (= (sub DIAGNOSTIC-RUNS uri) run)
   (if opened
@@ -792,7 +798,8 @@
    the backend, or send it a stale view.  A run that is not a refresh then
    refreshes the other documents (refresh-outdated); a run still the latest
    whose compile ran under an older macro environment than the last
-   refresh's target (_REFRESH-TARGET) publishes again, as a refresh run."
+   refresh's target (_REFRESH-TARGET) publishes again, as a refresh run and
+   a rerun, unless it is a rerun itself or a parse error."
   (if (not (_current-p run))
       (return))
   (= doc run.doc)
@@ -807,12 +814,14 @@
   ;; A refresh skips a document whose run is compiling (it has no epoch
   ;; yet), so that run may have published a compile from before the
   ;; environment the refresh brought the documents to, and would stay
-  ;; stale.  Its rerun enters fresh-modules after the drop the target
-  ;; stands for, so its epoch is no older than _REFRESH-TARGET and this
-  ;; ends there.
-  (if (and (_current-p run) (is-not compiled.epoch None)
+  ;; stale: it runs once more.  The target may never be reached (no drop
+  ;; happens while a hung compile blocks it, or the staleness vanishes), so
+  ;; termination rests on no epoch: a parse error ran no macro and is never
+  ;; rerun, and a rerun (DiagnosticRun.rerun) never reruns itself.
+  (if (and (_current-p run) (not run.rerun) (!= compiled.stage PARSE-STAGE)
+           (is-not compiled.epoch None)
            (is-not _REFRESH-TARGET None) (< compiled.epoch _REFRESH-TARGET))
-      (publish-diagnostics run.ls doc.uri :refresh True)))
+      (publish-diagnostics run.ls doc.uri :refresh True :rerun True)))
 
 ;; The epoch of the compile that last started a refresh (refresh-outdated):
 ;; a run under no newer one starts none.
@@ -822,13 +831,10 @@
 (= _REFRESH-TARGET None)
 
 (def refresh-epochs []
-  "(now, target): the macro environment's version now (macro_modules.epoch,
-   None while a drop is due), and the one a compile started from now runs
-   under at the least: now, or past the current counter while a drop is
-   due.  It stats the tracked files, so callers on the loop run it in a
-   thread."
-  (= now (macro-modules.epoch))
-  (return (, now (ife (is now None) (+ (macro-modules.current-epoch) 1) now))))
+  "(now, target) of the macro environment (macro_modules.epoch-and-target,
+   read under one hold of its lock).  It stats the tracked files, so
+   callers on the loop run it in a thread."
+  (return (macro-modules.epoch-and-target)))
 
 (async-def refresh-outdated [ls uri compiled]
   "Run when a diagnostic run of document uri published a compile under a

@@ -950,6 +950,10 @@ def test_a_refresh_keeps_a_pending_changes_recompile_and_refresh(scripted):
     server.publish_diagnostics(editor, editor.uri, refresh=True)
     run = server.DIAGNOSTIC_RUNS[editor.uri]
     assert (run.recompile, run.refresh) == (False, True)
+    del server.DIAGNOSTIC_RUNS[editor.uri]
+    server.publish_diagnostics(editor, editor.uri, refresh=True, rerun=True)
+    server.publish_diagnostics(editor, editor.uri)  # a change clears a rerun
+    assert not server.DIAGNOSTIC_RUNS[editor.uri].rerun
 
 
 def refreshes(monkeypatch, runs, now, refreshed_epoch, compiled_epoch):
@@ -1013,6 +1017,55 @@ def test_a_run_compiled_before_a_refresh_publishes_again(scripted, monkeypatch):
     assert len(editor.published) == 2
 
 
+def test_a_rerun_below_the_target_is_not_rerun(scripted, monkeypatch):
+    # Defect: a rerun whose compile still runs under an epoch below the
+    # refresh target (one no compile reaches: a hung compile blocks the
+    # drop, or the staleness vanished) reruns itself forever.
+    editor, _ = scripted
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
+    held_runs(editor)
+    monkeypatch.setattr(server, "_REFRESHED_EPOCH", 10)
+    monkeypatch.setattr(server, "_REFRESH_TARGET", 10)
+    _, rerun = finished(editor, 3)
+    assert rerun.rerun
+    rerun.compiled = True
+    compiled = server.compile_document(editor.uri, None, editor.document.source)
+    compiled.epoch = 3
+    asyncio.run(server.finish_run(rerun, compiled))
+    assert server.DIAGNOSTIC_RUNS[editor.uri] is rerun
+
+
+def test_a_parse_error_under_an_unreached_target_settles(scripted, monkeypatch):
+    # Defect: a parse error runs no macro, so it never enters fresh-modules
+    # and never reaches a refresh target past its epoch (a drop due): it
+    # republishes itself forever.
+    editor, _ = scripted
+    monkeypatch.setattr(server, "_REFRESH_TARGET", macro_modules.current_epoch() + 5)
+
+    async def scenario():
+        editor.change("(= a")
+        await until(lambda: editor.published, timeout=3)
+        await until(drained, timeout=3)
+
+    run_bounded(scenario())
+    [[diagnostic]] = editor.published
+    assert diagnostic.message.startswith("Parse error:")
+
+
+def test_the_refresh_target_is_read_with_the_epoch(monkeypatch):
+    # Defect: the epoch and the counter are read under two holds of the
+    # lock, so a drop landing between them gives a target past the epoch
+    # every later compile runs under, and every finishing run republishes.
+    def due_then_dropped():  # a drop due, then made before the next read
+        with macro_modules._SHARED.condition:
+            macro_modules._SHARED.epoch += 1
+        return None
+
+    monkeypatch.setattr(macro_modules, "epoch", due_then_dropped)
+    _, target = server.refresh_epochs()
+    assert target <= macro_modules.current_epoch()  # no drop is due now
+
+
 def test_a_run_compiled_before_a_due_drop_publishes_again(scripted, monkeypatch):
     # Defect: a run compiling while a refresh happened is checked against
     # the epoch of the run that started the refresh, not the environment
@@ -1021,8 +1074,7 @@ def test_a_run_compiled_before_a_due_drop_publishes_again(scripted, monkeypatch)
     # compile from before the drop.
     editor, _ = scripted
     monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
-    monkeypatch.setattr(macro_modules, "epoch", lambda: None)  # a drop due
-    monkeypatch.setattr(macro_modules, "current_epoch", lambda: 7)
+    monkeypatch.setattr(macro_modules, "epoch_and_target", lambda: (None, 8))
     asyncio.run(server.refresh_outdated(None, "trigger", SimpleNamespace(epoch=7)))
     held_runs(editor)
     run, latest = finished(editor, 7)
