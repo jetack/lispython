@@ -646,14 +646,16 @@
             (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
   (return (sub entry 1)))
 
+(= NREPL-NS-FIELD "ns")  ; the request field naming an eval/complete/macroexpand scope
+
 (def _nrepl-request-scope [msg fields scope]
   "The scope a request runs in: the file scope of the first of fields (tried
    in order) whose value is a string path, else the session scope.  The one
    home of the ns rule: a present, non-null ns must be an absolute path
    (standard clients send namespace names, which would otherwise become
    <cwd>/name), checked even when an earlier field wins; ValueError if not."
-  (if (in "ns" fields)
-      (do (= ns (.get msg "ns"))
+  (if (in NREPL-NS-FIELD fields)
+      (do (= ns (.get msg NREPL-NS-FIELD))
           (if (and (is-not ns None)
                    (not (and (isinstance ns str) (osp.isabs ns))))
               (raise (ValueError
@@ -941,7 +943,7 @@
         ;; no file the filename stays None, so linecache and tracebacks never
         ;; name the ns file; file wins when both are sent.
         (do (= result (nrepl-eval (sub msg "code")
-                                  (_nrepl-request-scope msg ["file" "ns"] scope)
+                                  (_nrepl-request-scope msg ["file" NREPL-NS-FIELD] scope)
                                   :filename (.get msg "file")
                                   :line (.get msg "line")
                                   :column (.get msg "column")))
@@ -956,11 +958,11 @@
 
         (== op "macroexpand")
         (return (nrepl-macroexpand (sub msg "code")
-                                   (_nrepl-request-scope msg ["file" "ns"] scope)))
+                                   (_nrepl-request-scope msg ["file" NREPL-NS-FIELD] scope)))
 
         (== op "complete")
         (return (nrepl-complete (sub msg "prefix")
-                                (_nrepl-request-scope msg ["file" "ns"] scope)))
+                                (_nrepl-request-scope msg ["file" NREPL-NS-FIELD] scope)))
 
         (== op "docs")
         (return (nrepl-docs (sub msg "symbol")

@@ -498,3 +498,13 @@ def test_null_ns_counts_as_absent(name):
     [reply] = serve([line(op=name, id=1, code="(+ 1 2)", prefix="pri", ns=None)])
     assert reply["op"] != "error"
     assert reply["id"] == 1
+
+
+def test_ns_field_has_one_spelling_in_tools():
+    # "ns" is spelled once, as NREPL_NS_FIELD; editor clients mirror that name,
+    # and a second inline spelling could drift from it.
+    from pathlib import Path
+
+    src = Path(tools.__file__).with_name("tools.lpy").read_text()
+    assert tools.NREPL_NS_FIELD == "ns"
+    assert re.findall(r'"ns"', src) == ['"ns"']
