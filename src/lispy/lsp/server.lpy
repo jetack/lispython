@@ -1778,9 +1778,14 @@
                                                :kind lsp.CompletionItemKind.Variable)))))
   (return items))
 
-(def local-completion [doc :line None]
+(def local-completion [doc :line None :col None]
   "The completion answer when no Python backend gives one: the general
-   list, with no guess at what an attribute's object holds."
+   list, or none at all on an attribute (attribute-context-p at line and
+   col), because only the backend knows a base's members and a base it
+   cannot resolve has none."
+  (if (and (is-not line None) (is-not col None)
+           (attribute-context-p doc.source line col))
+      (return (lsp.CompletionList :is-incomplete False :items [])))
   (return (lsp.CompletionList :is-incomplete False
                               :items (general-items doc :line line))))
 
@@ -2140,7 +2145,7 @@
 (async-def backend-completion [doc line col insert-replace]
   "The completion answer with the Python backend's help, or None when it
    gives none (no backend, a buffer with no Python view, no items), and
-   local-completion is the answer.  doc is a snapshot (document-snapshot).
+   local-completion is the answer (none at all on an attribute).  doc is a snapshot (document-snapshot).
    On an attribute the backend's items alone answer, and the request may
    start the backend; elsewhere lispython's own items merged with the
    backend's (merged-items) do, from an already running backend within
@@ -2398,7 +2403,7 @@
       (= result None)))
   (if (is-not result None)
       (return result))
-  (return (local-completion doc :line line))))
+  (return (local-completion doc :line line :col col))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend
