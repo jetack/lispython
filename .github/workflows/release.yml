@@ -1,24 +1,33 @@
-# Publishes lispython to PyPI when a `v*` tag is pushed. No token: PyPI Trusted
-# Publishing (OIDC). The PyPI trusted publisher must match owner jetack, repo
-# lispython, workflow release.yml, environment pypi. Only the publish job holds
-# the OIDC permission, and it runs no project code (it just uploads the built
-# artifact).
-name: Release
+# Tests every push to main and every pull request on the whole supported range,
+# and publishes lispython to PyPI when a `v*` tag is pushed. The test job is
+# one home for both, so a release cannot publish code the matrix did not pass.
+# It shares this file with the publish job because HQ's CI gate (the
+# `# hq:test-gate` and `# hq:deploy-job` markers) needs both in one workflow,
+# and the file keeps its name because the PyPI trusted publisher is bound to
+# release.yml. No token: PyPI Trusted Publishing (OIDC). The PyPI trusted
+# publisher must match owner jetack, repo lispython, workflow release.yml,
+# environment pypi. Only the publish job holds the OIDC permission, and it runs
+# no project code (it just uploads the built artifact).
+# The test matrix must equal noxfile.py PYTHONS (tests/test_ci_workflow.py).
+name: CI and Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
 
 permissions: {}
 
 jobs:
   test:
+    name: Test (Python ${{ matrix.python }}) # hq:test-gate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
@@ -29,9 +38,10 @@ jobs:
         with:
           version: "0.13.0"
           enable-cache: false
-      - run: uv run --frozen --python ${{ matrix.python }} --extra dev pytest
+      - run: uv run --frozen --python ${{ matrix.python }} --extra dev --extra lsp pytest
 
   build:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
