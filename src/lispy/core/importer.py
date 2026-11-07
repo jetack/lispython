@@ -8,7 +8,6 @@ import os
 import os.path as osp
 import runpy
 import sys
-import tempfile
 import threading
 import types
 
@@ -155,12 +154,16 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
 
 _CACHE_MAGIC = b"LPYC"
 _LOCAL = threading.local()
+# Real path of an .lpy to the record of the code this process loaded or last
+# compiled from it; none while its latest compile failed.
 _RECORDS = {}
-# Real path to (st_mtime_ns, st_size) of every source path_stats observed, as
-# of its latest load: a macro module with no record (a .py) is stamped as it
-# was read, never as it is when a requiring module's compile ends.
+# Path as the loader stat'ed it (a module's __file__) to (st_mtime_ns,
+# st_size), as of its latest load: a macro module with no record (a .py) is
+# stamped as it was read, never as it is when a requiring module's compile
+# ends.  Keyed by the path as given, so an import costs one stat, no realpath.
 _READ_STAMPS = {}
 _cache_header = None
+_TEMP_ATTEMPTS = 3
 _excluded_dirs = None
 
 
@@ -177,9 +180,11 @@ def lpy_cache_path(path):
 
 
 def lpy_record(path):
-    """The dependency record of the .lpy at path as this process last
-    compiled or loaded it from its cache: a tuple of (real path,
-    st_mtime_ns, st_size), its own source first; None when it has none."""
+    """The dependency record of the code this process loaded for the .lpy at
+    path (compiled, or from its cache): a tuple of (real path, st_mtime_ns,
+    st_size), its own source first.  None when it has none, which includes
+    while its latest compile failed: a record only ever describes code that
+    is loaded."""
     return _RECORDS.get(osp.realpath(path))
 
 
@@ -253,12 +258,15 @@ def _lpy_path_stats(self, path):
     # predates the text compiled: an edit during the import makes the record
     # stale, never missed.
     try:
-        stamp = _stamp(path)
+        st = os.stat(path)
     except OSError:
         pass
     else:
-        _READ_STAMPS[stamp[0]] = stamp[1:]
-        _record_into_windows([stamp], filtered=True)
+        _READ_STAMPS[path] = (st.st_mtime_ns, st.st_size)
+        if getattr(_LOCAL, "windows", None):
+            _record_into_windows(
+                [(osp.realpath(path), st.st_mtime_ns, st.st_size)], filtered=True
+            )
     return _org_path_stats(self, path)
 
 
@@ -299,15 +307,22 @@ def _write_cache(cache_path, deps, code, source_path):
         + marshal.dumps(code)
     )
     try:
-        directory = osp.dirname(cache_path)
-        os.makedirs(directory, exist_ok=True)
-        fd, temp = tempfile.mkstemp(dir=directory, prefix=osp.basename(cache_path))
+        os.makedirs(osp.dirname(cache_path), exist_ok=True)
+        # The source's permission bits, writable by its owner, given at
+        # creation so the umask applies, as CPython's pyc writer does.
+        mode = (os.stat(source_path).st_mode & 0o666) | 0o200
+        for attempt in range(_TEMP_ATTEMPTS):
+            # A random name, so a temp file a crashed writer left blocks nothing.
+            temp = f"{cache_path}.{os.urandom(8).hex()}.tmp"
+            try:
+                fd = os.open(temp, os.O_EXCL | os.O_CREAT | os.O_WRONLY, mode)
+                break
+            except FileExistsError:
+                if attempt == _TEMP_ATTEMPTS - 1:
+                    raise
         try:
             with open(fd, "wb") as f:
                 f.write(data)
-            # The source's permission bits, writable by its owner, as
-            # CPython gives a pyc (mkstemp creates the file owner-only).
-            os.chmod(temp, (os.stat(source_path).st_mode & 0o666) | 0o200)
             os.replace(temp, cache_path)
         except OSError:
             try:
@@ -337,7 +352,7 @@ def _dependencies(own, window, scope, fullname):
             continue
         record = _RECORDS.get(real)
         if record is None:
-            stamp = _READ_STAMPS.get(real)
+            stamp = _READ_STAMPS.get(module_file)
             if stamp is not None:
                 record = ((real, *stamp),)
             else:
@@ -374,6 +389,9 @@ def _lpy_get_code(self, fullname):
             _RECORDS[own[0]] = deps
             _record_into_windows(deps, filtered=False)
             return code
+    # The record of the code loaded before goes now: if this compile fails, no
+    # record may describe code that is no longer what the file holds.
+    _RECORDS.pop(osp.realpath(source_path), None)
     data = self.get_data(source_path)
     window = {}
     windows = _windows()

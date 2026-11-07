@@ -4,6 +4,7 @@ Expected positions are read off the source and generated text with
 ``locate``, so every assertion names the word it lands on.
 """
 
+import contextlib
 import hashlib
 import importlib
 import json
@@ -1541,6 +1542,44 @@ class TestMacroModules:
         assert self.view(package).text.endswith("yy = 1")
         (package.pkg / "h.py").write_text("VALUE = 99\n")
         assert self.view(package).text.endswith("yy = 99")
+
+    def test_a_broken_macro_module_keeps_the_environment_settled(
+        self, package, monkeypatch
+    ):
+        # While mac fails to compile, its file alone is tracked: nothing is
+        # stale until it changes again.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        assert self.view(package).text.endswith("yy = 2 + 2")
+        (package.pkg / "mac.lpy").write_text("(defmacro twice [x]")
+        with contextlib.suppress(Exception):
+            self.view(package)
+        epoch = mm.epoch()
+        for _ in range(3):
+            with contextlib.suppress(Exception):
+                self.view(package)
+            assert mm.epoch() == epoch
+
+    def test_a_helper_a_macro_module_imported_before_is_seen(
+        self, package, monkeypatch
+    ):
+        # b imports h at top level, after b's own compile, so h is in no
+        # record: mac compiles while b is loaded, and only the drop's removal
+        # of mac's cache makes the next view compile mac again.
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        (package.pkg / "h.py").write_text("VALUE = 1\n")
+        (package.pkg / "b.lpy").write_text(
+            f"(import {package.name}.h as h)\n(defmacro val [] (return h.VALUE))"
+        )
+        (package.pkg / "mac.lpy").write_text(
+            "(require .b *)\n(defmacro twice [x] (return (val)))"
+        )
+        kwargs = dict(package=package.name, import_root=str(package.root))
+        pv.compile_view(
+            "(require .b *)\n(= zz (val))", name=package.name + ".other", **kwargs
+        )
+        assert self.view(package).text.endswith("yy = 1")
+        (package.pkg / "h.py").write_text("VALUE = 77\n")
+        assert self.view(package).text.endswith("yy = 77")
 
     def test_a_second_instance_of_the_module_installs_nothing(
         self, package, monkeypatch

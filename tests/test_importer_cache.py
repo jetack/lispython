@@ -17,8 +17,10 @@ import importlib, json, os, sys
 import lispy
 from lispy.core.importer import lpy_cache_path
 m = importlib.import_module(sys.argv[1])
+cache = lpy_cache_path(m.__file__)
 print(json.dumps({"result": getattr(m, "result", None),
-                  "cached": os.path.exists(lpy_cache_path(m.__file__))}))
+                  "cached": os.path.exists(cache),
+                  "mode": os.path.exists(cache) and os.stat(cache).st_mode}))
 """
 
 
@@ -36,9 +38,9 @@ def modules(tmp_path):
     def write(name, text):
         (directory / name).write_text(text)
 
-    def run(module="a"):
+    def run(module="a", before=""):
         proc = subprocess.run(
-            [sys.executable, "-c", RUN, module],
+            [sys.executable, "-c", before + RUN, module],
             env=env,
             cwd=tmp_path,
             capture_output=True,
@@ -127,3 +129,27 @@ def test_a_cached_module_a_macro_imports_brings_its_record(modules):
     assert modules.run()["result"] == 1
     modules("n.py", "VALUE = 55555\n")
     assert modules.run()["result"] == 55555
+
+
+PY_MACROS = "def val():\n    return {}\n\n\n__macro_namespace = {{'val': val}}\n"
+
+
+def test_a_py_macro_module_is_stamped_as_it_was_read(modules):
+    # b is edited after this process imported it, before a compiles: a's
+    # code holds the old expansion, so its record must hold b's old stamp.
+    modules("b.py", PY_MACROS.format(1))
+    modules("a.lpy", "(require b *)\n(= result (val))")
+    edit = (
+        "import pathlib, lispy, b\n"
+        f"pathlib.Path(b.__file__).write_text({PY_MACROS.format(666)!r})\n"
+    )
+    assert modules.run(before=edit)["result"] == 1
+    assert modules.run()["result"] == 666
+
+
+def test_the_cache_takes_the_umask(modules):
+    modules("a.lpy", "(= result 1)")
+    os.chmod(modules.dir / "a.lpy", 0o666)
+    out = modules.run(before="import os\nos.umask(0o022)\n")
+    assert out["cached"]
+    assert out["mode"] & 0o022 == 0

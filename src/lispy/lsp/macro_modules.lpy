@@ -232,8 +232,9 @@
   (return (_under-root-p (osp.realpath path) root)))
 
 (def _track-record [path root]
-  "Track the files under root in the cache record of the .lpy at path (none
-   while it has no record: its import failed).  Under _CONDITION."
+  "Track the files under root in the cache record of the .lpy at path, the
+   record of the code loaded from it (none while its latest compile failed,
+   so a broken file is tracked by its own stamp alone).  Under _CONDITION."
   (= record (lpy-record path))
   (if (is record None)
       (return))
