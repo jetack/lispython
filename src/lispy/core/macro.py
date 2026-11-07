@@ -13,7 +13,7 @@ from lispy.core.errors import LispyCompileError
 from lispy.core.macro_table import MacroTable, find_entry, find_macro
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
-from lispy.core.nodes import atom_text, macro_expansion_nodes
+from lispy.core.nodes import atom_text, macro_expansion_nodes, mark_compiler_forms
 from lispy.core.utils import trampoline
 
 __macro_namespace: dict[str, Callable[[Node], ast.AST]] = {}
@@ -53,6 +53,8 @@ def define_macro(sexp, scope, include_meta=True):
             f"(defmacro ...) expects an undotted name, got {name}", name
         )
     transformed = defmacro_transform(sexp)
+    # Only the parameter list and body forms are the user's; they still expand.
+    mark_compiler_forms(transformed, sexp.list[2:])
     # Expand outside compile_nesting_errors: a RecursionError there is a
     # macro's own, not nesting.
     # Binding checks stay on: a parameter or local named like an active macro
@@ -82,6 +84,7 @@ def define_macro(sexp, scope, include_meta=True):
 
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
+    mark_compiler_forms(transformed)
     try:
         body = macroexpand_then_compile(
             [transformed], scope, include_meta=include_meta, check_bindings=False
@@ -161,8 +164,9 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
         [op, *operands] = sexp.list
         name = atom_text(op)
         # A meta form, like a macro call, is one only at a ( head: a [...] or
-        # {...} with that head is a plain collection.
-        is_call = isinstance(sexp, Paren) and not in_quasi
+        # {...} with that head is a plain collection, and never in the
+        # compiler's own forms (Expression.compiler_form).
+        is_call = isinstance(sexp, Paren) and not in_quasi and not sexp.compiler_form
         if name == "defmacro" and is_call:
             sexp = define_macro(sexp, scope, include_meta=include_meta)
         elif name == "require" and is_call:
