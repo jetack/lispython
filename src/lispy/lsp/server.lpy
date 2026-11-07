@@ -511,8 +511,8 @@
       (do (.add _COMPILING uri)
           (_schedule-run (compile-latest uri)))))
 
-;; The project roots whose pyrefly preset fallback was decided, told or
-;; not, for this server's life.
+;; The project roots told of their pyrefly preset fallback, for this
+;; server's life.
 (= _PRESET-FALLBACK-NOTIFIED (set))
 
 (def preset-fallback-message [root fallback]
@@ -524,31 +524,34 @@
                    f"use {preset}. To choose, add a [tool.pyrefly] table in pyproject.toml "
                    f"or a pyrefly.toml, e.g. preset = \"{DEFAULT-PYREFLY-PRESET}\"."))
         (== fallback.reason "malformed")
-        (return (+ f"lispython: {fallback.source} could not be read as a pyrefly config, "
-                   f"so the Python diagnostics of {root} use {preset}.")))
+        (return (+ f"lispython: {fallback.source} could not be read as a pyrefly config "
+                   "(the LSP log has the detail), so the Python diagnostics of "
+                   f"{root} use {preset}.")))
   (return (+ f"lispython: pyrefly refused the settings in {fallback.source} "
              "(the LSP log has the detail), so the Python diagnostics of "
              f"{root} use {preset}.")))
 
 (def notify-preset-fallback [client]
-  "Tell the user once per project root, when backend client's start wrote
-   its view root (Backends' on-view-prepared), that its pyrefly diagnostics
-   run DEFAULT-PYREFLY-PRESET, and why, as the config writer recorded it
-   (pyrefly-fallback).  The root counts as decided whether or not it was
-   told.  Never raises."
+  "Tell the user once per project root, when backend client started
+   (Backends' on-view-prepared), that its pyrefly diagnostics run
+   DEFAULT-PYREFLY-PRESET, and why, as the config writer recorded it
+   (pyrefly-fallback).  A start with no fallback marks nothing, so a
+   config that later breaks is still told at the next start.  Never
+   raises."
   ;; A showMessage, once: the view's preset may differ from what pyrefly
   ;; check runs over the same project, and the user must learn which one is
   ;; in effect and how to choose; a logMessage alone sits unread in an
   ;; output channel.  Once per root, never per start or change, so it never
-  ;; nags; and read from the writer's record, so the project config is
-  ;; neither parsed on the loop nor checked by pyrefly twice.
+  ;; nags; and read from the writer's record (a dict lookup), so the
+  ;; project config is neither parsed on the loop nor checked by pyrefly
+  ;; twice.
   (try
     (if (or (!= client.name "pyrefly") (in client.project-root _PRESET-FALLBACK-NOTIFIED))
         (return))
-    (.add _PRESET-FALLBACK-NOTIFIED client.project-root)
     (= fallback (pyrefly-fallback client.view-root))
     (if (is fallback None)
         (return))
+    (.add _PRESET-FALLBACK-NOTIFIED client.project-root)
     (= message (preset-fallback-message client.project-root fallback))
     (.info logger "%s" message)
     (.window-show-message server (lsp.ShowMessageParams :type lsp.MessageType.Info

@@ -1509,7 +1509,8 @@
    them, dict, fallback reason): its pyrefly.toml, else [tool.pyrefly] of
    its pyproject.toml, as pyrefly finds them.  The dict is None and the
    reason \"missing\" when it has none, \"malformed\" when that file cannot
-   be read or its table is no table; the reason is None with a dict."
+   be read or its table is no table, which is logged as a warning naming
+   the file (the user's to fix); the reason is None with a dict."
   (= path (osp.join project-root PYREFLY-CONFIG))
   (try
     (if (osp.isfile path)
@@ -1524,11 +1525,12 @@
           (return (, path None "missing"))
           (isinstance config dict)
           (return (, path config None)))
-    (return (, path None "malformed"))
-    (except [(, OSError ValueError AttributeError)]
-      (.debug logger "lispython view: no pyrefly settings read from %s" path
-              :exc-info True)
-      (return (, path None "malformed")))))
+    (= problem "[tool.pyrefly] is not a table")
+    (except [(, OSError ValueError AttributeError) as e]
+      (= problem e)))
+  (.warning logger "lispython LSP: cannot read the pyrefly settings of %s, so the view uses none of them: %s"
+            path problem)
+  (return (, path None "malformed")))
 
 ;; View root -> its PyreflyFallback, or None when its pyrefly.toml holds the
 ;; project's settings or checks nothing: decided by write-pyrefly-config,

@@ -412,8 +412,9 @@
     ;; Called with an lpy uri on the loop when its diagnostics arrive; set by
     ;; Backends.
     (= self.on-diagnostics None)
-    ;; Called with this client on the loop once a start wrote the view root
-    ;; (_prepare-view-root); set by Backends.
+    ;; Called with this client on the loop once a start succeeded, so the
+    ;; process runs over the view root that start wrote (_prepare-view-root);
+    ;; set by Backends.  Never raises (_start catches).
     (= self.on-view-prepared None)
     ;; lpy uri -> its requests in flight (request), which a full view's
     ;; sync waits for.
@@ -521,12 +522,18 @@
     ;; text in the backend, which no request may ever send.
     (for lpy-uri in (list self._full)
       (._sync-full self lpy-uri))
+    ;; Only now: a start that failed or was shut down tells nobody of the
+    ;; view it wrote, since no backend ever used it.
+    (if (is-not self.on-view-prepared None)
+        (try
+          (self.on-view-prepared self)
+          (except [Exception]
+            (.exception logger "lispython LSP: reacting to the start of %s failed"
+                        self.project-root))))
     (return True))
 
   (async-def _spawn [self]
     (await (asyncio.to-thread self._prepare-view-root))
-    (if (is-not self.on-view-prepared None)
-        (self.on-view-prepared self))
     (= self._docs {})
     (= root (os.fspath self.view-root))
     (= root-uri (.as-uri (pathlib.Path root)))
@@ -923,8 +930,8 @@
    the others never start one, and send to one only when it already runs
    (a start sends the pushed buffers itself).  on-diagnostics, set by the
    server, is called with an lpy uri when the backend published that
-   buffer's diagnostics; on-view-prepared with a BackendClient once a start
-   wrote its view root's shadows and config file."
+   buffer's diagnostics; on-view-prepared with a BackendClient once its
+   start succeeded, over the view root's shadows and config file it wrote."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
@@ -961,12 +968,9 @@
                         lpy-uri)))))
 
   (def _view-prepared [self client]
+    ;; BackendClient._start catches what this raises.
     (if (is-not self.on-view-prepared None)
-        (try
-          (self.on-view-prepared client)
-          (except [Exception]
-            (.exception logger "lispython LSP: reacting to the view of %s failed"
-                        client.project-root)))))
+        (self.on-view-prepared client)))
 
   (def _project-root [self path]
     "The real path of the innermost workspace folder holding path, or None."

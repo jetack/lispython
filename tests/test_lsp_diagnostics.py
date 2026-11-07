@@ -663,23 +663,25 @@ def test_a_compile_that_raises_never_stops_the_next(scripted, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def shown_on_open(
-    tmp_path, monkeypatch, name, init_options=None, config=None, refuses=None
+def preset_server(
+    tmp_path, monkeypatch, name, init_options=None, config=None, refuses=None, argv=None
 ):
-    """(project, view root, the messages the server shows) while main.lpy
-    and other.lpy of one project are opened, with backend name installed
-    (alone) and configured by init_options; config is (file name, text) of
-    a project file, and refuses a pyrefly.toml value the installed pyrefly
-    is taken to refuse. The backend's process never starts (its argv runs
-    nothing): the notice follows the view root the start writes first, not
-    the backend's answers."""
+    """(project, backends, shown): a server over one project whose backend
+    name (alone installed) is the fake backend, or argv, configured by
+    init_options, and the messages it shows. config is (file name, text) of a
+    project file, and refuses a pyrefly.toml value the installed pyrefly is
+    taken to refuse."""
     project = tmp_path / "project"
     project.mkdir()
     if config is not None:
         (project / config[0]).write_text(config[1])
+    if argv is None:
+        script = tmp_path / "fake_backend.py"
+        script.write_text(FAKE_SERVER)
+        argv = [sys.executable, str(script)]
     for other in ("pyrefly", "basedpyright"):
-        argv = [str(tmp_path / "no-such-backend")] if other == name else None
-        monkeypatch.setitem(backend.BACKENDS, other, lambda argv=argv: argv)
+        installed = argv if other == name else None
+        monkeypatch.setitem(backend.BACKENDS, other, lambda a=installed: a)
     monkeypatch.setattr(
         backend,
         "pyrefly_config_problem",
@@ -697,25 +699,47 @@ def shown_on_open(
     monkeypatch.setattr(
         server, "server", SimpleNamespace(window_show_message=shown.append)
     )
-    editors = [Editor((project / f).as_uri()) for f in ("main.lpy", "other.lpy")]
+    return project, backends, shown
 
-    def started():
-        # A start begins at the open (start_soon) or never.
-        return all(
-            client._starting is None or client._starting.done()
-            for client in backends.clients.values()
-        )
+
+async def started(client):
+    """Once client's latest start, if any, has ended."""
+    await until(lambda: client._starting is None or client._starting.done())
+
+
+async def open_and_request(project, backends):
+    """Open main.lpy and other.lpy, ask a hover (which starts a backend that
+    no open started, pythonDiagnostics off), close both, and return the
+    project's BackendClient once its start ended."""
+    editors = [Editor((project / f).as_uri()) for f in ("main.lpy", "other.lpy")]
+    for editor in editors:
+        editor.open("(= y 1)\n")
+        await until(lambda: editor.published)
+    uri = editors[0].uri
+    client = backends.client_for(uri)
+    await backends.request(
+        uri, lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+    )
+    await started(client)
+    for editor in editors:
+        editor.close()
+    return client
+
+
+def shown_after_start(tmp_path, monkeypatch, *args, **kwargs):
+    """(project, view root, shown) once a server of preset_server's opened
+    two buffers of the project and its backend started."""
+    project, backends, shown = preset_server(tmp_path, monkeypatch, *args, **kwargs)
 
     async def scenario():
-        for editor in editors:
-            editor.open("(= y 1)\n")
-            await until(lambda: editor.published and started())
-        for editor in editors:
-            editor.close()
+        try:
+            client = await open_and_request(project, backends)
+            assert client.running
+            return client.view_root
+        finally:
+            await backends.shutdown_all()
 
-    run_bounded(scenario())
-    roots = [client.view_root for client in backends.clients.values()]
-    return project, (roots or [None])[0], shown
+    return project, run_bounded(scenario()), shown
 
 
 @pytest.mark.parametrize(
@@ -744,10 +768,10 @@ def test_a_project_whose_pyrefly_config_is_not_used_is_told_once(
     tmp_path, monkeypatch, config, refuses, reason, names
 ):
     # Defects: the user is never told that the view runs a preset of its own,
-    # is told on every open or start, or is told the project has no config
-    # when it has one the view could not read or pyrefly refused (the notice
-    # must name that file, the one to fix).
-    project, root, shown = shown_on_open(
+    # is told on every open, or is told the project has no config when it
+    # has one the view could not read or pyrefly refused (the notice must
+    # name that file, the one to fix).
+    project, root, shown = shown_after_start(
         tmp_path, monkeypatch, "pyrefly", config=config, refuses=refuses
     )
     assert pv.pyrefly_fallback(root).reason == reason
@@ -775,10 +799,68 @@ def test_no_notice_where_the_preset_is_not_the_views(
     tmp_path, monkeypatch, name, init_options, config
 ):
     # Defects: the notice nags a project whose own pyrefly config decides
-    # its preset, one whose Python diagnostics are off (nothing is checked),
-    # or a basedpyright user, whose diagnostics no pyrefly preset decides.
-    _, _, shown = shown_on_open(tmp_path, monkeypatch, name, init_options, config)
+    # its preset, one whose Python diagnostics are off (nothing is checked,
+    # though a request started the backend), or a basedpyright user, whose
+    # diagnostics no pyrefly preset decides.
+    _, _, shown = shown_after_start(tmp_path, monkeypatch, name, init_options, config)
     assert shown == []
+
+
+def test_a_failed_start_tells_nothing(tmp_path, monkeypatch):
+    # Defect: the notice comes when the view root is written, before the
+    # backend process starts, so a backend that never ran (not runnable,
+    # shut down while starting) tells of a preset nothing checks with.
+    project, backends, shown = preset_server(
+        tmp_path, monkeypatch, "pyrefly", argv=[str(tmp_path / "no-such-backend")]
+    )
+
+    async def scenario():
+        try:
+            client = await open_and_request(project, backends)
+            assert not client.running
+            return client.view_root
+        finally:
+            await backends.shutdown_all()
+
+    root = run_bounded(scenario())
+    # The view was written with the fallback: only the start kept it quiet.
+    assert pv.pyrefly_fallback(root).reason == "missing"
+    assert shown == []
+
+
+def test_a_config_that_breaks_later_is_told_at_the_next_start(tmp_path, monkeypatch):
+    # Defects: a project whose config was fine at the first start is marked
+    # as told, so the config breaking later (the backend restarting over
+    # the fallback) is never told; or each start over the fallback tells
+    # it again.
+    monkeypatch.setattr(backend, "MAX_SPAWNS", 3)
+    project, backends, shown = preset_server(
+        tmp_path, monkeypatch, "pyrefly", config=("pyrefly.toml", 'preset = "basic"\n')
+    )
+
+    async def restart(client):
+        process = client.process
+        process.kill()
+        await process.wait()
+        client.start_soon()
+        await started(client)
+        assert client.running and client.process is not process
+
+    async def scenario():
+        try:
+            client = await open_and_request(project, backends)
+            assert client.running and shown == []
+            (project / "pyrefly.toml").write_text("preset = \n")
+            await restart(client)
+            assert pv.pyrefly_fallback(client.view_root).reason == "malformed"
+            assert len(shown) == 1
+            await restart(client)
+            assert len(shown) == 1
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert str(project / "pyrefly.toml") in shown[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -787,10 +869,11 @@ def test_no_notice_where_the_preset_is_not_the_views(
 
 
 # Each real backend's diagnostic on an undefined name, as (code, message in
-# the buffer's spelling).
+# the buffer's spelling, or None where only the backticked buffer spelling is
+# pinned: nox installs the newest pyrefly, whose wording may change).
 UNDEFINED_NAME = {
     "basedpyright": ("reportUndefinedVariable", '"undefined-name" is not defined'),
-    "pyrefly": ("unknown-name", "Could not find name `undefined-name`"),
+    "pyrefly": ("unknown-name", None),
 }
 
 
@@ -824,7 +907,11 @@ def test_a_real_backend_reports_on_the_lpy_word(
     code, message = UNDEFINED_NAME[name]
     assert found.code == code
     assert found.severity == lsp.DiagnosticSeverity.Error
-    assert found.message == message
+    if message is None:
+        assert "`undefined-name`" in found.message
+        assert "undefined_name" not in found.message
+    else:
+        assert found.message == message
     assert (found.range.start.line, found.range.start.character) == (0, 7)
     assert (found.range.end.line, found.range.end.character) == (0, 21)
 
