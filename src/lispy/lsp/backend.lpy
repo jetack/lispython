@@ -453,17 +453,18 @@
 
   (async-def _ensure-started [self deadline]
     "True once a backend process runs, waiting for its start until deadline
-     (the loop's clock).  The start is a task of its own, awaited shielded:
-     a request that is cancelled (the editor's $/cancelRequest) or runs out
-     of time stops waiting, never the start, which a later request finds
-     done.  Only a start that fails or a process that exits uses up a spawn."
+     (the loop's clock).  The start is a task of its own, awaited without
+     cancelling it (`_await-until`): a request that is cancelled (the
+     editor's $/cancelRequest) or runs out of time stops waiting, never the
+     start, which a later request finds done.  Only a start that fails or a
+     process that exits uses up a spawn."
     (if self.running
         (return True))
     (= task (._start-task self))
     (if (is task None)
         (return False))
     (try
-      (return (await (asyncio.wait-for (asyncio.shield task) (_remaining deadline))))
+      (return (await (_await-until task deadline)))
       (except [TimeoutError]
         (return False))
       (except [asyncio.CancelledError]
@@ -554,7 +555,9 @@
     ;; that is discarding, and the client this call took off self would then
     ;; keep its pygls tasks with nobody left to stop them.  shutdown waits
     ;; for every one left (_cleanups, which also keeps them referenced: the
-    ;; loop holds tasks only weakly).
+    ;; loop holds tasks only weakly).  The shield is safe from 3.14+'s
+    ;; "exception in shielded future" ERROR log only because _reap never
+    ;; raises (it catches every Exception): keep it so.
     (= cleanup (asyncio.create-task (_reap client process drain)))
     (.add self._cleanups cleanup)
     (.add-done-callback cleanup self._cleanups.discard)
@@ -614,11 +617,11 @@
             (._sync self uri text :origin origin))
         (= msg-id (str (uuid.uuid4)))
         (= answer (.send-request-async client.protocol method params :msg-id msg-id))
-        ;; shielded, so a timeout cancels only this wait: the late answer
-        ;; then resolves a future nobody awaits instead of one cancelled.
+        ;; a timeout only stops waiting (`_await-until`): the late answer
+        ;; resolves a future nobody awaits, which `_retrieve` marks read.
         (.add-done-callback answer _retrieve)
         (try
-          (return (await (asyncio.wait-for (asyncio.shield answer) (_remaining deadline))))
+          (return (await (_await-until answer deadline)))
           (except [TimeoutError]
             (.debug logger "python backend: %s timed out" method)
             (.notify client.protocol lsp.CANCEL_REQUEST (lsp.CancelParams :id msg-id))
@@ -863,6 +866,16 @@
 (def _remaining [deadline]
   "Seconds left until deadline on the running loop's clock, never below 0."
   (return (max 0 (- deadline (.time (asyncio.get-running-loop))))))
+
+(async-def _await-until [future deadline]
+  "The result of future, waiting until deadline (the loop's clock) and
+   raising TimeoutError after it.  Never cancels the future and never uses
+   asyncio.shield, whose 3.14+ exception logging fires when a future we
+   stopped waiting on later fails."
+  (await (asyncio.wait [future] :timeout (_remaining deadline)))
+  (if (not (.done future))
+      (raise (TimeoutError)))
+  (return (.result future)))
 
 (def _retrieve [future]
   "Mark a request future's exception retrieved: one whose wait timed out is
