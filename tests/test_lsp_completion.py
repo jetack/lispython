@@ -8,6 +8,7 @@ server at it and gets a fresh view cache. ``|`` in a source marks the cursor.
 
 import importlib
 import time
+from types import SimpleNamespace
 
 import pytest
 from lsprotocol import types as lsp
@@ -459,6 +460,16 @@ def test_the_built_in_macros_are_offered_once_by_their_own_names(merged):
     labels = set(by_label(merged("(require lispy.macros *)\n(= x 1)\n(print x|)")[2]))
     assert {"->", "->>", "--"} <= labels
     assert not {"_to_", "_to_>", "__"} & labels
+
+
+def test_a_view_macro_is_offered_as_it_was_registered_not_by_its_name_key():
+    # Defect: a macro the buffer never spells (a required one) is labelled
+    # my_mac, its name-key, instead of my-mac.
+    view = SimpleNamespace(macros={"my_mac": "my-mac", "mod.my_mac": "mod.my-mac"})
+    view.fallback = False
+    labels = [item.label for item in server.merged_items(None, 1, view, [])]
+    assert "my-mac" in labels and "my_mac" not in labels
+    assert "mod.my-mac" not in labels  # qualified: typed as an attribute
 
 
 @once

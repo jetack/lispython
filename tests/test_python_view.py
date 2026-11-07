@@ -1544,6 +1544,26 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert cache.view("u", 1, src, **kwargs).text.endswith("yy = 2 * 2 * 2")
 
+    @pytest.mark.parametrize(
+        "require, expected",
+        [
+            ("(require .mac *)", {"my_mac": "my-mac"}),
+            ("(require .mac [my-mac])", {"my_mac": "my-mac"}),
+            ("(require .mac)", {".mac.my_mac": ".mac.my-mac"}),
+        ],
+    )
+    def test_view_macros_keep_the_registered_spelling(self, package, require, expected):
+        # Defect: the view keeps only the name-key, so completion offers the
+        # required hyphenated macro as my_mac though the buffer never spells it.
+        (package.pkg / "mac.lpy").write_text("(defmacro my-mac [] 1)")
+        view = pv.compile_view(
+            require + "\n(= yy 1)",
+            package=package.name,
+            name=package.name + ".mod",
+            import_root=str(package.root),
+        )
+        assert {k: v for k, v in view.macros.items() if "my" in k} == expected
+
     def test_diagnostics_see_an_edited_macro_module(self, package):
         # The document's own import root (module-names) puts its package on
         # sys.path for the compile, as compile-buffer does for every view.

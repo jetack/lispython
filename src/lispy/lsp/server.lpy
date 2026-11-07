@@ -2033,9 +2033,9 @@
         (pass))))
   (return (list names)))
 
-(def merged-items [doc line view items spellings]
-  "lispython's own items (lispython-items, then each macro of the view as
-   the buffer spells it) followed by items, the backend's (backend-items),
+(def merged-items [doc line view items]
+  "lispython's own items (lispython-items, then each macro of the view under
+   the spelling it was registered as, view.macros) followed by items, the backend's (backend-items),
    whose name (name-key) none of them has: a special form or macro wins
    over whatever the backend offers by that name.  Over a fallback view
    (only the text before the cursor compiled) the buffer's definitions the
@@ -2043,12 +2043,12 @@
    follow."
   (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
-  ;; view.macros holds name-keys, as taken does.
+  ;; view.macros is keyed by name-key, as taken is, and holds the spelling.
   (for name in (sorted view.macros)
     ;; A qualified macro (module.name) is typed as an attribute
     ;; (qualified-macro-items).
     (if (and (not-in "." name) (not-in name taken))
-        (do (= label (.get spellings name name))
+        (do (= label (sub view.macros name))
             (.add taken name)
             (.append merged (own-item label *_MACRO-STYLE)))))
   (= rest (list items))
@@ -2201,7 +2201,7 @@
         (not found)
         (return None)
         (not view.attribute)
-        (= found (merged-items doc line view found spellings)))
+        (= found (merged-items doc line view found)))
   (return (lsp.CompletionList :is-incomplete incomplete :items found)))
 
 (def document-snapshot [doc]
