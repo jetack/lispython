@@ -38,7 +38,7 @@ def modules(tmp_path):
     def write(name, text):
         (directory / name).write_text(text)
 
-    def run(module="a", before=""):
+    def run(module="a", before="", check=True):
         proc = subprocess.run(
             [sys.executable, "-c", before + RUN, module],
             env=env,
@@ -47,6 +47,8 @@ def modules(tmp_path):
             text=True,
             timeout=120,
         )
+        if not check:
+            return proc
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout.strip().splitlines()[-1])
         out["stderr"] = proc.stderr
@@ -153,3 +155,59 @@ def test_the_cache_takes_the_umask(modules):
     out = modules.run(before="import os\nos.umask(0o022)\n")
     assert out["cached"]
     assert out["mode"] & 0o022 == 0
+
+
+RELOAD_FAILS = (
+    "try:\n"
+    "    importlib.reload(x)\n"
+    "except {} as e:\n"
+    "    print('RELOAD FAILED:', e, file=sys.stderr)\n"
+    "else:\n"
+    "    raise SystemExit('the reload of x did not fail')\n"
+)
+
+
+def test_a_failed_reload_keeps_the_record_of_the_loaded_code(modules):
+    # x's reload fails on z's broken text, so x keeps the code compiled
+    # against the old z, and w expands that code: w's record must hold x as
+    # loaded (with z's old stamp), not the stamps of the failed read.
+    modules("z.lpy", "(defmacro zv [] (return 1))")
+    modules("x.lpy", "(require z *)\n(defmacro xm [] (return (zv)))")
+    modules("w.lpy", "(require x *)\n(= result (xm))")
+    broken = (
+        "import importlib, pathlib, sys, lispy\n"
+        "import x\n"
+        "pathlib.Path(x.__file__).with_name('z.lpy')"
+        ".write_text('(defmacro zv [] (return')\n"
+        'del sys.modules["z"]\n' + RELOAD_FAILS.format("SyntaxError")
+    )
+    out = modules.run("w", before=broken)
+    assert out["result"] == 1
+    assert "RELOAD FAILED" in out["stderr"] and "z.lpy" in out["stderr"]
+    modules("z.lpy", "(defmacro zv [] (return 77))")
+    assert modules.run("w")["result"] == 77
+
+
+def test_a_reload_failing_partway_keeps_the_stamp_of_the_code_that_ran(modules):
+    # x's new text compiles but raises before redefining its macros, so x
+    # still holds the old val and w expands it: w's record must hold x's old
+    # stamp as well as the new one.
+    modules("x.py", PY_MACROS.format(1))
+    modules("w.lpy", "(require x *)\n(= result (val))")
+    raising = (
+        "import builtins\n"
+        "if getattr(builtins, 'FAIL_X', False):\n"
+        "    raise RuntimeError('x refused')\n" + PY_MACROS.format(2)
+    )
+    reload = (
+        "import builtins, importlib, pathlib, sys, lispy\n"
+        "import x\n"
+        f"pathlib.Path(x.__file__).write_text({raising!r})\n"
+        "builtins.FAIL_X = True\n"
+        + RELOAD_FAILS.format("RuntimeError")
+        + "del builtins.FAIL_X\n"
+    )
+    out = modules.run("w", before=reload)
+    assert out["result"] == 1
+    assert "RELOAD FAILED: x refused" in out["stderr"]
+    assert modules.run("w")["result"] == 2
