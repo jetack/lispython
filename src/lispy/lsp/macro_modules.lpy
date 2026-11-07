@@ -33,8 +33,10 @@
 ;; loaded from its cache reads none of the files its compile read (a module a
 ;; macro imported as it expanded), so no window sees them.  dirs maps a
 ;; directory searched for a module no finder found to its st_mtime_ns when
-;; searched.  active counts the compiles running; epoch is the macro
-;; environment's version.
+;; searched.  running holds a token per compile in progress (one object per
+;; fresh-modules entry), hung the running ones a drop's wait timed out on: a
+;; token leaves both when its compile ends.  epoch is the macro environment's
+;; version.
 (class _Shared []
   (def __init__ [self original-path-stats]
     (= self.local (threading.local))
@@ -43,14 +45,15 @@
     (= self.tracked {})
     (= self.dep-files {})
     (= self.dirs {})
-    (= self.active 0)
+    (= self.running (set))
+    (= self.hung (set))
     (= self.epoch 0)))
 
 ;; How long, in seconds, a compile waits for the running ones to end before
 ;; it drops stale modules.  Unbounded, a macro hung in one compile would hold
 ;; every later one (filling the worker threads, and write-shadows holds the
-;; view root's lock while it waits); bounded, a compile that times out goes
-;; on with the modules as they are, and a later one drops them.
+;; view root's lock while it waits).  A compile still running when the wait
+;; ends is hung: no drop waits for it again, so it costs one WAIT-LIMIT.
 (= WAIT-LIMIT 5.0)
 
 (= _EXCLUDED-PARTS (frozenset ["site-packages" "dist-packages"]))
@@ -163,27 +166,32 @@
       (.warning logger "lispython LSP: cannot remove the bytecode of %s: %s"
                 path e))))
 
-(def _drop-stale []
-  "Drop every tracked module once one is stale, after the compiles running
-   have ended, waiting at most WAIT-LIMIT for them; once the wait timed
-   out, drop nothing while one is running and go on with the modules as
-   they are.  Under _SHARED.condition."
+(def _drop-stale [wait]
+  "Drop every tracked module once one is stale, once the compiles running
+   (less the hung ones) have ended.  wait: wait for them up to WAIT-LIMIT,
+   then mark those still running hung and drop all the same; else drop
+   only when none is running.  True when nothing is stale afterwards (no
+   drop was due, or it was made).  Under _SHARED.condition."
   ;; A wait rather than a drop at once: deleting a sys.modules entry while
   ;; another thread is importing it makes that import raise (importlib's
   ;; _load_unlocked pops the entry back out).  A compile arriving while a
-  ;; module is stale waits too, so none goes on with stale modules, within
-  ;; WAIT-LIMIT.
+  ;; module is stale waits too, so none goes on with stale modules.
   (= deadline (+ (time.monotonic) WAIT-LIMIT))
   (while True
     (= [changed stale] (_stale-state))
     (if (not stale)
-        (return))
-    (if (> _SHARED.active 0)
-        (do (= remaining (- deadline (time.monotonic)))
-            (if (<= remaining 0)
-                (return))
-            (.wait _SHARED.condition remaining)
-            (continue)))
+        (return True))
+    (= blockers (- _SHARED.running _SHARED.hung))
+    (if blockers
+        (do (if (not wait)
+                (return False))
+            (= remaining (- deadline (time.monotonic)))
+            (if (> remaining 0)
+                (do (.wait _SHARED.condition remaining)
+                    (continue)))
+            ;; Dropping under a hung compile can break only an import it
+            ;; has in progress, and that compile is broken already.
+            (.update _SHARED.hung blockers)))
     ;; A pyc keeps its source's mtime in whole seconds and its size, so an
     ;; edit of the same size within that second would load the old pyc: a
     ;; changed .py loses its pyc.  Every tracked .lpy loses its cache too,
@@ -208,7 +216,7 @@
     (importlib.invalidate-caches)
     (+= _SHARED.epoch 1)
     (.notify-all _SHARED.condition)
-    (return)))
+    (return True)))
 
 (def _under-root-p [real root]
   "Whether the real path real lies under root (already real), outside
@@ -249,18 +257,21 @@
 (deco contextlib.contextmanager
   (def fresh-modules [import-root]
     "Wrap one compile: first drop every tracked module once one is stale
-     (_drop-stale), then track every .py or .lpy source the
+     (_drop-stale, waiting), then track every .py or .lpy source the
      compile reads under import-root (nothing for None, _trackable-p) by the
      stamp its file had when read, the files under it in each such .lpy's
      cache record (_track-record), and every directory under it searched for
-     a module no finder found by its mtime."
+     a module no finder found by its mtime.  Yields the epoch the compile
+     runs under."
     (= reads [])
+    (= token (object))
     (with [_SHARED.condition]
-      (_drop-stale)
-      (+= _SHARED.active 1))
+      (_drop-stale True)
+      (= current _SHARED.epoch)
+      (.add _SHARED.running token))
     (try
       (.append (_windows) reads)
-      (yield)
+      (yield current)
       (finally
         (= windows (_windows))
         (if (and windows (is (sub windows -1) reads))
@@ -281,13 +292,23 @@
                             (if (.endswith path ".lpy")
                                 (_track-record path root)))))))
             (finally
-              (-= _SHARED.active 1)
+              (.discard _SHARED.running token)
+              (.discard _SHARED.hung token)
               (.notify-all _SHARED.condition))))))))
 
 (def epoch []
-  "The macro environment's version: it moves whenever the tracked modules
-   are dropped, which this drops first when one is stale, as a compile
-   would.  A view or shadow made under one epoch is stale under another."
+  "The macro environment's version, never waiting: it moves whenever the
+   tracked modules are dropped, which this does first when one is stale
+   and no compile (less the hung ones) runs.  None while such a drop is
+   due but compiles run: every view or shadow made before is stale then.  A
+   view or shadow made under one epoch is stale under another."
   (with [_SHARED.condition]
-    (_drop-stale)
+    (if (_drop-stale False)
+        (return _SHARED.epoch))
+    (return None)))
+
+(def current-epoch []
+  "The epoch counter as it is, with no staleness check: the version of a
+   result no macro took part in (a parse error)."
+  (with [_SHARED.condition]
     (return _SHARED.epoch)))

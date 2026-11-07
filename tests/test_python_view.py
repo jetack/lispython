@@ -906,9 +906,9 @@ class TestShadows:
         assert mod.read_text() == "my_x = 1"
 
         calls = []
-        real = pv.compile_view
+        real = pv.compile_buffer
         monkeypatch.setattr(
-            pv, "compile_view", lambda s, **kw: calls.append(s) or real(s, **kw)
+            pv, "compile_buffer", lambda s, **kw: calls.append(s) or real(s, **kw)
         )
         stamp = mod.stat().st_mtime_ns
         pv.write_shadows(str(project), str(root), manifest=manifest)
@@ -1587,6 +1587,80 @@ class TestMacroModules:
             if waiter.ident is not None:
                 waiter.join(10)
 
+    @contextlib.contextmanager
+    def held_compile(self, monkeypatch, limit=0.3):
+        """A compile hung in its macros for the whole block (a thread inside
+        fresh-modules), WAIT_LIMIT set to limit; yields the list of the
+        timed waits on the shared condition made meanwhile."""
+        monkeypatch.setattr(mm, "WAIT_LIMIT", limit)
+        condition = mm._SHARED.condition
+        real, waits = condition.wait, []
+
+        def counting(timeout=None):
+            if timeout is not None:
+                waits.append(timeout)
+            return real(timeout)
+
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules(None):
+                entered.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(10)
+            monkeypatch.setattr(condition, "wait", counting)
+            yield waits
+        finally:
+            release.set()
+            holder.join(10)
+            assert not holder.is_alive()
+
+    def test_a_hung_compile_costs_one_wait_and_drops_resume(self, package, monkeypatch):
+        # Defect: a compile hung in a macro keeps every later drop from
+        # happening, so no edit is seen again and every compile waits
+        # WAIT_LIMIT anew; and epoch waits too, before every cached lookup.
+        mac = package.pkg / "mac.lpy"
+        assert self.view(package).text.endswith("yy = 2 + 2")
+        edits = [
+            (THRICE, "yy = 2 * 2 * 2"),
+            ("(defmacro twice [x] (return `(- ~x ~x ~x ~x)))", "yy = 2 - 2 - 2 - 2"),
+            ("(defmacro twice [x] (return `(+ ~x 1)))", "yy = 2 + 1"),
+        ]
+        with self.held_compile(monkeypatch) as waits:
+            for number, (text, expected) in enumerate(edits):
+                next_tick()
+                mac.write_text(text)
+                if number == 0:
+                    assert mm.epoch() is None
+                    assert waits == []
+                assert self.view(package).text.endswith(expected)
+            assert len(waits) == 1
+
+    def test_a_cursor_view_waits_once_for_a_hung_compile(self, package, monkeypatch):
+        # Defect: a cursor view waits for the hung compile in epoch and again
+        # in each of its compiles (the buffer's, then its prefix's), past the
+        # backend's request timeout.  The open form makes the prefix compile.
+        cache = pv.ViewCache()
+        src = "(require .mac *)\n(= yy (+ (twice 2) zz)"
+        kwargs = dict(
+            package=package.name,
+            name=package.name + ".mod",
+            import_root=str(package.root),
+        )
+        line, col = plus(locate(src, "zz"), 2)
+        first = cache.view_at_cursor("u", 1, src, line, col, **kwargs)
+        assert "yy = 2 + 2 + zz" in first.text
+        with self.held_compile(monkeypatch) as waits:
+            next_tick()
+            (package.pkg / "mac.lpy").write_text(THRICE)
+            view = cache.view_at_cursor("u", 2, src, line, col, **kwargs)
+            assert len(waits) == 1
+        assert view.fallback and "yy = 2 * 2 * 2 + zz" in view.text
+
     def test_a_missing_module_keeps_the_environment_settled(
         self, package, tmp_path, monkeypatch
     ):
@@ -1613,11 +1687,11 @@ class TestMacroModules:
         pv.write_shadows(str(project), str(root), manifest=manifest)
         entries = dict(manifest.sources)
         compiled = []
-        compile_view = pv.compile_view
+        compile_buffer = pv.compile_buffer
         monkeypatch.setattr(
             pv,
-            "compile_view",
-            lambda *a, **k: compiled.append(a) or compile_view(*a, **k),
+            "compile_buffer",
+            lambda *a, **k: compiled.append(a) or compile_buffer(*a, **k),
         )
         pv.write_shadows(str(project), str(root), manifest=manifest)
         assert compiled == []
