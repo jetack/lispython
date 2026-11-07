@@ -29,6 +29,7 @@
 (from lispy.core.nodes *)
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
+(from lispy.core.compiler.literal [hyphen-spelling name-key])
 (from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.utils [compile-nesting-errors])
@@ -686,25 +687,15 @@
                "expansion" None
                "error" (.rstrip (traceback.format-exc))}))))
 
-(def _mangle [s]
-  (return (.replace s "-" "_")))
-
-(def _unmangle [s]
-  "Convert Python identifier to lispy symbol, preserving leading/trailing underscores."
-  (if (not s) (return ""))
-  (= leading (- (len s) (len (.lstrip s "_"))))
-  (= trailing (- (len s) (len (.rstrip s "_"))))
-  (if (>= (+ leading trailing) (len s))
-      (return s))
-  (= middle (sub s [: leading (ife trailing (- (len s) trailing) None)]))
-  (= middle (.replace middle "_" "-"))
-  (return (+ (* "_" leading) middle (* "_" trailing))))
+(def _py-name [text]
+  "The Python name lispython text stands for, as the compiler maps it
+   (Symbol.name: my-x is my_x, ok? is ok_p)."
+  (return (. (Symbol text) name)))
 
 (def _resolve-obj [symbol scope]
   "Resolve a symbol string to a Python object in scope."
-  (= mangled (_mangle symbol))
   (try
-    (return (eval mangled scope))
+    (return (eval (_py-name symbol) scope))
     (except [Exception]
       (return None))))
 
@@ -793,12 +784,52 @@
   (with [(nrepl-scope-lock scope)]
     (return (list (.get scope "__macro_namespace" {})))))
 
+(def _scope-macro [symbol scope]
+  "The macro of scope's table a call headed symbol expands, or None: the
+   key written exactly as symbol, as the compiler finds it (core/macro.py)."
+  (with [(nrepl-scope-lock scope)]
+    (return (.get (.get scope "__macro_namespace" {}) symbol))))
+
+(def _python-spelling-p [prefix]
+  "Whether completion labels each name as Python spells it (the Python name)
+   rather than by its hyphen spelling (hyphen-spelling): when the word being
+   typed, prefix's last .-part, holds no - and a _ past its leading ones
+   (my_v, my_; never _pri, whose hyphen spellings still start with it).  An
+   nREPL item carries no filterText and a client asks once per prefix,
+   filtering that reply by the typed word, so a label must start with it:
+   my_v would match no my-val."
+  (= word (sub (.split prefix ".") -1))
+  (return (and (in "_" (.lstrip word "_")) (not-in "-" word))))
+
+(def _prefix-match-p [text prefix py-prefix]
+  "Whether text (a name or macro key) starts with prefix as typed, or its
+   Python name with prefix's (py-prefix), so my-v and my_v both find my_val."
+  (return (or (.startswith text prefix)
+              (.startswith (_py-name text) py-prefix))))
+
 (def nrepl-complete [prefix scope]
   "Return completions matching prefix, including dot-completion.  Every key
    of the scope's macro table (defmacro, every require form) is a macro, so a
-   qualified macro (mod.name) is offered under a dotted prefix too."
-  (= macro-matches (set (filter (fn [k] (.startswith k prefix))
-                                (_scope-macro-names scope))))
+   qualified macro (mod.name) is offered under a dotted prefix too.  Each
+   name is offered once (name-key), the first source naming it winning:
+   macros, lispython's own names, keywords, the scope, the builtins.  A name
+   is labelled by its hyphen spelling (hyphen-spelling, as the LSP labels
+   it), or as Python spells it while the typed word does
+   (_python-spelling-p).  A macro is labelled by its key as registered,
+   matched by its text or its Python name."
+  (= python-spelling (_python-spelling-p prefix))
+  (= spell (fn [name] (ife python-spelling name (hyphen-spelling name))))
+  (= py-prefix (_py-name prefix))
+  ;; name-key -> (label, (tag, runtime word)).
+  (= entries {})
+  (def add [label cls]
+    (.setdefault entries (name-key label) (, label cls)))
+  ;; ⚠️ Never respell a macro key: a macro call is found by its head's exact
+  ;; text (core/macro.py), so (my-mac x) never expands a macro defined as
+  ;; my_mac.
+  (for key in (_scope-macro-names scope)
+    (if (_prefix-match-p key prefix py-prefix)
+        (add key (_tagged MACRO-TAG))))
   (if (in "." prefix)
       (do
         ;; Dot completion: resolve object, list its attributes
@@ -806,50 +837,34 @@
         (= obj-part (.join "." (sub parts [: -1])))
         (= attr-prefix (sub parts -1))
         (= obj (_resolve-obj obj-part scope))
-        (= classes {})
         (if (is-not obj None)
-            (do (= py-attr (.replace attr-prefix "-" "_"))
+            (do (= py-attr (_py-name attr-prefix))
                 (for attr in (dir obj)
                   (if (.startswith attr py-attr)
-                      (= (sub classes (+ obj-part "." (_unmangle attr)))
-                         (_untagged (_attribute-kind obj attr)))))))
-        (for name in macro-matches
-          (= (sub classes name) (_tagged MACRO-TAG)))
-        (return (_complete-result classes)))
+                      (add (+ obj-part "." (spell attr))
+                           (_untagged (_attribute-kind obj attr))))))))
       (do
-        ;; Prefix completion from macros, scope, builtins, keywords and
-        ;; lispython's own names
+        ;; Prefix completion from lispython's own names, keywords, scope
+        ;; and builtins
+        (for k in _OWN-NAME-TAGS
+          (if (.startswith k prefix)
+              (add k (_tagged (sub _OWN-NAME-TAGS k)))))
+        (for k in keyword.kwlist
+          (if (.startswith k prefix)
+              (add k (_untagged "keyword"))))
         (with [(nrepl-scope-lock scope)]
           (= names (list scope)))
-        (= matches (set macro-matches))
-        (= py-prefix (_mangle prefix))
+        ;; A scope binding shadows the builtin of the same name.
         (for k in names
-          (if (or (.startswith k prefix) (.startswith k py-prefix))
-              (matches.add (_unmangle k))))
+          (if (_prefix-match-p k prefix py-prefix)
+              (add (spell k) (_untagged (_completion-kind (.get scope k))))))
         (= builtins (ife (isinstance __builtins__ dict)
                          __builtins__
                          (vars __builtins__)))
         (for k in builtins
-          (if (or (.startswith k prefix) (.startswith k py-prefix))
-              (matches.add k)))
-        (for k in [*keyword.kwlist *_OWN-NAME-TAGS]
-          (if (.startswith k prefix)
-              (matches.add k)))
-        ;; Classify each name once
-        (= classes {})
-        (for name in matches
-          (= mangled (_mangle name))
-          (= (sub classes name)
-             (conde (in name macro-matches) (_tagged MACRO-TAG)
-                    (in name _OWN-NAME-TAGS) (_tagged (sub _OWN-NAME-TAGS name))
-                    (in name keyword.kwlist) (_untagged "keyword")
-                    ;; A scope binding shadows the builtin of the same name.
-                    (in mangled scope)
-                    (_untagged (_completion-kind (sub scope mangled)))
-                    (in mangled builtins)
-                    (_untagged (_completion-kind (sub builtins mangled)))
-                    (_untagged "variable"))))
-        (return (_complete-result classes)))))
+          (if (_prefix-match-p k prefix py-prefix)
+              (add (spell k) (_untagged (_completion-kind (sub builtins k))))))))
+  (return (_complete-result (dict (.values entries)))))
 
 (def nrepl-docs [symbol scope]
   "Return documentation for a symbol."
@@ -862,7 +877,7 @@
         (return {"op" "docs-result" "docs" None "error" None}))
     ;; Build docs string
     (= parts [])
-    (= name (_unmangle symbol))
+    (= name (hyphen-spelling symbol))
     ;; Signature
     (try
       (= sig (inspect.signature obj))
@@ -870,15 +885,15 @@
       (for [pname p] in (.items sig.parameters)
         (= kind p.kind)
         (cond (== kind inspect.Parameter.VAR-POSITIONAL)
-              (params.append (+ "*" (_unmangle pname)))
+              (params.append (+ "*" (hyphen-spelling pname)))
               (== kind inspect.Parameter.VAR-KEYWORD)
-              (params.append (+ "**" (_unmangle pname)))
+              (params.append (+ "**" (hyphen-spelling pname)))
               (and (!= p.default inspect.Parameter.empty)
                    (in kind [inspect.Parameter.KEYWORD-ONLY
                              inspect.Parameter.POSITIONAL-OR-KEYWORD]))
-              (params.append (+ ":" (_unmangle pname) " " (repr p.default)))
+              (params.append (+ ":" (hyphen-spelling pname) " " (repr p.default)))
               True
-              (params.append (_unmangle pname))))
+              (params.append (hyphen-spelling pname))))
       (parts.append (+ name " [" (.join " " params) "]"))
       (except [TypeError ValueError]
         (parts.append name)))
@@ -917,7 +932,7 @@
           True
           (= annotation "instance"))
     (return {"op" "annotate-result"
-             "annotation" (+ "<" annotation " " (_unmangle symbol) ">")})
+             "annotation" (+ "<" annotation " " (hyphen-spelling symbol) ">")})
     (except [Exception as e]
       (return {"op" "annotate-result"
                "annotation" "unknown"}))))

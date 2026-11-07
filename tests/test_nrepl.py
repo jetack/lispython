@@ -508,3 +508,57 @@ def test_ns_field_has_one_spelling_in_tools():
     src = Path(tools.__file__).with_name("tools.lpy").read_text()
     assert tools.NREPL_NS_FIELD == "ns"
     assert re.findall(r'"ns"', src) == ['"ns"']
+
+
+@pytest.fixture
+def spelled_scope():
+    scope = {"__name__": "__nrepl_spelling__", "__macro_namespace": {}}
+    result = tools.nrepl_eval(
+        "(import collections)\n"
+        "(= my_val 1)\n"
+        "(= a__b 1)\n"
+        "(= _priv_x 1)\n"
+        "(defmacro my_mac [x] x)",
+        scope,
+    )
+    assert result["error"] is None
+    return scope
+
+
+def complete_labels(prefix, scope):
+    return [item["label"] for item in tools.nrepl_complete(prefix, scope)["items"]]
+
+
+@pytest.mark.parametrize(
+    "prefix, label, absent",
+    [
+        ("my", "my-val", "my_val"),
+        ("a", "a__b", "a--b"),
+        ("_pri", "_priv-x", "_priv_x"),
+        ("collections.OrderedDict.move", "collections.OrderedDict.move-to-end", None),
+        ("my-v", "my-val", "my_val"),
+        # A typed _ asks for the Python spelling: an item carries no
+        # filterText, so the client filters labels by the typed my_v; a
+        # leading _ does not (every spelling of _priv_x starts with _pri).
+        ("my_v", "my_val", "my-val"),
+        ("my_", "my_val", "my-val"),
+        (
+            "collections.OrderedDict.move_to",
+            "collections.OrderedDict.move_to_end",
+            "collections.OrderedDict.move-to-end",
+        ),
+        # A macro keeps its registered key: a call is found by its exact
+        # head, so (my-mac x) would never expand my_mac.
+        ("my", "my_mac", "my-mac"),
+    ],
+)
+def test_complete_labels_names_by_the_hyphen_spelling(
+    spelled_scope, prefix, label, absent
+):
+    # Defects: the nREPL drifting from the LSP's rule (hyphen_spelling), as
+    # its old unmangling did (a__b offered as a--b, another name); a _
+    # prefix that no label starts with, so the client shows nothing; a
+    # macro offered in a spelling that does not call it; one name twice.
+    labels = complete_labels(prefix, spelled_scope)
+    assert labels.count(label) == 1
+    assert absent not in labels
