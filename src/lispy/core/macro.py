@@ -96,14 +96,14 @@ def require_macro(sexp, scope, include_meta=True):
 def _eval_require(code, scope):
     """Run a require's code in scope. A key the require registers is the
     require's from then on, even when it registers the very macro a unit
-    start seeded there (SEEDED_KEY), so a later TOP start keeps it: the
+    start seeded there (MacroTable.seeded), so a later TOP start keeps it: the
     seeded keys are set aside while it runs, and each it did not register
     again is put back, still seeded."""
-    seeded = scope.get(SEEDED_KEY)
+    namespace = scope.get("__macro_namespace")
+    seeded = namespace.seeded if isinstance(namespace, MacroTable) else None
     if not seeded:
         eval(code, scope)
         return
-    namespace = scope.setdefault("__macro_namespace", {})
     aside = {key: namespace.pop(key) for key in list(seeded) if key in namespace}
     try:
         eval(code, scope)
@@ -211,7 +211,7 @@ def active_macro_kind(scope):
 
     def kind(spelling):
         namespace = scope.get("__macro_namespace") or {}
-        prelude = scope.get(PRELUDE_KEY) or {}
+        prelude = namespace.prelude if isinstance(namespace, MacroTable) else {}
         found = None
         # A snapshot: in the nREPL another connection's running code (a
         # compiled defmacro or require) may add to the table meanwhile.
@@ -251,14 +251,29 @@ def macroexpand_then_compile(sexp_list, scope, include_meta=True, check_bindings
 # The built-in macros every compilation unit starts with (Clojure's
 # clojure.core refer): copied into the unit's compile-time scope only, so
 # they emit no code and a module's runtime __macro_namespace holds only its
-# own defmacros and explicit requires. The scope keeps the copy under this
-# key, which marks it seeded (a persistent scope, such as a REPL session, is
-# seeded once) and is what every later unit start copies from.
-PRELUDE_KEY = "__macro_prelude"
-# The keys of the scope's macro table a unit start (seed_prelude, MODULE,
-# TOP) put there from the prelude and nothing has registered since: the
-# entries a TOP start may take back. A require never adds to it.
-SEEDED_KEY = "__macro_seeded"
+# own defmacros and explicit requires.
+class MacroTable(dict):
+    """A scope's macro table (its ``__macro_namespace``) with the bookkeeping
+    that describes it, kept on the table and never as a key in the scope,
+    which is the user's globals (completion would offer it, ``(globals)``
+    would show it). Dropping the table drops its record with it, so a scope
+    whose table was replaced is seeded again, and no side table outlives a
+    scope.
+
+    prelude: the built-in macros the scope was seeded with, what every later
+    unit start copies from and what tells a built-in from a user macro.
+    seeded: the keys a unit start (seed_prelude, MODULE, TOP) put there from
+    the prelude and nothing has registered since: the entries a TOP start
+    may take back. A require never adds to it."""
+
+    __slots__ = ("prelude", "seeded")
+
+    def __init__(self, table=(), prelude=None):
+        super().__init__(table)
+        self.prelude = {} if prelude is None else prelude
+        self.seeded = set()
+
+
 PRELUDE_MODULE = "lispy.macros"
 
 
@@ -274,12 +289,12 @@ def _prelude_source_p(scope):
 
 
 def seed_prelude(scope):
-    """Record the prelude in scope (under PRELUDE_KEY) and add its macros to
-    scope's macro table, once: a scope already seeded is left as it is, and a
-    name the table already defines keeps its own macro. compile_unit seeds
-    every scope it compiles in; how a unit start then reshapes the table is
+    """Record the prelude in scope's macro table (a MacroTable) and add its
+    macros to it, once: a scope already seeded is left as it is, and a name
+    the table already defines keeps its own macro. compile_unit seeds every
+    scope it compiles in; how a unit start then reshapes the table is
     UnitStart's."""
-    if PRELUDE_KEY in scope:
+    if isinstance(scope.get("__macro_namespace"), MacroTable):
         return
     if _prelude_source_p(scope):
         prelude = {}
@@ -287,13 +302,12 @@ def seed_prelude(scope):
         import lispy.macros
 
         prelude = dict(getattr(lispy.macros, "__macro_namespace"))
-    scope[PRELUDE_KEY] = prelude
-    namespace = scope.setdefault("__macro_namespace", {})
-    seeded = scope.setdefault(SEEDED_KEY, set())
+    namespace = MacroTable(scope.get("__macro_namespace") or (), prelude)
+    scope["__macro_namespace"] = namespace
     for name, macro in prelude.items():
         if name not in namespace:
             namespace[name] = macro
-            seeded.add(name)
+            namespace.seeded.add(name)
 
 
 class UnitStart(enum.Enum):
@@ -309,7 +323,7 @@ class UnitStart(enum.Enum):
 
     TOP: the unit is a region at the top of a file whose scope persists (an
     nREPL eval sent at line 1). Only the entries a unit start seeded from
-    the prelude (SEEDED_KEY) are derived again, from the region's first
+    the prelude (MacroTable.seeded) are derived again, from the region's first
     form: each still holding its prelude macro is dropped, then every
     prelude macro whose name the table lacks is seeded again, unless that
     form is the opt-out, whose require adds its selection back as it
@@ -352,18 +366,18 @@ def _start_unit(scope, forms, start):
     says (UnitStart)."""
     if start is UnitStart.CONTINUE:
         return
-    namespace = scope.setdefault("__macro_namespace", {})
-    prelude = scope.get(PRELUDE_KEY, {})
+    namespace = scope["__macro_namespace"]
+    prelude = namespace.prelude
     first = _first_form(forms)
     if start is UnitStart.MODULE:
         namespace.clear()
     elif first is None:
         return
     else:
-        for key in scope.get(SEEDED_KEY, ()):
+        for key in namespace.seeded:
             if key in namespace and namespace[key] is prelude.get(key):
                 del namespace[key]
-    seeded = scope[SEEDED_KEY] = set()
+    seeded = namespace.seeded = set()
     if not _opt_out_form_p(first):
         for key, macro in prelude.items():
             if key not in namespace:

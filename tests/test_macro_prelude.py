@@ -368,6 +368,25 @@ def test_nrepl_scope_lock_is_not_in_the_scope(session, tmp_path):
     assert tools.nrepl_scope_lock(session) is tools.nrepl_scope_lock(session)
 
 
+def test_nrepl_macro_bookkeeping_is_not_a_global(session, tmp_path):
+    # The prelude record and the seeded keys live on the macro table, so
+    # neither completion nor (globals) shows them.
+    path = tmp_path / "f.lpy"
+    assert eval_at(session, path, "(= a 1)", 1)["error"] is None
+    for scope in (session, tools.nrepl_file_scope(str(path))):
+        assert [k for k in scope if k.startswith("__macro")] == ["__macro_namespace"]
+    for prefix in ("__macro_p", "__macro_s"):
+        assert request(session, op="complete", prefix=prefix)["completions"] == []
+
+
+def test_a_scope_whose_table_is_dropped_is_seeded_again():
+    scope = {}
+    compile_unit(parse("(= a 1)"), scope)
+    del scope["__macro_namespace"]
+    compile_unit(parse("(= b 1)"), scope)
+    assert "inc" in scope["__macro_namespace"]
+
+
 @pytest.mark.parametrize("opted_out_first", [True, False])
 def test_nrepl_reload_after_the_first_form_changes(session, tmp_path, opted_out_first):
     # A file scope persists across loads; each load starts from the whole
