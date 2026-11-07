@@ -656,7 +656,7 @@
       (return (CompiledBuffer None :stage PARSE-STAGE :error e :epoch (current-epoch)))))
   (= macro-epoch None)
   (try
-    (with [(fresh-modules import-root) as entered (_on-sys-path import-root)]
+    (with [(fresh-modules) as entered (_on-sys-path import-root)]
       (= macro-epoch entered)
       (= body (list (compile-unit forms scope))))
     (except [Exception as e]

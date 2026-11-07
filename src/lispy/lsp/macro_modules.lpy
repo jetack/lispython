@@ -14,6 +14,7 @@
 (import os)
 (import os.path as osp)
 (import sys)
+(import sysconfig)
 (import threading)
 (import time)
 
@@ -26,10 +27,13 @@
 ;; kept on the loader): a second instance of this module (a reload, or an
 ;; import after it was dropped from sys.modules) takes that same object, so
 ;; its compiles and drops wait for one another's.  local holds each thread's
-;; open windows; condition guards the rest.  tracked maps a module name to
-;; (path, (st_mtime_ns, st_size)): its file as it was stat'ed just before it
-;; was read.  dep-files maps each file under the import root in the cache
-;; record of a tracked .lpy (lpy-record) to its recorded stamp: a module
+;; open windows; condition guards the rest.  files maps each tracked file's
+;; path to (st_mtime_ns, st_size), the first stamp it had when read in this
+;; epoch (an earlier stamp can only make it stale, never missed); names is the
+;; modules to drop from sys.modules.  Both are by path, never by name: one
+;; name may be read from two source roots in one epoch.  dep-files maps each
+;; trackable file (_trackable-path-p) in the cache record of a tracked .lpy
+;; (lpy-record) to its recorded stamp: a module
 ;; loaded from its cache reads none of the files its compile read (a module a
 ;; macro imported as it expanded), so no window sees them.  dirs maps a
 ;; directory searched for a module no finder found to its st_mtime_ns when
@@ -42,7 +46,8 @@
     (= self.local (threading.local))
     (= self.condition (threading.Condition))
     (= self.original-path-stats original-path-stats)
-    (= self.tracked {})
+    (= self.files {})
+    (= self.names (set))
     (= self.dep-files {})
     (= self.dirs {})
     (= self.running (set))
@@ -58,6 +63,11 @@
 
 (= _EXCLUDED-PARTS (frozenset ["site-packages" "dist-packages"]))
 (= _LISPY-DIR (osp.dirname (osp.realpath lispy.__file__)))
+;; lispython's own package and the interpreter's library directories.
+(= _EXCLUDED-DIRS
+   (+ (, _LISPY-DIR)
+      (tuple (sorted {, (osp.realpath (sub (sysconfig.get-paths) key))
+                        for key in ["stdlib" "platstdlib" "purelib" "platlib"]}))))
 
 (def _stamp [path]
   "(st_mtime_ns, st_size) of path; OSError when it cannot be read."
@@ -135,7 +145,7 @@
    failed is in none, and stays tracked until its file changes.  Under
    _SHARED.condition."
   (= changed [])
-  (for [path stamp] in (+ (list (.values _SHARED.tracked)) (list (.items _SHARED.dep-files)))
+  (for [path stamp] in (+ (list (.items _SHARED.files)) (list (.items _SHARED.dep-files)))
     (try
       (if (!= (_stamp path) stamp)
           (.append changed path))
@@ -202,15 +212,16 @@
     (for path in changed
       (if (.endswith path ".py")
           (_remove-bytecode path)))
-    (for [path _] in (list (.values _SHARED.tracked))
+    (for path in (list _SHARED.files)
       (if (.endswith path ".lpy")
           (_remove-bytecode path)))
     ;; Every tracked module goes, not just the changed one: the import graph
     ;; is unknown, and a module importing the changed one holds its old
     ;; functions.
-    (for name in (list _SHARED.tracked)
+    (for name in (list _SHARED.names)
       (.pop sys.modules name None))
-    (.clear _SHARED.tracked)
+    (.clear _SHARED.files)
+    (.clear _SHARED.names)
     (.clear _SHARED.dep-files)
     (.clear _SHARED.dirs)
     (importlib.invalidate-caches)
@@ -218,51 +229,56 @@
     (.notify-all _SHARED.condition)
     (return True)))
 
-(def _under-root-p [real root]
-  "Whether the real path real lies under root (already real), outside
-   site-packages, dist-packages and lispython's own package."
+(def _within-p [real directory]
+  "Whether the real path real is directory (already real) or below it."
   (try
-    (if (!= (osp.commonpath [real root]) root)
-        (return False))
-    (if (== (osp.commonpath [real _LISPY-DIR]) _LISPY-DIR)
-        (return False))
+    (return (== (osp.commonpath [real directory]) directory))
     ;; Paths on different drives (Windows) share no root.
     (except [ValueError]
-      (return False)))
-  (return (.isdisjoint _EXCLUDED-PARTS (.split real os.sep))))
+      (return False))))
 
-(def _trackable-p [name path root]
+(def _trackable-path-p [real]
+  "Whether the file or directory at the real path real may be tracked: it
+   lies outside lispython's own package, the interpreter's library
+   directories (_EXCLUDED-DIRS) and every site-packages or dist-packages
+   directory.  Any other source root qualifies (a workspace member, an
+   editable install, a PYTHONPATH entry), not only the compiling file's."
+  (if (not (.isdisjoint _EXCLUDED-PARTS (.split real os.sep)))
+      (return False))
+  (return (not (any ((_within-p real directory) for directory in _EXCLUDED-DIRS)))))
+
+(def _trackable-p [name path]
   "Whether the module name read from path in a window may be dropped: a .py
-   or .lpy file under root (_under-root-p) and no module of lispython
-   itself.  The server's own modules (a user may edit lispython itself) and
-   third-party or extension modules (numpy refuses a second load) must
-   never be dropped."
+   or .lpy file at a trackable path (_trackable-path-p) and no module of
+   lispython itself.  The server's own modules (a user may edit lispython
+   itself) and third-party or extension modules (numpy refuses a second
+   load) must never be dropped."
   (if (or (== name "lispy") (.startswith name "lispy."))
       (return False))
   (if (or (not (isinstance path str)) (not (.endswith path (, ".py" ".lpy"))))
       (return False))
-  (return (_under-root-p (osp.realpath path) root)))
+  (return (_trackable-path-p (osp.realpath path))))
 
-(def _track-record [path root]
-  "Track the files under root in the cache record of the .lpy at path, the
+(def _track-record [path]
+  "Track the trackable files in the cache record of the .lpy at path, the
    record of the code loaded from it (none while its latest compile failed,
-   so a broken file is tracked by its own stamp alone).  Under _SHARED.condition."
+   so a broken file is tracked by its own stamp alone).  Under
+   _SHARED.condition."
   (= record (lpy-record path))
   (if (is record None)
       (return))
   (for [real mtime size] in record
-    (if (_under-root-p real root)
+    (if (_trackable-path-p real)
         (.setdefault _SHARED.dep-files real (, mtime size)))))
 
 (deco contextlib.contextmanager
-  (def fresh-modules [import-root]
+  (def fresh-modules []
     "Wrap one compile: first drop every tracked module once one is stale
      (_drop-stale, waiting), then track every .py or .lpy source the
-     compile reads under import-root (nothing for None, _trackable-p) by the
-     stamp its file had when read, the files under it in each such .lpy's
-     cache record (_track-record), and every directory under it searched for
-     a module no finder found by its mtime.  Yields the epoch the compile
-     runs under."
+     compile reads (_trackable-p) by the stamp its file had when read, the
+     trackable files in each such .lpy's cache record (_track-record), and
+     every trackable directory searched for a module no finder found by its
+     mtime.  Yields the epoch the compile runs under."
     (= reads [])
     (= token (object))
     (with [_SHARED.condition]
@@ -278,19 +294,18 @@
             (.pop windows))
         (with [_SHARED.condition]
           (try
-            (if (is-not import-root None)
-                (do (= root (osp.realpath import-root))
-                    (for [name path stamp] in reads
-                      (cond
-                        (is name None)
-                        (do (= directory (osp.realpath path))
-                            (if (_under-root-p directory root)
-                                (= (sub _SHARED.dirs directory) stamp)))
+            (for [name path stamp] in reads
+              (cond
+                (is name None)
+                (do (= directory (osp.realpath path))
+                    (if (_trackable-path-p directory)
+                        (.setdefault _SHARED.dirs directory stamp)))
 
-                        (_trackable-p name path root)
-                        (do (= (sub _SHARED.tracked name) (, path stamp))
-                            (if (.endswith path ".lpy")
-                                (_track-record path root)))))))
+                (_trackable-p name path)
+                (do (.setdefault _SHARED.files path stamp)
+                    (.add _SHARED.names name)
+                    (if (.endswith path ".lpy")
+                        (_track-record path)))))
             (finally
               (.discard _SHARED.running token)
               (.discard _SHARED.hung token)

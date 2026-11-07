@@ -1468,27 +1468,77 @@ class TestMacroModules:
         [diagnostic] = server.compute_diagnostics(src, uri)
         assert "pvmm-boom" in diagnostic.message
 
-    def test_a_module_outside_the_import_root_is_never_dropped(
+    def test_a_module_from_another_source_root_is_seen(
         self, package, tmp_path, monkeypatch
     ):
-        # Only modules under the import root are dropped: a library a macro
-        # imports keeps its one instance (an extension refuses a second load).
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        ext = "pvmmoutsideext"
-        (outside / (ext + ".py")).write_text("VALUE = 1\n")
-        monkeypatch.syspath_prepend(str(outside))
+        # Defect: only modules under the compiling file's import root are
+        # tracked, so a helper from another source root (a workspace member,
+        # an editable install, a PYTHONPATH entry) keeps its old instance.
+        other = tmp_path / "other"
+        other.mkdir()
+        helper = package.name + "helper"
+        (other / (helper + ".py")).write_text("VALUE = 1\n")
+        monkeypatch.syspath_prepend(str(other))
+        monkeypatch.delitem(sys.modules, helper, raising=False)
+        (package.pkg / "mac.lpy").write_text(
+            f"(import {helper})\n(defmacro twice [x] (return {helper}.VALUE))"
+        )
+        try:
+            assert self.view(package).text.endswith("yy = 1")
+            (other / (helper + ".py")).write_text("VALUE = 22\n")
+            assert self.view(package).text.endswith("yy = 22")
+        finally:
+            sys.modules.pop(helper, None)
+
+    def test_a_module_in_site_packages_is_never_dropped(
+        self, package, tmp_path, monkeypatch
+    ):
+        # A library a macro imports keeps its one instance (an extension
+        # refuses a second load).
+        site = tmp_path / "lib" / "site-packages"
+        site.mkdir(parents=True)
+        ext = package.name + "ext"
+        (site / (ext + ".py")).write_text("VALUE = 1\n")
+        monkeypatch.syspath_prepend(str(site))
         monkeypatch.delitem(sys.modules, ext, raising=False)
         (package.pkg / "mac.lpy").write_text(f"(import {ext})\n" + TWICE)
         try:
             self.view(package)
             module = sys.modules[ext]
-            (outside / (ext + ".py")).write_text("VALUE = 22\n")
+            (site / (ext + ".py")).write_text("VALUE = 22\n")
             (package.pkg / "mac.lpy").write_text(f"(import {ext})\n" + THRICE)
             assert self.view(package).text.endswith("yy = 2 * 2 * 2")
             assert sys.modules[ext] is module
         finally:
             sys.modules.pop(ext, None)
+
+    def test_one_name_from_two_roots_tracks_both_files(self, package, tmp_path):
+        # Defect: tracking by module name lets the second root's file replace
+        # the first's, so fixing the first (whose import failed) is never
+        # seen: the name stays bound to the second root's module.
+        name = package.name + "two"
+        first, second = tmp_path / "first", tmp_path / "second"
+        for root in [first, second]:
+            root.mkdir()
+        (first / (name + ".lpy")).write_text("(defmacro twice [x]")
+        (second / (name + ".lpy")).write_text(THRICE)
+
+        def view(root):
+            return pv.compile_view(
+                f"(require {name} *)\n(= yy (twice 2))",
+                name="pvmmtwo",
+                import_root=str(root),
+            )
+
+        try:
+            assert view(first) is None
+            assert view(second).text.endswith("yy = 2 * 2 * 2")
+            (first / (name + ".lpy")).write_text(
+                "(defmacro twice [x] (return `(- ~x ~x)))"
+            )
+            assert view(first).text.endswith("yy = 2 - 2")
+        finally:
+            sys.modules.pop(name, None)
 
     def consumer(self, kind, package, tmp_path):
         """The text a ViewCache view (one uri and version throughout) or a
@@ -1564,12 +1614,12 @@ class TestMacroModules:
         entered, release = threading.Event(), threading.Event()
 
         def hold():
-            with mm.fresh_modules(None):
+            with mm.fresh_modules():
                 entered.set()
                 release.wait(30)
 
         def wait():
-            with mm.fresh_modules(None):
+            with mm.fresh_modules():
                 pass
 
         holder = threading.Thread(target=hold, daemon=True)
@@ -1604,7 +1654,7 @@ class TestMacroModules:
         entered, release = threading.Event(), threading.Event()
 
         def hold():
-            with mm.fresh_modules(None):
+            with mm.fresh_modules():
                 entered.set()
                 release.wait(30)
 
@@ -1831,7 +1881,7 @@ class TestMacroModules:
         entered, release = threading.Event(), threading.Event()
 
         def hold():
-            with second.fresh_modules(None):
+            with second.fresh_modules():
                 entered.set()
                 release.wait(30)
 
@@ -1854,11 +1904,11 @@ class TestMacroModules:
                 dropper.join(10)
 
     def test_lispython_own_modules_are_never_tracked(self, tmp_path):
-        root = os.path.realpath(tmp_path)
-        path = os.path.join(root, "m.py")
-        assert mm._trackable_p("pvmmown.m", path, root)
-        assert not mm._trackable_p("lispy", path, root)
-        assert not mm._trackable_p("lispy.lsp.m", path, root)
+        path = os.path.join(os.path.realpath(tmp_path), "m.py")
+        assert mm._trackable_p("pvmmown.m", path)
+        assert not mm._trackable_p("lispy", path)
+        assert not mm._trackable_p("lispy.lsp.m", path)
+        assert not mm._trackable_p("pvmmown.m", os.__file__)
 
 
 def fresh_with_p(node):
