@@ -24,6 +24,7 @@ from lispy.core.parser import parse
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
+macro_modules = importlib.import_module("lispy.lsp.macro_modules")
 
 URI = "file:///buffer.lpy"
 COMPLETE = "(def foo [] 1)\n(def bar [x] (foo))\n"
@@ -683,6 +684,49 @@ def test_a_newer_version_supersedes_pending_cursor_views(slow_views, tmp_path):
     assert stale == (None, None)
     assert [view.version for view, _ in latest] == [3, 3]
     assert slow_views.calls == [(1, 1), (3, 1)]
+
+
+def test_a_cursor_view_that_never_returns_stops_holding_up_its_document(
+    monkeypatch, tmp_path
+):
+    # Defect: a cursor view whose compile never returns (a macro looping
+    # forever) keeps every later request of its document waiting behind it.
+    started, release = threading.Event(), threading.Event()
+
+    def cursor_view(uri, version, source, line, col, *rest):
+        if version == 1:
+            started.set()
+            release.wait(10)
+        return SimpleNamespace(version=version)
+
+    monkeypatch.setattr(server, "cursor_view", cursor_view)
+    monkeypatch.setattr(macro_modules, "WAIT_LIMIT", 0.1)
+
+    async def scenario():
+        first = asyncio.ensure_future(view_of(tmp_path, 1, timeout=5))
+        await until(started.is_set)
+        second = await view_of(tmp_path, 2, timeout=3)
+        return await first, second
+
+    try:
+        (first, _), (second, _) = asyncio.run(scenario())
+    finally:
+        release.set()
+    assert first is None
+    assert second.version == 2
+
+
+def test_a_request_with_no_timeout_still_has_a_deadline(
+    slow_views, monkeypatch, tmp_path
+):
+    # Defect: hover and signature help (timeout None) wait for a cursor
+    # view that never comes, forever.
+    monkeypatch.setattr(server, "REQUEST_TIMEOUT", 0.2)
+
+    async def scenario():
+        return await asyncio.wait_for(view_of(tmp_path, 1), 3)
+
+    assert asyncio.run(scenario()) == (None, None)
 
 
 def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
