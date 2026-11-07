@@ -384,6 +384,30 @@ class TestCache:
         assert len(calls) == 2  # nothing was cached for the closed document
 
     @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
+    def test_a_late_older_version_keeps_the_newer_entry(self, monkeypatch, method):
+        # Defect: an older version's compile (one given up on) that returns
+        # after a newer version was cached replaces the newer entry, so the
+        # newer version compiles again at its next request.
+        cache = pv.ViewCache()
+        calls = []
+        real = pv.compile_buffer
+
+        def at(version):
+            cursor = (1, 10) if method == "view_at_cursor" else ()
+            return ("u", version, "(print a.b)") + cursor
+
+        def late(source, **kw):
+            calls.append(source)
+            if len(calls) == 1:  # version 2 is cached while version 1 compiles
+                getattr(cache, method)(*at(2))
+            return real(source, **kw)
+
+        monkeypatch.setattr(pv, "compile_buffer", late)
+        getattr(cache, method)(*at(1))
+        getattr(cache, method)(*at(2))
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("method", ["view", "view_at_cursor"])
     def test_a_close_before_the_worker_starts_leaves_no_entry(
         self, monkeypatch, method
     ):

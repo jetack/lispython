@@ -403,14 +403,27 @@
 ;; forever).  Run in the loop's default executor, a few such compiles would
 ;; park every worker, stalling each later asyncio.to-thread of the server;
 ;; a thread of its own parks only itself.
+(class OwnThread []
+  "A call running in a thread of its own (in-own-thread): future, an
+   asyncio future of its outcome; ended, set once the call returned or
+   raised, whatever became of future; parked, whether it was given up on
+   while running (_park)."
+  (def __init__ [self future]
+    (= self.future future)
+    (= self.ended False)
+    (= self.parked False)))
+
 (def in-own-thread [func *args]
-  "An asyncio future of func(*args), run in a new daemon thread of its own
-   in a copy of the caller's context.  The future is settled from the
-   thread only while it is not done (its waiter may have cancelled it), so
-   a late result or exception is dropped; func's exception, BaseException
-   included, becomes the future's; a loop closed meanwhile is ignored."
+  "An OwnThread of func(*args), run in a new daemon thread of its own in a
+   copy of the caller's context.  Its future is settled from the thread
+   only while it is not done (its waiter may have cancelled it), so a late
+   result or exception is dropped; func's exception becomes the future's,
+   and a BaseException that is no Exception (a macro's sys.exit) a
+   RuntimeError caused by it, so the caller's except Exception takes it
+   rather than the loop stopping; a loop closed meanwhile is ignored."
   (= loop (asyncio.get-running-loop))
   (= future (.create-future loop))
+  (= thread (OwnThread future))
   (= context (contextvars.copy-context))
   (def settle [result error]
     (cond (.done future)
@@ -423,41 +436,100 @@
     (= outcome (, None None))
     (try
       (= outcome (, (.run context func *args) None))
+      (except [Exception as e]
+        (= outcome (, None e)))
       (except [BaseException as e]
-        (= outcome (, None e))))
+        (= wrapped (RuntimeError f"the compile raised {(. (type e) __name__)}: {e!r}"))
+        (= wrapped.__cause__ e)
+        (= outcome (, None wrapped)))
+      (finally
+        (_thread-ended thread)))
     (try
       (.call-soon-threadsafe loop settle *outcome)
       (except [RuntimeError]
         (pass))))
   (.start (threading.Thread :target run :daemon True :name "lpy-compile"))
-  (return future))
+  (return thread))
+
+;; The most given-up compiles whose threads still run, for the process: each
+;; is a thread spinning in a macro, so past this many a compile is waited
+;; for again rather than given up on.
+(= MAX-PARKED-COMPILES 4)
+
+(class _ParkedCompiles []
+  "count, the given-up compiles whose threads still run; warned, whether
+   the cap's error was logged since the count last fell; lock, guarding
+   both and every OwnThread's ended and parked."
+  (def __init__ [self]
+    (= self.count 0)
+    (= self.warned False)
+    (= self.lock (threading.Lock))))
+
+(= PARKED-COMPILES (_ParkedCompiles))
+
+(def _park [thread]
+  "Count thread's compile given up on, while its call still runs and fewer
+   than MAX-PARKED-COMPILES are; whether it was."
+  (with [PARKED-COMPILES.lock]
+    (if (or thread.ended (>= PARKED-COMPILES.count MAX-PARKED-COMPILES))
+        (return False))
+    (+= PARKED-COMPILES.count 1)
+    (= thread.parked True)
+    (return True)))
+
+(def _thread-ended [thread]
+  "thread's call returned or raised (in its own thread): a parked one no
+   longer counts."
+  (with [PARKED-COMPILES.lock]
+    (= thread.ended True)
+    (if thread.parked
+        (do (-= PARKED-COMPILES.count 1)
+            (= PARKED-COMPILES.warned False)))))
+
+(def _cap-warning-due [thread]
+  "Whether thread's compile, still running, is held at the cap with no
+   error logged since the count last fell; marks it logged."
+  (with [PARKED-COMPILES.lock]
+    (if (or thread.ended PARKED-COMPILES.warned)
+        (return False))
+    (= PARKED-COMPILES.warned True)
+    (return True)))
 
 ;; What compile-or-give-up returns for a compile it stopped waiting for.
 (= GAVE-UP (object))
 
-(async-def compile-or-give-up [future superseded started]
-  "The result of future, a compile's (in-own-thread), raising its
-   exception; or GAVE-UP once superseded (an asyncio.Event: a newer version
-   of the document, or its close, came) is set and the compile has run
-   macro_modules.WAIT-LIMIT seconds since started (the loop's clock).
-   Giving up, or being cancelled, cancels future, so the compile's late
-   outcome is dropped."
-  ;; A given-up compile's thread keeps running (one parked thread per hung
-  ;; macro); its fresh-modules token is marked hung by the next drop's wait
-  ;; (macro_modules), so it holds up no later drop either.  The same
-  ;; WAIT-LIMIT: past it a compile counts as hung for both.
+(async-def compile-or-give-up [thread superseded started]
+  "The result of thread's compile (an OwnThread), raising its exception;
+   or GAVE-UP once superseded (an asyncio.Event: a newer version of the
+   document, or its close, came) is set and the compile has run
+   macro_modules.WAIT-LIMIT seconds since started (the loop's clock), while
+   fewer than MAX-PARKED-COMPILES given-up compiles still run.  At the cap
+   it waits on, trying again every WAIT-LIMIT, and logs one error per
+   reaching the cap.  Giving up, or being cancelled, cancels the future, so
+   the compile's late outcome is dropped."
+  ;; A given-up compile's thread keeps running (a parked thread per hung
+  ;; macro, capped); its fresh-modules token is marked hung by the next
+  ;; drop's wait (macro_modules), so it holds up no later drop either.  The
+  ;; same WAIT-LIMIT: past it a compile counts as hung for both.
+  (= future thread.future)
   (= loop (asyncio.get-running-loop))
   (= waiter (asyncio.ensure-future (.wait superseded)))
   (try
     (await (asyncio.wait [future waiter] :return-when asyncio.FIRST-COMPLETED))
-    (if (not (.done future))
-        (await (asyncio.wait [future]
-                             :timeout (max 0 (- (+ started macro-modules.WAIT-LIMIT)
-                                                (.time loop))))))
-    (if (.done future)
-        (return (.result future)))
-    (.cancel future)
-    (return GAVE-UP)
+    (= wait (max 0 (- (+ started macro-modules.WAIT-LIMIT) (.time loop))))
+    (while (not (.done future))
+      (await (asyncio.wait [future] :timeout wait))
+      (if (.done future)
+          (break))
+      (if (_park thread)
+          (do (.cancel future)
+              (return GAVE-UP)))
+      (if (_cap-warning-due thread)
+          (.error logger (+ "lispython LSP: %s compiles were given up on and still run: "
+                            "a macro does not return.  Restart the language server.")
+                  MAX-PARKED-COMPILES))
+      (= wait macro-modules.WAIT-LIMIT))
+    (return (.result future))
     (except [asyncio.CancelledError]
       (if (and (not (.cancel future)) (not (.cancelled future)))
           (.exception future))
@@ -719,8 +791,8 @@
    compile and this task: a push then would reopen a closed document in
    the backend, or send it a stale view.  A run that is not a refresh then
    refreshes the other documents (refresh-outdated); a run still the latest
-   whose compile ran under an older macro environment than the documents
-   were last refreshed for publishes again, as a refresh run."
+   whose compile ran under an older macro environment than the last
+   refresh's target (_REFRESH-TARGET) publishes again, as a refresh run."
   (if (not (_current-p run))
       (return))
   (= doc run.doc)
@@ -734,27 +806,35 @@
       (await (refresh-outdated run.ls doc.uri compiled)))
   ;; A refresh skips a document whose run is compiling (it has no epoch
   ;; yet), so that run may have published a compile from before the
-  ;; refreshed macro environment and would stay stale.  Its rerun enters
-  ;; fresh-modules after the drop, so its epoch is no older than
-  ;; _REFRESHED-EPOCH and this ends there.
+  ;; environment the refresh brought the documents to, and would stay
+  ;; stale.  Its rerun enters fresh-modules after the drop the target
+  ;; stands for, so its epoch is no older than _REFRESH-TARGET and this
+  ;; ends there.
   (if (and (_current-p run) (is-not compiled.epoch None)
-           (is-not _REFRESHED-EPOCH None) (< compiled.epoch _REFRESHED-EPOCH))
+           (is-not _REFRESH-TARGET None) (< compiled.epoch _REFRESH-TARGET))
       (publish-diagnostics run.ls doc.uri :refresh True)))
 
-;; The macro environment (macro_modules.epoch) the open documents were last
-;; refreshed for (refresh-outdated).
+;; The epoch of the compile that last started a refresh (refresh-outdated):
+;; a run under no newer one starts none.
 (= _REFRESHED-EPOCH None)
+;; The macro environment the last refresh brought the open documents to
+;; (refresh-epochs' target), the greatest so far.
+(= _REFRESH-TARGET None)
 
-(def macro-epoch []
-  "The macro environment's version now (macro_modules.epoch).  It stats
-   the tracked files, so callers on the loop run it in a thread."
-  (return (macro-modules.epoch)))
+(def refresh-epochs []
+  "(now, target): the macro environment's version now (macro_modules.epoch,
+   None while a drop is due), and the one a compile started from now runs
+   under at the least: now, or past the current counter while a drop is
+   due.  It stats the tracked files, so callers on the loop run it in a
+   thread."
+  (= now (macro-modules.epoch))
+  (return (, now (ife (is now None) (+ (macro-modules.current-epoch) 1) now))))
 
 (async-def refresh-outdated [ls uri compiled]
   "Run when a diagnostic run of document uri published a compile under a
    newer macro environment than the open documents were refreshed for:
    publish again every other open document whose latest run published a
-   compile under another one than now (macro-epoch; every run with an
+   compile under another one than now (refresh-epochs; every run with an
    epoch while a drop is due), so an edit to a macro module reaches the
    documents requiring it.  A run with no epoch (not compiled yet,
    compiling, or its compile raised or was given up on) is left alone: a
@@ -766,14 +846,17 @@
    file it imports moves the epoch on every compile, so a refreshed run
    refreshing again would never end.  The runs are read after the epoch,
    so a document closed meanwhile is skipped: publishing it would reopen
-   it."
-  (global _REFRESHED-EPOCH)
+   it.  The refresh's target environment becomes _REFRESH-TARGET, which a
+   run compiling meanwhile is checked against (finish-run)."
+  (global _REFRESHED-EPOCH _REFRESH-TARGET)
   ;; The maximum: a slow run finishing under an older epoch moves nothing.
   (if (or (is compiled.epoch None)
           (and (is-not _REFRESHED-EPOCH None) (<= compiled.epoch _REFRESHED-EPOCH)))
       (return))
   (= _REFRESHED-EPOCH compiled.epoch)
-  (= now (await (asyncio.to-thread macro-epoch)))
+  (= [now target] (await (asyncio.to-thread refresh-epochs)))
+  (if (or (is _REFRESH-TARGET None) (> target _REFRESH-TARGET))
+      (= _REFRESH-TARGET target))
   (for [other run] in (list (.items DIAGNOSTIC-RUNS))
     (if (and (!= other uri) (is-not run.epoch None)
              (or (is now None) (!= run.epoch now)))

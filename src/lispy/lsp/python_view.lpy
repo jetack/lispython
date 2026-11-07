@@ -803,8 +803,15 @@
     (= self._generation 0))
 
   (def _store [self table uri key result generation]
+    "Keep result as uri's entry in table under key, (version, epoch, ...),
+     unless the document was forgotten since generation, or the entry is of
+     a newer version: a slow compile of an older version (one given up on)
+     returning late must not cost the newer one a recompile."
     (with [self._lock]
-      (if (== generation self._generation)
+      (= old (.get table uri))
+      (if (and (== generation self._generation)
+               (or (is old None) (is (sub (sub old 0) 0) None) (is (sub key 0) None)
+                   (<= (sub (sub old 0) 0) (sub key 0))))
           (= (sub table uri) (, key result)))))
 
   (def _hit [self table uri key]

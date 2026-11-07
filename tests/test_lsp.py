@@ -729,6 +729,40 @@ def test_a_request_with_no_timeout_still_has_a_deadline(
     assert asyncio.run(scenario()) == (None, None)
 
 
+def test_given_up_compiles_still_running_are_capped(monkeypatch):
+    # Defect: every compile given up on leaves its thread spinning in the
+    # macro, so a user typing over a macro that never returns piles up
+    # threads without bound; or a parked thread that ends still counts, so
+    # the cap holds every later hung compile for good.
+    monkeypatch.setattr(server, "MAX_PARKED_COMPILES", 1)
+    monkeypatch.setattr(server, "PARKED_COMPILES", server._ParkedCompiles())
+    monkeypatch.setattr(macro_modules, "WAIT_LIMIT", 0.05)
+    parked, held = threading.Event(), threading.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        superseded = asyncio.Event()
+        superseded.set()
+        first = server.in_own_thread(parked.wait, 10)
+        given_up = await server.compile_or_give_up(first, superseded, loop.time())
+        assert given_up is server.GAVE_UP
+        second = asyncio.ensure_future(
+            server.compile_or_give_up(
+                server.in_own_thread(held.wait, 10), superseded, loop.time()
+            )
+        )
+        await asyncio.sleep(0.3)  # several WAIT_LIMITs
+        assert not second.done()  # held at the cap
+        parked.set()  # the parked thread ends
+        return await asyncio.wait_for(second, 3)
+
+    try:
+        assert asyncio.run(scenario()) is server.GAVE_UP
+    finally:
+        parked.set()
+        held.set()
+
+
 def test_a_cursor_view_error_reaches_its_caller(monkeypatch, tmp_path):
     # Defect: an exception in the compile thread never reaches the waiter,
     # so the request hangs instead of failing into the handler's except.

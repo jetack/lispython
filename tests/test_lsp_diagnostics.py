@@ -287,6 +287,7 @@ def fresh_server_state(monkeypatch):
     monkeypatch.setattr(server, "_COMPILING", set())
     monkeypatch.setattr(server, "_PRESET_FALLBACK_NOTIFIED", set())
     monkeypatch.setattr(server, "_REFRESHED_EPOCH", None, raising=False)
+    monkeypatch.setattr(server, "_REFRESH_TARGET", None, raising=False)
     for name in ["WORKSPACE_INDEX", "WORKSPACE_SYMBOLS", "FILE_TREES"]:
         monkeypatch.setattr(server, name, {})
 
@@ -596,7 +597,7 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
     # close, which reads the closed file back from disk, publishes its
     # diagnostics and keeps a cache entry for it that nobody forgets.
     editor, mac, mod = macro_documents
-    real = server.macro_epoch
+    real = server.refresh_epochs
     armed, entered, go = threading.Event(), threading.Event(), threading.Event()
 
     def held():
@@ -606,7 +607,7 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
             assert go.wait(10)
         return now
 
-    monkeypatch.setattr(server, "macro_epoch", held)
+    monkeypatch.setattr(server, "refresh_epochs", held)
 
     async def scenario():
         mod_uri = await opened(editor, mac, mod)
@@ -900,6 +901,33 @@ def test_a_compile_that_raises_publishes_an_internal_error(scripted, monkeypatch
     assert "cache broke" in diagnostic.message
 
 
+def test_a_macro_exiting_publishes_an_internal_error(scripted, monkeypatch):
+    # Defect: a macro calling sys.exit raises SystemExit out of the compile
+    # thread, past the compile loop's except Exception, so nothing is
+    # published and the SystemExit reaches the event loop.
+    editor, backends = scripted
+    real = server.compile_document
+
+    def exiting(uri, version, source, **kwargs):
+        if version == 1:
+            raise SystemExit(3)
+        return real(uri, version, source, **kwargs)
+
+    monkeypatch.setattr(server, "compile_document", exiting)
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
+
+    async def scenario():
+        editor.change("(= a 1)\n")
+        await until(lambda: editor.published, timeout=3)
+        editor.change("(= a")  # the loop still compiles
+        await until(lambda: len(editor.published) == 2, timeout=3)
+
+    run_bounded(scenario())
+    [internal], [parse] = editor.published
+    assert "SystemExit" in internal.message
+    assert parse.message.startswith("Parse error:")
+
+
 def held_runs(editor):
     """editor's document, its uri held as compiling, so a publish only
     records its run."""
@@ -927,9 +955,9 @@ def test_a_refresh_keeps_a_pending_changes_recompile_and_refresh(scripted):
 def refreshes(monkeypatch, runs, now, refreshed_epoch, compiled_epoch):
     """The uris refresh_outdated refreshes for a run of "self" compiled
     under compiled_epoch, with the documents' runs at the epochs runs maps
-    them to, macro_epoch at now and _REFRESHED_EPOCH at refreshed_epoch."""
+    them to, the epoch at now and _REFRESHED_EPOCH at refreshed_epoch."""
     refreshed = []
-    monkeypatch.setattr(server, "macro_epoch", lambda: now)
+    monkeypatch.setattr(server, "refresh_epochs", lambda: (now, now))
     monkeypatch.setattr(
         server, "publish_diagnostics", lambda ls, uri, **kw: refreshed.append(uri)
     )
@@ -957,6 +985,18 @@ def test_a_run_with_no_epoch_is_not_refreshed(scripted, monkeypatch):
     assert refreshes(monkeypatch, runs, 6, 5, 6) == ["old"]
 
 
+def finished(editor, epoch):
+    """(run, latest): a change of editor's document whose compile ran under
+    epoch, finished (finish_run), and the document's latest run after."""
+    server.publish_diagnostics(editor, editor.uri)
+    run = server.DIAGNOSTIC_RUNS[editor.uri]
+    run.compiled = True
+    compiled = server.compile_document(editor.uri, None, editor.document.source)
+    compiled.epoch = epoch
+    asyncio.run(server.finish_run(run, compiled))
+    return run, server.DIAGNOSTIC_RUNS[editor.uri]
+
+
 def test_a_run_compiled_before_a_refresh_publishes_again(scripted, monkeypatch):
     # Defect: a run compiling while a refresh happened (skipped by it, with
     # no epoch yet) publishes a compile from the older macro environment
@@ -964,22 +1004,29 @@ def test_a_run_compiled_before_a_refresh_publishes_again(scripted, monkeypatch):
     editor, _ = scripted
     monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
     held_runs(editor)
-
-    def finished(epoch):
-        server.publish_diagnostics(editor, editor.uri)
-        run = server.DIAGNOSTIC_RUNS[editor.uri]
-        run.compiled = True
-        compiled = server.compile_document(editor.uri, None, editor.document.source)
-        compiled.epoch = epoch
-        asyncio.run(server.finish_run(run, compiled))
-        return run, server.DIAGNOSTIC_RUNS[editor.uri]
-
     monkeypatch.setattr(server, "_REFRESHED_EPOCH", 10)
-    run, latest = finished(3)
+    monkeypatch.setattr(server, "_REFRESH_TARGET", 10)
+    run, latest = finished(editor, 3)
     assert latest is not run and latest.refresh and not latest.compiled
-    run, latest = finished(10)  # no older than the refresh: done
+    run, latest = finished(editor, 10)  # no older than the refresh: done
     assert latest is run
     assert len(editor.published) == 2
+
+
+def test_a_run_compiled_before_a_due_drop_publishes_again(scripted, monkeypatch):
+    # Defect: a run compiling while a refresh happened is checked against
+    # the epoch of the run that started the refresh, not the environment
+    # the refresh brought the documents to: with a drop due then, a run
+    # under the triggering epoch, or one between it and the drop, keeps a
+    # compile from before the drop.
+    editor, _ = scripted
+    monkeypatch.setattr(server, "DIAGNOSTICS_TIMEOUT", 0)
+    monkeypatch.setattr(macro_modules, "epoch", lambda: None)  # a drop due
+    monkeypatch.setattr(macro_modules, "current_epoch", lambda: 7)
+    asyncio.run(server.refresh_outdated(None, "trigger", SimpleNamespace(epoch=7)))
+    held_runs(editor)
+    run, latest = finished(editor, 7)
+    assert latest is not run and latest.refresh
 
 
 # ---------------------------------------------------------------------------
