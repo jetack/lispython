@@ -779,16 +779,10 @@
         True (return (_completion-kind raw))))
 
 (def _scope-macro-names [scope]
-  "The keys of scope's macro table, as written: a macro is looked up by its
-   head's text, and (require mod) registers mod.name."
+  "The keys of scope's macro table, as written ((require mod) registers
+   mod.name); a call finds one by any spelling of its name (find-macro)."
   (with [(nrepl-scope-lock scope)]
     (return (list (.get scope "__macro_namespace" {})))))
-
-(def _scope-macro [symbol scope]
-  "The macro of scope's table a call headed symbol expands, or None: the
-   key written exactly as symbol, as the compiler finds it (core/macro.py)."
-  (with [(nrepl-scope-lock scope)]
-    (return (.get (.get scope "__macro_namespace" {}) symbol))))
 
 (def _python-spelling-p [prefix]
   "Whether completion labels each name as Python spells it (the Python name)
@@ -815,8 +809,8 @@
    macros, lispython's own names, keywords, the scope, the builtins.  A name
    is labelled by its hyphen spelling (hyphen-spelling, as the LSP labels
    it), or as Python spells it while the typed word does
-   (_python-spelling-p).  A macro is labelled by its key as registered,
-   matched by its text or its Python name."
+   (_python-spelling-p); a macro key too, matched by its text or its
+   Python name.  Under a dotted prefix the typed head stays as typed."
   (= python-spelling (_python-spelling-p prefix))
   (= spell (fn [name] (ife python-spelling name (hyphen-spelling name))))
   (= py-prefix (_py-name prefix))
@@ -824,12 +818,12 @@
   (= entries {})
   (def add [label cls]
     (.setdefault entries (name-key label) (, label cls)))
-  ;; ⚠️ Never respell a macro key: a macro call is found by its head's exact
-  ;; text (core/macro.py), so (my-mac x) never expands a macro defined as
-  ;; my_mac.
+  (= head (sub (.split prefix ".") [: -1]))
   (for key in (_scope-macro-names scope)
     (if (_prefix-match-p key prefix py-prefix)
-        (add key (_tagged MACRO-TAG))))
+        (add (.join "." [*head (spell (.join "." (sub (.split key ".")
+                                                       [: (len head) None])))])
+             (_tagged MACRO-TAG))))
   (if (in "." prefix)
       (do
         ;; Dot completion: resolve object, list its attributes

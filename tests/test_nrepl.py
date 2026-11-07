@@ -547,9 +547,10 @@ def complete_labels(prefix, scope):
             "collections.OrderedDict.move_to_end",
             "collections.OrderedDict.move-to-end",
         ),
-        # A macro keeps its registered key: a call is found by its exact
-        # head, so (my-mac x) would never expand my_mac.
-        ("my", "my_mac", "my-mac"),
+        # A macro takes the default spelling too, and its Python spelling
+        # once a _ is typed.
+        ("my", "my-mac", "my_mac"),
+        ("my_m", "my_mac", "my-mac"),
     ],
 )
 def test_complete_labels_names_by_the_hyphen_spelling(
@@ -558,7 +559,7 @@ def test_complete_labels_names_by_the_hyphen_spelling(
     # Defects: the nREPL drifting from the LSP's rule (hyphen_spelling), as
     # its old unmangling did (a__b offered as a--b, another name); a _
     # prefix that no label starts with, so the client shows nothing; a
-    # macro offered in a spelling that does not call it; one name twice.
+    # macro offered in a spelling other than the default; one name twice.
     labels = complete_labels(prefix, spelled_scope)
     assert labels.count(label) == 1
     assert absent not in labels

@@ -275,6 +275,9 @@ def test_a_qualified_macro_is_offered_as_it_was_defined(complete, backend_reques
     backend_requests.answer["value"] = []
     labels = by_label(complete("(require macmod)\n(macmod.my|)")[2])
     assert "my-mac" in labels and "my_mac" not in labels
+    # Defect: a macro defined with an underscore keeps it after mod. (my_umac)
+    # instead of the hyphen spelling every name is offered in.
+    assert "my-umac" in labels and "my_umac" not in labels
 
 
 @once
@@ -496,13 +499,12 @@ def test_a_required_macro_is_offered_as_it_was_defined(merged, selection):
 
 
 @once
-def test_a_macro_defined_with_underscores_keeps_its_spelling(merged):
-    # Defect: a macro respelled like every other name (my-mac for my_mac),
-    # though a call is found by its head's exact text, so accepting that
-    # completion calls a function my_mac that does not exist.
+def test_a_macro_defined_with_underscores_is_offered_as_my_mac(merged):
+    # Defect: a macro offered in a spelling other than the default (my_mac,
+    # as registered) where every other name takes the hyphen spelling.
     items = by_label(merged("(defmacro my_mac [x] x)\n(print my|)")[2])
-    assert "my_mac" in items and "my-mac" not in items
-    assert items["my_mac"].label_details.description == "macro"
+    assert "my-mac" in items and "my_mac" not in items
+    assert items["my-mac"].label_details.description == "macro"
 
 
 @once
@@ -615,16 +617,14 @@ def test_the_fallback_list_keeps_the_definitions_after_the_cursor(
 
 
 @once
-def test_the_fallback_list_hyphenates_all_but_the_buffers_macros(
-    complete, off_backends
-):
+def test_the_fallback_list_hyphenates_every_definition(complete, off_backends):
     # Defects: with no backend a buffer's my_val keeps its _ spelling, or is
-    # offered twice beside my-val; a defmacro name is respelled (my-mac for
-    # my_mac), a call no macro expands.
+    # offered twice beside my-val; a defmacro is offered in a spelling other
+    # than the default (my_mac).
     source = "(defmacro my_mac [x] x)\n(= my_val 1)\n(= my-val 2)\n(my|)"
     labels = [item.label for item in complete(source, off_backends)[2]]
     assert labels.count("my-val") == 1 and "my_val" not in labels
-    assert "my_mac" in labels and "my-mac" not in labels
+    assert "my-mac" in labels and "my_mac" not in labels
 
 
 @once
@@ -670,9 +670,8 @@ def test_a_fallback_definition_and_the_backends_item_share_a_label(
 
 
 @once
-def test_the_fallback_list_keeps_a_nested_macros_spelling(complete, off_backends):
-    # Defect: only a top-level defmacro keeps its spelling, so one inside a
-    # (do ...), which registers all the same, is offered as in-do, a call
-    # no macro expands.
+def test_the_fallback_list_hyphenates_a_nested_macro(complete, off_backends):
+    # Defect: a defmacro nested in a (do ...), which registers all the same,
+    # is offered in a spelling other than the default (in_do).
     labels = by_label(complete("(do (defmacro in_do [x] x))\n(in|)", off_backends)[2])
-    assert "in_do" in labels and "in-do" not in labels
+    assert "in-do" in labels and "in_do" not in labels

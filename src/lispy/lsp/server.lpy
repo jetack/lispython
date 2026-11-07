@@ -1140,8 +1140,7 @@
   (if (is-not symbols None)
       (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
 
-(def collect-definitions [nodes uri :defs None :symbols None :in-function False
-                          :macros None]
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
   "Walk AST and collect all definition locations keyed by symbol name.
 
    defs feeds go-to-definition and completion, so it also holds the names
@@ -1151,8 +1150,7 @@
    with the kind definition-kind gives it.  Imports and loop variables bind
    names but declare nothing, so they get no symbol, and an = inside a def
    body (in-function) is a local, so it gets none either; module and
-   class-body assignments do.  When macros is a set, the same pass adds the
-   name of every defmacro, one nested in a form such as do included."
+   class-body assignments do."
   (if (is defs None)
       (= defs {}))
 
@@ -1172,12 +1170,10 @@
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
                   (_add-symbol symbols name (definition-kind form) loc)
-                  (if (and (== form "defmacro") (is-not macros None))
-                      (.add macros name))
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
                                            :defs defs :symbols symbols
-                                           :in-function True :macros macros)))))
+                                           :in-function True)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -1189,8 +1185,7 @@
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs :symbols symbols
-                                       :macros macros))))
+                  (collect-definitions body uri :defs defs :symbols symbols))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
@@ -1214,7 +1209,7 @@
                   (.append (.setdefault defs name []) loc)))
           (collect-definitions (sub node.list [: 1 None]) uri
                                :defs defs :symbols symbols
-                               :in-function in-function :macros macros))
+                               :in-function in-function))
 
       (in form IMPORT-HEADS)
       (for [name name-node] in (buffer-import-bindings node)
@@ -1224,8 +1219,7 @@
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs :symbols symbols :in-function in-function
-            :macros macros))))
+            uri :defs defs :symbols symbols :in-function in-function))))
 
   (return defs))
 
@@ -2071,26 +2065,23 @@
   "The names doc's definitions bind (collect-definitions), in source order
    and as completion offers them: each labelled as a backend item of its
    Python name is (completion-label over buffer-spellings at line), so one
-   name gives one label; a defmacro's as written (collect-definitions'
-   macros), since a macro call is found by its head's exact text.  The one home of
-   that list, over the partial parses of buffer-texts at the 1-based line
-   (None: no cursor)."
+   name gives one label, a defmacro's included.  The one home of that list,
+   over the partial parses of buffer-texts at the 1-based line (None: no
+   cursor)."
   (= names {})
-  (= macros (set))
   (for text in (buffer-texts doc.source line)
     (try
-      (.update names (collect-definitions (parse text :partial True) doc.uri
-                                          :macros macros))
+      (.update names (collect-definitions (parse text :partial True) doc.uri))
       (except [Exception]
         (pass))))
   (= spellings (buffer-spellings doc.source :line line))
-  (return [(ife (in name macros) name (completion-label (py-name name) spellings))
-           for name in names]))
+  (return [(completion-label (py-name name) spellings) for name in names]))
 
 (def merged-items [doc line view items]
   "lispython's own items (lispython-items, then each macro of the view under
-   the spelling it was registered as, view.macros) followed by items, the
-   backend's (backend-items), whose name (name-key) none of them has: a
+   the hyphen spelling of its registered key, view.macros) followed by
+   items, the backend's (backend-items), whose name (name-key) none of them
+   has: a
    special form or macro wins over whatever the backend offers by that
    name.  Over a fallback view (only the text before the cursor compiled)
    the buffer's definitions the backend could not see
@@ -2098,14 +2089,11 @@
   (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
   ;; view.macros is keyed by name-key, as taken is, and holds the spelling.
-  ;; ⚠️ Never respell a macro (hyphen-spelling): a call is found by its
-  ;; head's exact text (core/macro.py), so (my-mac x) never expands a macro
-  ;; registered as my_mac.
   (for name in (sorted view.macros)
     ;; A qualified macro (module.name) is typed as an attribute
     ;; (qualified-macro-items).
     (if (and (not-in "." name) (not-in name taken))
-        (do (= label (sub view.macros name))
+        (do (= label (hyphen-spelling (sub view.macros name)))
             (.add taken name)
             (.append merged (own-item label *_MACRO-STYLE)))))
   (= rest (list items))
@@ -2124,10 +2112,11 @@
   "The macros of view a (require mod) registered for the base written glued
    to the dot before the word at the 1-based line and code-point col
    (glued-base: mod.|, a.b.ma|; never (. mod |), since such a macro is
-   called only as mod.name), as own items labelled by the spelling each was
-   registered under (view.macros: my-mac, never its name-key my_mac; never
-   respelled, as in merged-items).  The require registers them as mod.name keys of the macro table, and no
-   backend knows them: it never binds mod at runtime."
+   called only as mod.name), as own items labelled by the hyphen spelling
+   of the name each was registered under (view.macros, hyphen-spelling:
+   my-mac, whether defined as my-mac or my_mac).  The require registers
+   them as mod.name keys of the macro table, and no backend knows them: it
+   never binds mod at runtime."
   (= text (line-text doc.source line))
   (= base (glued-base text (sub (partial-span text (min col (len text))) 0)))
   (if (is base None)
@@ -2141,8 +2130,9 @@
             (if (and name (not-in "." name))
                 ;; name-key only turns a part's - into _, so the spelling's
                 ;; base prefix is as long as the key's.
-                (.append items (own-item (sub (sub view.macros key)
-                                              [: (len prefix) None])
+                (.append items (own-item (hyphen-spelling
+                                           (sub (sub view.macros key)
+                                                [: (len prefix) None]))
                                          *_MACRO-STYLE))))))
   (return items))
 
