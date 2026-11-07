@@ -325,6 +325,14 @@ def test_built_in_macro_is_tagged_macro_and_special_form_keeps_its_tag():
     assert items["ife"].kind == lsp.CompletionItemKind.Keyword
 
 
+def test_completion_skips_reader_syntax_doc_keys_that_hover_keeps():
+    # Defect: "f-string" and the quote characters were offered as heads.
+    labels = {i.label for i in server.lispython_items()}
+    assert not {"f-string", "'", "`", "~@"} & labels
+    assert {"def", ",", ".", "~"} <= labels
+    assert {"f-string", "'", "`", "~@"} <= set(server.SPECIAL_FORM_DOCS)
+
+
 # Hover usage text for statement forms comes from the compiler's FORM_USAGE,
 # the table its error messages quote, so the two cannot drift.
 FORM_KEYS = sorted(k for k in FORM_USAGE if k not in HEADLESS_FORMS)

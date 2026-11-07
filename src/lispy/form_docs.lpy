@@ -133,7 +133,6 @@ this module only reads them."""
    "continue"  (FormDoc STATEMENT (, "(continue)") "Continue to the next loop iteration.")
    ;; Expression forms
    ","         (FormDoc EXPRESSION (, "(, a b c)") "Tuple literal.")
-   "f-string"  (FormDoc EXPRESSION (, "f\"text {expr} more\"") "Formatted string literal (f-string).")
    ;; Operators
    "+"  (FormDoc EXPRESSION (tuple) "Arithmetic addition / unary positive.")
    "-"  (FormDoc EXPRESSION (tuple) "Arithmetic subtraction / unary negative.")
@@ -151,7 +150,13 @@ this module only reads them."""
    "not" (FormDoc EXPRESSION (tuple) "Logical NOT.")
    ;; The macro system
    "defmacro"  (FormDoc MACRO-SYSTEM (, "(defmacro name [args] body...)") "Define a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression.")
-   "require"   (FormDoc MACRO-SYSTEM (, "(require module)" "(require module *)" "(require module [names...])") "Import macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none.")
+   "require"   (FormDoc MACRO-SYSTEM (, "(require module)" "(require module *)" "(require module [names...])") "Import macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none.")})
+
+;; Documented names not meant to be typed as heads (`f"..."` is the reader's
+;; spelling of the f-string head; the quote characters are prefixes): hover and
+;; the docs show them, completion never offers them.
+(= READER-SYNTAX-DOCS
+  {"f-string"  (FormDoc EXPRESSION (, "f\"text {expr} more\"") "Formatted string literal (f-string).")
    "'"  (FormDoc MACRO-SYSTEM (tuple) "Quote — prevent evaluation; return the form as data.")
    "`"  (FormDoc MACRO-SYSTEM (tuple) "Quasiquote — like quote but allows unquote (`~`) splicing.")
    "~@" (FormDoc MACRO-SYSTEM (tuple) "Unquote-splice — splice a list into a quasiquote.")})
@@ -162,9 +167,11 @@ this module only reads them."""
   "Raises if a hand-written entry shares a key with usage."
   (= shadowed (& (set hand-written) (set usage)))
   (if shadowed
-      (raise (RuntimeError f"HAND-WRITTEN-DOCS shadows FORM_USAGE entries: {(sorted shadowed)}"))))
+      (raise (RuntimeError f"a hand-written docs table shadows FORM_USAGE entries: {(sorted shadowed)}"))))
 
 (refuse-shadowing HAND-WRITTEN-DOCS FORM-USAGE)
+(refuse-shadowing READER-SYNTAX-DOCS FORM-USAGE)
+(refuse-shadowing READER-SYNTAX-DOCS HAND-WRITTEN-DOCS)
 
 ;; Every form the compiler dispatches as a statement has an entry.
 (def refuse-undocumented [heads docs]
@@ -173,10 +180,13 @@ this module only reads them."""
   (if missing
       (raise (RuntimeError f"statement heads with no form docs: {(sorted missing)}"))))
 
-;; The forms hover, signature help and completion offer everywhere.
-(= SPECIAL-FORMS {**(form-docs FORM-USAGE FORM-PROSE EXTRA-USAGE) **HAND-WRITTEN-DOCS})
+;; The special forms usable at a form head, which completion offers.
+(= HEAD-FORMS {**(form-docs FORM-USAGE FORM-PROSE EXTRA-USAGE) **HAND-WRITTEN-DOCS})
 
-(refuse-undocumented STATEMENT-HEADS SPECIAL-FORMS)
+(refuse-undocumented STATEMENT-HEADS HEAD-FORMS)
+
+;; Everything hover and the docs document under a special-form name.
+(= SPECIAL-FORMS {**HEAD-FORMS **READER-SYNTAX-DOCS})
 
 ;; Not in SPECIAL-FORMS: `type` is also the builtin, so the LSP shows this only
 ;; where type-alias-p (the compiler's own test) accepts the form.
@@ -211,11 +221,12 @@ this module only reads them."""
 (= FUNCTION-TAG "function")
 
 ;; lispython's own names as (names, tag) rows, the first row naming a name
-;; winning: the special forms, the built-in macros (BUILTIN-MACROS, never a
+;; winning: the special forms usable at a head (HEAD-FORMS, never the reader
+;; syntax SPECIAL-FORMS also documents), the built-in macros (BUILTIN-MACROS, never a
 ;; hand list), and `gensym`, a function that exists only inside defmacro
 ;; bodies.
 (= OWN-NAME-TAGS
-   [(, SPECIAL-FORMS SPECIAL-FORM-TAG)
+   [(, HEAD-FORMS SPECIAL-FORM-TAG)
     (, BUILTIN-MACROS MACRO-TAG)
     (, ["gensym"] FUNCTION-TAG)])
 

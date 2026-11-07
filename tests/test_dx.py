@@ -429,6 +429,15 @@ def test_completion_kinds(scope, prefix, name, kind):
     assert complete(prefix, scope)[name] == kind
 
 
+def test_completion_never_offers_reader_syntax_doc_keys(scope):
+    doc_only = {"f-string", "'", "`", "~@"}
+    for prefix in ["", "f-", "'", "`", "~"]:
+        assert not doc_only & set(complete(prefix, scope)), prefix
+    # The invert symbol and the tuple head are typeable heads.
+    assert "~" in complete("~", scope)
+    assert "," in complete(",", scope)
+
+
 @pytest.mark.parametrize(
     ["prefix", "name", "kind"],
     [
