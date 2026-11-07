@@ -512,13 +512,13 @@ def test_completion_reads_the_view_generation_before_the_hand_off(
     uri = (tmp_path / "main.lpy").as_uri()
     monkeypatch.setattr(server, "view_cache", pv.ViewCache())
     compiled = []
-    real_view_at_cursor = pv.view_at_cursor
+    real_view_at_cursor = pv._view_at_cursor
 
     def counting(*args, **kwargs):
         compiled.append(args)
         return real_view_at_cursor(*args, **kwargs)
 
-    monkeypatch.setattr(pv, "view_at_cursor", counting)
+    monkeypatch.setattr(pv, "_view_at_cursor", counting)
     real_to_thread = asyncio.to_thread
 
     async def close_first(fn, *args, **kwargs):
