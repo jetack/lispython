@@ -107,7 +107,6 @@ def assert_refused(src, msg, at):
         ("(reduce - xs)", operator("-"), "-"),
         ("(-)", operator("-"), "-"),
         ("(def f [-] 1)", operator("-"), "-"),
-        ("(def - [] 1)", operator("-"), "-"),
         ("(for - in xs 1)", operator("-"), "-"),
         ("(import -)", operator("-"), "-"),
         ("(import a.-)", operator("-"), "a.-"),
@@ -118,6 +117,13 @@ def assert_refused(src, msg, at):
         ("(.- x)", operator("-"), ".-"),
         ("(f :- 1)", operator("-"), "-"),
         ("(match x (case - 1))", operator("-"), "-"),
+        # A dotted symbol's first part at fault is reported, by its first
+        # broken rule: an earlier part's keyword or bad name beats a later
+        # part's operator.
+        ("a.if.-", KEYWORD, "a.if.-"),
+        ("(import a.if.-)", KEYWORD, "a.if.-"),
+        ("a.b!.-", invalid("a.b!.-"), "a.b!.-"),
+        ("a.-.if", operator("-"), "a.-.if"),
         # Symbols that are no identifier.
         ("a.", invalid("a."), "a."),
         ("foo!", invalid("foo!"), "foo!"),
@@ -161,6 +167,33 @@ def assert_refused(src, msg, at):
 )
 def test_no_python_name_is_refused_at_the_symbol(src, msg, at):
     assert_refused(src, msg, at)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "(def {} [] 1)",
+        "(class {} [] 1)",
+        "(global {})",
+        "(try 1 (except [E as {}] 1))",
+        "(match x (case [*{}] 1))",
+        "(match x (case 1 as {} 1))",
+        "(match x (case (P :{} 1) 1))",
+        "(match x (case a.{} 1))",
+        "(match x (case ({}) 1))",
+        "(match x (case {{a.{} 1}} 1))",
+    ],
+)
+def test_minus_fails_a_name_shape_as_plus_does(template):
+    """``-`` mangles to the identifier ``_``, but a slot's own shape check
+    refuses it with the message it gives ``+``, at the same place."""
+    errors = []
+    for op in "+-":
+        with pytest.raises(LispyCompileError) as info:
+            src_to_python_org(template.format(op))
+        err = info.value
+        errors.append((err.msg.replace(op, "OP"), err.offset, err.end_offset))
+    assert errors[0] == errors[1]
 
 
 needs_312 = pytest.mark.skipif(sys.version_info < (3, 12), reason="type params: 3.12+")

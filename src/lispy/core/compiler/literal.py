@@ -316,30 +316,32 @@ def operator_spelling_p(text):
     return text in OPERATOR_TEXTS and not hyphenated_name_p(text)
 
 
-def name_spelling_p(text):
-    """Whether the undotted symbol spelled ``text`` is a Python name
-    python_name accepts: its mangled text passes identifier_p and it is no
-    operator (operator_spelling_p)."""
+def python_name_p(text):
+    """Whether the undotted symbol spelled ``text`` is a name python_name
+    accepts: its mangled text passes identifier_p and it is no operator
+    (operator_spelling_p). Not the LSP's name-spelling-p (python_view.lpy),
+    which also asks for a letter or digit, so ``_`` and ``->`` are names here
+    and none there."""
     return identifier_p(Symbol(text).name) and not operator_spelling_p(text)
 
 
-def python_name(name, node):
-    """``name`` (mangled text) as a Python name, else a LispyCompileError at
-    ``node``: the one home every emitted identifier passes through. With a
-    node, every ``.``-separated part of its spelling is checked for an
-    operator (operator_spelling_p), so ``a.-`` and the method head ``.-``
-    are refused too.
+def python_name(spelling, node):
+    """The Python name of the symbol part spelled ``spelling`` (mangled as
+    Symbol.name), else a LispyCompileError at ``node``: the one home every
+    emitted identifier passes through. A dotted symbol's caller passes each
+    part in source order, so the first part at fault is the one reported, by
+    the first rule it breaks: a hard keyword, an operator
+    (operator_spelling_p: ``a.-``, the method head ``.-``), no identifier.
     """
-    text = atom_text(node) if isinstance(node, Node) else name
+    name = Symbol(spelling).name
+    text = atom_text(node) if isinstance(node, Node) else spelling
     if keyword.iskeyword(name):
         raise LispyCompileError(
             f"{name} is a Python keyword and cannot be used as a name", node
         )
-    parts = text.split(".") if isinstance(text, str) else []
-    operator = next((part for part in parts if operator_spelling_p(part)), None)
-    if operator is not None:
+    if operator_spelling_p(spelling):
         raise LispyCompileError(
-            f"{operator} is an operator and cannot be used as a name", node
+            f"{spelling} is an operator and cannot be used as a name", node
         )
     if not name.isidentifier():
         msg = _malformed_number_message(text) or f"{text} is not a valid Python name"
@@ -354,7 +356,7 @@ def symbol_name(sexp):
         raise sexp.misuse_error()
     if type(sexp) is not Symbol:
         raise LispyCompileError(f"expected a name, got {sexp}", sexp)
-    return python_name(sexp.name, sexp)
+    return python_name(atom_text(sexp), sexp)
 
 
 # Bindings that shadow a macro. Macro lookup is by a call's head name with no
@@ -412,7 +414,7 @@ def binding_name(sexp):
 def method_name(method):
     """The attribute of a ``(.method obj ...)`` head: the text after its dot,
     mangled as a symbol and passed through python_name at the head."""
-    return python_name(Symbol(atom_text(method)[1:]).name, method)
+    return python_name(atom_text(method)[1:], method)
 
 
 def module_path(sexp, relative=False):
@@ -424,9 +426,7 @@ def module_path(sexp, relative=False):
     path = name[level:]
     if level and not path:
         return [None, level]
-    [first, *rest] = path.split(".")
-    python_name(first, sexp)
-    for part in rest:
+    for part in atom_text(sexp)[level:].split("."):
         python_name(part, sexp)
     return [path, level]
 
@@ -479,20 +479,22 @@ def hyphen_spelling(text):
 
 
 def plain_name_p(sexp):
-    """Whether ``sexp`` is shaped as a name: a symbol whose mangled text
-    passes identifier_p (so no dot). A shape test for sites with their own
-    form error; the name itself is still read through symbol_name, which also
-    refuses an operator."""
-    return type(sexp) is Symbol and identifier_p(sexp.name)
+    """Whether ``sexp`` is shaped as a name: a symbol python_name_p accepts
+    (so no dot and no operator: ``-`` fails the shape as ``+`` does). A shape
+    test for sites with their own form error; the name itself is still read
+    through symbol_name."""
+    return type(sexp) is Symbol and python_name_p(atom_text(sexp))
 
 
 def name_or_attr_p(sexp):
-    """Python's name_or_attr shape: every dot-part of the mangled name is an
-    identifier, so ``.x``, ``a..b`` and ``x.`` are no value pattern, mapping
-    key or class name. A hard keyword part (``a.if``) passes the shape and is
-    refused by name_compile, with the keyword message, at the symbol."""
+    """Python's name_or_attr shape: every dot-part's mangled text is an
+    identifier and no part is an operator (operator_spelling_p), so ``.x``,
+    ``a..b``, ``x.`` and ``a.-`` are no value pattern, mapping key or class
+    name. A hard keyword part (``a.if``) passes the shape and is refused by
+    name_compile, with the keyword message, at the symbol."""
     return type(sexp) is Symbol and all(
-        part.isidentifier() for part in sexp.name.split(".")
+        Symbol(part).name.isidentifier() and not operator_spelling_p(part)
+        for part in atom_text(sexp).split(".")
     )
 
 
@@ -507,10 +509,9 @@ def name_compile(symbol, ctx):
     """A Name, or an Attribute chain for a dotted symbol, every part through
     python_name. ``ctx`` is the undotted name's, else the last attribute's;
     other parts load."""
-    [name, *attrs] = symbol.name.split(".")
-    python_name(name, symbol)
-    for attr in attrs:
-        python_name(attr, symbol)
+    [name, *attrs] = [
+        python_name(part, symbol) for part in atom_text(symbol).split(".")
+    ]
     if ctx is ast.Store and not attrs:
         # A stored undotted name is a binding; a dotted one an attribute.
         check_binding(symbol)
