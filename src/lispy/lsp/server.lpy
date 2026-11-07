@@ -608,12 +608,31 @@
            (.document-changed backends doc.uri doc.source run.view))
       (await (wait-backend-diagnostics run)))
   (await (publish-run run))
-  ;; A save may have changed a macro module other open documents require:
-  ;; each compiled under an older macro environment compiles again.
-  (if run.recompile
-      (for uri in (await (asyncio.to-thread view-cache.outdated))
-        (if (!= uri doc.uri)
-            (publish-diagnostics run.ls uri)))))
+  (await (refresh-outdated run.ls compiled)))
+
+;; The macro environment (macro_modules.epoch) the open documents were last
+;; refreshed for (refresh-outdated).
+(= _REFRESHED-EPOCH None)
+
+(async-def refresh-outdated [ls compiled]
+  "Once a published compile ran under a macro environment the open
+   documents were not refreshed for, publish again every open document
+   whose cached compile ran under another one, so an edit to a macro module
+   reaches the documents requiring it.  Triggered by whichever run sees the
+   new epoch first, never by the save alone, because a newer change can
+   supersede the save's run; the refreshed runs see that same epoch, so
+   they refresh nothing.  A document closed while the cache is read is
+   skipped, since publishing it would reopen it."
+  (global _REFRESHED-EPOCH)
+  (if (or (is compiled.epoch None) (== compiled.epoch _REFRESHED-EPOCH))
+      (return))
+  (= _REFRESHED-EPOCH compiled.epoch)
+  (for uri in (await (asyncio.to-thread view-cache.outdated))
+    (if (in uri DIAGNOSTIC-RUNS)
+        (try
+          (publish-diagnostics ls uri)
+          (except [Exception]
+            (.exception logger "lispython LSP: cannot refresh %s" uri))))))
 
 (async-def wait-backend-diagnostics [run]
   "Wait until the backend's diagnostics for run's view are known, at most
