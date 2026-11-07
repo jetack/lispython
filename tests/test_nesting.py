@@ -3,14 +3,21 @@ what Python can compile is a positioned LispyCompileError, never a
 RecursionError."""
 
 import ast
+import dataclasses
+import functools
 import importlib
+import inspect
+import pathlib
 import sys
 import time
 import tracemalloc
+import types
+import typing
 
 import pytest
 
 import lispy.core.parser as parser_module
+import lispy.core.unparse as unparse_module
 import lispy.tools as tools
 from lispy.core import nodes
 from lispy.core.compiler import features
@@ -45,7 +52,7 @@ from lispy.core.utils import trampoline
 
 DEEP = 5000  # far past the recursion limit, for every recursive stage
 # The nesting error names the recursion limit only where it is what was hit:
-# compile() on 3.11 and ast.unparse everywhere, never compile() on 3.12+.
+# compile() on 3.11 and translating (l2py) everywhere, never compile() on 3.12+.
 C_LIMIT_MESSAGE = "form nested too deeply to compile"
 RECURSION_LIMIT_MESSAGE = (
     f"{C_LIMIT_MESSAGE} (Python's recursion limit is {sys.getrecursionlimit()})"
@@ -806,12 +813,274 @@ def test_a_deep_ast_within_the_limit_compiles(scope):
     assert eval(code) == 500
 
 
-def test_l2py_of_an_ast_unparse_cannot_write_is_a_positioned_error(scope):
-    # ast.unparse recurses several frames per level and gives up on an AST
-    # compile() still takes (the test above).
-    src = "(= x 1)\n" + plus(500)
+PLUS_BOUND = 60_000  # more operands than compile() takes on any release
+
+
+def stack_depth():
+    frame, depth = sys._getframe(1), 0
+    while frame is not None:
+        frame, depth = frame.f_back, depth + 1
+    return depth
+
+
+@pytest.fixture(scope="module")
+def plus_limit(scope):
+    """The most operands ``plus`` may have for compile() to take it here.
+
+    One build of plus(PLUS_BOUND); each BinOp ``left`` down the chain is the
+    tree of one operand fewer, so compile() is bisected over those without
+    building again.
+    """
+    [stmt] = macroexpand_then_compile(parse(plus(PLUS_BOUND)), scope)
+    chains = [stmt.value]  # chains[k] is the tree of plus(PLUS_BOUND - k)
+    while isinstance(chains[-1], ast.BinOp):
+        chains.append(chains[-1].left)
+
+    def compiles(k):
+        expr = ast.Expr(
+            chains[k], lineno=1, col_offset=0, end_lineno=1, end_col_offset=1
+        )
+        try:
+            compile(ast.Module([expr], type_ignores=[]), "<nesting>", "exec")
+        except RecursionError:
+            return False
+        return True
+
+    refused, taken = 0, len(chains) - 1
+    assert not compiles(refused), "raise PLUS_BOUND past compile()'s limit"
+    while taken - refused > 1:
+        middle = (refused + taken) // 2
+        if compiles(middle):
+            taken = middle
+        else:
+            refused = middle
+    return PLUS_BOUND - taken
+
+
+def test_l2py_translates_as_deep_as_compile_takes(plus_limit):
+    operands = plus_limit
+    pysrc = tools.l2py_s(plus(operands), fresh_scope=True, format=False)
+    assert pysrc == "import lispy\n\n" + " + ".join(["1"] * operands)
+
+
+# Sources covering the grammar; types has the `lambda: None` a cut
+# ast.arguments would write as `lambda : None`.
+UNPARSE_CORPUS = [features.stdlib_unparser(), typing, functools, types, dataclasses]
+
+# (oldest Python that parses it, source, ast.parse mode): the seams between
+# chunks, every kind of node a cut can sit next to.
+UNPARSE_SEAMS = [
+    (
+        (3, 11),
+        "match x:\n"
+        "    case 1 | 2:\n        pass\n"
+        "    case None | True:\n        pass\n"
+        "    case [a, *rest] | (a, b):\n        pass\n"
+        "    case {'k': v, **kw}:\n        pass\n"
+        "    case C(1, y=[2, *_]) as z if z:\n        pass\n"
+        "    case -1j | a.b:\n        pass\n"
+        "    case _:\n        pass\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "try:\n    a\nexcept* E as e:\n    b\nexcept* (F, G):\n    pass\n"
+        "else:\n    c\nfinally:\n    d\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "def f(a):\n    # type: (int) -> int\n    return a\n"
+        "x = 1  # type: int\ny = 2  # type: ignore[foo]\n"
+        "for i in j:  # type: int\n    pass  # type: ignore\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "lambda: None\nf(lambda x=1, *a, y=2, **k: x)\nlambda *, k: k\n"
+        "lambda: (yield)\n",
+        "exec",
+    ),
+    ((3, 11), "f'{a!r:>{w}.{p}} {b:{c}} {x=} {y!s} {z!a:^10} {{}} {q:%Y}'\n", "exec"),
+    # 3.11 writes a nested f-string whole through the part writer, avoiding
+    # backslashes.
+    ((3, 11), 'f\'{f"{x!r:>{w}}"} {f"{y:{z}} "!s:^9}\'\n', "exec"),
+    ((3, 12), "f'{b:{c:{d}}}'\n", "exec"),  # 3.11 parses two levels of spec
+    (
+        (3, 11),
+        "async def g():\n    await x\n    (y := await z)\n"
+        "    async with a as b, c:\n        async for i in j:\n            pass\n"
+        "def h():\n    x = yield\n    yield from y\n    return (yield a), w\n",
+        "exec",
+    ),
+    (
+        (3, 11),
+        "'''module doc'''\n@d\n@e.f(1)\nclass A(B, C, metaclass=M, **kw):\n"
+        "    '''class doc'''\n    def m(self, /, a, *, b):\n        '''m doc'''\n"
+        "def f():\n    global a\n    def g():\n        nonlocal b\n",
+        "exec",
+    ),
+    ((3, 11), "if x:\n    y\nelse:\n    z\n", "single"),
+    ((3, 11), "a = 1; b", "single"),
+    ((3, 11), "a if b else (c, *d)", "eval"),
+    ((3, 12), "class A[T: int, *Ts, **P]:\n    type X[U] = list[U]\n", "exec"),
+    ((3, 12), "f'{f'{f'{x!r:>{w}}'}'}'\n", "exec"),
+    ((3, 14), "t'{a!r:>{w}} {b:{c:{d}}} { x = } {t'{y}'}'\n", "exec"),
+]
+
+
+def seam_trees():
+    for since, src, mode in UNPARSE_SEAMS:
+        if sys.version_info >= since:
+            yield ast.parse(src, mode=mode, type_comments=True)
+    yield ast.Interactive(body=ast.parse("a = 1\nif x:\n    y\nb").body)
+    # A node in two places, read where the second does not set its
+    # precedence: the stdlib writes the first place's, f((a + b)).
+    shared = ast.BinOp(ast.Name("a"), ast.Add(), ast.Name("b"))
+    yield ast.Module(
+        [
+            ast.Expr(ast.BinOp(shared, ast.Mult(), ast.Name("c"))),
+            ast.Expr(ast.Call(ast.Name("f"), [shared], [])),
+        ],
+        type_ignores=[],
+    )
+
+
+def python_interpolations(tree):
+    """``tree`` with every Interpolation.str None: unparse always writes the
+    Python text, which is what ast.unparse writes for None."""
+    for node in ast.walk(tree):
+        if type(node).__name__ == "Interpolation":
+            node.str = None
+    return tree
+
+
+def corpus_trees():
+    for source in UNPARSE_CORPUS:
+        with open(inspect.getsourcefile(source), encoding="utf-8") as f:
+            yield ast.parse(f.read())
+    sugar = pathlib.Path(tools.__file__).parent / "macros" / "sugar.lpy"
+    body = macroexpand_then_compile(parse(sugar.read_text(encoding="utf-8")), {})
+    yield ast.Module(body, type_ignores=[])
+    yield from seam_trees()
+
+
+@pytest.mark.parametrize("chunk_depth", [1, 2, 5, unparse_module.CHUNK_DEPTH])
+def test_unparse_writes_what_ast_unparse_writes(chunk_depth, monkeypatch):
+    # Depth 1 makes every expression, statement and pattern a chunk.
+    monkeypatch.setattr(unparse_module, "CHUNK_DEPTH", chunk_depth)
+    for tree in corpus_trees():
+        tree = python_interpolations(tree)
+        assert unparse_module.unparse(tree) == ast.unparse(tree)
+
+
+def test_l2py_translates_statements_nested_past_ast_unparse(scope):
+    # Plain ast.unparse fails near 250 nested ifs. CPython's parser cannot
+    # read back 100 indent levels, so the text is checked exactly.
+    depth = 600
+    pysrc = tools.l2py_s(
+        "(if c " * depth + "(pass)" + ")" * depth, fresh_scope=True, format=False
+    )
+    lines = [" " * 4 * level + "if c:" for level in range(depth)]
+    assert (
+        pysrc == "import lispy\n\n" + "\n".join(lines) + "\n" + " " * 4 * depth + "pass"
+    )
+
+
+# (id, lispython opening, leaf, closing, the Python text at a depth)
+NESTED_PATTERNS = [
+    ("sequence", "[", "a", "]", lambda d: "[" * d + "a" + "]" * d),
+    ("or", "(| 1 ", "2", ")", lambda d: "1 | (" * (d - 1) + "1 | 2" + ")" * (d - 1)),
+    ("class", "(C ", "a", ")", lambda d: "C(" * d + "a" + ")" * d),
+]
+
+
+@pytest.mark.parametrize(
+    "opening, leaf, closing, python",
+    [case[1:] for case in NESTED_PATTERNS],
+    ids=[case[0] for case in NESTED_PATTERNS],
+)
+def test_l2py_translates_patterns_nested_past_ast_unparse(
+    opening, leaf, closing, python
+):
+    # Plain ast.unparse fails near 250 nested patterns.
+    depth = 400
+    pattern = opening * depth + leaf + closing * depth
+    pysrc = tools.l2py_s(
+        f"(match x (case {pattern} 1))", fresh_scope=True, format=False
+    )
+    assert pysrc == f"import lispy\n\nmatch x:\n    case {python(depth)}:\n        1"
+
+
+@pytest.mark.parametrize("prefix, needs_t", [("f", False), ("t", True)])
+def test_l2py_translates_format_specs_nested_past_ast_unparse(prefix, needs_t):
+    # Plain ast.unparse fails near 250 nested format specs, which the stdlib
+    # writes calling itself, outside any chunk.
+    skip_without_t_strings(needs_t)
+    depth = 400
+    src = prefix + '"' + "{x:" * depth + "}" * depth + '"'
+    pysrc = tools.l2py_s(src, fresh_scope=True, format=False, no_lispy=True)
+    assert pysrc == prefix + "'" + "{x:" * depth + "}" * depth + "'"
+
+
+def spec_ast_chain(depth):
+    """``f"{x:{x:...}}"``, ``depth`` format specs nested, built as an AST."""
+    spec = None
+    for _ in range(depth):
+        spec = ast.JoinedStr([ast.FormattedValue(ast.Name("x"), -1, spec)])
+    return ast.Expression(spec)
+
+
+def value_ast_chain(depth):
+    """``f"{f"{...}"}"``, ``depth`` f-strings nested in values, as an AST."""
+    node = ast.Name("x")
+    for _ in range(depth):
+        node = ast.JoinedStr([ast.FormattedValue(node, -1, None)])
+    return ast.Expression(node)
+
+
+CHAIN_DEPTH = 2000
+
+
+# (build, the counts of f, x and { in its text)
+@pytest.mark.parametrize(
+    "build, fields",
+    [
+        (spec_ast_chain, (1, CHAIN_DEPTH, CHAIN_DEPTH)),
+        pytest.param(
+            value_ast_chain,
+            (CHAIN_DEPTH, 1, CHAIN_DEPTH),
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 12),
+                reason="3.11 cannot nest same-quote f-strings",
+            ),
+        ),
+    ],
+    ids=["format-specs", "values"],
+)
+def test_nested_f_strings_unparse_in_memory_linear_in_the_depth(build, fields):
+    # Each level's memoized text holds every level inside it: kept past its
+    # one read, the memos hold about depth / 2 times the output at once.
+    tree = build(CHAIN_DEPTH)
+    tracemalloc.start()
+    try:
+        text = unparse_module.unparse(tree)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert (text.count("f"), text.count("x"), text.count("{")) == fields
+    assert peak < 50 * len(text)
+
+
+def test_translating_on_a_stack_with_no_room_is_a_positioned_error(scope):
+    # unparse needs a chunk's worth of frames, more than this caller leaves.
+    _, stmt = compile_src("(= x 1)\n" + plus(200), scope)
+
+    def at_depth(frames):
+        return at_depth(frames - 1) if frames else tools.ast_to_python(stmt)
+
     with pytest.raises(LispyCompileError) as info:
-        tools.l2py_s(src, fresh_scope=True, format=False)
+        at_depth(sys.getrecursionlimit() - stack_depth() - 40)
     err = info.value
     assert err.msg == TRANSLATE_MESSAGE
     assert (err.lineno, err.offset) == (2, 1)
@@ -1078,6 +1347,20 @@ def test_nested_f_strings_parse_on_a_deep_stack(openings, needs_t):
     [found, leaf] = literal_depth(form)
     assert found == depth
     assert (type(leaf), atom_text(leaf), leaf.col_offset) == (Symbol, "x", 3 * depth)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="3.11 cannot nest same-quote f-strings"
+)
+def test_l2py_translates_nested_f_strings_past_cpython_s_lexer_limit():
+    # Each nested f-string costs the stdlib unparser frames no chunk bounds.
+    # Python's lexer reads back at most 149 levels, so that depth is run.
+    texts = {}
+    for depth in (149, NESTED_LITERAL_DEPTH):
+        src = nested_literals(['f"{'], depth)
+        texts[depth] = tools.l2py_s(src, fresh_scope=True, format=False, no_lispy=True)
+        assert texts[depth].count("f") == depth
+    assert eval(texts[149], {"x": "leaf"}) == "leaf"
 
 
 def spec_chain(depth):
