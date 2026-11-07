@@ -60,7 +60,8 @@
 ;; it drops stale modules.  Unbounded, a macro hung in one compile would hold
 ;; every later one (filling the worker threads, and write-shadows holds the
 ;; view root's lock while it waits).  A compile still running when the wait
-;; ends is hung: no drop waits for it again, so it costs one WAIT-LIMIT.
+;; ends is marked hung (it may only be slow): no drop waits for it again, so
+;; it costs one WAIT-LIMIT.
 (= WAIT-LIMIT 5.0)
 
 (= _EXCLUDED-PARTS (frozenset ["site-packages" "dist-packages"]))
@@ -255,8 +256,10 @@
             (if (> remaining 0)
                 (do (.wait _SHARED.condition remaining)
                     (continue)))
-            ;; Dropping under a hung compile can break only an import it
-            ;; has in progress, and that compile is broken already.
+            ;; A compile past WAIT-LIMIT may only be slow.  Dropping under it
+            ;; can fail an import it has in progress; its result is keyed by
+            ;; the epoch it began under, now outdated, so it is compiled
+            ;; again.
             (.update _SHARED.hung blockers)))
     ;; A pyc keeps its source's mtime in whole seconds and its size, so an
     ;; edit of the same size within that second would load the old pyc: a
