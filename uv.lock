@@ -285,6 +285,7 @@ dev = [
     { name = "pre-commit" },
     { name = "pygments" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
     { name = "toml" },
 ]
@@ -313,6 +314,7 @@ requires-dist = [
     { name = "pygments", marker = "extra == 'docs'", specifier = ">=2.20" },
     { name = "pyrefly", marker = "extra == 'lsp'", specifier = ">=1.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "toml", marker = "extra == 'dev'", specifier = ">=0.10.2" },
 ]
