@@ -252,6 +252,15 @@ def test_a_required_modules_macros_follow_its_name(complete, backend_requests):
 
 
 @once
+def test_a_qualified_macro_is_offered_as_it_was_defined(complete, backend_requests):
+    # Defect: a macro after its module's name is labelled by its name-key
+    # (my_mac), not the spelling it was defined as (my-mac).
+    backend_requests.answer["value"] = []
+    labels = by_label(complete("(require macmod)\n(macmod.my|)")[2])
+    assert "my-mac" in labels and "my_mac" not in labels
+
+
+@once
 def test_a_required_macro_wins_over_the_backends_name(complete, backend_requests):
     # Defects: the backend's items replace the macros, or a backend item of
     # a macro's name is offered beside it.

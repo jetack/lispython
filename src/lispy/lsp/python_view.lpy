@@ -480,10 +480,10 @@
    compile had registered once expanded to the spelling it was registered
    under (my-mac, mod.my-mac): a name there is a lispython form at a call's
    head, which no Python backend knows, and the spelling is what completion
-   offers.  builtin-macros maps the
-   name (name-key) of each of those that is a built-in macro (the very
-   macro of lispy.macros, so never one a defmacro or another module's
-   require registered under that name) to the built-in's own name."
+   offers.  builtin-macros maps the name (name-key) of each of those that
+   is a built-in macro (the very macro of lispy.macros, so never one a
+   defmacro or another module's require registered under that name) to the
+   built-in's own name."
   (def __init__ [self text position-map tree :macros {}
                  :builtin-macros {}]
     (= self._lines None)
