@@ -101,9 +101,12 @@
 
 ;; A namespace package has no file, so path_stats never sees it: a require of
 ;; a directory with no __init__ yet binds an empty namespace module.  Its
-;; name is recorded to drop, with each portion directory (where a later
-;; __init__ goes) and its parent (where a later module file of that name
-;; goes) by mtime, when every portion is trackable.
+;; name is recorded to drop, with each portion directory by mtime (where a
+;; later __init__ goes) and the module files that would replace it beside
+;; that directory (<name>.py, <name>.lpy) by their stamp, None while absent,
+;; when every portion is trackable.  Never the parent directory's mtime:
+;; for a top-level namespace in a flat layout that is the import root, where
+;; every lock or backup file would drop every module.
 (def _recording-namespace-exec [self module]
   (= windows (getattr _SHARED.local "windows" None))
   (if windows
@@ -113,14 +116,20 @@
                               (_trackable-path-p (osp.realpath portion)))
                          for portion in portions)))
               (do (= reads (sub windows -1))
+                  (= stem (sub (.rpartition module.__name__ ".") 2))
                   (.append reads (, module.__name__ None None))
                   (for portion in portions
-                    (for directory in [portion (osp.dirname portion)]
+                    (try
+                      (.append reads (, None portion (. (os.stat portion) st-mtime-ns)))
+                      (except [OSError]
+                        (pass)))
+                    (for suffix in [".py" ".lpy"]
+                      (= candidate (osp.join (osp.dirname portion) (+ stem suffix)))
                       (try
-                        (.append reads (, None directory
-                                          (. (os.stat directory) st-mtime-ns)))
+                        (= stamp (_stamp candidate))
                         (except [OSError]
-                          (pass)))))))))
+                          (= stamp None)))
+                      (.append reads (, module.__name__ candidate stamp))))))))
   (return (_SHARED.original-namespace-exec self module)))
 
 ;; A missing module is never read, so path_stats cannot see it, and a require
@@ -190,12 +199,14 @@
    failed is in none, and stays tracked until its file changes.  Under
    _SHARED.condition."
   (= changed [])
+  ;; A None stamp is a file tracked while absent: stale once it exists.
   (for [path stamp] in (+ (list (.items _SHARED.files)) (list (.items _SHARED.dep-files)))
     (try
       (if (!= (_stamp path) stamp)
           (.append changed path))
       (except [OSError]
-        (.append changed path))))
+        (if (is-not stamp None)
+            (.append changed path)))))
   (if changed
       (return (, changed True)))
   (for [directory mtime] in (list (.items _SHARED.dirs))
@@ -357,7 +368,7 @@
                 (_trackable-p name path)
                 (do (.setdefault _SHARED.files path stamp)
                     (.add _SHARED.names name)
-                    (if (.endswith path ".lpy")
+                    (if (and (is-not stamp None) (.endswith path ".lpy"))
                         (_track-record path)))))
             (finally
               (.discard _SHARED.running token)

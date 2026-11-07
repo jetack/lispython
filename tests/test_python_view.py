@@ -1611,6 +1611,39 @@ class TestMacroModules:
         (package.pkg / "nosuch" / "__init__.lpy").write_text(THRICE)
         assert pv.compile_view(src, **kwargs).text.endswith("yy = 2 * 2 * 2")
 
+    def flat_namespace(self, package, tmp_path):
+        """(project, name): a flat layout whose import root holds a
+        directory name with no __init__, after a view requiring it."""
+        project = tmp_path / "flat"
+        name = package.name + "ns"
+        (project / name).mkdir(parents=True)
+        assert self.flat_view(project, name).text.endswith("yy = twice(2)")
+        next_tick()
+        return project, name
+
+    def test_a_module_created_beside_a_namespace_directory_is_seen(
+        self, package, tmp_path
+    ):
+        # A module file of the namespace's name replaces it on import.
+        project, name = self.flat_namespace(package, tmp_path)
+        try:
+            (project / (name + ".lpy")).write_text(THRICE)
+            assert self.flat_view(project, name).text.endswith("yy = 2 * 2 * 2")
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_namespace_leaves_its_parent_directory_unwatched(self, package, tmp_path):
+        # Defect: a top-level namespace stamps its parent directory, the
+        # import root of a flat layout, so any file written there drops
+        # every module.
+        project, name = self.flat_namespace(package, tmp_path)
+        try:
+            epoch = mm.epoch()
+            (project / "uv.lock").write_text("")
+            assert mm.epoch() == epoch
+        finally:
+            sys.modules.pop(name, None)
+
     def flat_view(self, project, mac):
         return pv.compile_view(
             f"(require {mac} *)\n(= yy (twice 2))",
