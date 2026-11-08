@@ -86,6 +86,22 @@ def test_prefixes_wrap_a_name(lexer):
     ]
 
 
+@pytest.mark.parametrize(
+    ["src", "expected"],
+    [
+        ["*1", [(Operator, "*"), (Number.Integer, "1")]],
+        ["*-1+2j", [(Operator, "*"), (Number, "-1+2j")]],
+        ["^-1", [(Operator, "^"), (Operator, "-"), (Number.Integer, "1")]],
+        ["**0x1", [(Operator, "**"), (Number.Hex, "0x1")]],
+    ],
+)
+def test_a_prefixed_number_is_the_readers_number(lexer, src, expected):
+    # Defect: the highlighter peels with its own copy of the reader's rule,
+    # which never re-types the rest after a prefix: *1 shows a name 1, and
+    # *-1+2j splits off a sign the reader keeps in one complex constant.
+    assert tokens(lexer, f"(f {src})")[2:-1] == expected
+
+
 def test_quote_operators(lexer):
     src = "(return `(do ~@body (while ~pred 'x)))"
     for text in ["`", "~@", "~", "'"]:
