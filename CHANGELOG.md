@@ -84,14 +84,17 @@ follows [Semantic Versioning](https://semver.org/).
   which no code could spell. Code calling `(.mac.name ...)` must call
   `(mac.name ...)`. `(require .)` and `(require ..)` with no selection bind
   no name and are a compile error; give them `as`, `*` or a list.
-- A `require` whose module is no module name is a compile error at it:
-  `(require 1)`, `(require "m")`, and a malformed path (`(require mac.)`,
-  `(require a..b)`, `(require m.-)`, `(require .mac.)`). The first two used
-  to be a "module not found" warning.
-- A relative `require` in a module outside any package (`lpy -c`, a
-  top-level script) is a compile error at the module, "attempted relative
-  import with no known parent package", instead of Python's bare
-  `TypeError`.
+- A `require` whose module is no symbol, `(require 1)` or `(require "m")`,
+  is a compile error at it; it used to be a "module not found" warning.
+- A relative `require` compiled with no package (a module outside any
+  package; `lpy -c` or the REPL run from a directory that is no package) is
+  a compile error at the module, "attempted relative import with no known
+  parent package", instead of Python's bare `TypeError`.
+- `require` imports a module by the name `import` gives it: `(require ok?)`
+  imports `ok_p` and `(require ->foo)` `_to_foo`, as `(import ok?)` and
+  `(import ->foo)` do, instead of `ok?` and `_>foo`. A malformed path
+  (`(require mac.)`, `a..b`, `m.-`, `.mac.`) is a compile error at the
+  module, worded as `from` words it.
 - A `defmacro` no longer binds any name in the module that defines it. It
   used to star-import `lispy.core.nodes` and `lispy.core.builtins` there,
   overwriting the module's own `Paren`, `Symbol` or `gensym` and leaving

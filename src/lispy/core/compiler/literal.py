@@ -438,6 +438,16 @@ def module_path(sexp, relative=False):
     return [path, level]
 
 
+def module_import_name(sexp):
+    """The module name an import of the module symbol ``sexp`` takes, as
+    ``importlib.import_module`` reads it: a relative module's dots, then its
+    module_path (``->foo`` is ``_to_foo``, ``.ok?`` is ``.ok_p``). A part
+    that is no name is module_path's LispyCompileError. The one home of that
+    name for require and the LSP's module lookup."""
+    path, level = module_path(sexp, relative=True)
+    return "." * level + (path or "")
+
+
 def hyphenated_name_p(text):
     """Whether ``text`` is a name written with hyphens as word separators
     (``my-x``, ``inc``): its Python name is ``text`` with each ``-`` as ``_``

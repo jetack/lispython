@@ -21,6 +21,7 @@ from lispy import form_docs
 from lispy.core import nodes
 from lispy.core.compiler import features, literal
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
+from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
@@ -411,6 +412,34 @@ class TestRequireSelection:
         got = server.find_import_target(node, folders, origin=origin)
         expected = package / ("__init__.lpy" if "[macmod]" in form else "macmod.lpy")
         assert got == str(expected)
+
+    @pytest.mark.parametrize("form", ["(require pkg.dual)", "(require .dual)"])
+    def test_a_package_wins_over_a_module_file_of_its_name(self, package, form):
+        # Defect: dual.lpy is taken where Python's FileFinder imports the
+        # package dual/ (its __init__.lpy).
+        (package / "dual").mkdir()
+        (package / "dual" / "__init__.lpy").write_text("")
+        (package / "dual.lpy").write_text("")
+        [node] = parse(form)
+        origin = str(package / "mod.lpy")
+        folders = [SimpleNamespace(uri=package.parent.as_uri())]
+        got = server.find_import_target(node, folders, origin=origin)
+        assert got == str(package / "dual" / "__init__.lpy")
+
+    @pytest.mark.parametrize("spelling", ["ok?", "->foo"])
+    def test_a_required_module_is_looked_up_by_its_import_name(self, package, spelling):
+        # Defect: the lookup mangles the name by a rule of its own (each -
+        # as _), so it misses the file the import of ok? (ok_p) reads.
+        [stmt] = list(
+            macroexpand_then_compile(
+                parse(f"(import {spelling})"), {"__macro_namespace": {}}
+            )
+        )
+        target = package / f"{stmt.names[0].name}.lpy"
+        target.write_text("")
+        [node] = parse(f"(require .{spelling})")
+        origin = str(package / "mod.lpy")
+        assert server.find_import_target(node, [], origin=origin) == str(target)
 
     @pytest.mark.parametrize("form", ["(require ..macmod)", "(from ..macmod [x])"])
     def test_a_relative_module_beyond_the_top_level_package_resolves_to_nothing(

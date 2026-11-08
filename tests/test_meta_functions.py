@@ -123,12 +123,6 @@ class TestRequireQualifier:
             ("(require m a b c)", "a"),
             ("(require m :as c)", ":as"),
             ("(require m [a 1])", "1"),
-            ("(require mac.)", "mac."),
-            ("(require a..b)", "a..b"),
-            ("(require m.-)", "m.-"),
-            ("(require a.if)", "a.if"),
-            ("(require .mac.)", ".mac."),
-            ("(require ..mac..x *)", "..mac..x"),
         ],
     )
     def test_a_malformed_require_is_a_compile_error_at_its_fault(self, form, fault):
@@ -157,13 +151,48 @@ class TestRequireQualifier:
         assert "no known parent package" in info.value.msg
         assert (info.value.lineno, info.value.offset) == (2, 12)
 
-    def test_a_malformed_relative_path_is_no_package_alone(self):
-        # Defect: .mac. is read as a package alone, whose message suggests
-        # (require .mac. as name), which fails again.
-        scope = {"__macro_namespace": {}}
+    @staticmethod
+    def _error(source):
         with pytest.raises(LispyCompileError) as info:
-            list(macroexpand_then_compile(parse("(require .mac.)"), scope))
-        assert "expects a module name" in info.value.msg
+            list(macroexpand_then_compile(parse(source), {"__macro_namespace": {}}))
+        return (info.value.msg, info.value.lineno, info.value.offset)
+
+    @pytest.mark.parametrize(
+        "module", ["mac.", "a..b", "m.-", "a.if", ".mac.", "..mac..x", ".ok?.if"]
+    )
+    def test_a_malformed_module_path_is_refused_as_the_import_forms_refuse_it(
+        self, module
+    ):
+        # Defects: the path is not checked (mac. reaches importlib), .mac.
+        # is read as a package alone (whose message suggests a fix that
+        # fails again), or require checks a path by a rule of its own, so
+        # it refuses or words a path otherwise than (from ...) does.
+        # The from form is padded so its module starts in the same column.
+        assert self._error(f"(require {module})") == self._error(
+            f"(from    {module} [x])"
+        )
+
+    @pytest.mark.parametrize("spelling", ["ok?", "->foo", "my-mod", "a.ok?"])
+    def test_a_require_imports_the_module_import_would(self, monkeypatch, spelling):
+        # Defect: require mangles the module name by a rule of its own (each
+        # - as _), so (require ok?) imports "ok?" and (require ->foo) "_>foo",
+        # while (import ok?) imports ok_p and (import ->foo) _to_foo.
+        [stmt] = list(
+            macroexpand_then_compile(
+                parse(f"(import {spelling})"), {"__macro_namespace": {}}
+            )
+        )
+        module = stmt.names[0].name
+        registered = self._registered(
+            monkeypatch, f"(require {spelling})", None, module
+        )
+        assert registered == {f"{spelling}.a", f"{spelling}.b"}
+
+    def test_a_relative_require_imports_the_module_from_would(self, monkeypatch):
+        registered = self._registered(
+            monkeypatch, "(require .ok?)", "reqq", "reqq.ok_p"
+        )
+        assert registered == {"ok?.a", "ok?.b"}
 
     def test_a_package_alone_names_the_fix(self):
         # Python binds no name for from . import, so neither may a require:

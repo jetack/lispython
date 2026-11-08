@@ -26,7 +26,8 @@
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
 ;; The one completion-spelling rule, shared with the nREPL, and the one
 ;; completion matching rule.
-(from lispy.core.compiler.literal [completion-label completion-prefix name-spellings])
+(from lispy.core.compiler.literal [completion-label completion-prefix module-import-name
+                                   name-spellings])
 (from lispy.core.meta-functions [require-parse REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
@@ -151,8 +152,11 @@
              (isinstance node.op Symbol)
              (== node.op.value "require")
              (isinstance (sub node 1) Symbol))
-        (do (= module-name (. (sub node 1) value))
-            (index-installed-package module-name)))))
+        (try
+          ;; The name the require imports (require-parse's).
+          (index-installed-package (sub (require-parse node) 3))
+          (except [LispyCompileError]
+            (pass))))))
 
 (def index-file [uri]
   "Parse a .lpy file and add its definitions to the workspace index.
@@ -202,24 +206,32 @@
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
 (def module-file-under [module-name roots]
-  "The .lpy file of the absolute module-name under the first of roots that
-   holds one (module.lpy, else the package's __init__.lpy), or None."
-  (= rel-path (osp.join *(.split (.replace module-name "-" "_") ".")))
+  "The .lpy file of the absolute import name module-name (already its
+   Python spelling, module-import-name) under the first of roots that holds
+   one, or None.  A package directory's __init__.lpy wins over a module
+   file of the same name, as CPython's FileFinder prefers the package."
+  (= rel-path (osp.join *(.split module-name ".")))
   (for root in roots
-    (for candidate in [(+ (osp.join root rel-path) ".lpy")
-                       (osp.join root rel-path "__init__.lpy")]
+    (for candidate in [(osp.join root rel-path "__init__.lpy")
+                       (+ (osp.join root rel-path) ".lpy")]
       (if (osp.isfile candidate)
           (return candidate))))
   (return None))
 
-(def resolve-module-to-file [module-name workspace-folders :origin None]
-  "Resolve a LisPython module name to a .lpy file path.
-   e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'.  A relative name
+(def resolve-module-to-file [module workspace-folders :origin None]
+  "Resolve a LisPython module symbol to a .lpy file path, through the name
+   its import takes (module-import-name, the compiler's own; a symbol that
+   is no module name resolves to nothing).
+   e.g., lispy.tools -> '/path/to/src/lispy/tools.lpy'.  A relative name
    resolves as Python resolves it from origin, the importing file's path:
    in origin's package (module-names, the package-root rule) to an
    absolute name (importlib.util.resolve-name), looked up under origin's
    import root.  With no origin, or no package, or beyond the top-level
    package, it resolves to nothing."
+  (try
+    (= module-name (module-import-name module))
+    (except [LispyCompileError]
+      (return None)))
   (if (.startswith module-name ".")
       (do (if (is origin None)
               (return None))
@@ -239,7 +251,7 @@
       (return found))
   ;; 2. Python's sys.path (finds installed packages, including lispython itself)
   (try
-    (do (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+    (do (= spec (importlib.util.find-spec module-name))
         (if (and spec spec.origin (.endswith spec.origin ".lpy"))
             (return spec.origin))
         ;; Package without __init__.lpy but has submodule files
@@ -253,11 +265,12 @@
   (return None))
 
 (def index-installed-package [module-name]
+  ;; module-name is an import name, already in its Python spelling.
   "Index all .lpy files in an installed Python package (e.g., lispython).
    Used to make defmacros in required modules discoverable."
   (try
     (do (import importlib.util)
-        (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+        (= spec (importlib.util.find-spec module-name))
         (if (and spec spec.submodule-search-locations)
             (for search-path in spec.submodule-search-locations
               (for fpath in (glob.glob (osp.join search-path "**" "*.lpy") :recursive True)
@@ -279,8 +292,7 @@
     (do ;; (from module [names...])
         (if (< (len node) 3)
             (return None))
-        (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders :origin origin))
+        (= fpath (resolve-module-to-file (sub node 1) workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -289,8 +301,7 @@
     (do ;; (import module)
         (if (< (len node) 2)
             (return None))
-        (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders :origin origin))
+        (= fpath (resolve-module-to-file (sub node 1) workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -299,8 +310,7 @@
     (do ;; (require module *)
         (if (< (len node) 2)
             (return None))
-        (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders :origin origin))
+        (= fpath (resolve-module-to-file (sub node 1) workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -323,7 +333,7 @@
    own rule (require-parse) decides; the buffer may be mid-edit, so a
    require the compiler would reject registers nothing."
   (try
-    (= [kind qualifier names] (require-parse node))
+    (= [kind qualifier names _] (require-parse node))
     (except [LispyCompileError]
       (return None)))
   (= key (name-key name))
@@ -2161,7 +2171,7 @@
               (not (isinstance (sub node 1) Symbol)))
           (continue))
       (try
-        (= [kind qualifier _] (require-parse node))
+        (= [kind qualifier _ _] (require-parse node))
         (except [LispyCompileError]
           (continue)))
       (if (and (== kind REQUIRE-QUALIFIED) (== (name-key qualifier) key))

@@ -1,6 +1,6 @@
 WARNING = "This script should be edited in .lpy file, not translated .py file."
 from lispy.core.builtins import __all__ as MACRO_SCOPE_NAMES
-from lispy.core.compiler.literal import identifier_p, plain_name_p, python_name_p
+from lispy.core.compiler.literal import identifier_p, module_import_name, plain_name_p
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
 from lispy.core.nodes import atom_text
@@ -105,12 +105,15 @@ def require_qualifier(module):
 
 def require_parse(sexp):
     """The one parse of (require module ...), read by the compiler and the LSP:
-    (kind, qualifier, names).  REQUIRE-QUALIFIED for (require module) and
+    (kind, qualifier, names, module).  REQUIRE-QUALIFIED for (require module) and
     (require module as alias): every macro, registered as qualifier.name,
     the qualifier being alias, else require-qualifier's.  REQUIRE-ALL for *:
     every macro, unqualified.  REQUIRE-NAMED for a list: exactly names, so
     an empty [] registers none.  The qualifier is None unless qualified,
-    names None unless named.  A malformed require is a LispyCompileError at
+    names None unless named.  module is the name the import takes: the
+    relative level's dots, then the dotted path mangled as the import forms
+    mangle theirs (module-import-name, which refuses a part that is no
+    name: mac., a..b, m.-, ok?.if).  A malformed require is a LispyCompileError at
     the part at fault (require-error), as the import forms refuse theirs."""
     args = sexp.list[1:]
     if len(args) == 0:
@@ -120,12 +123,10 @@ def require_parse(sexp):
         raise module.misuse_error()
     if type(module) is not Symbol:
         raise require_error(module, f"expects a module name, got {module}")
-    path = atom_text(module).lstrip(".")
-    if path and (not all(map(python_name_p, path.split(".")))):
-        raise require_error(module, f"expects a module name, got {module}")
+    module_name = module_import_name(module)
     rest = args[1:]
     if len(rest) == 0:
-        return (REQUIRE_QUALIFIED, require_qualifier(module), None)
+        return (REQUIRE_QUALIFIED, require_qualifier(module), None, module_name)
     selection = rest[0]
     if symbol_text_p(selection, "as"):
         if len(rest) == 1:
@@ -138,7 +139,7 @@ def require_parse(sexp):
                 rest[2],
                 f"takes no selection after an alias, which qualifies every macro, got {rest[2]}",
             )
-        return (REQUIRE_QUALIFIED, atom_text(alias), None)
+        return (REQUIRE_QUALIFIED, atom_text(alias), None, module_name)
     star = symbol_text_p(selection, "*")
     if not (star or isinstance(selection, Bracket)):
         raise require_error(
@@ -153,16 +154,15 @@ def require_parse(sexp):
             else f"takes one selection after the module, got {rest[1]}",
         )
     if star:
-        return (REQUIRE_ALL, None, None)
+        return (REQUIRE_ALL, None, None, module_name)
     for name in selection:
         if type(name) is not Symbol:
             raise require_error(name, f"expects a macro name, got {name}")
-    return (REQUIRE_NAMED, None, [atom_text(name) for name in selection])
+    return (REQUIRE_NAMED, None, [atom_text(name) for name in selection], module_name)
 
 
 def require_transform(sexp):
-    [kind, qualifier, names] = require_parse(sexp)
-    module_name_str = atom_text(sexp.list[1]).replace("-", "_")
+    [kind, qualifier, names, module_name_str] = require_parse(sexp)
     is_relative = module_name_str.startswith(".")
     import_call = (
         Paren(
