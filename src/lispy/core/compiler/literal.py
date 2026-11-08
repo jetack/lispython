@@ -8,7 +8,6 @@ import tokenize
 from lispy.core.compiler.features import require
 from lispy.core.errors import LispyCompileError, compile_warning, filtered_warnings
 from lispy.core.nodes import (
-    NAME_MANGLE,
     Expression,
     GluedHead,
     MetaIndicator,
@@ -562,93 +561,6 @@ def completion_prefix(typed, label):
             continue
         return None
     return typed + label[len(typed) :]
-
-
-# The signs the reader peels off the front of a token (leading_signs).
-SIGNS = "+-"
-# Besides a letter or digit (str.isalnum), what may follow a sign run for the
-# reader to peel it (leading_signs).
-SIGN_PEEL_FOLLOWERS = "_."
-
-
-def leading_signs(token):
-    """The run of signs the reader peels off the front of symbol ``token`` as
-    unary operators, or "" when it peels none: a run of ``+``/``-`` followed by
-    a letter, digit, ``_`` or ``.`` (``-foo`` is ``(- foo)``, ``--x`` is
-    ``(- (- x))``). A run followed by anything else stays in the symbol
-    (``->f``, ``-?``), and a run with nothing after it is the operator itself.
-    The one home of the rule: the reader (token_parse), the highlighter and
-    the completion word (completion_word_span) all peel through it."""
-    rest = token.lstrip(SIGNS)
-    if rest != token and rest and (rest[0].isalnum() or rest[0] in SIGN_PEEL_FOLLOWERS):
-        return token[: len(token) - len(rest)]
-    return ""
-
-
-def name_char_p(text, i):
-    """Whether ``text[i]`` is a character of a name: a Python identifier
-    character (``("a" + ch).isidentifier()``, Unicode included), or the
-    punctuation the name mangle rewrites (nodes.NAME_MANGLE), each only where
-    its whole spelling stands (a ``>`` only as the ``>`` of ``->``). A name
-    holds nothing else: whatever the reader lets into a symbol beyond that
-    (``~ @ ! < = * + / % & | ^ :``) makes no Python name, so it ends the word
-    completion reads, and ``a~b`` completes ``b``."""
-    ch = text[i]
-    if ("a" + ch).isidentifier():
-        return True
-    for spelling, _ in NAME_MANGLE:
-        for offset, part in enumerate(spelling):
-            begin = i - offset
-            if part == ch and begin >= 0 and text.startswith(spelling, begin):
-                return True
-    return False
-
-
-def name_run_end(text, start):
-    """Where the run of name characters (name_char_p) starting at ``start``
-    ends."""
-    end = start
-    while end < len(text) and name_char_p(text, end):
-        end += 1
-    return end
-
-
-def completion_word_span(line, col):
-    """``(start, replace_start, end)`` of the word being typed at code-point
-    column ``col`` (0 <= col <= len(line)) of ``line``: the one home of the
-    completion word boundary, which the LSP derives its ranges from and the
-    editors' native copies pin against (``python -m lispy.word_boundary``).
-
-    - ``start``: where the dotted word before ``col`` starts, walking back over
-      name characters (name_char_p) and ``.``, less the leading signs the
-      reader peels (leading_signs: ``-fo`` is ``(- fo)``, so its word is
-      ``fo``). A sign run with no name character after it (``-``, ``--``)
-      is the word itself, typed as the prefix of a name that starts with it
-      (``->``, ``-?``): it is no name, but only labels starting with ``-``
-      match it, and accepting ``->`` from ``(-`` gives ``(->``. A caret
-      inside a peeled run (``-|-x``) is likewise typing the run: the word is
-      the run, ending where the run ends.
-    - ``replace_start``: after the last ``.`` between ``start`` and ``col``,
-      since a completion offers the part after the last dot (``heapq.nl``
-      completes ``nl``).
-    - ``end``: where the name run after ``col`` ends (no dot), the rest of
-      the word a completion replaces.
-
-    Prefixes (``: ^ * ** ' ` ~ ~@ ,``) are no name characters, so the walk
-    stops after them, and an augmented assignment (``**=``) has an empty
-    word."""
-    start = col
-    while start > 0 and (line[start - 1] == "." or name_char_p(line, start - 1)):
-        start -= 1
-    end = name_run_end(line, col)
-    # The character after the run decides the peel, as the token's next one
-    # does in the reader.
-    signs = leading_signs(line[start : end + 1])
-    if signs:
-        if start + len(signs) > col:
-            return start, start, start + len(signs)
-        start += len(signs)
-    return start, start + line[start:col].rfind(".") + 1, end
 
 
 def plain_name_p(sexp):

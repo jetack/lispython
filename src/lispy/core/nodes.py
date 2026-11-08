@@ -1061,10 +1061,8 @@ class Literal(Node):
         return self._classname_call(self.operands_generate(in_quasi))
 
 
-# The spellings a symbol rewrites into its Python name, applied in this order
-# (``->`` before ``-``, or ``->`` would become ``_>``). The only punctuation a
-# name may hold: the completion word rule (compiler/literal.py name_char_p)
-# reads its characters from here, so a new entry is a name character there too.
+# The spellings a symbol rewrites into its Python name (Symbol.name), applied
+# in this order: ``->`` before ``-``, or ``->`` would become ``_>``.
 NAME_MANGLE = (("->", "_to_"), ("-", "_"), ("?", "_p"))
 
 

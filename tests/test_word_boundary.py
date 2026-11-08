@@ -1,16 +1,16 @@
-"""The completion word boundary (completion_word_span) and its published spec
-(python -m lispy.word_boundary), which lpy-mode and vsc-lispy pin against."""
+"""The completion word boundary (completion_word_span, the reader's word) and
+its published spec (python -m lispy.word_boundary), which lpy-mode and
+vsc-lispy pin against."""
 
 import json
-import string
 import subprocess
 import sys
 
 import pytest
 
-from lispy.core.compiler.literal import completion_word_span, name_char_p
-from lispy.core.nodes import NAME_MANGLE, Paren, Symbol
-from lispy.core.parser import parse
+import lispy.macros
+from lispy.core.nodes import Constant, Paren, Symbol
+from lispy.core.parser import completion_word_span, parse, tokenize
 from lispy.word_boundary import CASE_INPUTS
 
 # (line with | at the caret, (start, replace_start, end)), checked by hand.
@@ -20,70 +20,78 @@ SPANS = [
     ("|x", (0, 0, 1)),
     ("|", (0, 0, 0)),
     ("x1|", (0, 0, 2)),
-    # The mangle's punctuation is part of a name.
+    # Every character the reader lets into a symbol is a word character: a
+    # macro name is no Python name.
+    ("(->>|", (1, 1, 4)),
+    ("(++|", (1, 1, 3)),
+    ("(swap!|", (1, 1, 6)),
     ("ok?|", (0, 0, 3)),
-    ("my-x|", (0, 0, 4)),
-    ("x-|", (0, 0, 2)),
-    ("->f|", (0, 0, 3)),
-    ("-|>f", (0, 0, 3)),
-    # A > is a name character only as the > of ->.
-    ("a>b|", (2, 2, 3)),
-    ("-->x|", (0, 0, 4)),
-    ("-?|", (0, 0, 2)),
-    # Leading signs before a letter, digit, _ or . are the reader's unary
-    # operators, never part of the name.
-    ("-fo|", (1, 1, 3)),
-    ("--x|", (2, 2, 3)),
-    ("(- -fo|", (4, 4, 6)),
-    ("-|foo", (1, 1, 4)),
-    ("-.x|", (1, 2, 3)),
-    ("-_a|", (1, 1, 3)),
-    # A combining mark is a name character but no letter or digit: no peel.
-    ("-\u0301x|", (0, 0, 3)),
-    # A superscript digit is alnum (the reader peels before it) but no name
-    # character.
-    ("-|\u00b2", (1, 1, 1)),
-    ("-\u00b2|", (2, 2, 2)),
-    # A sign run with no name character after it is typed as the prefix of a
-    # name that starts with it (->), and so is a peeled run the caret is in.
+    ("a~b|", (0, 0, 3)),
+    ("a(b|", (0, 0, 3)),
+    ("a'b|", (0, 0, 3)),
+    ("except*|", (0, 0, 7)),
+    ("!=|", (0, 0, 2)),
+    ("a-|>b", (0, 0, 4)),
+    # An augmented assignment is never peeled.
+    ("**=|", (0, 0, 3)),
+    ("+=|", (0, 0, 2)),
+    ("-=|", (0, 0, 2)),
+    ("^**=|", (1, 1, 4)),
+    # A lone sign run is the word, the prefix of -> or --.
     ("-|", (0, 0, 1)),
     ("(-|", (1, 1, 2)),
     ("--|", (0, 0, 2)),
-    ("-|-x", (0, 0, 2)),
-    # Whatever the reader lets into a symbol beyond the name rule ends the
-    # word.
-    ("a~b|", (2, 2, 3)),
-    ("a@b|", (2, 2, 3)),
-    ("ok!|", (3, 3, 3)),
-    ("a<b|", (2, 2, 3)),
-    ("a=b|", (2, 2, 3)),
-    ("a/b|", (2, 2, 3)),
-    ("#x|", (1, 1, 2)),
-    ("+x|", (1, 1, 2)),
-    # Prefixes are no name characters.
+    ("-->x|", (0, 0, 4)),
+    # Leading signs before a letter, digit, _ or . are the reader's unary
+    # operators, never part of the word.
+    ("-fo|", (1, 1, 3)),
+    ("--x|", (2, 2, 3)),
+    ("(- -fo|", (4, 4, 6)),
+    ("-.x|", (1, 2, 3)),
+    ("-_a|", (1, 1, 3)),
+    ("-1|", (1, 1, 2)),
+    # A combining mark is no letter or digit: no peel. A superscript two is
+    # one (str.isalnum), so the sign before it is peeled.
+    ("-́x|", (0, 0, 3)),
+    ("-²|", (1, 1, 2)),
+    ("-|foo", (1, 1, 4)),
+    # The caret inside the peeled front: the whole token is the word.
+    ("-|-x", (0, 0, 3)),
+    ("*|*x", (0, 0, 3)),
+    # token_parse's prefixes, and the reader's openings and quote marks.
     (":kw|", (1, 1, 3)),
+    ("::x|", (2, 2, 3)),
     ("^x|", (1, 1, 2)),
     ("*x|", (1, 1, 2)),
     ("**x|", (2, 2, 3)),
+    ("^*x|", (2, 2, 3)),
     ("'x|", (1, 1, 2)),
     ("`x|", (1, 1, 2)),
     ("~x|", (1, 1, 2)),
     ("~@x|", (2, 2, 3)),
+    ("^'x|", (2, 2, 3)),
+    ("'|x", (1, 1, 2)),
+    ("(|", (1, 1, 1)),
+    ("~|@x", (1, 1, 1)),
+    # ~ with nothing after it is the invert symbol.
+    ("~|", (0, 0, 1)),
+    ("{x|", (1, 1, 2)),
+    ("[x|", (1, 1, 2)),
     (",x|", (1, 1, 2)),
-    # An augmented assignment has no name characters: never cut to =.
-    ("**=|", (3, 3, 3)),
-    ("+=|", (2, 2, 2)),
-    # The dotted word starts at its first part, the replaced word after the
-    # last dot; the end never crosses a dot.
+    ("#x|", (0, 0, 2)),
+    # A non-breaking space and a file separator are whitespace to the reader.
+    ("a b|", (2, 2, 3)),
+    ("a\u001cb|", (2, 2, 3)),
+    # The dotted word: the replaced part follows the last dot; the end stops
+    # at the next one.
     ("heapq.nl|", (0, 6, 8)),
     ("heapq.|", (0, 6, 6)),
+    ("x.|", (0, 2, 2)),
     ("a.b|.c", (0, 2, 3)),
+    ("a..b|", (0, 3, 4)),
     (".method|", (0, 1, 7)),
     ("(.c|", (1, 2, 3)),
-    ("a.-|", (0, 2, 3)),
-    ("a.-x|", (0, 2, 4)),
-    ("x.|", (0, 2, 2)),
-    ("a-|>b", (0, 0, 4)),
+    ("x .c|", (2, 3, 4)),
     # Unicode identifier characters, astral ones included (code points).
     ("한국|", (0, 0, 2)),
     ("x한|", (0, 0, 2)),
@@ -98,45 +106,66 @@ def span_at(marked):
 
 @pytest.mark.parametrize("marked, expected", SPANS, ids=[m for m, _ in SPANS])
 def test_completion_word_span(marked, expected):
-    # Defects: the reader's symbol characters taken as name characters (a~b
-    # one word, **= cut to =); a peeled sign kept in the word (-fo, which
-    # matches no name); a lone - dropped from the word (every label offered,
-    # and -> accepted from (- gives (-->); a > counted outside -> (a>b one
-    # word); the dotted word's head left in the replaced word.
+    # Defects: a word cut at a character no Python name holds (->> to an
+    # empty word, so a macro name is never completed); an augmented
+    # assignment cut down to =; a peeled prefix or sign kept in the word (-fo,
+    # which matches no name); a lone - dropped (-> accepted from (- gives
+    # (-->); the dotted word's head left in the replaced word.
     assert span_at(marked) == expected
 
 
-def test_the_mangle_is_the_only_name_punctuation():
-    # Defect: a mangle entry added in nodes.NAME_MANGLE while the word rule
-    # keeps a punctuation set of its own, so completion cuts the new name
-    # (or, the other way, the rule accepts punctuation no name can hold).
-    keys = [spelling for spelling, _ in NAME_MANGLE]
-    for key in keys:
-        line = f"x{key}y"
-        assert span_at(line + "|") == (0, 0, len(line)), key
-    mangled = {ch for key in keys for ch in key}
-    for ch in sorted(set(string.punctuation) - mangled - {"_", "."}):
-        assert completion_word_span(f"a{ch}b", 3) == (2, 2, 3), ch
-        assert not name_char_p(ch, 0), ch
+def reader_leaf(line):
+    """The leaf node the reader makes of the one token in "(" + token +
+    ")"."""
+    [form] = parse(line + ")")
+    [node] = form.list
+    while not isinstance(node, (Symbol, Constant)):
+        if isinstance(node, Paren):
+            node = node.list[1]  # a peeled sign: (- operand)
+        else:
+            node = node.value  # a prefix wrapper or quote mark
+    return node
 
 
-def reader_name_start(token):
-    """The column where the reader's name starts in token, past the unary
-    operators it peels off the front."""
-    [node] = parse(token)
-    while isinstance(node, Paren) and node.list[0].value in "+-":
-        node = node.list[1]
-    assert type(node) is Symbol
-    return node.col_offset
+PRELUDE_MACROS = sorted(getattr(lispy.macros, "__macro_namespace"))
+TOKENS = [
+    *PRELUDE_MACROS,
+    "swap!",
+    "ok?",
+    "a~b",
+    "a'b",
+    "except*",
+    "!=",
+    "**=",
+    "^**=",
+    "-fo",
+    "--x",
+    "-_a",
+    "-1",
+    "-́x",
+    "-²",
+    ":kw",
+    "^x",
+    "**x",
+    "^*x",
+    "'x",
+    "`x",
+    "~x",
+    "~@x",
+    "-",
+    "~",
+]
 
 
-@pytest.mark.parametrize(
-    "token", ["-foo", "--x", "-_a", "-한", "-.x", "->f", "-->x", "-?", "--?", "x-"]
-)
-def test_the_word_peels_the_signs_the_reader_peels(token):
-    # Defect: the word rule and the reader (token_parse) peel different sign
-    # runs, so the word typed is not the name the code holds.
-    assert completion_word_span(token, len(token))[0] == reader_name_start(token)
+@pytest.mark.parametrize("token", TOKENS)
+def test_the_word_is_the_readers_leaf(token):
+    # Defect: the word rule and the reader disagree (a character set or a
+    # peel of the word rule's own), so the word typed is not the name, macro
+    # or operator the code holds: ->>, ++ and swap! get no word at all.
+    line = "(" + token
+    leaf = reader_leaf(line)
+    start, _, end = completion_word_span(line, len(line))
+    assert (start, end) == (leaf.col_offset, leaf.end_col_offset)
 
 
 def test_the_spec_command_prints_the_canonical_spans():
@@ -148,9 +177,27 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 1 and spec["columns"] == "code points"
-    assert spec["rule"]["mangle"] == [list(pair) for pair in NAME_MANGLE]
+    assert spec["version"] == 2 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"])
         assert (case["start"], case["replaceStart"], case["end"]) == expected
+
+
+def test_the_specs_stop_characters_end_the_readers_symbol():
+    # Defect: the published stop set is not what ends a symbol in the reader
+    # (\s read as ASCII whitespace, a stop left out), so a client built from
+    # it joins words the reader splits, or splits words it keeps whole.
+    result = subprocess.run(
+        [sys.executable, "-m", "lispy.word_boundary"],
+        capture_output=True,
+        check=True,
+    )
+    stops = set(json.loads(result.stdout.decode("utf-8"))["rule"]["stopChars"])
+    probes = {chr(c) for c in range(32, 127)} | {
+        chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()
+    }
+    for ch in sorted(probes - {"\n", "\r"}):
+        tokens = [(tk, tktype) for tk, tktype, *_ in tokenize(f"a{ch}b")]
+        whole = tokens == [(f"a{ch}b", "symbol")]
+        assert whole == (ch not in stops), repr(ch)

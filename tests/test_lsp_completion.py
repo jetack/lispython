@@ -949,6 +949,23 @@ def item(label):
     return lsp.CompletionItem(label=label, kind=lsp.CompletionItemKind.Variable)
 
 
+def test_a_macro_name_is_the_word_typed(off_complete):
+    # Defect: the word stops at characters no Python name holds, so (->>|
+    # types nothing: every label is offered, and ->> is never narrowed to.
+    labels = set(by_label(off_complete("(->>|)")[2]))
+    assert "->>" in labels
+    assert all(label.startswith("->>") for label in labels)
+
+
+def test_a_user_macro_with_a_bang_is_offered(off_complete):
+    # Defect: the ! ends the word, so swap! is typed as nothing and buried
+    # in the whole list, or never matched.
+    source = "(defmacro swap! [a b] `(, ~b ~a))\n(swap!|)"
+    labels = set(by_label(off_complete(source)[2]))
+    assert "swap!" in labels
+    assert all(label.startswith("swap!") for label in labels)
+
+
 PEELED_SIGN = "(= foo 1)\n(- -fo|)"
 
 

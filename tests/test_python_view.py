@@ -383,6 +383,8 @@ class TestCursor:
             ("(print ~@xs)", "~@xs"),  # an unquote-splice outside a quasiquote
             ("(print x.class)", "class"),  # restored as a keyword: no Python
             ("(print a+b)", "a+b"),  # an operator symbol, no name
+            # an operator is no name, never restored as its mangled text _
+            ("(-)", "-"),
             ('(print "my-wo")', "my-wo"),  # inside a string literal
             ('(print f"ab-c{x}")', "ab-c"),  # inside an f-string's text
         ],

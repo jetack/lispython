@@ -40,13 +40,14 @@ from pygments.token import (
 
 import lispy  # noqa: F401  (the .lpy import hook, for lispy.form_docs)
 from lispy import form_docs
-from lispy.core.compiler.literal import PLAIN_STRING_PREFIXES, leading_signs
+from lispy.core.compiler.literal import PLAIN_STRING_PREFIXES
 from lispy.core.parser import (
     _F_STRING_PREFIXES,
     _FIELD_BRACES,
     _STRING_TYPES,
     _T_STRING_PREFIXES,
     _token_patterns,
+    leading_signs,
     special_literals,
 )
 
