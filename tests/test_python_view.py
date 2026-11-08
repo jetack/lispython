@@ -550,9 +550,9 @@ class TestShadows:
         ]
         assert names == [
             ("top", "", str(tmp_path), (str(tmp_path),)),
-            ("pkg.mod", "pkg", str(src), (str(src),)),
-            ("pkg.a", "pkg.a", str(src), (str(src),)),
-            ("pkg.a.m", "pkg.a", str(src), (str(src),)),
+            ("pkg.mod", "pkg", str(src), (str(src / "pkg"), str(src))),
+            ("pkg.a", "pkg.a", str(src), (str(src / "pkg" / "a"), str(src))),
+            ("pkg.a.m", "pkg.a", str(src), (str(src / "pkg" / "a"), str(src))),
         ]
 
     def test_a_namespace_package_counts_up_to_a_root_above(self, tmp_path):
@@ -733,9 +733,9 @@ class TestShadows:
     ):
         # Defect: the search dirs are the module's own directory and the
         # import root only, so for pvtools/pvmypkg/a.lpy (a regular package
-        # in a namespace directory) pvtools/, where `lpy` runs it from, is
-        # neither on sys.path while its macros run nor a backend search
-        # path: (require pvmypkg.mac *) loads no macros.
+        # in a namespace directory) pvtools/, its script root (the l2py
+        # rule), is neither on sys.path while its macros run nor a backend
+        # search path: (require pvmypkg.mac *) loads no macros.
         project, root = tmp_path / "project", tmp_path / "view"
         tools = project / "pvtools"
         pkg = tools / "pvmypkg"
@@ -746,7 +746,7 @@ class TestShadows:
             "pvtools.pvmypkg.a",
             "pvtools.pvmypkg",
             str(project),
-            (str(tools), str(project)),
+            (str(pkg), str(tools), str(project)),
         )
         names = ["pvmypkg", "pvmypkg.mac", "pvtools", "pvtools.pvmypkg"]
         names.append("pvtools.pvmypkg.mac")
@@ -764,6 +764,34 @@ class TestShadows:
         )
         assert str(root / "pvtools") in json.loads(open(path).read())["extraPaths"]
 
+    def test_a_bare_sibling_require_resolves_from_the_files_own_directory(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: the file's own directory is neither the script root nor the
+        # import root, so for pvowntools/pvownpkg/a.lpy a bare sibling
+        # (require pvownhelper *), which `lpy a.lpy` resolves from the file's
+        # directory, loads no macros.
+        project, root = tmp_path / "project", tmp_path / "view"
+        pkg = project / "pvowntools" / "pvownpkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "pvownhelper.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(pkg / "a.lpy", "(require pvownhelper *)\n(= y (twice 2))")
+        assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project))[3][
+            0
+        ] == str(pkg)
+        names = ["pvownhelper", "pvownpkg", "pvownpkg.pvownhelper", "pvowntools"]
+        names.append("pvowntools.pvownpkg")
+        names.append("pvowntools.pvownpkg.pvownhelper")
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        try:
+            pv.write_shadows(str(project), str(root), manifest=pv.ShadowManifest())
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        shadow = root / "pvowntools" / "pvownpkg" / "a.py"
+        assert shadow.read_text().endswith("y = 2 + 2")
+
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pkg"
@@ -773,7 +801,7 @@ class TestShadows:
         self.write(pkg / "notes.txt", "")
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
-        assert manifest.import_roots == [str(project / "src")]
+        assert manifest.import_roots == [str(project / "src"), str(pkg)]
         for name in ["__init__.py", "helper.py"]:
             assert os.readlink(root / "src" / "pkg" / name) == str(pkg / name)
 
@@ -781,7 +809,13 @@ class TestShadows:
             str(project), str(root), import_roots=manifest.import_roots
         )
         extra = json.loads(open(path).read())["extraPaths"]
-        assert extra == [str(root / "src"), str(project / "src"), str(project)]
+        assert extra == [
+            str(root / "src"),
+            str(root / "src" / "pkg"),
+            str(project / "src"),
+            str(project / "src" / "pkg"),
+            str(project),
+        ]
 
         (pkg / "helper.py").unlink()
         self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py

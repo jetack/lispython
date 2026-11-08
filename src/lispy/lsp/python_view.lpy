@@ -1288,20 +1288,18 @@
    so ns/a.lpy with no ns/__init__ is ns.a from the project root.  The
    search dirs, a tuple, are the one home of the directories the module's
    compile searches (on sys.path while its macros run, compile-buffer) and
-   the backend searches for it (ShadowManifest.import-roots): the import
-   root, and before it the script root when that differs (a namespace
-   package lies above the file's regular packages), because the file is
-   also what `lpy` runs as a script, from the root its regular packages
-   give with no search roots (the CLI's rule, package-root): scripts/ for
-   scripts/x.lpy, tools/ for tools/mypkg/a.lpy, whose modules it imports
-   by their names from there."
+   the backend searches for it (ShadowManifest.import-roots), in this
+   order, each once: the file's own directory, which `lpy` and the nREPL's
+   load-file put on sys.path when they run the file as a script; then the
+   script root, the root its regular packages give with no search roots
+   (the l2py rule, package-root): scripts/ for scripts/x.lpy, tools/ for
+   tools/mypkg/a.lpy, so (require mypkg.mac) resolves; then the import
+   root."
   (= directory (osp.dirname (osp.abspath lpy-path)))
   (= roots (ife (is project-root None) [] (project-import-roots project-root)))
   (= [import-root parts] (package-root directory roots))
   (= script-root (sub (package-root directory) 0))
-  (= search-dirs (ife (== script-root import-root)
-                      (, import-root)
-                      (, script-root import-root)))
+  (= search-dirs (tuple (dict.fromkeys [directory script-root import-root])))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (.join "." parts))
   (if (== stem "__init__")
