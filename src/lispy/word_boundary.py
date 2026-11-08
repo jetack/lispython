@@ -101,6 +101,7 @@ CASE_INPUTS = (
     'f|"x"',
     "-1+2j|",
     ":-1+2j|",
+    '한|"',
     "heapq.nl|",
     "heapq.|",
     "a.b|.c",
@@ -167,7 +168,6 @@ def rule():
         "signs": list(SIGNS),
         "signPeelFollowers": list(SIGN_PEEL_FOLLOWERS),
         "neverPeeled": sorted(augassignop_dict),
-        # Python re syntax over str (Unicode \d, \w, \s).
         "stringPrefix": parser._STRING_PREFIX,
         "stringOpenings": sorted(parser._STRING_TYPES, key=len, reverse=True),
         "danglingQuotes": _matching(parser._DANGLING_QUOTES, 2),
@@ -215,6 +215,8 @@ def spec():
     return {
         "version": VERSION,
         "columns": "code points",
+        "patterns": "Python re syntax over str: \\d, \\w and \\s are Unicode "
+        "(\\w holds 한, \\d holds ١)",
         "rule": rule(),
         "cases": [case(marked) for marked in CASE_INPUTS],
     }

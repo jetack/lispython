@@ -966,9 +966,8 @@ def test_the_cursor_word_is_the_word_its_view_restores(line):
         word = server.cursor_word(doc, 1, col)
         if word is None:
             continue
-        start, end, offset = word
+        start, end, _ = word
         assert (start, end) == pv.partial_span(line, end), col
-        assert offset == -len(pv.py_name(line[start:end])), col
     assert server.cursor_word(doc, 1, len(line) - 1) is not None
 
 

@@ -95,6 +95,9 @@ SPANS = [
     ('f|"x"', (1, 1, 1)),
     # A string opening inside the run, the caret after it.
     ("x'''|", (4, 4, 4)),
+    # \w is Unicode: 한" is a string opening, so the caret before its quote is
+    # at no word.
+    ('한|"', (1, 1, 1)),
     # A signed complex is one number, never peeled; after a : prefix the rest
     # is re-typed as a number.
     ("-1+2j|", (0, 0, 5)),
@@ -228,9 +231,10 @@ def one_of(entries):
     return "|".join(re.escape(e) for e in sorted(entries, key=len, reverse=True))
 
 
-def spec_word_span(rule, line, caret):
-    """(start, replaceStart, end) as an editor client reproduces it from the
-    published rule alone: no parser internal is read here."""
+def spec_word_span(rule):
+    """A function (line, caret) -> (start, replaceStart, end), as an editor
+    client reproduces it from the published rule alone: no parser internal is
+    read here. The rule's regexes are compiled once."""
     stop = "[" + "".join(re.escape(c) for c in rule["stopChars"]) + "]"
     form_end = "(?:[" + "".join(re.escape(c) for c in rule["formEndChars"]) + "]|$)"
     wrapper = f"(?:{one_of(rule['wrappers'])})"
@@ -254,66 +258,96 @@ def spec_word_span(rule, line, caret):
             ]
         )
     )
+    stop_re = re.compile(stop)
+    number_re = re.compile(rule["numberToken"])
+    signed_complex_re = re.compile(rule["signedComplex"])
     signs = "".join(rule["signs"])
 
-    def stop_at(i):
-        return re.match(stop, line[i]) is not None
+    def word_span(line, caret):
+        run_start, run_end = caret, caret
+        while run_start > 0 and not stop_re.match(line[run_start - 1]):
+            run_start -= 1
+        while run_end < len(line) and not stop_re.match(line[run_end]):
+            run_end += 1
+        # Lex the line from the run's start until a token reaches the run's end.
+        pos, kind = run_start, None
+        while pos < run_end:
+            m = token_re.match(line, pos)
+            start, end, kind = pos, m.end(), m.lastgroup
+            if end > caret or (end == caret and kind in ("symbol", "number")):
+                break
+            pos, kind = end, None
+        if kind not in ("symbol", "number"):
+            return caret, caret, caret
+        leaf = line[start:end]
+        while leaf not in rule["neverPeeled"] and len(leaf) >= 2:
+            if kind == "number" and (
+                leaf[0] not in signs or signed_complex_re.fullmatch(leaf)
+            ):
+                break
+            prefix = next((p for p in rule["tokenPrefixes"] if leaf.startswith(p)), "")
+            rest = leaf.lstrip(signs)
+            if prefix:
+                leaf = leaf[len(prefix) :]
+                kind = "number" if number_re.fullmatch(leaf) else kind
+            elif (
+                rest != leaf
+                and rest
+                and (rest[0].isalnum() or rest[0] in rule["signPeelFollowers"])
+            ):
+                leaf = rest
+            else:
+                break
+        if caret >= end - len(leaf):
+            start = end - len(leaf)
+        dot = line.find(".", caret, end)
+        return start, start + line[start:caret].rfind(".") + 1, end if dot < 0 else dot
 
-    run_start, run_end = caret, caret
-    while run_start > 0 and not stop_at(run_start - 1):
-        run_start -= 1
-    while run_end < len(line) and not stop_at(run_end):
-        run_end += 1
-    # Lex the line from the run's start until a token reaches the run's end.
-    pos, kind = run_start, None
-    while pos < run_end:
-        m = token_re.match(line, pos)
-        start, end, kind = pos, m.end(), m.lastgroup
-        if end > caret or (end == caret and kind in ("symbol", "number")):
-            break
-        pos, kind = end, None
-    if kind not in ("symbol", "number"):
-        return caret, caret, caret
-    leaf = line[start:end]
-    while leaf not in rule["neverPeeled"] and len(leaf) >= 2:
-        if kind == "number" and (
-            leaf[0] not in signs or re.fullmatch(rule["signedComplex"], leaf)
-        ):
-            break
-        prefix = next((p for p in rule["tokenPrefixes"] if leaf.startswith(p)), "")
-        rest = leaf.lstrip(signs)
-        if prefix:
-            leaf = leaf[len(prefix) :]
-            kind = "number" if re.fullmatch(rule["numberToken"], leaf) else kind
-        elif (
-            rest != leaf
-            and rest
-            and (rest[0].isalnum() or rest[0] in rule["signPeelFollowers"])
-        ):
-            leaf = rest
-        else:
-            break
-    if caret >= end - len(leaf):
-        start = end - len(leaf)
-    dot = line.find(".", caret, end)
-    return start, start + line[start:caret].rfind(".") + 1, end if dot < 0 else dot
+    return word_span
 
 
-def test_the_published_rule_alone_reproduces_every_case():
-    # Defect: the published rule is not the reader's (it lexes the run alone,
-    # leaves out a string opening, a quote mark or the signed complex, or
-    # misorders the peel), so a client implementing it to the letter fails
-    # the cases it is pinned against.
+@pytest.fixture(scope="module")
+def published():
+    """The spec as ``python -m lispy.word_boundary`` prints it."""
     result = subprocess.run(
         [sys.executable, "-m", "lispy.word_boundary"],
         capture_output=True,
         check=True,
     )
-    spec = json.loads(result.stdout.decode("utf-8"))
-    for case in spec["cases"]:
+    return json.loads(result.stdout.decode("utf-8"))
+
+
+def test_the_published_rule_alone_reproduces_every_case(published):
+    # Defect: the published rule is not the reader's (it lexes the run alone,
+    # leaves out a string opening, a quote mark or the signed complex, or
+    # misorders the peel), so a client implementing it to the letter fails
+    # the cases it is pinned against.
+    word_span = spec_word_span(published["rule"])
+    for case in published["cases"]:
         expected = (case["start"], case["replaceStart"], case["end"])
-        got = spec_word_span(spec["rule"], case["text"], case["caret"])
+        got = word_span(case["text"], case["caret"])
         assert got == expected, (case["text"], case["caret"])
+
+
+# Every line up to the length over each alphabet, at every caret.
+DIFFERENTIAL = [("-+*^:'`~@([\" .1jx;#", 4), ("-+*:1jx.e", 5)]
+
+
+@pytest.mark.parametrize("alphabet, length", DIFFERENTIAL)
+def test_the_published_rule_agrees_with_the_reader_everywhere(
+    published, alphabet, length
+):
+    # Defect: the rule and completion_word_span part on a line no case
+    # names (an ordering of the token patterns, a lookahead, the peel's
+    # re-typing), so a client pinned on the cases still differs from the
+    # reader as the user types.
+    word_span = spec_word_span(published["rule"])
+    for size in range(length + 1):
+        for chars in itertools.product(alphabet, repeat=size):
+            line = "".join(chars)
+            for caret in range(size + 1):
+                got = word_span(line, caret)
+                assert got == completion_word_span(line, caret), (line, caret)
 
 
 def number_token_corpus():
@@ -353,4 +387,5 @@ def test_the_signed_complex_pattern_is_number_parts_reading():
 def test_a_leading_zero_decimal_is_one_number_on_every_interpreter(token):
     # Defect: 3.11's pure-Python tokenizer splits 01, so there alone the sign
     # of -01+2j was peeled and its malformed literal placed a column later.
+    # On the old code this fails only on 3.11 (the nox matrix runs it there).
     assert token_prefixes(token, "number")[0] == []

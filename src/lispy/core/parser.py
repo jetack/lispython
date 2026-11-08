@@ -1,8 +1,8 @@
 import contextvars
 import re
-import tokenize
 from bisect import bisect_right
 from collections import deque
+from tokenize import Binnumber, Floatnumber, Hexnumber, Imagnumber, Octnumber
 
 from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
@@ -51,18 +51,19 @@ _NUMBER_TOKEN = "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")"
 # placed alike everywhere.
 _PY_NUMBER = "|".join(
     [
-        tokenize.Imagnumber,
-        tokenize.Floatnumber,
-        tokenize.Hexnumber,
-        tokenize.Binnumber,
-        tokenize.Octnumber,
+        Imagnumber,
+        Floatnumber,
+        Hexnumber,
+        Binnumber,
+        Octnumber,
         "[0-9](?:_?[0-9])*",
     ]
 )
 # A number token the reader keeps whole, signs included (_signed_complex_p):
-# signs, a number, + or -, a number, as number_parts splits it (-1+2j is one
-# Constant, as Python binds the sign to the real part; literal_value refuses a
-# right part that is not imaginary, 0x1e+2).
+# signs, a number, + or -, a number, as number_parts splits it: -1+2j is one
+# Constant, as Python binds the sign to the real part, and so is -0x1e+2 (the
+# real sum -28; only a match pattern refuses a right part that is not
+# imaginary).
 _SIGNED_COMPLEX = f"[+-]*(?:{_PY_NUMBER})[+-](?:{_PY_NUMBER})"
 # The wrapper an opening or a meta-indicator may carry: one of ^, *, **
 # (wrapper_dict). ^ followed by stars has no meaning before an opening or a
@@ -1321,8 +1322,9 @@ def run_tokens(line, start):
     may pass the run's end: an opening whose bracket is a stop character
     (``*[``) or a string opening whose quote is (``a"``). A string opening
     may also lex inside the run (``x'''``); the run's tokens are otherwise
-    openings, meta-indicators and quote marks (``(``, ``^{``, ``'``, ``~@``)
-    and a symbol or number, which ends the run."""
+    openings, meta-indicators and quote marks (``(``, ``^{``, ``'``, ``~@``),
+    bad prefixes (``^*(``, ``^*'``, ``^**``) and a symbol or number, which
+    ends the run."""
     end = start
     while end < len(line) and not symbol_stop_p(line[end]):
         end += 1
