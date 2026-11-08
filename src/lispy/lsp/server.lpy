@@ -24,6 +24,8 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
+(from lispy.core.builtins [LAMBDA-HEADS])
+(from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
 ;; The one completion-spelling rule, shared with the nREPL, and the one
 ;; completion matching rule.
@@ -344,6 +346,23 @@
     (return (import-bindings node))
     (except [LispyCompileError]
       (return []))))
+
+(def buffer-param-bindings [node]
+  "The Symbols the parameter list node binds, by the compiler's own rule
+   (param-bindings), or [] when node is no [params] bracket or one the
+   compiler would reject: the buffer may be mid-edit."
+  (if (not (isinstance node Bracket))
+      (return []))
+  (try
+    (return (param-bindings node))
+    (except [LispyCompileError]
+      (return []))))
+
+(def _add-params [defs uri params]
+  "Record in defs each name the parameter list params binds."
+  (for name-node in (buffer-param-bindings params)
+    (.append (.setdefault defs name-node.value [])
+             (lsp.Location :uri uri :range (node-range name-node)))))
 
 (def require-registered-name [node name]
   "The name, in the required module, of the macro a (require ...) node
@@ -1202,15 +1221,19 @@
   (if (is-not symbols None)
       (.append symbols (lsp.SymbolInformation :name name :kind kind :location loc))))
 
-(def collect-definitions [nodes uri :defs None :symbols None :in-function False]
+(def collect-definitions [nodes uri :defs None :symbols None :in-function False
+                           :params False]
   "Walk AST and collect all definition locations keyed by symbol name.
 
    defs feeds go-to-definition and completion, so it also holds the names
-   bound by import/from and for/async-for.  When symbols is a list, the same
+   bound by import/from and for/async-for; with params (completion's list
+   alone, buffer-definition-names), the parameters of a def, async-def,
+   defmacro, lambda or fn (LAMBDA-HEADS) too, which a name-only definition lookup must never
+   offer for a name used elsewhere.  When symbols is a list, the same
    pass appends an lsp.SymbolInformation for each declaration a user searches
    for with workspace/symbol -- def, async-def, defmacro, class and = --
-   with the kind definition-kind gives it.  Imports and loop variables bind
-   names but declare nothing, so they get no symbol, and an = inside a def
+   with the kind definition-kind gives it.  Imports, loop variables and
+   parameters bind names but declare nothing, so they get no symbol, and an = inside a def
    body (in-function) is a local, so it gets none either; module and
    class-body assignments do."
   (if (is defs None)
@@ -1232,10 +1255,12 @@
                   (= loc (lsp.Location :uri uri :range (node-range name-node)))
                   (.append (.setdefault defs name []) loc)
                   (_add-symbol symbols name (definition-kind form) loc)
+                  (if (and params (>= (len node) 3))
+                      (_add-params defs uri (sub node 2)))
                   (if (> (len node) 3)
                       (collect-definitions (sub node.list [: 3 None]) uri
                                            :defs defs :symbols symbols
-                                           :in-function True)))))
+                                           :in-function True :params params)))))
 
       (== form "class")
       (do (if (and (>= (len node) 2) (is-not (def-name-symbol (sub node 1)) None))
@@ -1247,7 +1272,8 @@
                   (= body (ife (> (len node) 3)
                                (sub node.list [: 3 None])
                                (sub node.list [: 2 None])))
-                  (collect-definitions body uri :defs defs :symbols symbols))))
+                  (collect-definitions body uri :defs defs :symbols symbols
+                                       :params params))))
 
       (and (== form "type") (type-alias-p node))
       (do (= name-node (def-name-symbol (sub node 1)))
@@ -1271,7 +1297,14 @@
                   (.append (.setdefault defs name []) loc)))
           (collect-definitions (sub node.list [: 1 None]) uri
                                :defs defs :symbols symbols
-                               :in-function in-function))
+                               :in-function in-function :params params))
+
+      (in form LAMBDA-HEADS)
+      (do (if (and params (>= (len node) 2))
+              (_add-params defs uri (sub node 1)))
+          (collect-definitions [c for c in node.list if (isinstance c Paren)]
+                               uri :defs defs :symbols symbols
+                               :in-function in-function :params params))
 
       (in form IMPORT-HEADS)
       (for [name name-node] in (buffer-import-bindings node)
@@ -1281,7 +1314,8 @@
       ;; Default: recurse into nested paren forms
       (do (collect-definitions
             [c for c in node.list if (isinstance c Paren)]
-            uri :defs defs :symbols symbols :in-function in-function))))
+            uri :defs defs :symbols symbols :in-function in-function
+            :params params))))
 
   (return defs))
 
@@ -2097,7 +2131,8 @@
   (= names {})
   (for text in (buffer-texts doc.source line)
     (try
-      (.update names (collect-definitions (parse text :partial True) doc.uri))
+      (.update names (collect-definitions (parse text :partial True) doc.uri
+                                         :params True))
       (except [Exception]
         (pass))))
   (= spellings (buffer-spellings doc.source :line line))

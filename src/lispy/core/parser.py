@@ -183,6 +183,23 @@ _SPEC_NEWLINE_MSG = (
 _LINE_BREAK_RE = re.compile("\r\n|\r|\n")
 
 
+def _line_starts(src):
+    """The index in src of each line's start, by the lexer's line breaks,
+    then one past the end."""
+    line_starts = [0]
+    line_starts.extend(m.end() for m in _LINE_BREAK_RE.finditer(src))
+    line_starts.append(len(src) + 1)
+    return line_starts
+
+
+def source_offset(src):
+    """offset(lineno, col_offset) -> the index in src of a position the
+    lexer placed (a token's, a compile error's), the inverse of its
+    locator: lines end where the lexer ends them (a lone CR too)."""
+    line_starts = _line_starts(src)
+    return lambda lineno, col_offset: line_starts[lineno - 1] + col_offset
+
+
 def _source_locator(src):
     """locate(i, j) -> position_info of src[i:j], in any order of calls.
 
@@ -190,9 +207,7 @@ def _source_locator(src):
     never a count from the start of the source (or of a token): counting made
     a literal with many fields quadratic.
     """
-    line_starts = [0]
-    line_starts.extend(m.end() for m in _LINE_BREAK_RE.finditer(src))
-    line_starts.append(len(src) + 1)
+    line_starts = _line_starts(src)
     # [line, its start, the next line's start] of the last position: tokens
     # come in order, so most lookups stay on that line.
     last = [1, 0, line_starts[1]]

@@ -115,6 +115,14 @@ def test_definition_hover_and_references(buffer):
     assert run_hover(ls, position(0, 1)) is not None
 
 
+def test_a_parameter_is_no_definition_of_a_module_name():
+    # Defect: the name-only local lookup lists every parameter spelled like
+    # the name, so the module's x also jumps into g's parameter list.
+    ls = ls_with("(= x 1)\n(def g [x] x)\n(print x)\n(fo")
+    locations = run_definition(ls, position(2, 7))
+    assert [loc.range.start.line for loc in locations] == [0]
+
+
 def test_completion(buffer):
     # Right after the last line's (, so no typed word filters the list.
     items = run_completion(ls_with(buffer), position(2, 1))
