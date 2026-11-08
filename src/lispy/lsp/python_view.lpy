@@ -201,9 +201,9 @@
 
 (def partial-span [text col]
   "The partial word at code-point column col of line text, as view-at-cursor
-   reads it: (start, end), where start..col is what was typed before the
-   cursor after its last dot and col..end the rest of the name run after it
-   (completion-word-span)."
+   reads it: (start, end), the reader's word from after its last dot before
+   col through to the next dot after col or the token's end
+   (completion-word-span's replace-start..end)."
   (= [_ start end] (completion-word-span text col))
   (return (, start end)))
 
