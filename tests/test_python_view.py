@@ -274,6 +274,48 @@ class TestCursor:
         assert view.text == "my_x = 1\nprint(my_x.fo)"
         assert view.cursor == plus(locate(view.text, "fo"), 2)
 
+    def test_a_form_refused_around_the_cursor_is_unwrapped(self):
+        # Defect: an (== ...) with one operand and a (when ...) with no
+        # body around the cursor leave no view; or the unwrap moves the
+        # cursor out of the def, where grid is no name.
+        src = "(def f [grid]\n  (when (== (sub gr\n"
+        view = pv.view_at_cursor(src, *plus(locate(src, "gr", 1), 2))
+        assert view.fallback is True
+        assert view.text == "def f(grid):\n    gr"
+
+    def test_a_lone_carriage_return_never_loops_the_unwrap(self, monkeypatch):
+        # Defect: a lone CR is a line break to the lexer but not to a split
+        # on \n, so the blanked span missed the refused bracket and every
+        # round recompiled (running the user's macros) without end. Four
+        # open forms allow at most five compiles.
+        compiles = []
+        compile_buffer = pv.compile_buffer
+
+        def counted(*args, **kwargs):
+            compiles.append(args)
+            assert len(compiles) <= 5, "the unwrap does not terminate"
+            return compile_buffer(*args, **kwargs)
+
+        monkeypatch.setattr(pv, "compile_buffer", counted)
+        src = '(def f [grid]\n  (print "a\rb") (when (== (sub gr\n'
+        pv.view_at_cursor(src, *plus(locate(src, "gr", 1), 2))
+        assert len(compiles) <= 5
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "(def f [grid y",
+            "(def f [grid] (lambda [a y",
+            "(async-def f [grid y",
+            "(defmacro m [grid y",
+        ],
+    )
+    def test_a_cursor_in_a_refused_forms_parameters_is_none(self, src):
+        # Defect: the def is refused at its bracket (no body) and unwrapped,
+        # so the parameter being named is answered as a name of the scope
+        # around it.
+        assert pv.view_at_cursor(src, *plus(locate(src, " y"), 2)) is None
+
     def test_unclosable_prefix_is_none(self):
         src = '(= my-x 1)\n(print f"{my-x.'
         assert pv.view_at_cursor(src, 2, len('(print f"{my-x.')) is None

@@ -152,7 +152,10 @@ def _replace_symbol(node, name, new, in_quasi):
 
 def _replace_in_params(params, name, new):
     """Rename inside a lambda param list's defaults and annotations (see
-    def_args_parse for the syntax); return whether a param binds ``name``."""
+    def_args_parse for the syntax); return whether a param binds ``name``.
+    Deliberately not param_bindings: replace_symbol runs on any form a
+    macro hands it, so it reads a list the compiler would refuse instead of
+    raising (compiling the result reports that list)."""
     binds = False
     expect_default = False
     lst = params.list
