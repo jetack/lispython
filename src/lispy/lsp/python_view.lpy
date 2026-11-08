@@ -39,8 +39,8 @@
 (from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.errors [LispyCompileError compile-errors])
-(from lispy.core.nodes [Annotation Bracket Expression GluedHead MetaIndicator Paren
-                         Symbol Wrapper atom-text])
+(from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
+                         MetaIndicator Paren Starred Symbol Wrapper atom-text])
 (from lispy.core.parser [completion-word-span parse source-offset tokenize word-parts])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
@@ -797,15 +797,23 @@
   (= info node.position-info)
   (return (, (.get info "lineno") (.get info "col_offset"))))
 
-(def _unwrap-start [prefix refused]
-  "Where unwrapping refused, an open-forms entry of prefix, blanks up to:
-   the index in prefix of the start of refused's direct child that holds
-   the cursor sentinel, the prefixes and glue the reader gives it included
-   (' ~@ * : f[T] grid.), so that child takes the form's place and every
-   form inside it stays; or None, when the reader places no such form or
-   child, or the cursor stands where a form the unwrap drops binds a name
-   (_binds-sentinel-p): unwrapping would answer for the scope around it,
-   where that name is no name."
+;; The wrappers whose prefix means something only in an argument or
+;; parameter list (* ** : ^): a child taking a refused form's place stands
+;; where an expression goes, so it is read without them.
+(= _LIST-ONLY-WRAPPERS (, Annotation DoubleStarred Keyword Starred))
+
+(def _unwrap [prefix refused sentinel-start]
+  "prefix with refused, an open-forms entry of prefix, unwrapped, or None.
+   The text from the form's bracket up to the start of its direct child
+   that holds the cursor sentinel (at sentinel-start) is blanked, the
+   prefixes and glue the reader gives that child included (' ~@ f[T]
+   grid.), so the child takes the form's place, every form inside it
+   stays and every position after it is unmoved.  A quote mark the form is
+   glued to (`(a ~(when x|) stays on the child, written just before it.
+   None when the reader places no such form or child, or the cursor stands
+   where a form the unwrap drops binds a name (_binds-sentinel-p):
+   unwrapping would answer for the scope around it, where that name is no
+   name."
   ;; Only the refused form is dropped, never the forms between it and the
   ;; cursor: blanking up to the sentinel dropped a fn, for or glued base
   ;; there, and with it the names it binds or the attribute being typed.
@@ -814,21 +822,20 @@
       (return None))
   (= closed (+ prefix closers))
   (= opening (sub refused 2))
-  ;; A node's bracket token, where open-forms places it, is at the node's
-  ;; own position or at that of a wrapper the token includes (*( **(), so
-  ;; each node is walked with its wrapper's position too.
-  (= pending [(, node (_position node)) for node in (parse closed :partial True)])
+  ;; Each node is walked with the position of the quote marks it is the
+  ;; value of (the outermost of a run: '~(), or None.
+  (= pending [(, node None) for node in (parse closed :partial True)])
   (= form None)
+  (= marked None)
   (while pending
-    (= [node outer] (.pop pending))
+    (= [node marks] (.pop pending))
     (cond (isinstance node Expression)
-          (do (= here (, outer (_position node)))
-              (if (and (is form None) (in opening here))
-                  (= form node))
+          (do (if (and (is form None) (== (_position node) opening))
+                  (= [form marked] [node marks]))
               ;; A form counts when it is dropped, or the bracket of its
               ;; params or type parameters is (refused at its head:
               ;; (def f [:x|).
-              (= parts (list here))
+              (= parts [(_position node)])
               (= slot (ife (isinstance node Paren) (_param-slot node) None))
               (if (and (is-not slot None) (> (len node) slot))
                   (.append parts (_position (sub node slot))))
@@ -837,28 +844,43 @@
               (if (and (isinstance node Paren) (in opening parts)
                        (_binds-sentinel-p node))
                   (return None))
-              (.extend pending ((, child (_position child)) for child in node.list)))
+              (.extend pending ((, child None) for child in node.list)))
           (isinstance node GluedHead)
-          (.extend pending ((, child (_position child))
-                             for child in [node.head node.params]))
-          (isinstance node (, Wrapper MetaIndicator))
-          (.append pending (, node.value outer))))
+          (.extend pending [(, node.head None) (, node.params None)])
+          (isinstance node MetaIndicator)
+          (.append pending (, node.value (ife (is marks None) (_position node) marks)))
+          (isinstance node Wrapper)
+          (.append pending (, node.value None))))
   (if (is form None)
       (return None))
   (= child (_sentinel-child form))
   ;; A params or bases bracket is no expression ([a :b gr] is refused as a
   ;; list), so its child holding the cursor (a default, an annotation, a
-  ;; base) takes the form's place, an annotation without its ^ (the
-  ;; return annotation's mark where the form stood).
+  ;; base) takes the form's place.
   (= slot (ife (and (isinstance form Paren) (> (len form) 0)) (_header-slot form) None))
   (if (and (is-not child None) (is-not slot None) (> (len form) slot)
            (is child (sub form slot)) (isinstance child Bracket))
-      (do (= child (_sentinel-child child))
-          (if (isinstance child Annotation)
-              (= child child.value))))
+      (= child (_sentinel-child child)))
+  (while (isinstance child _LIST-ONLY-WRAPPERS)
+    (= child child.value))
   (if (is child None)
       (return None))
-  (return ((source-offset closed) *(_position child))))
+  (= offset (source-offset closed))
+  (= start (sub refused 4))
+  (= child-start (offset *(_position child)))
+  (if (not (< start child-start (+ sentinel-start 1)))
+      (return None))
+  (if (is marked None)
+      (return (_blank-span prefix start child-start)))
+  ;; The quote marks are glued tokens before the bracket, shorter than the
+  ;; blanked bracket and head, so they fit before the child with every
+  ;; position after them unmoved; a ~ left before blanks would read as the
+  ;; invert symbol.
+  (= marks-start (offset *marked))
+  (= marks (sub prefix [: marks-start start]))
+  (= blanked (_blank-span prefix marks-start child-start))
+  (return (+ (sub blanked [: None (- child-start (len marks))]) marks
+             (sub blanked [: child-start None]))))
 
 (def _binds-sentinel-p [form]
   "True when the cursor sentinel stands where form, a parsed Paren, binds a
@@ -922,9 +944,10 @@
    before the cursor with its open forms closed is compiled instead, and
    while that is refused at an open form around the cursor ((== (sub gr|
    with one operand, (when x| with no body), that one form is unwrapped:
-   its text up to its child holding the cursor is blanked (_unwrap-start,
-   _blank-span), so that child, and every form inside it, stands in the
-   form's place, every position unmoved; never with the cursor where the
+   its text up to its child holding the cursor is blanked (_unwrap), so
+   that child, and every form inside it, stands in the form's place (under
+   the quote marks the form had, without a * ** : ^ prefix), every position
+   unmoved; never with the cursor where the
    dropped form binds a name or inside a def or lambda it drops
    (_binds-sentinel-p), and a round that blanks no open bracket gives up.
    A word glued to a base (grid.re|) gives a view only as an attribute.
@@ -975,11 +998,9 @@
             (if (or (is refused None)
                     (not (<= 0 (sub refused 4) (- sentinel-start 1))))
                 (return (, None macro-epoch)))
-            (= child-start (_unwrap-start prefix refused))
-            (if (or (is child-start None)
-                    (not (< (sub refused 4) child-start (+ sentinel-start 1))))
-                (return (, None macro-epoch)))
-            (= prefix (_blank-span prefix (sub refused 4) child-start)))))
+            (= prefix (_unwrap prefix refused sentinel-start))
+            (if (is prefix None)
+                (return (, None macro-epoch))))))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
       (return (, None macro-epoch)))

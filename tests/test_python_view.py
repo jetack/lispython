@@ -333,6 +333,48 @@ class TestCursor:
         assert view.text.split("\n")[line - 1][:col].endswith(" gr")
 
     @pytest.mark.parametrize(
+        ["src", "before"],
+        [
+            # Defect: the ~ is left before the blanks, where a lone ~ is the
+            # invert symbol, so the child is no longer unquoted.
+            ("(def f [grid] (when `(a ~(when gr|", " gr"),
+            ("(def f [grid] (when `(a ~(> (len gr|", "len(gr"),
+            # Defect: the walk never finds a refused form inside an unquote.
+            ("(def f [grid] (when `(a ~(fn [row] (> (len ro|", "lambda row: len(ro"),
+        ],
+    )
+    def test_a_refused_form_in_an_unquote_stays_unquoted(self, src, before):
+        view = pv.view_at_cursor(*at_bar(src))
+        line, col = view.cursor
+        assert view.text.startswith("def f(grid):\n")
+        assert view.text.split("\n")[line - 1][:col].endswith(before)
+
+    @pytest.mark.parametrize(
+        ["src", "line", "attribute"],
+        [
+            ("(def f [grid] (when *gr|", "    gr", False),
+            ("(def f [grid] (when (== *grid.|", "    grid.", True),
+            ("(def f [grid] (when (== :gr|", "    gr", False),
+        ],
+    )
+    def test_a_child_in_the_refused_forms_place_drops_a_list_prefix(
+        self, src, line, attribute
+    ):
+        # Defect: the child keeps its * ** : prefix where an expression
+        # stands, so the view is no Python (*gr as a statement).
+        view = pv.view_at_cursor(*at_bar(src))
+        assert (view.text.split("\n")[-1], view.attribute) == (line, attribute)
+
+    def test_a_glued_word_that_is_no_attribute_is_no_view(self):
+        # Defect: a macro turns grid.re into re, and the view asks for the
+        # scope's names where the user typed an attribute of grid.
+        src = (
+            '(defmacro m [x] (return (Symbol (sub (.split x.name ".") -1))))\n'
+            "(def f [grid] (m grid.re|))"
+        )
+        assert pv.view_at_cursor(*at_bar(src)) is None
+
+    @pytest.mark.parametrize(
         ["src", "text"], [("[(when x|", "[x]"), ("((when x|", "x()")]
     )
     def test_the_innermost_refused_form_is_unwrapped(self, src, text):
