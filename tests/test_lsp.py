@@ -27,6 +27,7 @@ from lispy.core.parser import parse
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
 macro_modules = importlib.import_module("lispy.lsp.macro_modules")
+pv = importlib.import_module("lispy.lsp.python_view")
 
 URI = "file:///buffer.lpy"
 COMPLETE = "(def foo [] 1)\n(def bar [x] (foo))\n"
@@ -473,35 +474,94 @@ class TestRequireSelection:
         folders = [SimpleNamespace(uri=package.parent.as_uri())]
         assert server.find_import_target(node, folders, origin=origin) is None
 
+    # A module of a namespace package is also the script its directory runs
+    # (lpy lspnspkg/a.lpy), so it requires its package's module relatively
+    # and its sibling module bare.
+    NS_SOURCE = "(require .mac *)\n(require lspnshelper *)\n(= y (twice (thrice 1)))"
+    NS_EXPANDED = "y = 1 + 1 + 1 + (1 + 1 + 1)"
+    NS_MODULES = ["lspnspkg", "lspnspkg.mac", "lspnshelper"]
+
     @pytest.fixture
     def namespace(self, tmp_path, monkeypatch):
-        """A namespace package lspnspkg (no __init__) holding mac.lpy, in the
-        workspace folder tmp_path/proj; what a compile imports is dropped
-        after the test."""
+        """A namespace package lspnspkg (no __init__) holding mac.lpy and
+        lspnshelper.lpy, in the workspace folder tmp_path/proj, which the
+        server's workspace_folders reports; what a compile imports is
+        dropped after the test."""
         monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
         monkeypatch.setattr(server, "FILE_TREES", {})
         monkeypatch.setattr(sys, "path", list(sys.path))
-        for name in ["lspnspkg", "lspnspkg.mac"]:
+        for name in self.NS_MODULES:
             monkeypatch.delitem(sys.modules, name, raising=False)
         pkg = tmp_path / "proj" / "lspnspkg"
         pkg.mkdir(parents=True)
         (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+        (pkg / "lspnshelper.lpy").write_text(
+            "(defmacro thrice [x] (return `(+ ~x ~x ~x)))\n"
+        )
+        folders = [SimpleNamespace(uri=pkg.parent.as_uri())]
+        monkeypatch.setattr(server, "workspace_folders", lambda: folders)
         yield pkg
-        for name in ["lspnspkg", "lspnspkg.mac"]:
+        for name in self.NS_MODULES:
             sys.modules.pop(name, None)
 
-    def test_a_relative_require_compiles_in_a_namespace_package(
-        self, namespace, monkeypatch
+    def test_a_namespace_module_compiles_its_relative_and_sibling_requires(
+        self, namespace
     ):
-        # Defect: the document is named as a top-level module, so the
-        # require fails with "attempted relative import with no known
-        # parent package" where Python imports it as lspnspkg.a.
-        folders = [SimpleNamespace(uri=namespace.parent.as_uri())]
-        monkeypatch.setattr(server, "workspace_folders", lambda: folders)
-        source = "(require .mac *)\n(= y (twice 2))"
-        compiled = server.compile_document((namespace / "a.lpy").as_uri(), None, source)
+        # Defects: the document is named as a top-level module, so the
+        # relative require fails ("no known parent package"); or only the
+        # project root is on sys.path while its macros run, so the sibling
+        # require, which `lpy lspnspkg/a.lpy` imports, loads no macros.
+        uri = (namespace / "a.lpy").as_uri()
+        compiled = server.compile_document(uri, None, self.NS_SOURCE)
         assert compiled.error is None
-        assert compiled.view.text.endswith("y = 2 + 2")
+        assert compiled.view.text.endswith(self.NS_EXPANDED)
+
+    def test_a_cursor_view_compiles_a_namespace_module(self, namespace):
+        # Defect: the cursor view names the document by the regular-package
+        # rule alone, so its requires fail and the view is None.
+        source = self.NS_SOURCE + "\n(print y)"
+        doc = SimpleNamespace(uri=(namespace / "a.lpy").as_uri(), version=None)
+        doc.source = source
+
+        async def view():
+            deadline = asyncio.get_running_loop().time() + 30
+            return await server.awaited_cursor_view(doc, 4, 8, deadline)
+
+        got = asyncio.run(view())
+        assert got is not None and self.NS_EXPANDED in got.text
+
+    def test_a_disk_view_compiles_a_namespace_module(self, namespace, tmp_path):
+        # Defect: the disk view of a file the backend points into names it
+        # as a top-level module, so it never compiles to its shadow's text
+        # and a location in it is dropped.
+        path = namespace / "a.lpy"
+        path.write_text(self.NS_SOURCE)
+        pv.write_shadows(str(namespace.parent), str(tmp_path / "view"))
+        shadow = tmp_path / "view" / "lspnspkg" / "a.py"
+        assert shadow.read_text().endswith(self.NS_EXPANDED)
+        uri = path.as_uri()
+        try:
+            origin = server.disk_origin(uri, str(shadow), server.disk_views.generation)
+        finally:
+            server.disk_views.forget(uri)
+        assert origin is not None and origin[0] == self.NS_SOURCE
+
+    def test_a_file_link_takes_its_directorys_project(self, namespace, tmp_path):
+        # Defect: the project is found from the link's target, which lies
+        # outside every folder, so the document compiles as the top-level
+        # a and its relative require fails, while the shadow sweep (which
+        # walks the link where it is) names it lspnspkg.a.
+        elsewhere = tmp_path / "elsewhere" / "a.lpy"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text(self.NS_SOURCE)
+        link = namespace / "a.lpy"
+        link.symlink_to(elsewhere)
+        folders = server.workspace_folders()
+        assert server.project_root_of(str(link), folders) == str(
+            namespace.parent.resolve()
+        )
+        compiled = server.compile_document(link.as_uri(), None, self.NS_SOURCE)
+        assert compiled.error is None
 
     def test_definition_through_a_relative_require_in_a_namespace_package(
         self, namespace

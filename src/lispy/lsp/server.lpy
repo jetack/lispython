@@ -256,7 +256,7 @@
   (if (.startswith module-name ".")
       (do (if (is origin None)
               (return None))
-          (= [_ package import-root] (document-module-names origin
+          (= [_ package import-root _] (document-module-names origin
                                                             :folders workspace-folders))
           (try
             (= absolute (importlib.util.resolve-name module-name package))
@@ -634,21 +634,21 @@
   "The CompiledBuffer of document uri's source (python_view.compile-buffer),
    named as Python imports its file (module-names) so the prelude, its
    opt-out and the macros it defines apply as when the module compiles,
-   with its import root on sys.path, and its parse warnings naming the
+   with its search dirs on sys.path, and its parse warnings naming the
    file.  One compile per version (view-cache): a change's diagnostics,
    its backend push and every request on that version share it; fresh
    compiles again all the same and caches the result.  It runs
    the buffer's macros, so callers on the loop run it in a thread, reading
    view-cache's generation before the hand-off."
   (= path (to-fs-path uri))
-  (= [name package import-root] (ife (is path None)
-                                     (, "__main__" "" None)
-                                     (document-module-names path)))
+  (= [name package _ search-dirs] (ife (is path None)
+                                      (, "__main__" "" None (,))
+                                      (document-module-names path)))
   (if (is version None)
-      (return (compile-buffer source :package package :name name :import-root import-root
+      (return (compile-buffer source :package package :name name :search-dirs search-dirs
                               :filename (uri-to-path uri))))
   (return (.compiled view-cache uri version source :package package :name name
-                     :import-root import-root :filename (uri-to-path uri)
+                     :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
 (def error-diagnostic [exc source severity message]
@@ -1905,15 +1905,15 @@
 ;; The cursor views of the open documents, by version (python_view.ViewCache).
 (= view-cache (ViewCache))
 
-(def cursor-view [uri version source line col name package import-root generation]
+(def cursor-view [uri version source line col name package search-dirs generation]
   "view-at-cursor of source, through view-cache when the document has a
    version.  It runs the buffer's macros, so callers run it in a thread,
    reading view-cache's generation before the hand-off."
   (if (is version None)
       (return (view-at-cursor source line col :package package :name name
-                              :import-root import-root)))
+                              :search-dirs search-dirs)))
   (return (.view-at-cursor view-cache uri version source line col
-                           :package package :name name :import-root import-root
+                           :package package :name name :search-dirs search-dirs
                            :generation generation)))
 
 ;; Cursor-view compiles are scheduled apart from compile-latest's diagnostics
@@ -1951,7 +1951,7 @@
 ;; or running; dropped once it has neither.
 (= CURSOR-COMPILES {})
 
-(def scheduled-cursor-view [uri version source line col name package import-root]
+(def scheduled-cursor-view [uri version source line col name package search-dirs]
   "A future of cursor-view at the 1-based line and code-point col of
    document uri's source at version, of its own for each caller, so a
    timeout or cancellation of one caller never stops the compile others
@@ -1963,7 +1963,7 @@
    compile whose callers all gave up is never started, so abandoned
    keystrokes queue no compiles behind a slow one."
   (= future (.create-future (asyncio.get-running-loop)))
-  (= args (, uri version source line col name package import-root
+  (= args (, uri version source line col name package search-dirs
              view-cache.generation))
   (= state (.get CURSOR-COMPILES uri))
   (if (is state None)
@@ -2304,9 +2304,9 @@
   (= path (to-fs-path doc.uri))
   (if (is path None)
       (return None))
-  (= [name package import-root] (document-module-names path))
+  (= [name package _ search-dirs] (document-module-names path))
   (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
-                                   name package import-root))
+                                   name package search-dirs))
   (try
     (return (await (asyncio.wait-for making
                                      (max 0 (- deadline (.time (asyncio.get-running-loop)))))))
@@ -2852,9 +2852,9 @@
     (except [(, OSError ValueError)]
       (.forget disk-views lpy-uri)
       (return None)))
-  (= [name package import-root] (document-module-names lpy-path))
+  (= [name package _ search-dirs] (document-module-names lpy-path))
   (= view (.view disk-views lpy-uri source source :name name :package package
-                 :import-root import-root :generation generation))
+                 :search-dirs search-dirs :generation generation))
   (if (or (is view None) (!= view.text shadow))
       (return None))
   (return (, source view)))

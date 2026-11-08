@@ -999,8 +999,11 @@
 (def project-root-of [path folders]
   "The real path of the innermost of folders (workspace folders, objects
    with .uri) holding path, or None: path's project, the one home of that
-   rule (a document's backend, the module names its compiles take)."
-  (= real (pathlib.Path (osp.realpath path)))
+   rule (a document's backend, the module names its compiles take).  The
+   file's directory is resolved, never the file: a file link
+   proj/ns/a.lpy -> /elsewhere/a.lpy is in proj, as write-shadows' walk
+   and package-root see it."
+  (= real (pathlib.Path (osp.realpath (osp.dirname (osp.abspath path)))))
   (= best None)
   (for folder in folders
     (= folder-path (to-fs-path folder.uri))

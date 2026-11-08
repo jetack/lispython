@@ -547,10 +547,10 @@ class TestShadows:
             ]
         ]
         assert names == [
-            ("top", "", str(tmp_path)),
-            ("pkg.mod", "pkg", str(src)),
-            ("pkg.a", "pkg.a", str(src)),
-            ("pkg.a.m", "pkg.a", str(src)),
+            ("top", "", str(tmp_path), (str(tmp_path),)),
+            ("pkg.mod", "pkg", str(src), (str(src),)),
+            ("pkg.a", "pkg.a", str(src), (str(src),)),
+            ("pkg.a.m", "pkg.a", str(src), (str(src),)),
         ]
 
     def test_a_namespace_package_counts_up_to_a_root_above(self, tmp_path):
@@ -627,9 +627,10 @@ class TestShadows:
             pv.module_names(str(tmp_path.joinpath(*parts)), project_root=str(tmp_path))
             for parts in [("ns", "a.lpy"), ("src", "sns", "b.lpy")]
         ]
+        src = tmp_path / "src"
         assert got == [
-            ("ns.a", "ns", str(tmp_path)),
-            ("sns.b", "sns", str(tmp_path / "src")),
+            ("ns.a", "ns", str(tmp_path), (str(tmp_path / "ns"), str(tmp_path))),
+            ("sns.b", "sns", str(src), (str(src / "sns"), str(src))),
         ]
 
     def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):
@@ -651,7 +652,7 @@ class TestShadows:
                 *plus(locate(src, "yy"), 2),
                 package="pvcurpkg",
                 name="pvcurpkg.mod",
-                import_root=str(tmp_path / "src"),
+                search_dirs=(str(tmp_path / "src"),),
             )
         finally:
             for name in names:
@@ -691,6 +692,39 @@ class TestShadows:
                 sys.modules.pop(name, None)
         assert "y = 2 + 2" in (root / "src" / "pvsrcpkg" / "mod.py").read_text()
         assert sys.path == path
+
+    def test_a_namespace_module_compiles_and_is_searched_as_its_script(
+        self, tmp_path, monkeypatch
+    ):
+        # Defects: the sweep names scripts/x.lpy by the regular-package rule
+        # alone, so its relative require fails; or only the project root is
+        # on sys.path while its macros run, so its sibling require loads no
+        # macros; or scripts/ is no search path of the backend, so a sibling
+        # (import ...) the script run resolves stops resolving.
+        project, root = tmp_path / "project", tmp_path / "view"
+        scripts = project / "pvnsscripts"
+        self.write(scripts / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(
+            scripts / "pvnshelper.lpy", "(defmacro thrice [x] (return `(+ ~x ~x ~x)))"
+        )
+        self.write(scripts / "rel.lpy", "(require .mac *)\n(= y (twice 2))")
+        self.write(scripts / "bare.lpy", "(require pvnshelper *)\n(= y (thrice 2))")
+        names = ["pvnsscripts", "pvnsscripts.mac", "pvnshelper"]
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        manifest = pv.ShadowManifest()
+        try:
+            pv.write_shadows(str(project), str(root), manifest=manifest)
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        view = root / "pvnsscripts"
+        assert (view / "rel.py").read_text().endswith("y = 2 + 2")
+        assert (view / "bare.py").read_text().endswith("y = 2 + 2 + 2")
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        assert str(view) in json.loads(open(path).read())["extraPaths"]
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
@@ -1671,7 +1705,7 @@ class TestMacroModules:
             "(require .mac *)\n(= yy (twice 2))",
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
 
     def test_compile_view_sees_an_edited_macro_module(self, package):
@@ -1699,7 +1733,7 @@ class TestMacroModules:
         kwargs = dict(
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         assert cache.view("u", 1, src, **kwargs).text.endswith("yy = 2 + 2")
         (package.pkg / "mac.lpy").write_text(THRICE)
@@ -1714,7 +1748,7 @@ class TestMacroModules:
             "(require .mac)\n(= yy 1)",
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         assert view.macros["mac.my_mac"] == "mac.my-mac"
 
@@ -1789,7 +1823,7 @@ class TestMacroModules:
             return pv.compile_view(
                 f"(require {name} *)\n(= yy (twice 2))",
                 name="pvmmtwo",
-                import_root=str(root),
+                search_dirs=(str(root),),
             )
 
         try:
@@ -1816,7 +1850,7 @@ class TestMacroModules:
                     src,
                     package=package.name,
                     name=package.name + ".mod",
-                    import_root=str(package.root),
+                    search_dirs=(str(package.root),),
                 )
                 return None if view is None else view.text
 
@@ -1862,7 +1896,7 @@ class TestMacroModules:
         kwargs = dict(
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         assert pv.compile_view(src, **kwargs).text.endswith("yy = twice(2)")
         next_tick()
@@ -1906,7 +1940,7 @@ class TestMacroModules:
         return pv.compile_view(
             f"(require {mac} *)\n(= yy (twice 2))",
             name="pvmmflat",
-            import_root=str(project),
+            search_dirs=(str(project),),
         )
 
     def test_an_incidental_miss_leaves_the_import_root_unwatched(
@@ -1944,7 +1978,7 @@ class TestMacroModules:
                 1,
                 f"(require {mac} *)\n(= yy (twice 2))",
                 name="pvmmflat",
-                import_root=str(project),
+                search_dirs=(str(project),),
             ).text
 
         try:
@@ -2063,7 +2097,7 @@ class TestMacroModules:
         kwargs = dict(
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         line, col = plus(locate(src, "zz"), 2)
         first = cache.view_at_cursor("u", 1, src, line, col, **kwargs)
@@ -2084,7 +2118,7 @@ class TestMacroModules:
         (package.pkg / "bad.lpy").write_text(bad)
         (package.pkg / "mod.lpy").write_text("(require .mac *)\n(= yy (twice 2))")
         cache = pv.ViewCache()
-        kwargs = dict(package=package.name, import_root=str(package.root))
+        kwargs = dict(package=package.name, search_dirs=(str(package.root),))
 
         def good():
             return cache.view(
@@ -2208,7 +2242,7 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(
             "(require .b *)\n(defmacro twice [x] (return (val)))"
         )
-        kwargs = dict(package=package.name, import_root=str(package.root))
+        kwargs = dict(package=package.name, search_dirs=(str(package.root),))
         pv.compile_view(
             "(require .b *)\n(= zz (val))", name=package.name + ".other", **kwargs
         )
