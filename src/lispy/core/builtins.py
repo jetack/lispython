@@ -110,7 +110,12 @@ def _replace_symbol(node, name, new, in_quasi):
         if node.value == name:
             return new
         if node.value.startswith(name + "."):
-            return Symbol(new.value + node.value[len(name) :], **node.position_info)
+            # The span is the old spelling's text, so it is lent to the new one.
+            return Symbol(
+                new.value + node.value[len(name) :],
+                **node.position_info,
+                lent_position=True,
+            )
         return node
     if isinstance(node, Keyword):
         return node

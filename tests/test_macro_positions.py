@@ -584,11 +584,34 @@ def test_data_in_every_child_form_slot_is_converted():
     assert quote.value == 5 and glued.params == ["T"]
 
 
-def test_a_template_name_stays_inside_the_macro_call(scope):
+QP = "(defmacro qp [*_] (return '({} 1)))"
+RENAMED = (
+    "(defmacro rb [x] (return (replace-symbol x 'ab 'zz)))\n"
+    "(defmacro qa [] (return `(rb (ab.c 1))))"
+)
+
+
+@pytest.mark.parametrize(
+    ["macros", "src", "generated"],
+    [
+        (QP.format("print"), "(qp)", "print"),
+        (QP.format("print"), "(qp 1234567890)", "print"),
+        (QP.format("ab.c"), "(qp)", "ab.c"),
+        (RENAMED, "(qa)", "zz.c"),
+    ],
+)
+def test_a_template_name_spans_the_whole_macro_call(macros, src, generated, scope):
     # Defect: a template symbol placed at the call measured its end from its
     # own spelling, so `print` at the 4-character `(qp)` ended at column 5,
-    # past the end of the line.
-    define("(defmacro qp [] (return '(print 1)))", scope)
-    [call] = calls_to(compile_at_line(2, "(qp)", scope), "print")
-    assert (call.func.lineno, call.func.col_offset) == (2, 0)
-    assert (call.func.end_lineno, call.func.end_col_offset) == (2, 4)
+    # past the end of the line, at the longer call covered only `(qp `, and
+    # `ab` of `ab.c` at the equally long `(qp)` covered only `(q` (also once
+    # replace-symbol renamed it `zz`), where an error on the generated name
+    # then landed.
+    define(macros, scope)
+    [stmt] = compile_at_line(2, src, scope)
+    func = stmt.value.func
+    assert ast.unparse(func) == generated
+    parts = [func, func.value] if isinstance(func, ast.Attribute) else [func]
+    for part in parts:
+        assert (part.lineno, part.col_offset) == (2, 0)
+        assert (part.end_lineno, part.end_col_offset) == (2, len(src))
