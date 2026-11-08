@@ -996,6 +996,22 @@
 ;; The LSP's backends
 ;; ---------------------------------------------------------------------------
 
+(def project-root-of [path folders]
+  "The real path of the innermost of folders (workspace folders, objects
+   with .uri) holding path, or None: path's project, the one home of that
+   rule (a document's backend, the module names its compiles take)."
+  (= real (pathlib.Path (osp.realpath path)))
+  (= best None)
+  (for folder in folders
+    (= folder-path (to-fs-path folder.uri))
+    (if (is folder-path None)
+        (continue))
+    (= root (osp.realpath folder-path))
+    (if (and (.is-relative-to real root)
+             (or (is best None) (> (len root) (len best))))
+        (= best root)))
+  (return best))
+
 (class Backends []
   "The BackendClient of each workspace project, for lispython's LSP.
    folders gives the client's workspace folders (objects with .uri); a
@@ -1061,18 +1077,7 @@
         (self.on-view-prepared client)))
 
   (def _project-root [self path]
-    "The real path of the innermost workspace folder holding path, or None."
-    (= real (pathlib.Path (osp.realpath path)))
-    (= best None)
-    (for folder in (self.folders)
-      (= folder-path (to-fs-path folder.uri))
-      (if (is folder-path None)
-          (continue))
-      (= root (osp.realpath folder-path))
-      (if (and (.is-relative-to real root)
-               (or (is best None) (> (len root) (len best))))
-          (= best root)))
-    (return best))
+    (return (project-root-of path (self.folders))))
 
   (def _existing [self lpy-uri]
     "The BackendClient already made for document lpy-uri's project, or None."

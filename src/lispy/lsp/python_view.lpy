@@ -1296,12 +1296,23 @@
       (return None))
   (return (osp.normpath (osp.join (os.fspath view-root) rel))))
 
-(def module-names [lpy-path]
-  "(__name__, __package__, import root) of lpy-path as Python imports it:
-   the packages are the directories up from its own that hold __init__.py
-   or __init__.lpy (package-root, the rule the lpy CLI uses), and the import
-   root is where that walk stops, so src/pkg/m.lpy is pkg.m from src."
-  (= [import-root parts] (package-root (osp.dirname (osp.abspath lpy-path))))
+(def project-import-roots [project-root]
+  "The search roots a project's modules are imported from: the project
+   root and its src directory (the src layout).  The one home of that
+   list: module-names' namespace packages and resolve-module-to-file's
+   absolute lookup read it."
+  (return [project-root (osp.join project-root "src")]))
+
+(def module-names [lpy-path :project-root None]
+  "(__name__, __package__, import root) of lpy-path as Python imports it
+   (package-root, the rule the lpy CLI uses): the packages are the
+   directories up from its own that hold __init__.py or __init__.lpy, and
+   the import root is where that walk stops, so src/pkg/m.lpy is pkg.m from
+   src.  Under project-root (the document's workspace folder), namespace
+   packages count too, up to the nearest of project-import-roots, so
+   ns/a.lpy with no ns/__init__ is ns.a from the project root."
+  (= roots (ife (is project-root None) [] (project-import-roots project-root)))
+  (= [import-root parts] (package-root (osp.dirname (osp.abspath lpy-path)) roots))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (.join "." parts))
   (if (== stem "__init__")
@@ -1550,7 +1561,7 @@
   (= written [])
   (for lpy-path in sources
     (= shadow (view-path project-root root lpy-path))
-    (= names (module-names lpy-path))
+    (= names (module-names lpy-path :project-root project-root))
     (= (sub names-of lpy-path) names)
     (try
       (= st (os.stat lpy-path))

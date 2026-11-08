@@ -473,6 +473,50 @@ class TestRequireSelection:
         folders = [SimpleNamespace(uri=package.parent.as_uri())]
         assert server.find_import_target(node, folders, origin=origin) is None
 
+    @pytest.fixture
+    def namespace(self, tmp_path, monkeypatch):
+        """A namespace package lspnspkg (no __init__) holding mac.lpy, in the
+        workspace folder tmp_path/proj; what a compile imports is dropped
+        after the test."""
+        monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
+        monkeypatch.setattr(server, "FILE_TREES", {})
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        for name in ["lspnspkg", "lspnspkg.mac"]:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        pkg = tmp_path / "proj" / "lspnspkg"
+        pkg.mkdir(parents=True)
+        (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+        yield pkg
+        for name in ["lspnspkg", "lspnspkg.mac"]:
+            sys.modules.pop(name, None)
+
+    def test_a_relative_require_compiles_in_a_namespace_package(
+        self, namespace, monkeypatch
+    ):
+        # Defect: the document is named as a top-level module, so the
+        # require fails with "attempted relative import with no known
+        # parent package" where Python imports it as lspnspkg.a.
+        folders = [SimpleNamespace(uri=namespace.parent.as_uri())]
+        monkeypatch.setattr(server, "workspace_folders", lambda: folders)
+        source = "(require .mac *)\n(= y (twice 2))"
+        compiled = server.compile_document((namespace / "a.lpy").as_uri(), None, source)
+        assert compiled.error is None
+        assert compiled.view.text.endswith("y = 2 + 2")
+
+    def test_definition_through_a_relative_require_in_a_namespace_package(
+        self, namespace
+    ):
+        # Defect: the relative module resolves against an empty package,
+        # so neither the module nor its macro is found.
+        source = "(require .mac)\n(mac.twice 1)"
+        origin = namespace / "a.lpy"
+        [loc] = self._definition_in(source, origin.as_uri(), namespace.parent, 1, 6)
+        assert loc.uri == (namespace / "mac.lpy").as_uri()
+        [node] = parse("(from .mac [twice])")
+        folders = [SimpleNamespace(uri=namespace.parent.as_uri())]
+        got = server.find_import_target(node, folders, origin=str(origin))
+        assert got == str(namespace / "mac.lpy")
+
     def test_a_buffer_with_no_file_resolves_no_relative_module(
         self, package, monkeypatch
     ):

@@ -25,7 +25,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy.core import nodes, parser
-from lispy.core.importer import lpy_cache_path
+from lispy.core.importer import lpy_cache_path, package_root
 
 pv = importlib.import_module("lispy.lsp.python_view")
 server = importlib.import_module("lispy.lsp.server")
@@ -551,6 +551,85 @@ class TestShadows:
             ("pkg.mod", "pkg", str(src)),
             ("pkg.a", "pkg.a", str(src)),
             ("pkg.a.m", "pkg.a", str(src)),
+        ]
+
+    def test_a_namespace_package_counts_up_to_a_root_above(self, tmp_path):
+        # Defect: the walk stops at the first directory with no __init__,
+        # so ns/a.lpy gets no package where Python imports it as ns.a, and
+        # its relative requires fail ("no known parent package").
+        self.write(tmp_path / "ns" / "pkg" / "__init__.py", "")
+        roots = [str(tmp_path)]
+        assert package_root(str(tmp_path / "ns"), roots) == (str(tmp_path), ["ns"])
+        assert package_root(str(tmp_path / "ns" / "pkg"), roots) == (
+            str(tmp_path),
+            ["ns", "pkg"],
+        )
+        # A directory that is itself a root is its own import root.
+        assert package_root(str(tmp_path), roots) == (str(tmp_path), [])
+
+    def test_a_namespace_package_stops_at_the_nearest_root(self, tmp_path):
+        # Defect: the walk goes on to the outer root, naming src/ns/a.lpy
+        # src.ns.a where the src layout imports it as ns.a.
+        (tmp_path / "src" / "ns").mkdir(parents=True)
+        roots = [str(tmp_path), str(tmp_path / "src")]
+        assert package_root(str(tmp_path / "src" / "ns"), roots) == (
+            str(tmp_path / "src"),
+            ["ns"],
+        )
+
+    @pytest.mark.parametrize("name", ["my-ns", "class", "1ns"])
+    def test_a_directory_that_is_no_identifier_is_no_namespace(self, tmp_path, name):
+        # Defect: every directory up to the root becomes a part, giving a
+        # package Python can never import (my-ns, a keyword).
+        (tmp_path / name / "ns").mkdir(parents=True)
+        directory = str(tmp_path / name / "ns")
+        assert package_root(directory, [str(tmp_path)]) == (directory, [])
+
+    @pytest.mark.parametrize("module", ["ns.py", "ns.lpy", "ns.pyc"])
+    def test_a_module_file_beside_it_hides_the_namespace(self, tmp_path, module):
+        # Defect: ns/ is taken as a namespace package where FileFinder
+        # imports the module file ns.* instead.
+        (tmp_path / "ns").mkdir()
+        self.write(tmp_path / module, "")
+        directory = str(tmp_path / "ns")
+        assert package_root(directory, [str(tmp_path)]) == (directory, [])
+
+    def test_with_no_root_above_only_regular_packages_count(self, tmp_path):
+        # Defect: the walk climbs through every directory with no root to
+        # stop it, or a root below the directory is taken as one above.
+        self.write(tmp_path / "ns" / "pkg" / "__init__.py", "")
+        directory = str(tmp_path / "ns" / "pkg")
+        assert package_root(directory) == (str(tmp_path / "ns"), ["pkg"])
+        assert package_root(directory, [directory + "/inner"]) == (
+            str(tmp_path / "ns"),
+            ["pkg"],
+        )
+
+    def test_a_root_matches_a_symlinked_spelling_of_it(self, tmp_path):
+        # Defect: paths compare as spelled, so a workspace folder given by
+        # its real path (Backends' project root) never matches a document
+        # opened through a symlink, which then loses its namespace package.
+        real = tmp_path / "real"
+        (real / "ns").mkdir(parents=True)
+        (tmp_path / "link").symlink_to(real)
+        directory = str(tmp_path / "link" / "ns")
+        assert package_root(directory, [str(real)]) == (
+            str(tmp_path / "link"),
+            ["ns"],
+        )
+
+    def test_module_names_count_namespace_packages_under_the_project(self, tmp_path):
+        # Defect: the LSP names ns/a.lpy as the top-level module a, so its
+        # relative requires fail to compile.
+        (tmp_path / "src" / "sns").mkdir(parents=True)
+        (tmp_path / "ns").mkdir()
+        got = [
+            pv.module_names(str(tmp_path.joinpath(*parts)), project_root=str(tmp_path))
+            for parts in [("ns", "a.lpy"), ("src", "sns", "b.lpy")]
+        ]
+        assert got == [
+            ("ns.a", "ns", str(tmp_path)),
+            ("sns.b", "sns", str(tmp_path / "src")),
         ]
 
     def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):

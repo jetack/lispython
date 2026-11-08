@@ -632,15 +632,32 @@
 (= _NREPL-FILE-SCOPES {})  ; normalised absolute path -> scope
 (= _NREPL-FILE-SCOPES-LOCK (threading.Lock))
 
+;; The search roots a file scope's namespace packages are counted up to:
+;; sys.path as nrepl-server left it once it put the working directory on it,
+;; never the live list, because nrepl-load-file puts each loaded file's own
+;; directory there, and the nearest-root rule (package-root) would then make
+;; a file's package depend on which sibling was loaded first.  None until a
+;; server starts, when the current sys.path stands in.
+(= _NREPL-IMPORT-ROOTS None)
+
+(def nrepl-import-roots []
+  "The search roots a file scope's package is decided against (package-root's
+   roots): the server's sys.path snapshot, else the current sys.path, with
+   '' read as the working directory."
+  (= roots (ife (is _NREPL-IMPORT-ROOTS None) (list sys.path) _NREPL-IMPORT-ROOTS))
+  (return [(ife (== root "") (os.getcwd) root) for root in roots]))
+
 (def nrepl-file-scope [path]
   "The scope of the file at path, created (with the built-in macros) on first
-   use.  Its __name__ is __main__, so a load-file runs the main guard."
+   use.  Its __name__ is __main__, so a load-file runs the main guard; its
+   __package__ is the package Python imports the file in from
+   nrepl-import-roots (package-root, namespace packages included)."
   (= path (osp.abspath path))
   (= key (osp.normcase path))
   (with [_NREPL-FILE-SCOPES-LOCK]
     (= scope (.get _NREPL-FILE-SCOPES key))
     (if (is scope None)
-        (do (= [_ parts] (package-root (osp.dirname path)))
+        (do (= [_ parts] (package-root (osp.dirname path) (nrepl-import-roots)))
             (= scope {"__builtins__" __builtins__
                       "__name__" "__main__"
                       "__package__" (.join "." parts)
@@ -1126,9 +1143,11 @@
     (except [OSError] (pass))))
 
 (def nrepl-server [:host "127.0.0.1" :port 0]
+  (global _NREPL-IMPORT-ROOTS)
   (= cwd (os.getcwd))
   (if (not (in cwd sys.path))
       (sys.path.insert 0 cwd))
+  (= _NREPL-IMPORT-ROOTS (list sys.path))
   (= scope SCOPE)
   (nrepl-eval "(from pprint [pprint])" scope)
 

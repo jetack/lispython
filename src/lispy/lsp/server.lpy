@@ -5,7 +5,6 @@
 (import contextvars)
 (import functools)
 (import glob)
-(import importlib.machinery)
 (import importlib.util)
 (import inspect)
 (import logging)
@@ -22,6 +21,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
+(from lispy.core.importer [finder-suffixes])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
@@ -40,10 +40,10 @@
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
                              ViewCache compile-buffer glued-base hyphen-spelling
                              lpy-diagnostic-range lpy-range module-names name-key
-                             open-form-closers partial-span py-name
+                             open-form-closers partial-span project-import-roots py-name
                              pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor])
-(from lispy.lsp.backend [Backends REQUEST-TIMEOUT suppression-tool])
+(from lispy.lsp.backend [Backends REQUEST-TIMEOUT project-root-of suppression-tool])
 ;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
 (import lispy.lsp.macro-modules as macro-modules)
 
@@ -142,6 +142,14 @@
       ;; Not (return []): an empty bracket compiles to a bare return.
       (return (list)))))
 
+(def document-module-names [path :folders None]
+  "module-names of the .lpy file at path, under its project (the innermost
+   of folders holding it, default the client's workspace folders,
+   project-root-of), so its namespace packages count as the importer
+   counts them; a file in no folder takes the regular-package rule alone."
+  (= folders (ife (is folders None) (workspace-folders) folders))
+  (return (module-names path :project-root (project-root-of path folders))))
+
 ;; The Python backend of each workspace project (lispy.lsp.backend).  Its
 ;; document hooks never raise; only an open starts a backend, and only when
 ;; its diagnostics are forwarded.
@@ -208,14 +216,6 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def finder-suffixes []
-  "The file suffixes CPython's FileFinder tries, in its order (extension
-   modules, then source, then bytecode), read from importlib.machinery,
-   where the importer (core/importer.py) adds .lpy to the source ones."
-  (return (+ importlib.machinery.EXTENSION-SUFFIXES
-             importlib.machinery.SOURCE-SUFFIXES
-             importlib.machinery.BYTECODE-SUFFIXES)))
-
 (def module-file-under [module-name roots]
   "The .lpy file the absolute import name module-name (already its Python
    spelling, module-import-name) imports from the first of roots that
@@ -256,7 +256,8 @@
   (if (.startswith module-name ".")
       (do (if (is origin None)
               (return None))
-          (= [_ package import-root] (module-names origin))
+          (= [_ package import-root] (document-module-names origin
+                                                            :folders workspace-folders))
           (try
             (= absolute (importlib.util.resolve-name module-name package))
             (except [(, ImportError ValueError)]
@@ -265,8 +266,7 @@
   ;; 1. Workspace folders (direct or in src/)
   (= roots [])
   (for folder in workspace-folders
-    (= root (uri-to-path folder.uri))
-    (.extend roots [root (osp.join root "src")]))
+    (.extend roots (project-import-roots (uri-to-path folder.uri))))
   (= found (module-file-under module-name roots))
   (if found
       (return found))
@@ -643,7 +643,7 @@
   (= path (to-fs-path uri))
   (= [name package import-root] (ife (is path None)
                                      (, "__main__" "" None)
-                                     (module-names path)))
+                                     (document-module-names path)))
   (if (is version None)
       (return (compile-buffer source :package package :name name :import-root import-root
                               :filename (uri-to-path uri))))
@@ -2304,7 +2304,7 @@
   (= path (to-fs-path doc.uri))
   (if (is path None)
       (return None))
-  (= [name package import-root] (module-names path))
+  (= [name package import-root] (document-module-names path))
   (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
                                    name package import-root))
   (try
@@ -2852,7 +2852,7 @@
     (except [(, OSError ValueError)]
       (.forget disk-views lpy-uri)
       (return None)))
-  (= [name package import-root] (module-names lpy-path))
+  (= [name package import-root] (document-module-names lpy-path))
   (= view (.view disk-views lpy-uri source source :name name :package package
                  :import-root import-root :generation generation))
   (if (or (is view None) (!= view.text shadow))

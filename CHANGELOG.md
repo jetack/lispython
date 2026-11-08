@@ -252,6 +252,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The LSP and the nREPL resolve a relative `require` or `from` in a
+  namespace package (a directory with no `__init__`) as the importer does:
+  `ns/a.lpy` is `ns.a`, so `(require .mac)` compiles and go-to-definition
+  finds `ns/mac.lpy`. The LSP counts namespace packages up to the nearest
+  of the document's workspace folder and its `src`; the nREPL up to the
+  nearest `sys.path` entry as the server started. A directory that is no
+  identifier, or has a module file of its name beside it, is no namespace
+  package. A `.lpy` in a plain subdirectory of a workspace folder is now
+  named as a module of that namespace package (`scripts.tool`).
 - A malformed `require` (`(require mod a b)`, `(require mod as)`,
   `(require mod * as m)`, `(require)`, a non-name in its list) is a compile
   error at the part at fault, instead of a Python `ValueError` or
