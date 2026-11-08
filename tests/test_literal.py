@@ -649,3 +649,107 @@ class TestTypedInterpolatedHeads:
     @pytest.mark.parametrize("src", ["(f-string)", '(f-string "a")'])
     def test_valid_heads_compile(self, src):
         assert compile_lpy(src)
+
+
+def macro_field_src(head, field_args="", tail='(String "\\"\\"")'):
+    """A module whose macro ``m`` (called on line 3) returns a hand-built
+    ``(head "a" {x} tail)`` node, its field given ``field_args``."""
+    return (
+        f'(defmacro m [] (return (Paren (Symbol "{head}") (String "\\"a\\"")'
+        f' (FStrExpr (Symbol "x") {field_args}) {tail})))\n(= x 7)\n(= r (m))'
+    )
+
+
+def run_lpy(src):
+    namespace = {}
+    module = ast.Module(compile_lpy(src), type_ignores=[])
+    exec(compile(module, "<test>", "exec"), namespace)
+    return namespace["r"]
+
+
+class TestMacroBuiltFields:
+    """A macro builds an FStrExpr with any slot values: the defaults compile
+    as the reader's field would, and a slot the reader never fills that way is
+    a LispyCompileError at the macro call, never an AttributeError/TypeError."""
+
+    def test_default_slots_compile(self):
+        assert run_lpy(macro_field_src("f-string")) == "a7"
+
+    def test_given_slots_compile(self):
+        spec = '(Paren (Symbol "f-string") (String "\\">3\\""))'
+        args = f':conversion 114 :format-spec {spec} :debug "="'
+        assert run_lpy(macro_field_src("f-string", args)) == "ax=  7"
+
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings need 3.14")
+    def test_default_slots_compile_in_t_string(self):
+        template = run_lpy(macro_field_src("t-string"))
+        assert (template.strings, template.values) == (("a", ""), (7,))
+
+    @pytest.mark.parametrize(
+        ["args", "msg"],
+        [
+            (":conversion 5", "f-string: replacement field conversion"),
+            (':conversion "r"', "f-string: replacement field conversion"),
+            (":conversion 115.0", "f-string: replacement field conversion"),
+            (":debug 5", "f-string: replacement field debug text"),
+            (
+                ':format-spec (String "\\"x\\"")',
+                "f-string: replacement field format spec",
+            ),
+            (
+                ':format-spec (Paren (Symbol "t-string") (String "\\"x\\""))',
+                "f-string: replacement field format spec",
+            ),
+        ],
+    )
+    def test_bad_slot_refused(self, args, msg):
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(macro_field_src("f-string", args))
+        assert info.value.msg.startswith(msg)
+        assert info.value.lineno == 3
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            macro_field_src("f-string", tail="(String 3)"),
+            # Slot 1 is read by the form dispatch (atom_text) before any
+            # f-string code runs.
+            '\n(defmacro m [] (return (Paren (Symbol "f-string") (String 3))))'
+            "\n(= r (m))",
+            '\n(defmacro m [] (return (Paren (Symbol "print") (Symbol 3))))\n(= r (m))',
+            "\n(defmacro m [] (return (Paren (Symbol 3))))\n(= r (m))",
+            '\n(defmacro m [] (return (Paren (Symbol "print") (Constant None))))'
+            "\n(= r (m))",
+        ],
+    )
+    def test_non_str_atom_refused(self, src):
+        # A macro may build an atom around any value: refused at the call,
+        # never a TypeError wherever the compiler first reads its text.
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(src)
+        assert "an atom's text must be a str" in info.value.msg
+        assert info.value.lineno == 3
+
+    @pytest.mark.parametrize(
+        "use",
+        ["(= r (m))", "(m)", "(= (m) 1)", "(del (m))", "(for (m) in [1] (pass))"],
+    )
+    def test_field_outside_interpolation_refused(self, use):
+        # Expression, statement and target positions all reach expr_steps.
+        src = f'(defmacro m [] (return (FStrExpr (Symbol "x"))))\n\n{use}'
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(src)
+        assert info.value.msg.startswith("a replacement field (FStrExpr) is valid")
+        assert info.value.lineno == 3
+
+    @pytest.mark.parametrize("head", ["f-string", "t-string"])
+    def test_spec_part_names_its_owner(self, head):
+        if head == "t-string" and sys.version_info < (3, 14):
+            pytest.skip("t-strings need 3.14")
+        spec = '(Paren (Symbol "f-string") (String "\\"x\\"") (Symbol "y"))'
+        with pytest.raises(LispyCompileError) as info:
+            compile_lpy(macro_field_src(head, f":format-spec {spec}"))
+        assert info.value.msg.startswith(
+            f"{head} format spec: part 2 must be a replacement field"
+        )
+        assert info.value.lineno == 3
