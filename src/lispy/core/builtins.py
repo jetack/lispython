@@ -100,7 +100,9 @@ def replace_symbol(node, old, new):
     return _replace_symbol(node, old.value, new, False)
 
 
-_LAMBDA_HEADS = ("lambda", "fn")
+# The heads of a lambda: the form and the prelude's fn alias. A user macro
+# that wraps lambda is not one of them. Read by the LSP too (python_view).
+LAMBDA_HEADS = ("lambda", "fn")
 
 
 def _replace_symbol(node, name, new, in_quasi):
@@ -132,7 +134,7 @@ def _replace_symbol(node, name, new, in_quasi):
             and isinstance(node, Paren)
             and len(lst) >= 2
             and isinstance(lst[0], Symbol)
-            and lst[0].value in _LAMBDA_HEADS
+            and lst[0].value in LAMBDA_HEADS
             and isinstance(lst[1], Bracket)
         ):
             if _replace_in_params(lst[1], name, new):

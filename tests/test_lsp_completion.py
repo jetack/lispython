@@ -592,10 +592,11 @@ def test_parameters_are_in_the_fallback_list(off_complete):
     source = (
         "(def f [pos / mid * :kw-only ^annot-type default-val **rest]\n"
         "  (map (lambda [lam-arg] lam-arg) [])\n"
+        "  (map (fn [fn-arg] fn-arg) [])\n"
         "  (|))\n"
     )
     labels = set(by_label(off_complete(source)[2]))
-    assert {"pos", "mid", "kw-only", "rest", "lam-arg"} <= labels
+    assert {"pos", "mid", "kw-only", "rest", "lam-arg", "fn-arg"} <= labels
     assert not {"default-val", "annot-type"} & labels
 
 

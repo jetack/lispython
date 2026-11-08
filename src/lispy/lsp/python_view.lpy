@@ -36,8 +36,10 @@
     (= fcntl None)
     (import msvcrt)))
 
+(from lispy.core.builtins [LAMBDA-HEADS])
+(from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.errors [LispyCompileError compile-errors])
-(from lispy.core.nodes [Expression GluedHead Paren Symbol Wrapper atom-text])
+(from lispy.core.nodes [Bracket Expression GluedHead Paren Symbol Wrapper atom-text])
 (from lispy.core.parser [parse source-offset tokenize])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
@@ -762,14 +764,15 @@
   "The entry of stack (open-forms) that compiled's compile error is placed
    at, at its bracket or its head, or None: no such error, or an error at
    any other form, which unwrapping the forms around the cursor never
-   mends."
+   mends.  The innermost match wins, since an inner form's bracket is the
+   head of the one around it ((lambda [x|)."
   (= error compiled.error)
   (if (or (!= compiled.stage COMPILE-STAGE)
           (not (isinstance error LispyCompileError))
           (is error.lineno None) (is error.offset None))
       (return None))
   (= position (, error.lineno (- error.offset 1)))
-  (for entry in stack
+  (for entry in (reversed stack)
     (if (and (== (sub entry 0) "b")
              (in position (, (sub entry 2) (sub entry 3))))
         (return entry)))
@@ -781,36 +784,68 @@
   (= blanked (re.sub "[^\r\n]" " " (sub text [: start end])))
   (return (+ (sub text [: None start]) blanked (sub text [: end None]))))
 
-;; The forms whose [params] bracket binds names, by the slot it stands in.
-(= _PARAMETER-SLOTS {"def" 2 "async-def" 2 "defmacro" 2 "lambda" 1})
+;; The heads whose form binds parameters in its [params] bracket: these at
+;; slot 2, LAMBDA-HEADS at slot 1; and the heads whose name may carry glued
+;; type parameters (f[T]).  A user macro that wraps one is not seen.
+(= _DEF-HEADS (, "def" "async-def" "defmacro"))
+(= _TYPE-PARAMETER-HEADS (, "def" "async-def" "class" "type"))
 
-(def _in-parameter-list [prefix refused]
-  "True when the cursor sentinel in prefix stands in the parameter list
-   (or the type parameters) of refused, an open-forms entry: unwrapping
-   that form would answer for the scope around it, where the name being
-   typed is no name at all."
+(def _in-parameter-list [prefix removed]
+  "True when the cursor sentinel in prefix stands where one of removed, the
+   open-forms entries a blank would drop, binds a name (_binds-sentinel-p):
+   unwrapping it would answer for the scope around it, where the name being
+   bound is no name yet."
   (= closers (open-form-closers prefix))
   (if (is closers None)
-      (return False))
-  (= opening (sub refused 2))
+      (return True))
+  (= openings (set ((sub entry 2) for entry in removed)))
   (= pending (list (parse (+ prefix closers) :partial True)))
-  (= form None)
-  (while (and pending (is form None))
+  (while pending
     (= node (.pop pending))
-    (if (isinstance node Expression)
-        (do (if (and (isinstance node Paren)
-                     (== (, (.get node.position-info "lineno")
-                            (.get node.position-info "col_offset"))
-                         opening))
-                (= form node))
-            (.extend pending node.list))))
-  (if (or (is form None) (== (len form) 0))
+    (cond (isinstance node Expression)
+          ;; A form counts when it is dropped, or the bracket of its params
+          ;; or type parameters is (refused at its head: (def f [:x|).
+          (do (= parts (+ [node] (sub node.list [: 1 3])))
+              (if (and (>= (len node) 2) (isinstance (sub node 1) GluedHead))
+                  (.append parts (. (sub node 1) params)))
+              (if (and (isinstance node Paren)
+                       (any ((in (, (.get part.position-info "lineno")
+                                    (.get part.position-info "col_offset"))
+                                 openings)
+                             for part in parts))
+                       (_binds-sentinel-p node))
+                  (return True))
+              (.extend pending node.list))
+          (isinstance node GluedHead)
+          (.extend pending [node.head node.params])
+          (isinstance node Wrapper)
+          (.append pending node.value)))
+  (return False))
+
+(def _binds-sentinel-p [form]
+  "True when the cursor sentinel stands where form, a parsed Paren, binds a
+   name: a parameter's name (param-bindings; a list it refuses counts, the
+   name may be what is being typed), or anywhere in glued type parameters
+   (def f[T], class A[T]).  A default or annotation is read in the scope
+   around the form, so it never counts; nor do class bases."
+  (if (== (len form) 0)
       (return False))
-  (= slot (.get _PARAMETER-SLOTS (atom-text (sub form 0))))
-  (if (is slot None)
+  (= head (atom-text (sub form 0)))
+  (if (and (in head _TYPE-PARAMETER-HEADS) (>= (len form) 2)
+           (isinstance (sub form 1) GluedHead)
+           (_holds-sentinel (. (sub form 1) params)))
+      (return True))
+  (= slot (ife (in head _DEF-HEADS) 2
+               (ife (in head LAMBDA-HEADS) 1 None)))
+  (if (or (is slot None) (<= (len form) slot)
+          (not (isinstance (sub form slot) Bracket))
+          (not (_holds-sentinel (sub form slot))))
       (return False))
-  (= params [(sub form index) for index in (range 1 (min (+ slot 1) (len form)))])
-  (return (any ((_holds-sentinel node) for node in params))))
+  (try
+    (return (any ((== (atom-text name) CURSOR-SENTINEL)
+                  for name in (param-bindings (sub form slot)))))
+    (except [LispyCompileError]
+      (return True))))
 
 (def _holds-sentinel [node]
   "True when node, a parsed node, has the cursor sentinel among its atoms."
@@ -847,7 +882,7 @@
    with one operand, (when x| with no body), that form is unwrapped: its
    text up to the sentinel is blanked (_blank-span), so the sentinel stands
    in the forms outside it, every position unmoved; never with the cursor
-   in that form's parameter list (_in-parameter-list), and a round that
+   where a blanked form binds a name (_in-parameter-list), and a round that
    blanks no open bracket gives up.  The
    sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
@@ -895,7 +930,8 @@
             (= refused (_refused-open-form compiled stack))
             (if (or (is refused None)
                     (not (<= 0 (sub refused 4) (- sentinel-start 1)))
-                    (_in-parameter-list prefix refused))
+                    (_in-parameter-list prefix
+                                        (sub stack [: (.index stack refused) None])))
                 (return (, None macro-epoch)))
             (= prefix (_blank-span prefix (sub refused 4) sentinel-start)))))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)

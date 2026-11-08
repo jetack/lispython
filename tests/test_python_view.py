@@ -45,6 +45,14 @@ def plus(pos, cols):
     return pos[0], pos[1] + cols
 
 
+def at_bar(src):
+    """(source, line, col) of src with its | cursor mark removed."""
+    index = src.index("|")
+    text = src.replace("|", "", 1)
+    line = text.count("\n", 0, index) + 1
+    return text, line, index - (text.rfind("\n", 0, index) + 1)
+
+
 def view_of(src):
     view = pv.compile_view(src)
     assert view is not None
@@ -298,23 +306,55 @@ class TestCursor:
 
         monkeypatch.setattr(pv, "compile_buffer", counted)
         src = '(def f [grid]\n  (print "a\rb") (when (== (sub gr\n'
-        pv.view_at_cursor(src, *plus(locate(src, "gr", 1), 2))
+        view = pv.view_at_cursor(src, *plus(locate(src, "gr", 1), 2))
         assert len(compiles) <= 5
+        # The blank lands on the refused forms, so the cursor stays in f.
+        assert view.text == "def f(grid):\n    print('a\\nb')\n    gr"
 
     @pytest.mark.parametrize(
         "src",
         [
-            "(def f [grid y",
-            "(def f [grid] (lambda [a y",
-            "(async-def f [grid y",
-            "(defmacro m [grid y",
+            "(def f [grid y|",
+            "(async-def f [grid y|",
+            "(defmacro m [grid y|",
+            "(def f [:x 1 :y|",
+            "(def f [:x|",
+            "(def f [*ar|",
+            "(def f[T|",
+            "(class A[T|",
+            "(fn [y|",
+            # A binding form among the forms the blank drops, not the one
+            # refused, or the one an error at its bracket belongs to.
+            "(def f [grid] (lambda [a y|",
+            "(def f [grid] (fn [y|",
+            "(def f [grid] (if (lambda [x|",
+            "(def f [grid] (when (== (lambda [x|",
+            "(def f [grid] (for [i (lambda [x|",
+            "(def f [grid] ((lambda [x|",
+            "(def f [grid] [(lambda [x|",
+            "(def f [grid] {(lambda [x|",
         ],
     )
-    def test_a_cursor_in_a_refused_forms_parameters_is_none(self, src):
-        # Defect: the def is refused at its bracket (no body) and unwrapped,
-        # so the parameter being named is answered as a name of the scope
-        # around it.
-        assert pv.view_at_cursor(src, *plus(locate(src, " y"), 2)) is None
+    def test_a_cursor_where_a_dropped_form_binds_a_name_is_none(self, src):
+        # Defect: unwrapping drops the form whose parameter (or type
+        # parameter) is being named, so that name is answered as a name of
+        # the scope around it.
+        assert pv.view_at_cursor(*at_bar(src)) is None
+
+    @pytest.mark.parametrize(
+        ["src", "text"],
+        [
+            ("(def f [grid] (lambda [a :b gr|", "def f(grid):\n    gr"),
+            ("(def f [grid] (lambda [a ^gr|", "def f(grid):\n    gr"),
+            ("(def f [grid] (lambda [a :b (g gr|", "def f(grid):\n    gr"),
+            ("(class A [Ba|", "Ba"),
+        ],
+    )
+    def test_a_default_annotation_or_base_is_read_around_the_form(self, src, text):
+        # Defect: every cursor in a parameter list gives no view, though a
+        # default, an annotation or a class base is evaluated in the scope
+        # around the form, where the backend knows the names.
+        assert pv.view_at_cursor(*at_bar(src)).text == text
 
     def test_unclosable_prefix_is_none(self):
         src = '(= my-x 1)\n(print f"{my-x.'

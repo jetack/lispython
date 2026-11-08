@@ -24,6 +24,7 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
+(from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
 ;; The one completion-spelling rule, shared with the nREPL, and the one
@@ -1227,7 +1228,7 @@
    defs feeds go-to-definition and completion, so it also holds the names
    bound by import/from and for/async-for; with params (completion's list
    alone, buffer-definition-names), the parameters of a def, async-def,
-   defmacro or lambda too, which a name-only definition lookup must never
+   defmacro, lambda or fn (LAMBDA-HEADS) too, which a name-only definition lookup must never
    offer for a name used elsewhere.  When symbols is a list, the same
    pass appends an lsp.SymbolInformation for each declaration a user searches
    for with workspace/symbol -- def, async-def, defmacro, class and = --
@@ -1298,7 +1299,7 @@
                                :defs defs :symbols symbols
                                :in-function in-function :params params))
 
-      (== form "lambda")
+      (in form LAMBDA-HEADS)
       (do (if (and params (>= (len node) 2))
               (_add-params defs uri (sub node 1)))
           (collect-definitions [c for c in node.list if (isinstance c Paren)]
