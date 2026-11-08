@@ -531,6 +531,29 @@ def completion_label(name, spellings):
     return hyphen_spelling(name)
 
 
+_SEPARATORS = frozenset("-_")
+
+
+def completion_prefix(typed, label):
+    """The filterText of a completion item labelled ``label`` for the word
+    ``typed``, or None when the label does not start with it: compared char
+    by char, case-insensitively, a ``-`` and a ``_`` match each other where
+    the typed one follows a letter or digit (``my_v`` matches ``my-var``),
+    while a leading one is literal (``-`` never matches ``_x``). The text is
+    ``typed`` plus the rest of the label, so a client's own prefix match
+    keeps the item; nothing typed matches every label. The one home of the
+    rule the LSP completion filters by."""
+    if len(label) < len(typed):
+        return None
+    for i, (t, c) in enumerate(zip(typed, label)):
+        if t.lower() == c.lower():
+            continue
+        if t in _SEPARATORS and c in _SEPARATORS and i and typed[i - 1].isalnum():
+            continue
+        return None
+    return typed + label[len(typed) :]
+
+
 def plain_name_p(sexp):
     """Whether ``sexp`` is shaped as a name: a symbol python_name_p accepts
     (so no dot and no operator: ``-`` fails the shape as ``+`` does). A shape

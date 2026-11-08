@@ -434,6 +434,11 @@
     ;; or a save changed its config file (saved); set by Backends.  Never
     ;; raises (_tell-view-prepared catches).
     (= self.on-view-prepared None)
+    ;; Called on the loop once the backend's input changed: with an lpy uri
+    ;; once that buffer's full view was synced to it (_sync-full), with None
+    ;; once it was told files on disk changed (file-saved, saved); set by
+    ;; Backends.  Never raises (_tell-input-changed catches).
+    (= self.on-input-changed None)
     ;; The view root's config file text the running process last read: at
     ;; its start (_spawn) or when told it changed (saved).
     (= self._config-text None)
@@ -729,10 +734,21 @@
     (if (or (is full None) (not self.running))
         (return False))
     (try
-      (return (._sync self lpy-uri (sub full 0) :origin (sub full 1)))
+      (= synced (._sync self lpy-uri (sub full 0) :origin (sub full 1)))
       (except [Exception]
         (.debug logger "python backend: cannot sync %s" lpy-uri :exc-info True)
-        (return False))))
+        (return False)))
+    (if synced
+        (._tell-input-changed self lpy-uri))
+    (return synced))
+
+  (def _tell-input-changed [self lpy-uri]
+    "Call on-input-changed with lpy-uri, if set.  Never raises."
+    (if (is-not self.on-input-changed None)
+        (try
+          (self.on-input-changed lpy-uri)
+          (except [Exception]
+            (.exception logger "lispython LSP: reacting to a backend input change failed")))))
 
   (def _diagnostics-published [self client params]
     "The backend published diagnostics (publishDiagnostics params) from
@@ -862,8 +878,10 @@
                                   :type lsp.FileChangeType.Deleted)
                    for path in sweep.removed]))
     (if (and changes self.running)
-        (.workspace-did-change-watched-files self._client
-          (lsp.DidChangeWatchedFilesParams :changes changes))))
+        (do (.workspace-did-change-watched-files self._client
+              (lsp.DidChangeWatchedFilesParams :changes changes))
+            ;; On the loop: the thread's work ended at the await above.
+            (._tell-input-changed self None))))
 
   (async-def saved [self lpy-uri]
     "Document lpy-uri was saved: file-saved, then, when that changed the
@@ -883,6 +901,7 @@
       (lsp.DidChangeWatchedFilesParams
         :changes [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
                                  :type lsp.FileChangeType.Changed)]))
+    (._tell-input-changed self None)
     (._tell-view-prepared self))
 
   (async-def shutdown [self]
@@ -992,7 +1011,9 @@
    server, is called with an lpy uri when the backend published that
    buffer's diagnostics; on-view-prepared with a BackendClient once its
    start succeeded, over the view root's shadows and config file it wrote,
-   or a save changed its config file."
+   or a save changed its config file; on-input-changed with an lpy uri once
+   that buffer's full view reached a backend, or None once a backend was
+   told files on disk changed."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
@@ -1000,6 +1021,7 @@
     (= self.python-diagnostics True)
     (= self.on-diagnostics None)
     (= self.on-view-prepared None)
+    (= self.on-input-changed None)
     (= self.clients {})
     (= self._tasks (set))
     (= self._closed False))
@@ -1027,6 +1049,11 @@
           (except [Exception]
             (.exception logger "lispython LSP: publishing diagnostics failed for %s"
                         lpy-uri)))))
+
+  (def _input-changed [self lpy-uri]
+    ;; BackendClient._tell-input-changed catches what this raises.
+    (if (is-not self.on-input-changed None)
+        (self.on-input-changed lpy-uri)))
 
   (def _view-prepared [self client]
     ;; BackendClient._tell-view-prepared catches what this raises.
@@ -1079,6 +1106,7 @@
                                      (in self.name DEFINITION-WALKS-UP)))
             (= client.on-diagnostics self._diagnostics-arrived)
             (= client.on-view-prepared self._view-prepared)
+            (= client.on-input-changed self._input-changed)
             (= (sub self.clients root) client)))
     (if (is (.backend-uri client lpy-uri) None)
         (return None))

@@ -162,11 +162,14 @@ def lsp_document(backend_project, monkeypatch):
     server = importlib.import_module("lispy.lsp.server")
     python_view = importlib.import_module("lispy.lsp.python_view")
     monkeypatch.setattr(server, "view_cache", python_view.ViewCache())
+    monkeypatch.setattr(server, "completion_cache", server.CompletionCache())
     versions = itertools.count(1)
     uri = (backend_project / "main.lpy").as_uri()
 
     def open_buffer(marked, backends, **ls_attrs):
         monkeypatch.setattr(server, "backends", backends)
+        # As the server wires its own Backends.
+        monkeypatch.setattr(backends, "on_input_changed", server.backend_input_changed)
         before, after = marked.split("|")
         line_start = before.rfind("\n") + 1
         position = lsp.Position(
@@ -190,7 +193,8 @@ def lsp_buffer(lsp_document, real_backends):
     the local go-to-definition reads); position is the cursor in
     UTF-16 units, as a client sends it. lsp_buffer.document is the last
     buffer, a real pygls TextDocument, so lines and the position codec are
-    the ones the server uses. Each test gets a fresh view cache."""
+    the ones the server uses. Each test gets a fresh view cache and
+    completion cache."""
 
     def open_buffer(marked, backends=real_backends, **ls_attrs):
         opened = lsp_document(marked, backends, **ls_attrs)
