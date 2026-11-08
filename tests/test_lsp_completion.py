@@ -778,6 +778,44 @@ def test_a_fallback_definition_and_the_backends_item_share_a_label(
 
 
 @once
+@pytest.mark.parametrize(
+    "source",
+    ["(def main []\n  (|\n(= ? 1)\n", "(= ? 1)\n(print |)"],
+    ids=["fallback-view", "full-view"],
+)
+def test_a_symbol_only_definition_and_the_backends_item_share_its_spelling(
+    merged, backend_requests, source
+):
+    # Defect: the definition's own spelling (?) known to the fallback list
+    # alone, while the backend's item of its Python name (_p) is labelled by
+    # the buffer's spellings, which lacked it: two items over a fallback
+    # view, and _p over a full view where the backend off offers ?.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="_p", kind=lsp.CompletionItemKind.Variable),
+    ]
+    same = [
+        item.label for item in merged(source)[2] if server.py_name(item.label) == "_p"
+    ]
+    assert same == ["?"]
+
+
+@pytest.mark.parametrize(
+    "definition, label",
+    [("(= ? 1)", "?"), ("(= -?- 1)", "-?-"), ("(= self.ok? 1)", "self.ok?")],
+)
+def test_the_fallback_list_keeps_a_symbol_only_or_dotted_definition_spelling(
+    complete, off_backends, definition, label
+):
+    # Defect: buffer-spellings keys only dotted parts that spell a name, so
+    # these definitions were labelled by the hyphen rule alone (_p, __p_,
+    # self.ok-p) and typing their own spelling dropped the item.
+    answer = complete(f"{definition}\n(print |)", off_backends)[2]
+    labels = [item.label for item in answer]
+    assert labels.count(label) == 1
+    assert not {"_p", "__p_", "self.ok-p"} & set(labels)
+
+
+@once
 def test_the_fallback_list_hyphenates_a_nested_macro(complete, off_backends):
     # Defect: a defmacro nested in a (do ...), which registers all the same,
     # is offered in a spelling other than the default (in_do).

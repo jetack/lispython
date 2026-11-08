@@ -327,9 +327,8 @@ def operator_spelling_p(text):
 def python_name_p(text):
     """Whether the undotted symbol spelled ``text`` is a name python_name
     accepts: its mangled text passes identifier_p and it is no operator
-    (operator_spelling_p). Not the LSP's name-spelling-p (python_view.lpy),
-    which also asks for a letter or digit, so ``_`` and ``->`` are names here
-    and none there."""
+    (operator_spelling_p), so ``_``, ``?`` and ``->`` are names and ``-``
+    is none."""
     return identifier_p(Symbol(text).name) and not operator_spelling_p(text)
 
 
@@ -486,26 +485,21 @@ def hyphen_spelling(text):
     )
 
 
-def name_spelling_p(part):
-    """Whether ``part`` (one ``.``-part of a symbol) spells a Python name: its
-    Python name is an identifier and it holds a letter or digit, so an
-    operator such as ``-`` (Python name ``_``) is none."""
-    return identifier_p(Symbol(part).name) and any(map(str.isalnum, part))
-
-
 def name_spellings(nodes):
     """Python name -> the first spelling of it in ``nodes`` in source order:
     every Symbol counts, a dotted one (``a.my-b``) by each of its parts, each
-    only when it spells a name (name_spelling_p).  Iterative, so a deeply
-    nested tree costs no Python frame per level.  completion_label reads the
-    map; the LSP builds it from the buffer, the nREPL from evaluated code."""
+    only when the compiler reads it as a name (python_name_p: ``?`` and
+    ``-?-`` are the names ``_p`` and ``__p_``, the operator ``-`` is not the
+    name ``_``).  Iterative, so a deeply nested tree costs no Python frame
+    per level.  completion_label reads the map; the LSP builds it from the
+    buffer, the nREPL from evaluated code."""
     spellings = {}
     stack = list(reversed(nodes))
     while stack:
         node = stack.pop()
         if isinstance(node, Symbol):
             for part in node.value.split("."):
-                if name_spelling_p(part):
+                if python_name_p(part):
                     spellings.setdefault(Symbol(part).name, part)
         elif isinstance(node, Expression):
             stack.extend(reversed(node.list))
@@ -518,17 +512,22 @@ def name_spellings(nodes):
 
 
 def completion_label(name, spellings):
-    """The completion label of Python name ``name``: the spelling the code
-    uses (``spellings``, name_spellings' map) when that is no hyphenated
-    spelling of ``name`` (``ok?`` for ``ok_p``, ``->foo`` for ``_to_foo``:
-    name_key keeps it apart from ``name``), else hyphen_spelling, so a plain
-    ``my_x`` in the code never wins over ``my-x``.  The one rule of both the
-    LSP and the nREPL, so an editor merging their answers sees one label per
-    name."""
-    spelled = spellings.get(name)
-    if spelled is not None and name_key(spelled) != name:
+    """The completion label of Python name ``name``, ``.``-part by part, as
+    name_spellings keys the code's spellings: the spelling the code uses
+    (``spellings``, name_spellings' map) when that is no hyphenated spelling
+    of the part (``ok?`` for ``ok_p``, ``->foo`` for ``_to_foo``: name_key
+    keeps it apart from the part), else hyphen_spelling, so a plain ``my_x``
+    in the code never wins over ``my-x`` (``self.ok_p`` is ``self.ok?``).
+    The one rule of both the LSP and the nREPL, so an editor merging their
+    answers sees one label per name."""
+    return ".".join(_part_label(part, spellings) for part in name.split("."))
+
+
+def _part_label(part, spellings):
+    spelled = spellings.get(part)
+    if spelled is not None and name_key(spelled) != part:
         return spelled
-    return hyphen_spelling(name)
+    return hyphen_spelling(part)
 
 
 _SEPARATORS = frozenset("-_")

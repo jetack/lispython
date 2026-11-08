@@ -615,9 +615,10 @@ def test_an_operator_is_never_the_name_its_mangling_gives():
 
 def test_an_operator_never_spells_a_name():
     # Defect: (- a b) records - as the spelling of _ (py-name of -), so a
-    # backend member _ is relabelled "-"; ? (py-name _p) likewise.
+    # backend member _ is relabelled "-".  ? is a name (the compiler binds
+    # it as _p), so it does spell _p.
     spellings = server.buffer_spellings("(- a b)\n(? c)\n(= x._ x._p)")
-    assert (spellings.get("_", "_"), spellings["_p"]) == ("_", "_p")
+    assert (spellings.get("_", "_"), spellings["_p"]) == ("_", "?")
 
 
 def test_completion_reads_the_view_generation_before_the_hand_off(
