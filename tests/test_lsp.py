@@ -115,7 +115,8 @@ def test_definition_hover_and_references(buffer):
 
 
 def test_completion(buffer):
-    items = run_completion(ls_with(buffer), position(2, 2))
+    # Right after the last line's (, so no typed word filters the list.
+    items = run_completion(ls_with(buffer), position(2, 1))
     labels = {item.label for item in items.items}
     assert {"foo", "bar"} <= labels
 

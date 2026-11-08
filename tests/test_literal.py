@@ -6,6 +6,7 @@ import warnings
 import pytest
 
 from lispy.core.compiler.literal import (
+    completion_prefix,
     hyphen_spelling,
     hyphenated_name_p,
     identifier_p,
@@ -753,3 +754,49 @@ class TestMacroBuiltFields:
             f"{head} format spec: part 2 must be a replacement field"
         )
         assert info.value.lineno == 3
+
+
+class TestCompletionPrefix:
+    """completion_prefix, the rule the LSP completion filters items by."""
+
+    @pytest.mark.parametrize(
+        "typed, label",
+        [
+            ("my-", "my-var"),
+            ("my_", "my-var"),
+            ("my_val-x", "my-val-x"),
+            ("my-val_x", "my-val-x"),
+            ("my-v", "my_var"),
+            ("MY-V", "my-var"),
+            ("Ok", "ok?"),
+            ("->f", "->foo"),
+            ("_", "_x"),
+            ("", "anything"),
+            ("my-var", "my-var"),
+        ],
+    )
+    def test_matching_labels_keep_the_typed_word(self, typed, label):
+        # Defects: a separator spelt the other way (`my_v` against `my-var`)
+        # or a case difference filtering the item out, or a filterText that
+        # does not start with the word as typed, which a client's own prefix
+        # match then drops.
+        assert completion_prefix(typed, label) == typed + label[len(typed) :]
+
+    @pytest.mark.parametrize(
+        "typed, label",
+        [
+            ("-", "_x"),
+            ("_", "-x"),
+            ("-f", "_foo"),
+            ("my-var", "my-va"),
+            ("my--", "my-_x"),
+            ("myv", "my-var"),
+            ("x", "ax"),
+        ],
+    )
+    def test_other_labels_do_not_match(self, typed, label):
+        # Defects: a leading separator matched loosely (`-` offering every
+        # `_private`), a separator after a separator treated as a word
+        # break, a shorter label compared past its end, a dropped separator
+        # or an infix match.
+        assert completion_prefix(typed, label) is None

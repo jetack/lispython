@@ -23,8 +23,9 @@
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
-;; The one completion-spelling rule, shared with the nREPL.
-(from lispy.core.compiler.literal [completion-label name-spellings])
+;; The one completion-spelling rule, shared with the nREPL, and the one
+;; completion matching rule.
+(from lispy.core.compiler.literal [completion-label completion-prefix name-spellings])
 (from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
@@ -1288,6 +1289,7 @@
 (def did-close [ls params]
   (forget-diagnostics ls params.text_document.uri)
   (.forget view-cache params.text_document.uri)
+  (.invalidate completion-cache)
   (.document-closed backends params.text_document.uri)))
 
 ;; pygls' own shutdown awaits this before it answers, so every backend has
@@ -1704,24 +1706,6 @@
       (return (lsp.InsertReplaceEdit :new-text new-text :insert insert :replace replace)))
   (return (lsp.TextEdit :range insert :new-text new-text)))
 
-;; filterText decides whether the client keeps an item while the user types
-;; (VS Code and eglot's flex matching read it, not the label).  `-` is a
-;; completion trigger character, so the client asks again right after one
-;; and filters that answer by the word typed so far, hyphen included; `_` is
-;; not, so after a `_` the client filters the answer it already holds.  So
-;; an item carries the spelling being typed: its label, the hyphen spelling
-;; (hyphen-spelling), once the typed word holds a `-` (my-|), else the
-;; Python name, which also matches what a user typing `_` spells (my_|).
-(def filter-text [label name typed]
-  "The filterText of a completion item labelled label (completion-label)
-   for Python name name, when typed is the word typed so far: a label that
-   is no hyphen spelling of name (the buffer's ok?, ->foo) itself, since
-   the user types it as written (? is no trigger character); else name
-   while typed holds no -, then label."
-  (if (!= label (hyphen-spelling name))
-      (return label))
-  (return (ife (in "-" typed) label name)))
-
 (def client-capability-p [ls path]
   "Whether the client advertises the capability at path (attribute names
    below ClientCapabilities) as True; False before initialize and for a
@@ -1805,7 +1789,7 @@
   (return items))
 
 (def local-completion [doc :line None :col None :base None]
-  "The completion answer when no Python view gives one: the general list,
+  "The completion items when no Python view gives any: the general list,
    or on an attribute (attribute-context-p at line and col) only the
    qualified macros of base, the qualified-base there, over doc's cached
    full view (qualified-macro-items over compiled-view, never a compile:
@@ -1819,12 +1803,8 @@
   (if (and (is-not line None) (is-not col None)
            (attribute-context-p doc.source line col))
       (do (= view (ife (is base None) None (compiled-view doc)))
-          (return (lsp.CompletionList
-                    :is-incomplete False
-                    :items (ife (is view None) []
-                                (qualified-macro-items view base))))))
-  (return (lsp.CompletionList :is-incomplete False
-                              :items (general-items doc :line line))))
+          (return (ife (is view None) [] (qualified-macro-items view base)))))
+  (return (general-items doc :line line)))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion through the Python backend
@@ -2022,14 +2002,13 @@
   "The backend's completion items as the buffer's: labelled by
    completion-label (the hyphen spelling, move-to-end, never move_to_end
    whatever the buffer writes; the buffer's own spelling only where the
-   hyphen rule cannot spell it, ok?), with filterText and edit over the
-   .lpy word at the cursor.  What is positioned in or tied to the generated code
+   hyphen rule cannot spell it, ok?), with an edit over the .lpy word at
+   the cursor (filtered-answer filters them).  What is positioned in or tied to the generated code
    (text_edit, insert_text, command, data) is dropped: it would land on
    lines the user never wrote.  So is an item with additional_text_edits
    (an auto-import of a symbol the buffer never binds), and a Python
    keyword (python-syntax-p)."
   (= ranges (completion-ranges doc line col))
-  (= typed (sub ranges 2))
   (= result [])
   (for item in items
     (if (or (python-syntax-p item) item.additional-text-edits)
@@ -2047,7 +2026,6 @@
         :tags item.tags
         :deprecated item.deprecated
         :preselect item.preselect
-        :filter-text (filter-text label name typed)
         :text-edit (completion-edit ranges label insert-replace))))
   (return result))
 
@@ -2275,22 +2253,141 @@
                            :failed failed))))
 
 (async-def backend-answer [client doc line col timeout]
-  "(view, items, incomplete): the cursor view of doc, the backend's
-   completion items there ([] when either is missing, backend-request) and
-   whether the backend marked its list incomplete."
+  "(view, items, listed): the cursor view of doc, the backend's completion
+   items there ([] when either is missing, backend-request), and whether
+   the backend answered with a list or a CompletionList, marked incomplete
+   or not (never a null answer, a missing view, or a request that failed
+   or timed out)."
   (= [view answer] (await (backend-request
                             client doc line col timeout lsp.TEXT_DOCUMENT_COMPLETION
                             (fn [document view]
                               (lsp.CompletionParams :text-document document
-                                                    :position (generated-position view))))))
-  (return (, view (completion-items answer)
-             (and (isinstance answer lsp.CompletionList) (is answer.is-incomplete True)))))
+                                                    :position (generated-position view)))
+                            :failed NO-ANSWER)))
+  (= listed (isinstance answer (, list lsp.CompletionList)))
+  (return (, view (ife (is answer NO-ANSWER) [] (completion-items answer)) listed)))
+
+(def completion-context [doc line col attribute]
+  "(key, typed) of a completion at the 1-based line and code-point col of
+   snapshot doc: typed, the word typed before the cursor (partial-span, as
+   completion-ranges reads it); key, what a backend answer there depends on
+   besides that word: the line, the word's start, the text before the word
+   and after the cursor, and whether it is an attribute."
+  (= lines (.split doc.source "\n"))
+  (= text (line-text doc.source line))
+  (= col (min col (len text)))
+  (= start (sub (partial-span text col) 0))
+  (= before (.join "\n" [*(sub lines [: None (max 0 (- line 1))]) (sub text [: None start])]))
+  (= after (.join "\n" [(sub text [: col None]) *(sub lines [: line None])]))
+  (return (, (, line start before after attribute) (sub text [: start col]))))
+
+(class CachedCompletion []
+  "A backend completion answer kept for the next keystrokes of its word:
+   client, the BackendClient that gave it; key and typed, completion-context's
+   at the request; epoch, the macro environment its view compiled under
+   (macro_modules.epoch); answer, the (view, items) of backend-answer."
+  (def __init__ [self client key typed epoch answer]
+    (= self.client client)
+    (= self.key key)
+    (= self.typed typed)
+    (= self.epoch epoch)
+    (= self.answer answer)))
+
+(class CompletionCache []
+  "uri -> the CachedCompletion of a document's last backend completion, so
+   a keystroke that only extends the word it was fetched for asks no
+   cursor view and no backend: the backend's items do not depend on the
+   word past what it already matched, and the items are built and filtered
+   anew from them each time (backend-items, filtered-answer).  An answer
+   also depends on every other file the backend reads, so invalidate drops
+   it once the backend's input changed (backend-input-changed) or a
+   document closed.  generation tells an answer still in flight whether an
+   invalidate that did not spare its uri came meanwhile.  Only the
+   completion handler, did-close and the backend's hooks use it, all on
+   the loop."
+  (def __init__ [self]
+    (= self._entries {})
+    ;; generation(uri) is _invalidations less the invalidations that spared
+    ;; uri (_spared), so an invalidate keeping uri leaves its generation.
+    (= self._invalidations 0)
+    (= self._spared {}))
+
+  (def generation [self uri]
+    "A number that moves whenever an invalidate drops uri's entry."
+    (return (- self._invalidations (.get self._spared uri 0))))
+
+  (def get [self uri client key typed epoch]
+    "The cached answer of uri when client, key and epoch are its and typed
+     extends, as written, the word it was fetched for, else None."
+    (= entry (.get self._entries uri))
+    (if (or (is entry None) (is-not entry.client client) (!= entry.key key)
+            (is epoch None) (!= entry.epoch epoch)
+            (not (.startswith typed entry.typed)))
+        (return None))
+    (return entry.answer))
+
+  (def put [self uri entry generation]
+    "Keep entry as uri's, unless uri's generation moved past generation,
+     read before its request."
+    (if (== generation (.generation self uri))
+        (= (sub self._entries uri) entry)))
+
+  (def invalidate [self :keep None]
+    "Drop every entry but keep's, the uri whose own edit its key already
+     tells (None: drop all): the one way entries go."
+    (+= self._invalidations 1)
+    (if (is keep None)
+        (= self._spared {})
+        (= (sub self._spared keep) (+ (.get self._spared keep 0) 1)))
+    (= self._entries (ife (in keep self._entries)
+                          {keep (sub self._entries keep)}
+                          {}))))
+
+(def backend-input-changed [uri]
+  "Backends' on-input-changed: the backend now holds the full view of
+   buffer uri, whose own entry its key already tells, or (None) was told
+   files on disk changed."
+  (.invalidate completion-cache :keep uri))
+
+(= backends.on-input-changed backend-input-changed)
+
+(= completion-cache (CompletionCache))
+
+(async-def cached-backend-answer [client doc line col timeout attribute]
+  "backend-answer's (view, items) at the 1-based line and code-point col
+   of snapshot doc, from completion-cache when it holds the answer for
+   this word.  A fresh answer is kept only when the backend answered with
+   a non-empty list over a view (an empty one may come while it still
+   analyses), under one macro environment from before the request to after
+   it (so the view was compiled under it), and no invalidate dropped the
+   document's entry while it was asked (CompletionCache.generation).  A list marked
+   incomplete is kept too: pyrefly and basedpyright mark every answer
+   incomplete, so refusing it would ask the backend on every keystroke;
+   that a kept answer offers what a fresh request would is pinned per real
+   backend (test_a_kept_answer_offers_what_a_fresh_request_does)."
+  (= [key typed] (completion-context doc line col attribute))
+  ;; epoch stats the tracked files, so it is read off the loop.
+  (= epoch (await (asyncio.to-thread macro-modules.epoch)))
+  (= hit (.get completion-cache doc.uri client key typed epoch))
+  (if (is-not hit None)
+      (return hit))
+  (= generation (.generation completion-cache doc.uri))
+  (= [view items listed] (await (backend-answer client doc line col timeout)))
+  (= answer (, view items))
+  (if (and listed items (is-not view None) (is-not epoch None)
+           (== epoch (await (asyncio.to-thread macro-modules.epoch))))
+      (.put completion-cache doc.uri (CachedCompletion client key typed epoch answer)
+            generation))
+  (return answer))
 
 (async-def backend-completion [doc line col base insert-replace]
-  "The completion answer over a Python view of doc, with the backend's help
+  "The completion items over a Python view of doc, with the backend's help
    when there is one, or None when there is none (no view, no items), and
-   local-completion is the answer.  doc is a snapshot (document-snapshot);
-   base is the qualified-base at the cursor.
+   local-completion is the answer (filtered-answer filters either).  doc
+   is a snapshot (document-snapshot); base is the qualified-base at the
+   cursor.  base is read off the text before the word, which the
+   completion-cache key holds, so a kept backend answer never outlives its
+   base, and the qualified macros are built anew from the kept view.
    On an attribute the backend's items answer, after the qualified macros
    of base (qualified-macro-items, winning by name-key), which answer
    alone when the backend gives no items; the request may start the
@@ -2311,15 +2408,15 @@
           (if (is view None)
               (return None))
           (= macros (qualified-macro-items view base))
-          (return (ife macros (lsp.CompletionList :is-incomplete False :items macros)
-                       None))))
+          (return (or macros None))))
   (= attribute (attribute-context-p doc.source line col))
   (if (and (not attribute) (not client.running))
       ;; Start one for the next keystroke, and answer this one now.
       (do (.start-soon client)
           (return None)))
-  (= [view items incomplete] (await (backend-answer client doc line col
-                                                    (ife attribute None MERGE-TIMEOUT))))
+  (= [view items] (await (cached-backend-answer
+                                      client doc line col
+                                      (ife attribute None MERGE-TIMEOUT) attribute)))
   (if (is view None)
       (return None))
   (= found (backend-items doc line col items insert-replace
@@ -2333,7 +2430,7 @@
         (return None)
         (not view.attribute)
         (= found (merged-items doc line view found)))
-  (return (lsp.CompletionList :is-incomplete incomplete :items found)))
+  (return found))
 
 (def document-snapshot [doc]
   "doc's text, version and position codec as they are now.  A handler that
@@ -2555,17 +2652,27 @@
             :active-signature answer.active-signature
             :active-parameter answer.active-parameter)))
 
-(def with-filter-texts [doc line col answer]
-  "answer with a filterText (filter-text, the label's py-name as the name)
-   on every item that has none, typed from completion-ranges at the 1-based
-   line and code-point col: the one pass that puts every item, whichever
-   builder made it (own items, macros, the fallback lists), under the rule
-   backend-items follows."
-  (= typed (sub (completion-ranges doc line col) 2))
-  (for item in answer.items
-    (if (is item.filter-text None)
-        (= item.filter-text (filter-text item.label (py-name item.label) typed))))
-  (return answer))
+;; The server filters completion items on every keystroke: an item stays
+;; when its label starts with the word typed (completion-prefix: case
+;; aside, `-` and `_` after a letter or digit match each other), and its
+;; filterText is that word as typed plus the rest of the label.  Every
+;; answer is isIncomplete, so the client asks again on each keystroke
+;; rather than filtering an older answer by rules of its own, and a
+;; client's plain prefix match over filterText keeps exactly the server's
+;; items (filtered-answer).
+(def filtered-answer [typed items]
+  "The items whose label starts with typed, the word typed so far
+   (completion-prefix), each with that filterText, as an incomplete
+   CompletionList: the one pass every completion answer goes through,
+   whichever builder made its items (backend, own items, macros, the
+   fallback lists)."
+  (= kept [])
+  (for item in items
+    (= text (completion-prefix typed item.label))
+    (if (is-not text None)
+        (do (= item.filter-text text)
+            (.append kept item))))
+  (return (lsp.CompletionList :is-incomplete True :items kept)))
 
 (deco (server.feature
         lsp.TEXT_DOCUMENT_COMPLETION
@@ -2576,7 +2683,7 @@
     (= [line col] (cursor-of doc params.position))
     (except [Exception]
       (.debug logger "completion position failed" :exc-info True)
-      (return (local-completion doc))))
+      (return (filtered-answer "" (local-completion doc)))))
   (= insert-replace (insert-replace-support ls))
   ;; Once per completion: it lexes the whole text before the cursor.
   (try
@@ -2591,7 +2698,7 @@
       (= result None)))
   (if (is result None)
       (= result (local-completion doc :line line :col col :base base)))
-  (return (with-filter-texts doc line col result))))
+  (return (filtered-answer (sub (completion-ranges doc line col) 2) result))))
 
 ;; ---------------------------------------------------------------------------
 ;; Definition and references through the Python backend
