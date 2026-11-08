@@ -602,6 +602,14 @@ def test_complete_labels_a_name_as_the_evaluated_code_spells_it(isolated):
     assert complete_labels("->f", isolated) == ["->foo"]
 
 
+def test_complete_labels_a_symbol_only_name_as_the_code_spells_it(isolated):
+    # Defect: the record keeping only spellings with a letter or digit, so
+    # ? (the name _p) is offered as _p beside the LSP's ?, and an editor
+    # merging both shows the name twice.
+    assert dispatch(isolated, code="(= ? 1)")["error"] is None
+    assert complete_labels("?", isolated) == ["?"]
+
+
 def test_a_later_hyphen_spelling_keeps_the_code_spelling(isolated):
     # Defect: a later eval's ok-p overwriting the recorded ok?, so ok_p is
     # labelled ok-p while the LSP (the buffer's first spelling) keeps ok?,

@@ -777,6 +777,28 @@ def test_a_fallback_definition_and_the_backends_item_share_a_label(
     assert same == ["ok-p"]
 
 
+@once
+@pytest.mark.parametrize(
+    "source",
+    ["(def main []\n  (|\n(= ? 1)\n", "(= ? 1)\n(print |)"],
+    ids=["fallback-view", "full-view"],
+)
+def test_a_symbol_only_definition_and_the_backends_item_share_its_spelling(
+    merged, backend_requests, source
+):
+    # Defect: the definition's own spelling (?) known to the fallback list
+    # alone, while the backend's item of its Python name (_p) is labelled by
+    # the buffer's spellings, which lacked it: two items over a fallback
+    # view, and _p over a full view where the backend off offers ?.
+    backend_requests.answer["value"] = [
+        lsp.CompletionItem(label="_p", kind=lsp.CompletionItemKind.Variable),
+    ]
+    same = [
+        item.label for item in merged(source)[2] if server.py_name(item.label) == "_p"
+    ]
+    assert same == ["?"]
+
+
 @pytest.mark.parametrize(
     "definition, label",
     [("(= ? 1)", "?"), ("(= -?- 1)", "-?-"), ("(= self.ok? 1)", "self.ok?")],

@@ -1774,9 +1774,8 @@
    lispython's own (lispython-items), the Python builtins (builtin-names),
    then the buffer's definitions (buffer-definition-names), each name once
    (name-key); builtins labelled by their hyphen spelling (hyphen-spelling),
-   the buffer's definitions, macros included, by completion-label (as
-   buffer-definition-names labels them: the definition's own spelling where
-   the hyphen rule cannot write it)."
+   the buffer's definitions, macros included, as buffer-definition-names
+   labels them (completion-label)."
   (= items (lispython-items))
   (= seen (set [(name-key item.label) for item in items]))
   (for [label kind] in [*[(, (hyphen-spelling name) kind)
@@ -2044,11 +2043,6 @@
       (except [Exception]
         (pass))))
   (= spellings (buffer-spellings doc.source :line line))
-  ;; buffer-spellings keys only the dotted parts that spell a name, so a
-  ;; definition of ?, -?- or self.ok? has no entry under its Python name:
-  ;; its own spelling is the fallback (the buffer's first spelling wins).
-  (for name in names
-    (.setdefault spellings (py-name name) name))
   (return [(completion-label (py-name name) spellings) for name in names]))
 
 (def merged-items [doc line view items]
