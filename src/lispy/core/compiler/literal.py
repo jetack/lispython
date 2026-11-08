@@ -603,16 +603,18 @@ def name_compile(symbol, ctx):
     position_info = {**symbol.position_info}
     # Positions are .lpy columns: measure the spelling's components (``a.x->y``),
     # never the mangled Python names, which differ in length. Measure only when
-    # the spelling fits the symbol's own one-line span, so a measured end never
-    # leaves it: a symbol that borrowed another node's position (a macro
-    # template placed at its call, quote expansion's classname symbol) is
-    # measured when its spelling fits that span, and otherwise keeps the whole
-    # span on every part.
+    # the span is the symbol's own: one line exactly as long as the spelling,
+    # which is every symbol the reader makes (it moves the start past a ``^``,
+    # ``:``, ``*``, ``**`` or sign prefix). A symbol that borrowed another
+    # node's position (a macro template placed at its call, quote expansion's
+    # classname symbol) keeps that whole span on every part, so an error on it
+    # lands on the whole call: a measured end would cut the call's text at the
+    # spelling's length, or run past it.
     [spelled, *spelled_attrs] = symbol.value.split(".")
     measured = (
         position_info["lineno"] == position_info["end_lineno"]
         and position_info["col_offset"] + len(symbol.value)
-        <= position_info["end_col_offset"]
+        == position_info["end_col_offset"]
     )
     if measured:
         position_info["end_col_offset"] = position_info["col_offset"] + len(spelled)
