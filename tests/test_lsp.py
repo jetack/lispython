@@ -412,15 +412,17 @@ class TestRequireSelection:
         expected = package / ("__init__.lpy" if "[macmod]" in form else "macmod.lpy")
         assert got == str(expected)
 
+    @pytest.mark.parametrize("form", ["(require ..macmod)", "(from ..macmod [x])"])
     def test_a_relative_module_beyond_the_top_level_package_resolves_to_nothing(
-        self, package
+        self, package, form
     ):
         # Defect: each dot walks up one directory with no package boundary,
         # so ..macmod from pkg/mod.lpy finds the top-level macmod.lpy, which
         # Python's import never reaches.
-        source = "(require ..macmod)\n(macmod.thrice 1)"
-        uri = (package / "mod.lpy").as_uri()
-        assert not self._definition_in(source, uri, package.parent.parent, 1, 9)
+        [node] = parse(form)
+        origin = str(package / "mod.lpy")
+        folders = [SimpleNamespace(uri=package.parent.as_uri())]
+        assert server.find_import_target(node, folders, origin=origin) is None
 
     def test_a_buffer_with_no_file_resolves_no_relative_module(
         self, package, monkeypatch

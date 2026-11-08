@@ -157,6 +157,14 @@ class TestRequireQualifier:
         assert "no known parent package" in info.value.msg
         assert (info.value.lineno, info.value.offset) == (2, 12)
 
+    def test_a_malformed_relative_path_is_no_package_alone(self):
+        # Defect: .mac. is read as a package alone, whose message suggests
+        # (require .mac. as name), which fails again.
+        scope = {"__macro_namespace": {}}
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse("(require .mac.)"), scope))
+        assert "expects a module name" in info.value.msg
+
     def test_a_package_alone_names_the_fix(self):
         # Python binds no name for from . import, so neither may a require:
         # the message must say what does.
