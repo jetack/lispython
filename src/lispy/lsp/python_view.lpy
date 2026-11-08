@@ -45,7 +45,7 @@
 (from lispy.core.macro-table [MacroTable])
 (from lispy.core.compiler.literal [hyphen-spelling name-key python-name-p])
 (from lispy.core.unparse [unparse])
-(from lispy.core.importer [package-root])
+(from lispy.core.importer [has-init-file package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
 (from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
 
@@ -1308,21 +1308,39 @@
 
 (def backend-search-dirs [names]
   "The search dirs of module-names' result names that the backend searches
-   for the module (ShadowManifest.import-roots): all but the file's own
-   directory when that lies inside a regular package (it is not its own
-   script root)."
+   for the module (ShadowManifest.import-roots): the import root, and each
+   other search dir that is no regular package and lies inside none below
+   the import root (_in-regular-package-p)."
   ;; The backend config (extraPaths, search-path) is project-wide, while
   ;; `lpy` puts the own directory on sys.path only for the file it runs.  A
-  ;; package interior as a top-level root would shadow the stdlib and
-  ;; top-level names for every file (src/pkg/json.py answering `import
-  ;; json`) and make one module importable under two names (helper and
-  ;; pkg.helper).  A script directory that is no package is already the
-  ;; script root, a top-level root anyway.
-  (= search-dirs (sub names 3))
-  (= directory (sub search-dirs 0))
-  (if (== directory (sub (package-root directory) 0))
-      (return search-dirs))
-  (return (sub search-dirs [: 1 _])))
+  ;; directory inside a package (src/pkg, or src/pkg/res with no __init__ of
+  ;; its own) as a top-level root would shadow the stdlib and top-level
+  ;; names for every file (src/pkg/json.py answering `import json`) and make
+  ;; one module importable under two names (helper and pkg.helper).  A
+  ;; script directory in no package is a top-level root anyway.  Derived
+  ;; from names alone, so module-names stays the one home of the script
+  ;; root and import root.
+  (= import-root (sub names 2))
+  (= kept [])
+  (for directory in (sub names 3)
+    (if (or (== directory import-root)
+            (not (_in-regular-package-p directory import-root)))
+        (.append kept directory)))
+  (return (tuple kept)))
+
+(def _in-regular-package-p [directory import-root]
+  "Whether directory or a directory above it, up to but not including
+   import-root, is a regular package (has-init-file, the importer's
+   predicate)."
+  (= current directory)
+  (while (!= current import-root)
+    (if (has-init-file current)
+        (return True))
+    (= parent (osp.dirname current))
+    (if (== parent current)
+        (return False))
+    (= current parent))
+  (return False))
 
 ;; Directory names a source sweep never enters: dependencies and caches, not
 ;; the project's own modules.  Dot-directories and virtualenvs (a directory

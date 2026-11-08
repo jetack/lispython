@@ -820,6 +820,28 @@ class TestShadows:
         assert not init.is_symlink() and init.read_text() == "i = 1"
         assert (pkg / "__init__.py").read_text() == "from .helper import h"
 
+    def test_a_plain_directory_inside_a_package_is_no_backend_search_path(
+        self, tmp_path
+    ):
+        # Defect: src/pkg/res (no __init__ of its own, inside the regular
+        # package src/pkg) is its own script root, so keeping every own
+        # directory that is its own script root made it a project-wide
+        # backend search path: src/pkg/res/json.py would answer every file's
+        # `import json`.  Likewise src/pkg/res/sub one level deeper.
+        project, root = tmp_path / "project", tmp_path / "view"
+        res = project / "src" / "pkg" / "res"
+        self.write(project / "src" / "pkg" / "__init__.py", "")
+        self.write(res / "x.lpy", "(= x 1)")
+        self.write(res / "sub" / "y.lpy", "(= y 1)")
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        assert manifest.import_roots == [str(project / "src")]
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        extra = json.loads(open(path).read())["extraPaths"]
+        assert extra == [str(root / "src"), str(project / "src"), str(project)]
+
     def test_an_import_roots_modules_are_linked_beside_its_packages(self, tmp_path):
         # Defect: an import root holding only shadowed packages has none of
         # its other modules in the view, so a pure-.py package beside them

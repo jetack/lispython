@@ -92,8 +92,9 @@ follows [Semantic Versioning](https://semver.org/).
   `tools/mypkg/a.lpy` in a regular package) are on `sys.path` while its
   macros run and searched first by go-to-definition's local fallback (used
   only when the backend gives no answer), so a bare require or import of a
-  sibling still resolves. The backend searches the script root and import
-  root, and the own directory only when it is no package directory.
+  sibling still resolves. The backend searches the import root, and the own
+  directory and script root only when each is no regular package and inside
+  none.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call
