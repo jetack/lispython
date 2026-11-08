@@ -51,6 +51,10 @@ def atom_text(node):
 
 
 class Node:
+    # True on a node macro_expansion_nodes placed at its macro call: its span
+    # is the call's text, not its own.
+    lent_position = False
+
     def __init__(self, *args, **kwargs):
         self.lineno = 0
         self.col_offset = 0
@@ -236,8 +240,10 @@ def macro_expansion_nodes(expansion, call):
     those nodes (and the converted data) carry the Node default (lineno 0)
     and the Python code compiled from them would report line 0. The expander
     passes the macro call's position, so tracebacks and compile errors point
-    at the call. A node that has a position (an unquoted argument the user
-    wrote) keeps its own. Descends every Node attribute, so f-string fields
+    at the call, and marks each node it places ``lent_position``, so
+    name_compile keeps that whole span rather than measuring a name in it. A
+    node that has a position (an unquoted argument the user wrote) keeps its
+    own, and its flag with it. Descends every Node attribute, so f-string fields
     and their format specs, wrappers, quotes and glued heads are covered
     alike; the copy memos keep nodes shared between places in the expansion
     shared in the copy, and a list or tuple of data met in many places
@@ -395,6 +401,7 @@ def macro_expansion_nodes(expansion, call):
                 # to the wrapped value, which may already have a position.
                 for position_key in _POSITION_KEYS:
                     attrs[position_key] = position_info[position_key]
+                attrs["lent_position"] = True
             enter(value)
             for k in _child_form_keys(value):
                 attrs[k] = node_of(attrs[k])

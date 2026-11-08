@@ -584,13 +584,23 @@ def test_data_in_every_child_form_slot_is_converted():
     assert quote.value == 5 and glued.params == ["T"]
 
 
-@pytest.mark.parametrize("src", ["(qp)", "(qp 1234567890)"])
-def test_a_template_name_spans_the_whole_macro_call(src, scope):
+@pytest.mark.parametrize(
+    ["template", "src"],
+    [("print", "(qp)"), ("print", "(qp 1234567890)"), ("ab.c", "(qp)")],
+)
+def test_a_template_name_spans_the_whole_macro_call(template, src, scope):
     # Defect: a template symbol placed at the call measured its end from its
     # own spelling, so `print` at the 4-character `(qp)` ended at column 5,
-    # past the end of the line, and at the longer call covered only `(qp `,
-    # where an error on the generated name then landed.
-    define("(defmacro qp [*_] (return '(print 1)))", scope)
-    [call] = calls_to(compile_at_line(2, src, scope), "print")
-    assert (call.func.lineno, call.func.col_offset) == (2, 0)
-    assert (call.func.end_lineno, call.func.end_col_offset) == (2, len(src))
+    # past the end of the line, at the longer call covered only `(qp `, and
+    # `ab` of `ab.c` at the equally long `(qp)` covered only `(q`, where an
+    # error on the generated name then landed.
+    define(f"(defmacro qp [*_] (return '({template} 1)))", scope)
+    [stmt] = compile_at_line(2, src, scope)
+    func = stmt.value.func
+    parts = [func, func.value] if isinstance(func, ast.Attribute) else [func]
+    assert [type(p).__name__ for p in parts] == ["Attribute", "Name"][
+        -len(template.split(".")) :
+    ]
+    for part in parts:
+        assert (part.lineno, part.col_offset) == (2, 0)
+        assert (part.end_lineno, part.end_col_offset) == (2, len(src))
