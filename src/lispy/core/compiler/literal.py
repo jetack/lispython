@@ -603,16 +603,16 @@ def name_compile(symbol, ctx):
     position_info = {**symbol.position_info}
     # Positions are .lpy columns: measure the spelling's components (``a.x->y``),
     # never the mangled Python names, which differ in length. Measure only when
-    # the span is the spelling's own text: not lent by a macro call
-    # (``lent_position``, set by macro_expansion_nodes), and one line exactly
-    # as long as the spelling, as every symbol the reader makes is (it moves
-    # the start past a ``^``, ``:``, ``*``, ``**`` or sign prefix). The flag
-    # alone misses the borrowers built with another node's position_info
-    # (quote expansion's classname symbol, replace_symbol's renamed dotted
-    # head, a macro's explicit position), whose spelling is not that text; the
-    # length alone misses a lent call exactly as long as the spelling (``ab.c``
-    # at ``(qp)``). A borrowed span stays whole on every part, so an error on
-    # it lands on the whole call, never on a cut of it or past it.
+    # the span is the spelling's own text: not ``lent_position`` (a template
+    # placed at its macro call, quote expansion's classname symbol,
+    # replace_symbol's renamed dotted head; see Node), and one line exactly as
+    # long as the spelling, as every symbol the reader makes is (it moves the
+    # start past a ``^``, ``:``, ``*``, ``**`` or sign prefix). The flag
+    # alone misses a position a macro gives a symbol explicitly, which no one
+    # marks; the length alone misses a lent span exactly as long as the
+    # spelling (``ab.c`` at ``(qp)``). A borrowed span stays whole on every
+    # part, so an error on it lands on the whole call, never on a cut of it
+    # or past it.
     [spelled, *spelled_attrs] = symbol.value.split(".")
     measured = (
         not symbol.lent_position

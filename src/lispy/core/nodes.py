@@ -51,8 +51,11 @@ def atom_text(node):
 
 
 class Node:
-    # True on a node macro_expansion_nodes placed at its macro call: its span
-    # is the call's text, not its own.
+    # True on a node whose span is other text than its own spelling: one
+    # macro_expansion_nodes placed at its macro call, quote expansion's
+    # classname symbol, replace_symbol's renamed dotted head. A node built at
+    # another's position_info that is not its spelling sets it; name_compile
+    # keeps such a span whole.
     lent_position = False
 
     def __init__(self, *args, **kwargs):
@@ -100,7 +103,7 @@ class Node:
     def _classname_call(self, *operands):
         """``(ClassName operand ...)`` at this node's position."""
         return Paren(
-            Symbol(self.classname, **self.position_info),
+            Symbol(self.classname, **self.position_info, lent_position=True),
             *operands,
             **self.position_info,
         )
@@ -922,7 +925,7 @@ class FStrExpr(Wrapper):
             text_args = [Keyword(Symbol("expr-text")), String(repr(text))]
         value = yield self.value._generator_steps(in_quasi)
         return Paren(
-            Symbol(self.classname, **position_info),
+            Symbol(self.classname, **position_info, lent_position=True),
             value,
             Keyword(Symbol("conversion")),
             Constant(str(self.conversion)),
