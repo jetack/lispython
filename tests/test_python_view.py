@@ -25,7 +25,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy.core import nodes, parser
-from lispy.core.importer import lpy_cache_path
+from lispy.core.importer import lpy_cache_path, package_root
 
 pv = importlib.import_module("lispy.lsp.python_view")
 server = importlib.import_module("lispy.lsp.server")
@@ -547,10 +547,90 @@ class TestShadows:
             ]
         ]
         assert names == [
-            ("top", "", str(tmp_path)),
-            ("pkg.mod", "pkg", str(src)),
-            ("pkg.a", "pkg.a", str(src)),
-            ("pkg.a.m", "pkg.a", str(src)),
+            ("top", "", str(tmp_path), (str(tmp_path),)),
+            ("pkg.mod", "pkg", str(src), (str(src),)),
+            ("pkg.a", "pkg.a", str(src), (str(src),)),
+            ("pkg.a.m", "pkg.a", str(src), (str(src),)),
+        ]
+
+    def test_a_namespace_package_counts_up_to_a_root_above(self, tmp_path):
+        # Defect: the walk stops at the first directory with no __init__,
+        # so ns/a.lpy gets no package where Python imports it as ns.a, and
+        # its relative requires fail ("no known parent package").
+        self.write(tmp_path / "ns" / "pkg" / "__init__.py", "")
+        roots = [str(tmp_path)]
+        assert package_root(str(tmp_path / "ns"), roots) == (str(tmp_path), ["ns"])
+        assert package_root(str(tmp_path / "ns" / "pkg"), roots) == (
+            str(tmp_path),
+            ["ns", "pkg"],
+        )
+        # A directory that is itself a root is its own import root.
+        assert package_root(str(tmp_path), roots) == (str(tmp_path), [])
+
+    def test_a_namespace_package_stops_at_the_nearest_root(self, tmp_path):
+        # Defect: the walk goes on to the outer root, naming src/ns/a.lpy
+        # src.ns.a where the src layout imports it as ns.a.
+        (tmp_path / "src" / "ns").mkdir(parents=True)
+        roots = [str(tmp_path), str(tmp_path / "src")]
+        assert package_root(str(tmp_path / "src" / "ns"), roots) == (
+            str(tmp_path / "src"),
+            ["ns"],
+        )
+
+    @pytest.mark.parametrize("name", ["my-ns", "class", "1ns"])
+    def test_a_directory_that_is_no_identifier_is_no_namespace(self, tmp_path, name):
+        # Defect: every directory up to the root becomes a part, giving a
+        # package Python can never import (my-ns, a keyword).
+        (tmp_path / name / "ns").mkdir(parents=True)
+        directory = str(tmp_path / name / "ns")
+        assert package_root(directory, [str(tmp_path)]) == (directory, [])
+
+    @pytest.mark.parametrize("module", ["ns.py", "ns.lpy", "ns.pyc"])
+    def test_a_module_file_beside_it_hides_the_namespace(self, tmp_path, module):
+        # Defect: ns/ is taken as a namespace package where FileFinder
+        # imports the module file ns.* instead.
+        (tmp_path / "ns").mkdir()
+        self.write(tmp_path / module, "")
+        directory = str(tmp_path / "ns")
+        assert package_root(directory, [str(tmp_path)]) == (directory, [])
+
+    def test_with_no_root_above_only_regular_packages_count(self, tmp_path):
+        # Defect: the walk climbs through every directory with no root to
+        # stop it, or a root below the directory is taken as one above.
+        self.write(tmp_path / "ns" / "pkg" / "__init__.py", "")
+        directory = str(tmp_path / "ns" / "pkg")
+        assert package_root(directory) == (str(tmp_path / "ns"), ["pkg"])
+        assert package_root(directory, [directory + "/inner"]) == (
+            str(tmp_path / "ns"),
+            ["pkg"],
+        )
+
+    def test_a_root_matches_a_symlinked_spelling_of_it(self, tmp_path):
+        # Defect: paths compare as spelled, so a workspace folder given by
+        # its real path (Backends' project root) never matches a document
+        # opened through a symlink, which then loses its namespace package.
+        real = tmp_path / "real"
+        (real / "ns").mkdir(parents=True)
+        (tmp_path / "link").symlink_to(real)
+        directory = str(tmp_path / "link" / "ns")
+        assert package_root(directory, [str(real)]) == (
+            str(tmp_path / "link"),
+            ["ns"],
+        )
+
+    def test_module_names_count_namespace_packages_under_the_project(self, tmp_path):
+        # Defect: the LSP names ns/a.lpy as the top-level module a, so its
+        # relative requires fail to compile.
+        (tmp_path / "src" / "sns").mkdir(parents=True)
+        (tmp_path / "ns").mkdir()
+        got = [
+            pv.module_names(str(tmp_path.joinpath(*parts)), project_root=str(tmp_path))
+            for parts in [("ns", "a.lpy"), ("src", "sns", "b.lpy")]
+        ]
+        src = tmp_path / "src"
+        assert got == [
+            ("ns.a", "ns", str(tmp_path), (str(tmp_path / "ns"), str(tmp_path))),
+            ("sns.b", "sns", str(src), (str(src / "sns"), str(src))),
         ]
 
     def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):
@@ -572,7 +652,7 @@ class TestShadows:
                 *plus(locate(src, "yy"), 2),
                 package="pvcurpkg",
                 name="pvcurpkg.mod",
-                import_root=str(tmp_path / "src"),
+                search_dirs=(str(tmp_path / "src"),),
             )
         finally:
             for name in names:
@@ -612,6 +692,75 @@ class TestShadows:
                 sys.modules.pop(name, None)
         assert "y = 2 + 2" in (root / "src" / "pvsrcpkg" / "mod.py").read_text()
         assert sys.path == path
+
+    def test_a_namespace_module_compiles_and_is_searched_as_its_script(
+        self, tmp_path, monkeypatch
+    ):
+        # Defects: the sweep names scripts/x.lpy by the regular-package rule
+        # alone, so its relative require fails; or only the project root is
+        # on sys.path while its macros run, so its sibling require loads no
+        # macros; or scripts/ is no search path of the backend, so a sibling
+        # (import ...) the script run resolves stops resolving.
+        project, root = tmp_path / "project", tmp_path / "view"
+        scripts = project / "pvnsscripts"
+        self.write(scripts / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(
+            scripts / "pvnshelper.lpy", "(defmacro thrice [x] (return `(+ ~x ~x ~x)))"
+        )
+        self.write(scripts / "rel.lpy", "(require .mac *)\n(= y (twice 2))")
+        self.write(scripts / "bare.lpy", "(require pvnshelper *)\n(= y (thrice 2))")
+        names = ["pvnsscripts", "pvnsscripts.mac", "pvnshelper"]
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        manifest = pv.ShadowManifest()
+        try:
+            pv.write_shadows(str(project), str(root), manifest=manifest)
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        view = root / "pvnsscripts"
+        assert (view / "rel.py").read_text().endswith("y = 2 + 2")
+        assert (view / "bare.py").read_text().endswith("y = 2 + 2 + 2")
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        assert str(view) in json.loads(open(path).read())["extraPaths"]
+
+    def test_a_regular_package_in_a_plain_directory_keeps_its_script_root(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: the search dirs are the module's own directory and the
+        # import root only, so for pvtools/pvmypkg/a.lpy (a regular package
+        # in a namespace directory) pvtools/, where `lpy` runs it from, is
+        # neither on sys.path while its macros run nor a backend search
+        # path: (require pvmypkg.mac *) loads no macros.
+        project, root = tmp_path / "project", tmp_path / "view"
+        tools = project / "pvtools"
+        pkg = tools / "pvmypkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(pkg / "a.lpy", "(require pvmypkg.mac *)\n(= y (twice 2))")
+        assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project)) == (
+            "pvtools.pvmypkg.a",
+            "pvtools.pvmypkg",
+            str(project),
+            (str(tools), str(project)),
+        )
+        names = ["pvmypkg", "pvmypkg.mac", "pvtools", "pvtools.pvmypkg"]
+        names.append("pvtools.pvmypkg.mac")
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        manifest = pv.ShadowManifest()
+        try:
+            pv.write_shadows(str(project), str(root), manifest=manifest)
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        assert (root / "pvtools" / "pvmypkg" / "a.py").read_text().endswith("y = 2 + 2")
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        assert str(root / "pvtools") in json.loads(open(path).read())["extraPaths"]
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
@@ -1592,7 +1741,7 @@ class TestMacroModules:
             "(require .mac *)\n(= yy (twice 2))",
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
 
     def test_compile_view_sees_an_edited_macro_module(self, package):
@@ -1620,7 +1769,7 @@ class TestMacroModules:
         kwargs = dict(
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         assert cache.view("u", 1, src, **kwargs).text.endswith("yy = 2 + 2")
         (package.pkg / "mac.lpy").write_text(THRICE)
@@ -1635,7 +1784,7 @@ class TestMacroModules:
             "(require .mac)\n(= yy 1)",
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         assert view.macros["mac.my_mac"] == "mac.my-mac"
 
@@ -1710,7 +1859,7 @@ class TestMacroModules:
             return pv.compile_view(
                 f"(require {name} *)\n(= yy (twice 2))",
                 name="pvmmtwo",
-                import_root=str(root),
+                search_dirs=(str(root),),
             )
 
         try:
@@ -1737,7 +1886,7 @@ class TestMacroModules:
                     src,
                     package=package.name,
                     name=package.name + ".mod",
-                    import_root=str(package.root),
+                    search_dirs=(str(package.root),),
                 )
                 return None if view is None else view.text
 
@@ -1783,7 +1932,7 @@ class TestMacroModules:
         kwargs = dict(
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         assert pv.compile_view(src, **kwargs).text.endswith("yy = twice(2)")
         next_tick()
@@ -1827,7 +1976,7 @@ class TestMacroModules:
         return pv.compile_view(
             f"(require {mac} *)\n(= yy (twice 2))",
             name="pvmmflat",
-            import_root=str(project),
+            search_dirs=(str(project),),
         )
 
     def test_an_incidental_miss_leaves_the_import_root_unwatched(
@@ -1865,7 +2014,7 @@ class TestMacroModules:
                 1,
                 f"(require {mac} *)\n(= yy (twice 2))",
                 name="pvmmflat",
-                import_root=str(project),
+                search_dirs=(str(project),),
             ).text
 
         try:
@@ -1984,7 +2133,7 @@ class TestMacroModules:
         kwargs = dict(
             package=package.name,
             name=package.name + ".mod",
-            import_root=str(package.root),
+            search_dirs=(str(package.root),),
         )
         line, col = plus(locate(src, "zz"), 2)
         first = cache.view_at_cursor("u", 1, src, line, col, **kwargs)
@@ -2005,7 +2154,7 @@ class TestMacroModules:
         (package.pkg / "bad.lpy").write_text(bad)
         (package.pkg / "mod.lpy").write_text("(require .mac *)\n(= yy (twice 2))")
         cache = pv.ViewCache()
-        kwargs = dict(package=package.name, import_root=str(package.root))
+        kwargs = dict(package=package.name, search_dirs=(str(package.root),))
 
         def good():
             return cache.view(
@@ -2129,7 +2278,7 @@ class TestMacroModules:
         (package.pkg / "mac.lpy").write_text(
             "(require .b *)\n(defmacro twice [x] (return (val)))"
         )
-        kwargs = dict(package=package.name, import_root=str(package.root))
+        kwargs = dict(package=package.name, search_dirs=(str(package.root),))
         pv.compile_view(
             "(require .b *)\n(= zz (val))", name=package.name + ".other", **kwargs
         )

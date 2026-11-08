@@ -5,7 +5,6 @@
 (import contextvars)
 (import functools)
 (import glob)
-(import importlib.machinery)
 (import importlib.util)
 (import inspect)
 (import logging)
@@ -22,6 +21,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
+(from lispy.core.importer [finder-suffixes])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
@@ -40,10 +40,10 @@
 (from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
                              ViewCache compile-buffer glued-base hyphen-spelling
                              lpy-diagnostic-range lpy-range module-names name-key
-                             open-form-closers partial-span py-name
+                             open-form-closers partial-span project-import-roots py-name
                              pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor])
-(from lispy.lsp.backend [Backends REQUEST-TIMEOUT suppression-tool])
+(from lispy.lsp.backend [Backends REQUEST-TIMEOUT project-root-of suppression-tool])
 ;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
 (import lispy.lsp.macro-modules as macro-modules)
 
@@ -122,14 +122,12 @@
   (return (.as-uri (pathlib.Path path))))
 
 (def under-workspace [path folders]
-  "True when path lies inside one of the workspace folders.  Real paths are
-   compared by components, not by string prefix, so /ws-other is not inside
-   /ws and a symlink counts where its target lives."
-  (= real (pathlib.Path (osp.realpath path)))
-  (for folder in folders
-    (if (.is-relative-to real (osp.realpath (uri-to-path folder.uri)))
-        (return True)))
-  (return False))
+  "True when path lies inside one of the workspace folders: it has a
+   project (project-root-of), so the index agrees with the compiles about a
+   file.  Real paths are compared by components, not by string prefix, so
+   /ws-other is not inside /ws; a directory symlink counts where its target
+   lives, a file link where the link is."
+  (return (is-not (project-root-of path folders) None)))
 
 (def workspace-folders []
   "The client's workspace folders, read from the pygls workspace itself.
@@ -141,6 +139,14 @@
     (except [RuntimeError]
       ;; Not (return []): an empty bracket compiles to a bare return.
       (return (list)))))
+
+(def document-module-names [path :folders None]
+  "module-names of the .lpy file at path, under its project (the innermost
+   of folders holding it, default the client's workspace folders,
+   project-root-of), so its namespace packages count as the importer
+   counts them; a file in no folder takes the regular-package rule alone."
+  (= folders (ife (is folders None) (workspace-folders) folders))
+  (return (module-names path :project-root (project-root-of path folders))))
 
 ;; The Python backend of each workspace project (lispy.lsp.backend).  Its
 ;; document hooks never raise; only an open starts a backend, and only when
@@ -208,14 +214,6 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def finder-suffixes []
-  "The file suffixes CPython's FileFinder tries, in its order (extension
-   modules, then source, then bytecode), read from importlib.machinery,
-   where the importer (core/importer.py) adds .lpy to the source ones."
-  (return (+ importlib.machinery.EXTENSION-SUFFIXES
-             importlib.machinery.SOURCE-SUFFIXES
-             importlib.machinery.BYTECODE-SUFFIXES)))
-
 (def module-file-under [module-name roots]
   "The .lpy file the absolute import name module-name (already its Python
    spelling, module-import-name) imports from the first of roots that
@@ -246,7 +244,10 @@
    in origin's package (module-names, the package-root rule) to an
    absolute name (importlib.util.resolve-name), looked up under origin's
    import root.  With no origin, or no package, or beyond the top-level
-   package, it resolves to nothing."
+   package, it resolves to nothing.  An absolute name is looked up first
+   in origin's search dirs (module-names), in the order its compile puts
+   them on sys.path, so scripts/x.lpy finds its sibling helper.lpy, then
+   under every workspace folder (project-import-roots), then on sys.path."
   (if (not (isinstance module Symbol))
       (return None))
   (try
@@ -256,17 +257,19 @@
   (if (.startswith module-name ".")
       (do (if (is origin None)
               (return None))
-          (= [_ package import-root] (module-names origin))
+          (= [_ package import-root _] (document-module-names origin
+                                                            :folders workspace-folders))
           (try
             (= absolute (importlib.util.resolve-name module-name package))
             (except [(, ImportError ValueError)]
               (return None)))
           (return (module-file-under absolute [import-root]))))
-  ;; 1. Workspace folders (direct or in src/)
-  (= roots [])
+  ;; 1. origin's search dirs, then the workspace folders (direct or in src/)
+  (= roots (ife (is origin None)
+                []
+                (list (sub (document-module-names origin :folders workspace-folders) 3))))
   (for folder in workspace-folders
-    (= root (uri-to-path folder.uri))
-    (.extend roots [root (osp.join root "src")]))
+    (.extend roots (project-import-roots (uri-to-path folder.uri))))
   (= found (module-file-under module-name roots))
   (if found
       (return found))
@@ -634,21 +637,21 @@
   "The CompiledBuffer of document uri's source (python_view.compile-buffer),
    named as Python imports its file (module-names) so the prelude, its
    opt-out and the macros it defines apply as when the module compiles,
-   with its import root on sys.path, and its parse warnings naming the
+   with its search dirs on sys.path, and its parse warnings naming the
    file.  One compile per version (view-cache): a change's diagnostics,
    its backend push and every request on that version share it; fresh
    compiles again all the same and caches the result.  It runs
    the buffer's macros, so callers on the loop run it in a thread, reading
    view-cache's generation before the hand-off."
   (= path (to-fs-path uri))
-  (= [name package import-root] (ife (is path None)
-                                     (, "__main__" "" None)
-                                     (module-names path)))
+  (= [name package _ search-dirs] (ife (is path None)
+                                      (, "__main__" "" None (,))
+                                      (document-module-names path)))
   (if (is version None)
-      (return (compile-buffer source :package package :name name :import-root import-root
+      (return (compile-buffer source :package package :name name :search-dirs search-dirs
                               :filename (uri-to-path uri))))
   (return (.compiled view-cache uri version source :package package :name name
-                     :import-root import-root :filename (uri-to-path uri)
+                     :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
 (def error-diagnostic [exc source severity message]
@@ -1905,15 +1908,15 @@
 ;; The cursor views of the open documents, by version (python_view.ViewCache).
 (= view-cache (ViewCache))
 
-(def cursor-view [uri version source line col name package import-root generation]
+(def cursor-view [uri version source line col name package search-dirs generation]
   "view-at-cursor of source, through view-cache when the document has a
    version.  It runs the buffer's macros, so callers run it in a thread,
    reading view-cache's generation before the hand-off."
   (if (is version None)
       (return (view-at-cursor source line col :package package :name name
-                              :import-root import-root)))
+                              :search-dirs search-dirs)))
   (return (.view-at-cursor view-cache uri version source line col
-                           :package package :name name :import-root import-root
+                           :package package :name name :search-dirs search-dirs
                            :generation generation)))
 
 ;; Cursor-view compiles are scheduled apart from compile-latest's diagnostics
@@ -1951,7 +1954,7 @@
 ;; or running; dropped once it has neither.
 (= CURSOR-COMPILES {})
 
-(def scheduled-cursor-view [uri version source line col name package import-root]
+(def scheduled-cursor-view [uri version source line col name package search-dirs]
   "A future of cursor-view at the 1-based line and code-point col of
    document uri's source at version, of its own for each caller, so a
    timeout or cancellation of one caller never stops the compile others
@@ -1963,7 +1966,7 @@
    compile whose callers all gave up is never started, so abandoned
    keystrokes queue no compiles behind a slow one."
   (= future (.create-future (asyncio.get-running-loop)))
-  (= args (, uri version source line col name package import-root
+  (= args (, uri version source line col name package search-dirs
              view-cache.generation))
   (= state (.get CURSOR-COMPILES uri))
   (if (is state None)
@@ -2304,9 +2307,9 @@
   (= path (to-fs-path doc.uri))
   (if (is path None)
       (return None))
-  (= [name package import-root] (module-names path))
+  (= [name package _ search-dirs] (document-module-names path))
   (= making (scheduled-cursor-view doc.uri doc.version doc.source line col
-                                   name package import-root))
+                                   name package search-dirs))
   (try
     (return (await (asyncio.wait-for making
                                      (max 0 (- deadline (.time (asyncio.get-running-loop)))))))
@@ -2852,9 +2855,9 @@
     (except [(, OSError ValueError)]
       (.forget disk-views lpy-uri)
       (return None)))
-  (= [name package import-root] (module-names lpy-path))
+  (= [name package _ search-dirs] (document-module-names lpy-path))
   (= view (.view disk-views lpy-uri source source :name name :package package
-                 :import-root import-root :generation generation))
+                 :search-dirs search-dirs :generation generation))
   (if (or (is view None) (!= view.text shadow))
       (return None))
   (return (, source view)))

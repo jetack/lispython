@@ -83,6 +83,15 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- LSP: a `.lpy` in a plain subdirectory of a workspace folder (no
+  `__init__`) is named as a module of that namespace package
+  (`scripts/tool.lpy` is `scripts.tool`, imported from the folder), so its
+  `__name__`/`__package__` at compile time differ from before. It also
+  stays the script `lpy scripts/tool.lpy` runs: the directory the script
+  runs from (`scripts/`, or `tools/` for `tools/mypkg/a.lpy` in a regular
+  package) is on `sys.path` while its macros run, among the backend's
+  search paths, and searched first by go-to-definition, so a bare require
+  or import of a sibling still resolves.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call
@@ -252,6 +261,14 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The LSP and the nREPL resolve a relative `require` or `from` in a
+  namespace package (a directory with no `__init__`) as the importer does:
+  `ns/a.lpy` is `ns.a`, so `(require .mac)` compiles and go-to-definition
+  finds `ns/mac.lpy`. The LSP counts namespace packages up to the nearest
+  of the document's workspace folder and its `src`; the nREPL up to the
+  nearest `sys.path` entry as the server started. A directory that is no
+  identifier, or has a module file of its name beside it, is no namespace
+  package.
 - A malformed `require` (`(require mod a b)`, `(require mod as)`,
   `(require mod * as m)`, `(require)`, a non-name in its list) is a compile
   error at the part at fault, instead of a Python `ValueError` or

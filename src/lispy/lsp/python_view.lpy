@@ -657,6 +657,15 @@
                         (do (del (sub sys.path i))
                             (break)))))))))))
 
+(deco contextlib.contextmanager
+  (def _on-sys-paths [directories]
+    "Keep each of directories on sys.path for the body (_on-sys-path), the
+     first ending first in sys.path where none of them was there before."
+    (with [(contextlib.ExitStack) as stack]
+      (for directory in (reversed (list directories))
+        (.enter-context stack (_on-sys-path directory)))
+      (yield))))
+
 ;; id of each built-in macro -> its name: compile-buffer tells a built-in
 ;; macro in a buffer's macro table by identity, as the seeding and a require
 ;; of lispy.macros register the macro object itself, whatever the key.
@@ -681,14 +690,15 @@
     (= self.stage stage)
     (= self.error error)))
 
-(def compile-buffer [source :package "" :name "__main__" :import-root None
+(def compile-buffer [source :package "" :name "__main__" :search-dirs (,)
                      :filename None]
   "The CompiledBuffer of source: the one compile of a buffer, whose view
    the backend gets and whose failure diagnostics report.  The parse is
    strict and runs in compile-errors for filename (the document's path), so
-   a parse warning names that file.  Macros run with import-root
-   (module-names' third item) on sys.path, so a relative require imports
-   its package, and under fresh-modules, so a module a require imported is
+   a parse warning names that file.  Macros run with search-dirs
+   (module-names' fourth item) on sys.path (_on-sys-paths), so a relative
+   require imports its package and a script's sibling module imports, and
+   under fresh-modules, so a module a require imported is
    imported anew once its file changed (macro_modules.lpy); the generated
    module is never compiled or executed.  Warnings go where the process's
    filters send them (stderr, never the LSP's stdout); a filter that makes one an error fails the stage it was
@@ -707,7 +717,7 @@
       (return (CompiledBuffer None :stage PARSE-STAGE :error e :epoch (current-epoch)))))
   (= macro-epoch None)
   (try
-    (with [(fresh-modules) as entered (_on-sys-path import-root)]
+    (with [(fresh-modules) as entered (_on-sys-paths search-dirs)]
       (= macro-epoch entered)
       (= body (list (compile-unit forms scope))))
     (except [Exception as e]
@@ -730,11 +740,11 @@
                                       :builtin-macros builtin-macros)
                           :epoch macro-epoch)))
 
-(def compile-view [source :package "" :name "__main__" :import-root None]
+(def compile-view [source :package "" :name "__main__" :search-dirs (,)]
   "The PythonView of source (compile-buffer), or None when it does not
    become Python: a parse or compile error, a failing macro, a nesting too
    deep to unparse."
-  (return (. (compile-buffer source :package package :name name :import-root import-root)
+  (return (. (compile-buffer source :package package :name name :search-dirs search-dirs)
              view)))
 
 ;; Stands in for the word at the cursor: a plain name, unchanged by mangling,
@@ -862,13 +872,13 @@
           (return True)))
   (return False))
 
-(def view-at-cursor [source line col :package "" :name "__main__" :import-root None]
+(def view-at-cursor [source line col :package "" :name "__main__" :search-dirs (,)]
   "The PythonView of source at the cursor (_view-at-cursor)."
   (return (sub (_view-at-cursor source line col :package package :name name
-                                :import-root import-root)
+                                :search-dirs search-dirs)
                0)))
 
-(def _view-at-cursor [source line col :package "" :name "__main__" :import-root None]
+(def _view-at-cursor [source line col :package "" :name "__main__" :search-dirs (,)]
   "(view, epoch): view-at-cursor's view and the earliest macro environment
    its compiles ran under (None when none ran).  The PythonView of source for a request at 1-based line, code-point col,
    or None.  The partial word before the cursor (name characters back to a
@@ -887,8 +897,8 @@
    sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
    partial's Python name and the map follows that edit, the generated
-   partial standing for the whole .lpy word.  import-root is
-   compile-view's."
+   partial standing for the whole .lpy word.  search-dirs is
+   compile-buffer's."
   (= lines (.split source "\n"))
   (if (not (<= 1 line (len lines)))
       (return (, None None)))
@@ -901,7 +911,7 @@
   (= marked (.join "\n" lines))
   (= sentinel-end (+ start (len CURSOR-SENTINEL)))
   (= fallback False)
-  (= compiled (compile-buffer marked :package package :name name :import-root import-root))
+  (= compiled (compile-buffer marked :package package :name name :search-dirs search-dirs))
   (= view compiled.view)
   (= macro-epoch compiled.epoch)
   (if (is view None)
@@ -920,7 +930,7 @@
             (= open-count (len stack))
             (= compiled (compile-buffer
                           (+ prefix (.join "" (reversed [(sub entry 1) for entry in stack])))
-                          :package package :name name :import-root import-root))
+                          :package package :name name :search-dirs search-dirs))
             (if (or (is macro-epoch None)
                     (and (is-not compiled.epoch None) (< compiled.epoch macro-epoch)))
                 (= macro-epoch compiled.epoch))
@@ -1014,7 +1024,7 @@
       "The forget count a view made from now on stores under."
       (return self._generation)))
 
-  (def compiled [self uri version source :package "" :name "__main__" :import-root None
+  (def compiled [self uri version source :package "" :name "__main__" :search-dirs (,)
                  :filename None :generation None :fresh False]
     "The CompiledBuffer of uri's source at version (compile-buffer), compiled
      once per version: the diagnostics of a change and every request on the
@@ -1024,7 +1034,7 @@
     (= hit (._hit self self._views uri (, version (epoch))))
     (if (and (not fresh) (is-not hit None))
         (return (sub hit 1)))
-    (= result (compile-buffer source :package package :name name :import-root import-root
+    (= result (compile-buffer source :package package :name name :search-dirs search-dirs
                               :filename filename))
     (if (is-not result.epoch None)
         (._store self self._views uri (, version result.epoch) result generation))
@@ -1041,14 +1051,14 @@
         (return None))
     (return (. (sub hit 1) view)))
 
-  (def view [self uri version source :package "" :name "__main__" :import-root None
+  (def view [self uri version source :package "" :name "__main__" :search-dirs (,)
              :generation None]
     (return (. (.compiled self uri version source :package package :name name
-                          :import-root import-root :generation generation)
+                          :search-dirs search-dirs :generation generation)
                view)))
 
   (def view-at-cursor [self uri version source line col
-                       :package "" :name "__main__" :import-root None
+                       :package "" :name "__main__" :search-dirs (,)
                        :generation None]
     (if (is generation None)
         (= generation self._generation))
@@ -1056,7 +1066,7 @@
     (if (is-not hit None)
         (return (sub hit 1)))
     (= [result macro-epoch] (_view-at-cursor source line col :package package :name name
-                                             :import-root import-root))
+                                             :search-dirs search-dirs))
     (if (is-not macro-epoch None)
         (._store self self._cursor-views uri (, version macro-epoch line col) result
                  generation))
@@ -1296,17 +1306,42 @@
       (return None))
   (return (osp.normpath (osp.join (os.fspath view-root) rel))))
 
-(def module-names [lpy-path]
-  "(__name__, __package__, import root) of lpy-path as Python imports it:
-   the packages are the directories up from its own that hold __init__.py
-   or __init__.lpy (package-root, the rule the lpy CLI uses), and the import
-   root is where that walk stops, so src/pkg/m.lpy is pkg.m from src."
-  (= [import-root parts] (package-root (osp.dirname (osp.abspath lpy-path))))
+(def project-import-roots [project-root]
+  "The search roots a project's modules are imported from: the project
+   root and its src directory (the src layout).  The one home of that
+   list: module-names' namespace packages and resolve-module-to-file's
+   absolute lookup read it."
+  (return [project-root (osp.join project-root "src")]))
+
+(def module-names [lpy-path :project-root None]
+  "(__name__, __package__, import root, search dirs) of lpy-path as Python
+   imports it (package-root, the rule the lpy CLI uses): the packages are
+   the directories up from its own that hold __init__.py or __init__.lpy,
+   and the import root is where that walk stops, so src/pkg/m.lpy is pkg.m
+   from src.  Under project-root (the document's workspace folder),
+   namespace packages count too, up to the nearest of project-import-roots,
+   so ns/a.lpy with no ns/__init__ is ns.a from the project root.  The
+   search dirs, a tuple, are the one home of the directories the module's
+   compile searches (on sys.path while its macros run, compile-buffer) and
+   the backend searches for it (ShadowManifest.import-roots): the import
+   root, and before it the script root when that differs (a namespace
+   package lies above the file's regular packages), because the file is
+   also what `lpy` runs as a script, from the root its regular packages
+   give with no search roots (the CLI's rule, package-root): scripts/ for
+   scripts/x.lpy, tools/ for tools/mypkg/a.lpy, whose modules it imports
+   by their names from there."
+  (= directory (osp.dirname (osp.abspath lpy-path)))
+  (= roots (ife (is project-root None) [] (project-import-roots project-root)))
+  (= [import-root parts] (package-root directory roots))
+  (= script-root (sub (package-root directory) 0))
+  (= search-dirs (ife (== script-root import-root)
+                      (, import-root)
+                      (, script-root import-root)))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (.join "." parts))
   (if (== stem "__init__")
-      (return (, package package import-root)))
-  (return (, (.join "." (+ parts [stem])) package import-root)))
+      (return (, package package import-root search-dirs)))
+  (return (, (.join "." (+ parts [stem])) package import-root search-dirs)))
 
 ;; Directory names a source sweep never enters: dependencies and caches, not
 ;; the project's own modules.  Dot-directories and virtualenvs (a directory
@@ -1338,7 +1373,8 @@
    module-names, whether its shadow is written, the macro environment it
    compiled in (macro_modules.epoch)), so a file unchanged since, under the
    same macro environment, is not compiled again; and import-roots, the
-   sorted import roots of the written shadows' sources (_search-paths)."
+   sorted search dirs (module-names) of the written shadows' sources
+   (_search-paths)."
   (def __init__ [self]
     (= self.sources {})
     (= self.import-roots [])))
@@ -1550,7 +1586,7 @@
   (= written [])
   (for lpy-path in sources
     (= shadow (view-path project-root root lpy-path))
-    (= names (module-names lpy-path))
+    (= names (module-names lpy-path :project-root project-root))
     (= (sub names-of lpy-path) names)
     (try
       (= st (os.stat lpy-path))
@@ -1578,7 +1614,7 @@
         (continue)))
     (try
       (= compiled (compile-buffer source :name (sub names 0) :package (sub names 1)
-                                  :import-root (sub names 2)))
+                                  :search-dirs (sub names 3)))
       (= view compiled.view)
       (if (is-not view None)
           (do (_real-view-dir root (osp.dirname shadow))
@@ -1593,7 +1629,7 @@
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
     (= import-root (sub (sub names-of lpy-path) 2))
-    (.add import-roots import-root)
+    (.update import-roots (sub (sub names-of lpy-path) 3))
     ;; module-dirs: every import root with a shadow, whose other modules
     ;; are linked in (_mirror-py-files).
     (.add module-dirs import-root)
@@ -1725,7 +1761,9 @@
    modules and, whole, a package of it that holds a nested import root
    (_mirror-py-files links every other module of it into the view);
    then the project and its .venv site-packages.  The one list of every
-   backend's config."
+   backend's config.  The paths are project-wide, so a module of one
+   import root (a script directory's sibling) is visible from every file
+   of the project, not only from the modules that search it."
   (= roots [])
   (for import-root in (or import-roots [])
     (= import-root (osp.abspath import-root))

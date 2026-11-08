@@ -324,7 +324,7 @@ def test_named_required_macros_are_not_qualified(
     # Defect: every macro of the view is offered after the module's name,
     # though (require mod [a]) registers a alone, unqualified.
     view = python_view.compile_view(
-        "(require lpy-macs [twice])", import_root=str(backend_project)
+        "(require lpy-macs [twice])", search_dirs=(str(backend_project),)
     )
     assert "twice" in view.macros and "lpy_macs.twice" not in view.macros
     backend_requests.answer["value"] = []
@@ -402,14 +402,14 @@ def test_relative_required_macros_follow_the_modules_last_part(
 def cache_full_view(document):
     """Compile document's full view into the server's cache, as its
     diagnostics would."""
-    name, package, import_root = python_view.module_names(document.path)
+    name, package, _, search_dirs = python_view.module_names(document.path)
     server.view_cache.compiled(
         document.uri,
         document.version,
         document.source,
         name=name,
         package=package,
-        import_root=import_root,
+        search_dirs=search_dirs,
     )
     assert server.view_cache.cached_view(document.uri, document.version) is not None
 
@@ -1113,7 +1113,7 @@ def push_buffer(uri, path):
     """An event pushing the full view of the .lpy file at path to the
     backend as buffer uri, as a change or an open of that buffer does."""
     source = path.read_text()
-    view = python_view.compile_view(source, import_root=str(path.parent))
+    view = python_view.compile_view(source, search_dirs=(str(path.parent),))
     return lambda client: client.push_buffer(uri, source, view)
 
 

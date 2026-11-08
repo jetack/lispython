@@ -388,6 +388,18 @@ def test_under_workspace_compares_path_components(tmp_path):
     assert not server.under_workspace(str(tmp_path / "ws" / "a.lpy"), [])
 
 
+def test_a_file_link_in_the_workspace_is_a_workspace_file(tmp_path):
+    # Defect: the link's target is tested, so a file link ws/a.lpy into
+    # another tree publishes no workspace symbols, while it compiles as a
+    # module of the project (project_root_of) and the index glob lists it.
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "elsewhere.lpy").write_text("")
+    (tmp_path / "ws" / "a.lpy").symlink_to(tmp_path / "elsewhere.lpy")
+    folder = SimpleNamespace(uri=(tmp_path / "ws").as_uri())
+    assert server.under_workspace(str(tmp_path / "ws" / "a.lpy"), [folder])
+    assert not server.under_workspace(str(tmp_path / "elsewhere.lpy"), [folder])
+
+
 @pytest.fixture
 def scope():
     scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}

@@ -3,6 +3,7 @@ import builtins
 import importlib.machinery
 import importlib.util
 import io
+import keyword
 import marshal
 import os
 import os.path as osp
@@ -30,12 +31,64 @@ def has_init_file(dir_path):
     )
 
 
-def package_root(dir_path):
-    """(import root, package parts) of a module in dir_path: walking up while
-    each directory is a package, the directory the walk stops at and the
-    package names from the top one down.  A dir_path that is no package is
-    its own import root, with no parts.  Pure (the CLI and the LSP both read
-    it; the CLI adds the root to sys.path itself)."""
+def finder_suffixes():
+    """The file suffixes CPython's FileFinder tries, in its order (extension
+    modules, then source, then bytecode), read from importlib.machinery at
+    each call, where this module adds .lpy to the source ones."""
+    return (
+        importlib.machinery.EXTENSION_SUFFIXES
+        + importlib.machinery.SOURCE_SUFFIXES
+        + importlib.machinery.BYTECODE_SUFFIXES
+    )
+
+
+def _same_dir_key(path):
+    """The key two spellings of one directory share: its real path,
+    case-normalised, so a root given as a workspace folder's real path
+    matches the same directory reached through a symlinked spelling."""
+    return osp.normcase(osp.realpath(path))
+
+
+def _namespace_portion_p(dir_path):
+    """Whether CPython's FileFinder, searching dir_path's parent, would
+    import dir_path as a package: its name is an identifier that is no
+    keyword, and it is a regular package (it holds an __init__) or no
+    module file of its name with a finder suffix sits beside it, which
+    FileFinder would pick over a namespace portion."""
+    name = osp.basename(dir_path)
+    if not name.isidentifier() or keyword.iskeyword(name):
+        return False
+    if has_init_file(dir_path):
+        return True
+    parent = osp.dirname(dir_path)
+    return not any(
+        osp.isfile(osp.join(parent, name + suffix)) for suffix in finder_suffixes()
+    )
+
+
+def package_root(dir_path, roots=()):
+    """(import root, package parts) of a module in dir_path: the directory
+    the module is imported from and the package names from the top one down.
+
+    Walking up while each directory is a regular package (it holds
+    __init__.py or __init__.lpy) gives the parts; with no roots, the
+    directory the walk stops at is the import root, so a dir_path that is
+    no package is its own import root, with no parts.
+
+    roots are the search roots (sys.path entries) the caller imports from.
+    A namespace package (PEP 420) exists only relative to one, so when the
+    directory the walk stopped at is not itself a root and a root lies above
+    it, the walk goes on through namespace-package directories up to the
+    nearest (deepest) such root, which becomes the import root, every
+    directory in between a part, as the importer names a module by how it
+    was imported (loader.name).  If any directory on that way cannot be a
+    namespace portion (_namespace_portion_p: no identifier, or a module file
+    of its name beside it, which FileFinder imports instead), the regular
+    walk's result stands unchanged.  Directories match a root by real path
+    (_same_dir_key); the import root keeps dir_path's own spelling.
+
+    Pure (the CLI, the nREPL and the LSP read it; the CLI adds the root to
+    sys.path itself)."""
     parts = []
     current = dir_path
     while has_init_file(current):
@@ -44,7 +97,22 @@ def package_root(dir_path):
         if parent == current:
             break
         current = parent
-    return current, parts
+    root_keys = {_same_dir_key(root) for root in roots}
+    if not root_keys or _same_dir_key(current) in root_keys:
+        return current, parts
+    between = []
+    directory = current
+    while True:
+        between.insert(0, directory)
+        parent = osp.dirname(directory)
+        if parent == directory:
+            return current, parts
+        if _same_dir_key(parent) in root_keys:
+            break
+        directory = parent
+    if not all(_namespace_portion_p(d) for d in between):
+        return current, parts
+    return parent, [osp.basename(d) for d in between] + parts
 
 
 def _lpy_code(source, path, compile_module, scope):
