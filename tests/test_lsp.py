@@ -426,6 +426,18 @@ class TestRequireSelection:
         got = server.find_import_target(node, folders, origin=origin)
         assert got == str(package / "dual" / "__init__.lpy")
 
+    @pytest.mark.parametrize("init", ["__init__.py", "__init__.pyc"])
+    def test_a_package_of_another_suffix_hides_the_module_file(self, package, init):
+        # Defect: only __init__.lpy counts as the package, so dual.lpy is
+        # opened where Python imports the package dual/ (a .py one here),
+        # whose code is not that file's.
+        (package / "dual").mkdir()
+        (package / "dual" / init).write_text("")
+        (package / "dual.lpy").write_text("")
+        [node] = parse("(require .dual)")
+        origin = str(package / "mod.lpy")
+        assert server.find_import_target(node, [], origin=origin) is None
+
     @pytest.mark.parametrize("spelling", ["ok?", "->foo"])
     def test_a_required_module_is_looked_up_by_its_import_name(self, package, spelling):
         # Defect: the lookup mangles the name by a rule of its own (each -

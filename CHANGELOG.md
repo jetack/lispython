@@ -15,6 +15,10 @@ follows [Semantic Versioning](https://semver.org/).
   `require` or a `from`, as Python does: in the document's package, never
   beyond its top-level package, and not at all for a buffer with no file.
   A document path with a space or a non-ASCII character is read decoded.
+  It finds a module by the name its import takes, so `(from ok? [x])` and
+  `(import ->foo)` reach `ok_p.lpy` and `_to_foo.lpy`, and it picks the
+  file Python imports: a package's `__init__` (of any suffix) before a
+  module file of the same name, and nothing when that file is no `.lpy`.
 - nREPL: the `complete` reply carries `items`, LSP-shaped completion items in
   `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython

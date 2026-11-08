@@ -5,6 +5,7 @@
 (import contextvars)
 (import functools)
 (import glob)
+(import importlib.machinery)
 (import importlib.util)
 (import inspect)
 (import logging)
@@ -205,17 +206,33 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
+(def finder-suffixes []
+  "The file suffixes CPython's FileFinder tries, in its order (extension
+   modules, then source, then bytecode), read from importlib.machinery,
+   where the importer (core/importer.py) adds .lpy to the source ones."
+  (return (+ importlib.machinery.EXTENSION-SUFFIXES
+             importlib.machinery.SOURCE-SUFFIXES
+             importlib.machinery.BYTECODE-SUFFIXES)))
+
 (def module-file-under [module-name roots]
-  "The .lpy file of the absolute import name module-name (already its
-   Python spelling, module-import-name) under the first of roots that holds
-   one, or None.  A package directory's __init__.lpy wins over a module
-   file of the same name, as CPython's FileFinder prefers the package."
+  "The .lpy file the absolute import name module-name (already its Python
+   spelling, module-import-name) imports from the first of roots that
+   holds it, or None, as CPython's FileFinder picks the file: a package
+   directory's __init__ of any suffix before a module file, each in
+   finder-suffixes order.  The file Python would import there is the
+   answer, so a package or module that is no .lpy (x/__init__.py beside
+   x.lpy) gives None, never the .lpy it shadows."
   (= rel-path (osp.join *(.split module-name ".")))
+  (= suffixes (finder-suffixes))
   (for root in roots
-    (for candidate in [(osp.join root rel-path "__init__.lpy")
-                       (+ (osp.join root rel-path) ".lpy")]
+    (= base (osp.join root rel-path))
+    (= candidates (+ (ife (osp.isdir base)
+                          [(osp.join base (+ "__init__" suffix)) for suffix in suffixes]
+                          [])
+                     [(+ base suffix) for suffix in suffixes]))
+    (for candidate in candidates
       (if (osp.isfile candidate)
-          (return candidate))))
+          (return (ife (.endswith candidate ".lpy") candidate None)))))
   (return None))
 
 (def resolve-module-to-file [module workspace-folders :origin None]
@@ -228,6 +245,8 @@
    absolute name (importlib.util.resolve-name), looked up under origin's
    import root.  With no origin, or no package, or beyond the top-level
    package, it resolves to nothing."
+  (if (not (isinstance module Symbol))
+      (return None))
   (try
     (= module-name (module-import-name module))
     (except [LispyCompileError]
