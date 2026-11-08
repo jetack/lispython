@@ -265,9 +265,12 @@ def test_nrepl_file_scopes(session, tmp_path):
     assert "NameError: name 'inc' is not defined" in error
 
     file_completion = request(session, op="complete", prefix="sq", file=path)
-    assert {"label": "sq", "kind": 3, "labelDetails": {"description": "macro"}} in (
-        file_completion["items"]
-    )
+    assert {
+        "label": "sq",
+        "kind": 3,
+        "filterText": "sq",
+        "labelDetails": {"description": "macro"},
+    } in (file_completion["items"])
     assert "sq" not in request(session, op="complete", prefix="sq")["completions"]
 
     expansion = request(session, op="macroexpand", code="(sq 3)", file=path)
