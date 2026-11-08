@@ -80,8 +80,12 @@ follows [Semantic Versioning](https://semver.org/).
   `replace_symbol`. Module-level code that used those names after a
   `defmacro` without importing them needs `(from lispy.core.builtins *)`, and
   a body that used another name of either module (`reset_gensym_counter`,
-  `atom_text`, `deque`, ...) imports it itself. `defmacro` now also works
-  inside a function or class body.
+  `atom_text`, `deque`, ...) imports it itself. `(from lispy.core.builtins *)`
+  itself now exports exactly `__all__` (the node classes, `gensym`,
+  `replace_symbol`): it adds node classes such as `Brace`, `Constant` and
+  `String`, and no longer exports `reset_gensym_counter`, which must be
+  imported by name. `defmacro` now also works inside a function or class
+  body.
 - The operator `-` is no longer the Python name `_`: in a name slot (a value,
   an assignment or loop target, a parameter, an import, an attribute such as
   `a.-` or `(.- x)`, a keyword argument, a match capture, a slice operand) it
