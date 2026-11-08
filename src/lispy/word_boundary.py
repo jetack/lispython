@@ -7,9 +7,10 @@ compute the boundary natively on every keystroke, so they pin their copies
 against these cases. Columns are code points (Python str indices); a client
 counting UTF-16 units converts (the astral case is there for it).
 
-Every character set in the rule is read off the reader's own patterns and
-tables, never written here. No pygls or lsprotocol import: this runs
-wherever lispython does.
+Every character set and pattern in the rule is read off the reader's own
+patterns and tables, never written here; a pattern is Python ``re`` syntax
+over str (``\\d``, ``\\w`` and ``\\s`` are Unicode). No pygls or lsprotocol
+import: this runs wherever lispython does.
 """
 
 import itertools
@@ -28,7 +29,7 @@ from lispy.core.parser import (
 )
 from lispy.core.utils import augassignop_dict
 
-VERSION = 2
+VERSION = 3
 
 # The case inputs, each a line with ``|`` at the caret. Only the inputs are
 # written here: the expected spans are completion_word_span's.
@@ -95,6 +96,11 @@ CASE_INPUTS = (
     ",x|",
     "#x|",
     "x'''|",
+    "*|[1 2]",
+    'a|"',
+    'f|"x"',
+    "-1+2j|",
+    ":-1+2j|",
     "heapq.nl|",
     "heapq.|",
     "a.b|.c",
@@ -161,23 +167,42 @@ def rule():
         "signs": list(SIGNS),
         "signPeelFollowers": list(SIGN_PEEL_FOLLOWERS),
         "neverPeeled": sorted(augassignop_dict),
+        # Python re syntax over str (Unicode \d, \w, \s).
+        "stringPrefix": parser._STRING_PREFIX,
+        "stringOpenings": sorted(parser._STRING_TYPES, key=len, reverse=True),
+        "danglingQuotes": _matching(parser._DANGLING_QUOTES, 2),
+        "numberToken": parser._NUMBER_TOKEN,
+        "signedComplex": parser._SIGNED_COMPLEX,
         "steps": [
             "run: the stretch of the line around the caret holding no stopChars",
-            "lex the run from its start, trying at each token start in order: "
-            "a wrapper + an opening (prefix token); \\w* + ''' (a string "
-            "opening: no word); a wrapper + one of ' ` ~@ before a "
-            "formEndChars character or the line's end (dangling: no word); a "
-            "wrapper + a metaChar before anything else (prefix token); ^ + "
-            "one or more * before an opening, a metaChar, a stopChars "
-            "character or the line's end (prefix token); else the rest of the "
-            "run is one symbol token",
-            "the word token is the symbol token ending at or holding the "
-            "caret; with none (the caret in or right after a prefix token "
-            "with no symbol after it) the word is empty at the caret",
-            "peel the token's front, repeatedly: a tokenPrefixes entry, else a "
-            "run of signs followed by a str.isalnum character or a "
-            "signPeelFollowers one; never a neverPeeled token, a token under "
-            "2 characters, an unsigned number or a signed complex number",
+            "lex the line, not the run alone, from the run's start, token "
+            "after token, until a token reaches or passes the run's end; at "
+            "each token start try, in this order: an opening token (a wrappers "
+            "entry + an openings entry); a string opening (stringPrefix + a "
+            "stringOpenings entry); a dangling quote (a wrappers entry + a "
+            "danglingQuotes entry, followed by a formEndChars character or the "
+            "line's end); a meta-indicator (a wrappers entry + a metaChars "
+            "entry, followed by anything but a formEndChars character or the "
+            "line's end); a bad prefix (^ + one or more *, then an openings "
+            "entry, a metaChars entry, or before a stopChars character or the "
+            "line's end); a number (numberToken, followed by a formEndChars "
+            "character or the line's end); else a symbol (the rest of the "
+            "run). Entries are tried longest first. ~ is a metaChars entry and "
+            "no danglingQuotes one: a ~ followed by a formEndChars character "
+            "or the line's end matches none of these patterns, so it is a "
+            "symbol",
+            "the word token: the first token that ends after the caret, or "
+            "ends at it and is a symbol or number; when there is none, or it "
+            "is neither a symbol nor a number, the word is empty at the caret",
+            "peel the word token's front, repeatedly: never a neverPeeled "
+            "token; never a number token that does not start with a signs "
+            "character or that matches signedComplex whole; never a token "
+            "under 2 characters; else the first tokenPrefixes entry it starts "
+            "with, after which the rest is a number when it matches "
+            "numberToken whole and keeps its type otherwise; else a run of "
+            "signs followed by a str.isalnum character or a signPeelFollowers "
+            "one, the rest keeping its type; else nothing (the rest is the "
+            "leaf)",
             "start: the leaf's start, or the token's when the caret is in the "
             "peeled front",
             "replaceStart: after the last . between start and the caret",

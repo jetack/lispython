@@ -1,5 +1,6 @@
 import contextvars
 import re
+import tokenize
 from bisect import bisect_right
 from collections import deque
 
@@ -7,7 +8,6 @@ from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     PLAIN_STRING_PREFIXES,
     check_plain_string_prefix,
-    number_parts,
     string_literal_value,
 )
 from lispy.core.errors import LispyCompileError, compile_warning
@@ -42,6 +42,28 @@ _FLOATS = [
 _SCIENTIFIC = [x + "[eE][\\-\\+]?\\d+(?:_\\d+)*" for x in _FLOATS + [_INT]]
 _NUMBER = "|".join(_SCIENTIFIC + _FLOATS + [_INT])
 _COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
+# A number token's text: signs, then a complex or a plain number.
+_NUMBER_TOKEN = "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")"
+# One number as CPython 3.12+'s tokenizer reads it: tokenize's own patterns,
+# except that a decimal integer may have leading zeros (01 is one NUMBER, which
+# the parser refuses later). 3.11's pure-Python tokenizer splits 01 in two;
+# this is the 3.12+ reading on every interpreter, so a malformed literal is
+# placed alike everywhere.
+_PY_NUMBER = "|".join(
+    [
+        tokenize.Imagnumber,
+        tokenize.Floatnumber,
+        tokenize.Hexnumber,
+        tokenize.Binnumber,
+        tokenize.Octnumber,
+        "[0-9](?:_?[0-9])*",
+    ]
+)
+# A number token the reader keeps whole, signs included (_signed_complex_p):
+# signs, a number, + or -, a number, as number_parts splits it (-1+2j is one
+# Constant, as Python binds the sign to the real part; literal_value refuses a
+# right part that is not imaginary, 0x1e+2).
+_SIGNED_COMPLEX = f"[+-]*(?:{_PY_NUMBER})[+-](?:{_PY_NUMBER})"
 # The wrapper an opening or a meta-indicator may carry: one of ^, *, **
 # (wrapper_dict). ^ followed by stars has no meaning before an opening or a
 # quote/unquote (whatever follows it), nor alone (^* ending the token); that is
@@ -51,6 +73,16 @@ _COMPLEX = f"(?:(?:{_NUMBER})[+-])?(?:{_NUMBER})[jJ]"
 _WRAPPER = "(?:\\^|\\*{1,2})?"
 _OPENING = "[\\(\\{\\[]"
 _META_CHARS = "(?:'|`|~@|~)"
+# The quote marks that, with no form after them, are a dangling quote: ~ alone
+# is the invert symbol.
+_DANGLING_QUOTES = "(?:'|`|~@)"
+# A string token is only its opening: a prefix and a quote, longest first
+# (scan_string_body reads the body).
+_STRING_PREFIX = "\\w*"
+_STRING_TYPES = ("'''", '"""', '"')
+_STRING_OPENINGS = "|".join(
+    re.escape(quote) for quote in sorted(_STRING_TYPES, key=len, reverse=True)
+)
 # What can follow a form but never start one: it ends a number or a symbol
 # (so a comment needs no space before it: a;c is the symbol a), a quote
 # followed by it quotes nothing, and ~ followed by it is the symbol ~.
@@ -121,17 +153,14 @@ def _token_patterns(in_field, field_level=False):
         ["[\\)\\}\\]]", "closing"],
         # Only the opening of a string (prefix and quote): scan_string_body,
         # the one scanner of string bodies, reads the rest.
-        [f'\\w*(?:{quote}"""|\'\'\'|")', "string"],
+        [f"{_STRING_PREFIX}(?:{quote}{_STRING_OPENINGS})", "string"],
         # ' ` ~@ (any wrapper) with no form right after: refused by _parse. ~
         # alone is the invert operator, a symbol.
-        [_WRAPPER + f"(?:'|`|~@)(?=[{_FORM_END}]|{end})", "dangling-quote"],
+        [_WRAPPER + _DANGLING_QUOTES + f"(?=[{_FORM_END}]|{end})", "dangling-quote"],
         [_WRAPPER + _META_CHARS + f"(?![{_FORM_END}]|{end})", "meta-indicator"],
         [f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|{stop_ahead})", "bad-prefix"],
         [f";(?:{comment_char})*+", "comment"],
-        [
-            "[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + f")(?=[{_FORM_END}]|{end})",
-            "number",
-        ],
+        [_NUMBER_TOKEN + f"(?=[{_FORM_END}]|{end})", "number"],
         [",", "comma"],
         # "[" ends a symbol so that f[T] is a symbol glued to a bracket. At a
         # field's own level a lone ":" or "!" matches too, so the lexer sees
@@ -156,8 +185,9 @@ _BRACKETED_FIELD_TOKEN_RE = re.compile(
     "|".join(f"({p})" for [p, _] in _token_patterns(True))
 )
 _TOKEN_LABELS = [label for [_, label] in _token_patterns(False)]
-_NUMBER_TOKEN_RE = re.compile("[+-]*(?:" + "|".join([_COMPLEX, _NUMBER]) + ")$")
-_STRING_PREFIX_RE = re.compile("\\w*")
+_NUMBER_TOKEN_RE = re.compile(_NUMBER_TOKEN + "$")
+_SIGNED_COMPLEX_RE = re.compile(_SIGNED_COMPLEX)
+_STRING_PREFIX_RE = re.compile(_STRING_PREFIX)
 # The f- and t-string prefixes, lower-cased (interpolated_kind).
 _F_STRING_PREFIXES = ("f", "rf", "fr")
 _T_STRING_PREFIXES = ("t", "rt", "tr")
@@ -1186,8 +1216,6 @@ def _split_bad_prefix(token):
 
 special_literals = ("True", "False", "None", "...")
 
-_STRING_TYPES = ("'''", '"""', '"')
-
 
 # The signs the reader peels off the front of a token as unary operators
 # (leading_signs), and what besides a letter or digit (str.isalnum) may follow
@@ -1286,13 +1314,15 @@ def symbol_stop_p(ch):
 
 
 def run_tokens(line, start):
-    """``(start, end, type)`` of each token the reader lexes in the run of
-    symbol characters of ``line`` that starts at ``start`` (just after a stop
-    character or at the line's start), in order. A run holds no whitespace,
-    bracket closer, quote, comma or ``;``, so no string body or comment runs
-    through it; its tokens are openings and meta-indicators (``(``, ``^{``,
-    ``'``, ``~@``) and at most one symbol or number, which runs to the end
-    of the run."""
+    """``(start, end, type)`` of each token the reader lexes from ``start``
+    (just after a stop character or at the line's start) until one reaches or
+    passes the end of the run of symbol characters there, in order. The
+    reader lexes the whole ``line``, never the run alone, so the last token
+    may pass the run's end: an opening whose bracket is a stop character
+    (``*[``) or a string opening whose quote is (``a"``). A string opening
+    may also lex inside the run (``x'''``); the run's tokens are otherwise
+    openings, meta-indicators and quote marks (``(``, ``^{``, ``'``, ``~@``)
+    and a symbol or number, which ends the run."""
     end = start
     while end < len(line) and not symbol_stop_p(line[end]):
         end += 1
@@ -1369,9 +1399,8 @@ def word_parts(line, start, end):
 
 def _signed_complex_p(token):
     # -1+2j is one Constant, so the sign binds to the real part as in Python;
-    # a plain signed number stays (- 1), a unary op.
-    parts = number_parts(token)
-    return parts is not None and parts[2] is not None
+    # a plain signed number stays (- 1), a unary op (_SIGNED_COMPLEX).
+    return _SIGNED_COMPLEX_RE.fullmatch(token) is not None
 
 
 def _operand_type(operand, tktype):
