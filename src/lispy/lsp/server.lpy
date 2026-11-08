@@ -2653,10 +2653,12 @@
   "(start, end, offset) of the word at the 1-based line and code-point col
    of doc (partial-span), or None when there is none: a backend asks about
    it over a view made with the cursor at end, at offset code points from
-   that view's cursor, the word's generated start."
+   that view's cursor, the word's generated start.  A caret in the peeled
+   front of a token (the - of -x) has none: its word is the whole token,
+   while the view's partial at end is the leaf, so the offset would miss it."
   (= text (line-text doc.source line))
   (= [start end] (partial-span text (min col (len text))))
-  (if (== start end)
+  (if (or (== start end) (!= start (sub (partial-span text end) 0)))
       (return None))
   (return (, start end (- (len (py-name (sub text [: start end])))))))
 

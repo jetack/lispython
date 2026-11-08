@@ -47,8 +47,8 @@ from lispy.core.parser import (
     _STRING_TYPES,
     _T_STRING_PREFIXES,
     _token_patterns,
-    leading_signs,
     special_literals,
+    token_prefixes,
 )
 
 _MACROS = frozenset(form_docs.BUILTIN_MACROS)
@@ -67,37 +67,40 @@ _BUILTINS = {
 }
 
 
+def _named_kind(text, after_paren):
+    """The token type of a constant, form or macro name ``text``, or None."""
+    if text in _CONSTANTS:
+        return Keyword.Constant
+    if text in _KEYWORDS and (after_paren or text not in _HEAD_ONLY):
+        return Keyword if any(c.isalpha() for c in text) else Operator
+    if text in _MACROS:
+        return Keyword.Pseudo
+    return None
+
+
 def _symbol_tokens(text, start, after_paren):
     """(index, token type, text) of a symbol token, classified as the reader
-    reads it (``token_parse``): a ^, *, ** or sign prefix wraps the rest of
-    the token, and a ``:`` prefix makes a keyword."""
-    while True:
-        if text in _CONSTANTS:
-            yield start, Keyword.Constant, text
-            return
-        if text in _KEYWORDS and (after_paren or text not in _HEAD_ONLY):
-            kind = Keyword if any(c.isalpha() for c in text) else Operator
+    reads it: each prefix token_prefixes peels (^, *, **, signs) is an
+    operator before the rest, a ``:`` prefix makes the whole token a keyword,
+    and a leaf the reader re-types as a number (``*1``, ``*-1+2j``) is one."""
+    prefixes, leaf, tktype = token_prefixes(text, "symbol")
+    for prefix in prefixes:
+        kind = _named_kind(text, after_paren)
+        if kind is not None:
             yield start, kind, text
             return
-        if text in _MACROS:
-            yield start, Keyword.Pseudo, text
+        if prefix == ":":
+            # A keyword is one token, never an operator and a name.
+            yield start, String.Symbol, text
             return
-        if len(text) >= 2 and text[0] in "^*":
-            width = 2 if text.startswith("**") else 1
-        else:
-            width = len(leading_signs(text))
-        if width:
-            yield start, Operator, text[:width]
-            [text, start, after_paren] = [text[width:], start + width, False]
-            continue
-        if len(text) >= 2 and text[0] == ":":
-            kind = String.Symbol
-        elif text in _BUILTINS:
-            kind = _BUILTINS[text]
-        else:
-            kind = Name.Function if after_paren else Name
-        yield start, kind, text
-        return
+        yield start, Operator, prefix
+        [text, start, after_paren] = [text[len(prefix) :], start + len(prefix), False]
+    kind = _named_kind(text, after_paren)
+    if kind is None and tktype == "number":
+        kind = _number_kind(text)
+    elif kind is None:
+        kind = _BUILTINS.get(text, Name.Function if after_paren else Name)
+    yield start, kind, text
 
 
 def _symbol(lexer, match):
@@ -107,7 +110,10 @@ def _symbol(lexer, match):
 
 
 def _number(lexer, match):
-    text = match.group()
+    yield match.start(), _number_kind(match.group()), match.group()
+
+
+def _number_kind(text):
     digits = text.lstrip("+-").lower()
     if digits.endswith("j"):
         kind = Number
@@ -121,7 +127,7 @@ def _number(lexer, match):
         kind = Number.Float
     else:
         kind = Number.Integer
-    yield match.start(), kind, text
+    return kind
 
 
 def _prefixed(lexer, match):

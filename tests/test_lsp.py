@@ -953,6 +953,24 @@ def test_a_real_file_range_counts_in_the_editors_units(tmp_path, encoding, start
     assert (got.start.line, got.start.character, got.end.character) == (1, start, end)
 
 
+@pytest.mark.parametrize(
+    "line", ["(f -x)", "(f --x y.z)", "(g *args **kw :k)", "(h -1+2j a.b.c)"]
+)
+def test_the_cursor_word_is_the_word_its_view_restores(line):
+    # Defect: on the - of -x the word is the whole token -x, but the view is
+    # made with the cursor at the word's end, where the partial is the leaf x,
+    # so the offset back over -x lands before x and the backend answers for
+    # another name.
+    doc = SimpleNamespace(source=line)
+    for col in range(len(line) + 1):
+        word = server.cursor_word(doc, 1, col)
+        if word is None:
+            continue
+        start, end, _ = word
+        assert (start, end) == pv.partial_span(line, end), col
+    assert server.cursor_word(doc, 1, len(line) - 1) is not None
+
+
 def test_a_hover_on_a_non_builtin_name_caches_nothing():
     # Defect: the builtin lookup's cache keeps an entry (None) for every
     # name hovered, so it grows with every name a session hovers.
