@@ -777,6 +777,22 @@ def test_a_fallback_definition_and_the_backends_item_share_a_label(
     assert same == ["ok-p"]
 
 
+@pytest.mark.parametrize(
+    "definition, label",
+    [("(= ? 1)", "?"), ("(= -?- 1)", "-?-"), ("(= self.ok? 1)", "self.ok?")],
+)
+def test_the_fallback_list_keeps_a_symbol_only_or_dotted_definition_spelling(
+    complete, off_backends, definition, label
+):
+    # Defect: buffer-spellings keys only dotted parts that spell a name, so
+    # these definitions were labelled by the hyphen rule alone (_p, __p_,
+    # self.ok-p) and typing their own spelling dropped the item.
+    answer = complete(f"{definition}\n(print |)", off_backends)[2]
+    labels = [item.label for item in answer]
+    assert labels.count(label) == 1
+    assert not {"_p", "__p_", "self.ok-p"} & set(labels)
+
+
 @once
 def test_the_fallback_list_hyphenates_a_nested_macro(complete, off_backends):
     # Defect: a defmacro nested in a (do ...), which registers all the same,
