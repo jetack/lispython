@@ -122,14 +122,12 @@
   (return (.as-uri (pathlib.Path path))))
 
 (def under-workspace [path folders]
-  "True when path lies inside one of the workspace folders.  Real paths are
-   compared by components, not by string prefix, so /ws-other is not inside
-   /ws and a symlink counts where its target lives."
-  (= real (pathlib.Path (osp.realpath path)))
-  (for folder in folders
-    (if (.is-relative-to real (osp.realpath (uri-to-path folder.uri)))
-        (return True)))
-  (return False))
+  "True when path lies inside one of the workspace folders: it has a
+   project (project-root-of), so the index agrees with the compiles about a
+   file.  Real paths are compared by components, not by string prefix, so
+   /ws-other is not inside /ws; a directory symlink counts where its target
+   lives, a file link where the link is."
+  (return (is-not (project-root-of path folders) None)))
 
 (def workspace-folders []
   "The client's workspace folders, read from the pygls workspace itself.
@@ -246,7 +244,10 @@
    in origin's package (module-names, the package-root rule) to an
    absolute name (importlib.util.resolve-name), looked up under origin's
    import root.  With no origin, or no package, or beyond the top-level
-   package, it resolves to nothing."
+   package, it resolves to nothing.  An absolute name is looked up first
+   in origin's search dirs (module-names), in the order its compile puts
+   them on sys.path, so scripts/x.lpy finds its sibling helper.lpy, then
+   under every workspace folder (project-import-roots), then on sys.path."
   (if (not (isinstance module Symbol))
       (return None))
   (try
@@ -263,8 +264,10 @@
             (except [(, ImportError ValueError)]
               (return None)))
           (return (module-file-under absolute [import-root]))))
-  ;; 1. Workspace folders (direct or in src/)
-  (= roots [])
+  ;; 1. origin's search dirs, then the workspace folders (direct or in src/)
+  (= roots (ife (is origin None)
+                []
+                (list (sub (document-module-names origin :folders workspace-folders) 3))))
   (for folder in workspace-folders
     (.extend roots (project-import-roots (uri-to-path folder.uri))))
   (= found (module-file-under module-name roots))

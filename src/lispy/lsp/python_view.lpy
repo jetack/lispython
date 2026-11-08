@@ -45,7 +45,7 @@
 (from lispy.core.macro-table [MacroTable])
 (from lispy.core.compiler.literal [hyphen-spelling identifier-p name-key])
 (from lispy.core.unparse [unparse])
-(from lispy.core.importer [has-init-file package-root])
+(from lispy.core.importer [package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
 (from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
 
@@ -1324,15 +1324,19 @@
    search dirs, a tuple, are the one home of the directories the module's
    compile searches (on sys.path while its macros run, compile-buffer) and
    the backend searches for it (ShadowManifest.import-roots): the import
-   root, and before it the module's own directory when that is a namespace
-   package's, since the file is also the script `lpy scripts/x.lpy` runs
-   with scripts/ on sys.path, whose sibling modules it imports bare."
+   root, and before it the script root when that differs (a namespace
+   package lies above the file's regular packages), because the file is
+   also what `lpy` runs as a script, from the root its regular packages
+   give with no search roots (the CLI's rule, package-root): scripts/ for
+   scripts/x.lpy, tools/ for tools/mypkg/a.lpy, whose modules it imports
+   by their names from there."
   (= directory (osp.dirname (osp.abspath lpy-path)))
   (= roots (ife (is project-root None) [] (project-import-roots project-root)))
   (= [import-root parts] (package-root directory roots))
-  (= search-dirs (ife (or (== directory import-root) (has-init-file directory))
+  (= script-root (sub (package-root directory) 0))
+  (= search-dirs (ife (== script-root import-root)
                       (, import-root)
-                      (, directory import-root)))
+                      (, script-root import-root)))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (.join "." parts))
   (if (== stem "__init__")
@@ -1757,7 +1761,9 @@
    modules and, whole, a package of it that holds a nested import root
    (_mirror-py-files links every other module of it into the view);
    then the project and its .venv site-packages.  The one list of every
-   backend's config."
+   backend's config.  The paths are project-wide, so a module of one
+   import root (a script directory's sibling) is visible from every file
+   of the project, not only from the modules that search it."
   (= roots [])
   (for import-root in (or import-roots [])
     (= import-root (osp.abspath import-root))

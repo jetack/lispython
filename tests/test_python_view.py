@@ -726,6 +726,42 @@ class TestShadows:
         )
         assert str(view) in json.loads(open(path).read())["extraPaths"]
 
+    def test_a_regular_package_in_a_plain_directory_keeps_its_script_root(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: the search dirs are the module's own directory and the
+        # import root only, so for pvtools/pvmypkg/a.lpy (a regular package
+        # in a namespace directory) pvtools/, where `lpy` runs it from, is
+        # neither on sys.path while its macros run nor a backend search
+        # path: (require pvmypkg.mac *) loads no macros.
+        project, root = tmp_path / "project", tmp_path / "view"
+        tools = project / "pvtools"
+        pkg = tools / "pvmypkg"
+        self.write(pkg / "__init__.py", "")
+        self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(pkg / "a.lpy", "(require pvmypkg.mac *)\n(= y (twice 2))")
+        assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project)) == (
+            "pvtools.pvmypkg.a",
+            "pvtools.pvmypkg",
+            str(project),
+            (str(tools), str(project)),
+        )
+        names = ["pvmypkg", "pvmypkg.mac", "pvtools", "pvtools.pvmypkg"]
+        names.append("pvtools.pvmypkg.mac")
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        manifest = pv.ShadowManifest()
+        try:
+            pv.write_shadows(str(project), str(root), manifest=manifest)
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        assert (root / "pvtools" / "pvmypkg" / "a.py").read_text().endswith("y = 2 + 2")
+        path = pv.write_pyright_config(
+            str(project), str(root), import_roots=manifest.import_roots
+        )
+        assert str(root / "pvtools") in json.loads(open(path).read())["extraPaths"]
+
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pkg"

@@ -87,9 +87,11 @@ follows [Semantic Versioning](https://semver.org/).
   `__init__`) is named as a module of that namespace package
   (`scripts/tool.lpy` is `scripts.tool`, imported from the folder), so its
   `__name__`/`__package__` at compile time differ from before. It also
-  stays the script `lpy scripts/tool.lpy` runs: `scripts/` is on `sys.path`
-  while its macros run and among the backend's search paths, so a bare
-  require or import of a sibling still resolves.
+  stays the script `lpy scripts/tool.lpy` runs: the directory the script
+  runs from (`scripts/`, or `tools/` for `tools/mypkg/a.lpy` in a regular
+  package) is on `sys.path` while its macros run, among the backend's
+  search paths, and searched first by go-to-definition, so a bare require
+  or import of a sibling still resolves.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call

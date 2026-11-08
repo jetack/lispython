@@ -546,6 +546,23 @@ class TestRequireSelection:
             server.disk_views.forget(uri)
         assert origin is not None and origin[0] == self.NS_SOURCE
 
+    def test_an_absolute_require_resolves_beside_a_script_first(self, namespace):
+        # Defect: an absolute module is looked up only under the workspace
+        # folder (and its src), so the sibling lspnshelper.lpy that the
+        # compile imports is missed, or a folder-level one of that name is
+        # taken instead.
+        project = namespace.parent
+        (project / "lspnshelper.lpy").write_text("")
+        [node] = parse("(require lspnshelper)")
+        origin = str(namespace / "a.lpy")
+        folders = server.workspace_folders()
+        got = server.find_import_target(node, folders, origin=origin)
+        assert got == str(namespace / "lspnshelper.lpy")
+        # With no origin the folder's own module is the answer.
+        assert server.find_import_target(node, folders) == str(
+            project / "lspnshelper.lpy"
+        )
+
     def test_a_file_link_takes_its_directorys_project(self, namespace, tmp_path):
         # Defect: the project is found from the link's target, which lies
         # outside every folder, so the document compiles as the top-level
