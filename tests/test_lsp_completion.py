@@ -949,6 +949,46 @@ def item(label):
     return lsp.CompletionItem(label=label, kind=lsp.CompletionItemKind.Variable)
 
 
+def test_a_macro_name_is_the_word_typed(off_complete):
+    # Defect: the word stops at characters no Python name holds, so (->>|
+    # types nothing: every label is offered, and ->> is never narrowed to.
+    labels = set(by_label(off_complete("(->>|)")[2]))
+    assert "->>" in labels
+    assert all(label.startswith("->>") for label in labels)
+
+
+def test_a_user_macro_with_a_bang_is_offered(off_complete):
+    # Defect: the ! ends the word, so swap! is typed as nothing and buried
+    # in the whole list, or never matched.
+    source = "(defmacro swap! [a b] `(, ~b ~a))\n(swap!|)"
+    labels = set(by_label(off_complete(source)[2]))
+    assert "swap!" in labels
+    assert all(label.startswith("swap!") for label in labels)
+
+
+PEELED_SIGN = "(= foo 1)\n(- -fo|)"
+
+
+def test_a_peeled_sign_is_no_part_of_the_typed_word(off_complete):
+    # Defect: the word typed keeps the reader's unary sign (-fo in (- -fo),
+    # which reads (- foo)), so no name matches it and nothing is offered.
+    items = by_label(off_complete(PEELED_SIGN)[2])
+    assert items["foo"].filter_text == "foo"
+
+
+@once
+def test_a_peeled_signs_edit_starts_after_it(merged, backend_requests):
+    # Defect: accepting the item overwrites the unary sign before the word.
+    backend_requests.answer["value"] = [item("foo")]
+    line, character, items = merged(PEELED_SIGN)
+    edit = by_label(items)["foo"].text_edit
+    assert (edit.insert.start.character, edit.replace.end.character) == (
+        character - 2,
+        character,
+    )
+    assert edit.insert.start.line == line
+
+
 KEYSTROKES = ["my-v", "my_v", "my_val-x", "my-val_x", "MY-V"]
 
 
@@ -989,12 +1029,25 @@ def test_the_fallback_list_is_filtered_on_the_server(answer_at, off_backends, ty
 def test_a_leading_separator_is_matched_as_written(answer_at, off_backends):
     # Defect: a - or _ that starts the word matches the other one, so - (an
     # operator macro being typed) offers every _private name, and _ every
-    # operator.
+    # operator; or a lone - is no word, so every label is offered.
     source = "(= _hidden 1)\n({}|)"
     labels = set(by_label(answer_at(source.format("-"), off_backends).items))
     assert "->" in labels and "_hidden" not in labels
     labels = set(by_label(answer_at(source.format("_"), off_backends).items))
     assert "_hidden" in labels and "->" not in labels
+
+
+def test_a_lone_sign_is_the_word_a_completion_replaces():
+    # Defect: the - typed before a name that starts with it is left out of
+    # the word, so accepting -> from (- gives (-->.
+    text = "(-)"
+    insert, replace, typed = server.completion_ranges(
+        SimpleNamespace(source=text), 1, 2
+    )
+    assert typed == "-"
+    assert (insert.start.character, insert.end.character) == (1, 2)
+    applied = text[: replace.start.character] + "->" + text[replace.end.character :]
+    assert applied == "(->)"
 
 
 @once

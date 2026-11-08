@@ -1189,59 +1189,182 @@ special_literals = ("True", "False", "None", "...")
 _STRING_TYPES = ("'''", '"""', '"')
 
 
+# The signs the reader peels off the front of a token as unary operators
+# (leading_signs), and what besides a letter or digit (str.isalnum) may follow
+# such a run for it to be peeled.
+SIGNS = "+-"
+SIGN_PEEL_FOLLOWERS = "_."
+# The prefixes token_parse peels off a symbol or number token besides signs,
+# longest first, and the node each wraps the rest of the token in.
+TOKEN_PREFIXES = ("**", "*", "^", ":")
+_PREFIX_WRAPPERS = {"**": DoubleStarred, "*": Starred, "^": Annotation, ":": Keyword}
+
+
+def leading_signs(token):
+    """The run of signs the reader peels off the front of ``token`` as unary
+    operators, or "": a run followed by a letter, digit (str.isalnum) or one
+    of SIGN_PEEL_FOLLOWERS (``-foo`` is ``(- foo)``, ``--x`` is
+    ``(- (- x))``). A run followed by anything else stays in the symbol
+    (``->f``, ``-?``), and a run with nothing after it is the operator itself.
+    """
+    rest = token.lstrip(SIGNS)
+    if rest != token and rest and (rest[0].isalnum() or rest[0] in SIGN_PEEL_FOLLOWERS):
+        return token[: len(token) - len(rest)]
+    return ""
+
+
+def _token_prefix(token, tktype):
+    """The prefix token_parse peels off the front of ``token`` next, or ""
+    when ``token`` is the leaf: an augmented assignment operator, a special
+    literal, an unsigned or signed complex number and a token shorter than
+    two characters are never peeled."""
+    if token in augassignop_dict or token in special_literals:
+        return ""
+    if tktype == "number" and (token[0] not in SIGNS or _signed_complex_p(token)):
+        return ""
+    if len(token) < 2:
+        return ""
+    for prefix in TOKEN_PREFIXES:
+        if token.startswith(prefix):
+            return prefix
+    return leading_signs(token)
+
+
+def token_prefixes(token, tktype):
+    """``(prefixes, leaf, leaf_tktype)``: the prefixes the reader peels off
+    symbol or number ``token`` of type ``tktype``, outermost first, and what
+    is left. The one home of the peel, read by token_parse and the completion
+    word (completion_word_span), so the word typed is the reader's leaf."""
+    prefixes = []
+    while prefix := _token_prefix(token, tktype):
+        prefixes.append(prefix)
+        token = token[len(prefix) :]
+        if prefix[0] not in SIGNS:
+            tktype = _operand_type(token, tktype)
+    return prefixes, token, tktype
+
+
 def token_parse(token, tktype, position_info):
     """The node of a symbol or number token (strings go to string_parse).
 
-    A prefix (``^``, ``:``, ``*``, ``**``, or a run of signs before a name or
-    number) wraps the rest of the token, which may carry another. One loop
-    peels them outside in, then the leaf is wrapped inside out, so a chain of
+    A prefix (token_prefixes: ``^``, ``:``, ``*``, ``**``, or a run of signs
+    before a name or number) wraps the rest of the token. The prefixes are
+    peeled in one loop, then the leaf is wrapped inside out, so a chain of
     prefixes costs no Python frame per prefix.
     """
-    # Outermost first: [wrapper class, position] or ["signs", position, signs].
-    prefixes = []
-    while True:
-        if token in augassignop_dict:
-            node = Symbol(token, **position_info)
-            break
-        if token in special_literals:
-            node = Constant(token, **position_info)
-            break
-        if tktype == "number" and (token[0] not in "+-" or _signed_complex_p(token)):
-            node = Constant(token, **position_info)
-            break
-        if len(token) < 2:
-            node = Symbol(token, **position_info)
-            break
-        if token[0] in "^:*":
-            width = 2 if token.startswith("**") else 1
-            wrapper = (
-                Annotation
-                if token[0] == "^"
-                else Keyword
-                if token[0] == ":"
-                else wrapper_dict["*" * width]
-            )
-            prefixes.append([wrapper, position_info])
-            position_info = {**position_info}
-            position_info["col_offset"] += width
-            token = token[width:]
-            tktype = _operand_type(token, tktype)
-            continue
-        rest = token.lstrip("+-")
-        if token[0] in "+-" and rest and (rest[0].isalnum() or rest[0] in "_."):
-            signs = token[: len(token) - len(rest)]
-            prefixes.append(["signs", position_info, signs])
-            position_info = {**position_info}
-            position_info["col_offset"] += len(signs)
-            token = rest
-            continue
+    prefixes, token, tktype = token_prefixes(token, tktype)
+    outers = []
+    for prefix in prefixes:
+        outers.append(position_info)
+        position_info = {**position_info}
+        position_info["col_offset"] += len(prefix)
+    if token in augassignop_dict:
         node = Symbol(token, **position_info)
-        break
-    for [wrapper, outer, *signs] in reversed(prefixes):
+    elif token in special_literals or tktype == "number":
+        node = Constant(token, **position_info)
+    else:
+        node = Symbol(token, **position_info)
+    for prefix, outer in zip(reversed(prefixes), reversed(outers)):
         node = (
-            _unary_op_wrap(signs[0], node, outer) if signs else wrapper(node, **outer)
+            _unary_op_wrap(prefix, node, outer)
+            if prefix[0] in SIGNS
+            else _PREFIX_WRAPPERS[prefix](node, **outer)
         )
     return node
+
+
+# One character that ends a symbol token: the reader's own stop class.
+_SYMBOL_STOP_RE = re.compile(f"[{_SYMBOL_STOP}]")
+# The token types whose text is a word: the reader's leaf of one is a name, a
+# keyword's text, an operator or a number (token_parse).
+_WORD_TOKENS = ("symbol", "number")
+
+
+def symbol_stop_p(ch):
+    """Whether character ``ch`` ends a symbol token (``_SYMBOL_STOP``)."""
+    return _SYMBOL_STOP_RE.match(ch) is not None
+
+
+def run_tokens(line, start):
+    """``(start, end, type)`` of each token the reader lexes in the run of
+    symbol characters of ``line`` that starts at ``start`` (just after a stop
+    character or at the line's start), in order. A run holds no whitespace,
+    bracket closer, quote, comma or ``;``, so no string body or comment runs
+    through it; its tokens are openings and meta-indicators (``(``, ``^{``,
+    ``'``, ``~@``) and at most one symbol or number, which runs to the end
+    of the run."""
+    end = start
+    while end < len(line) and not symbol_stop_p(line[end]):
+        end += 1
+    pos = start
+    while pos < end:
+        m = _TOKEN_RE.match(line, pos)
+        yield pos, m.end(), _TOKEN_LABELS[m.lastindex - 1]
+        pos = m.end()
+
+
+def completion_word_span(line, col):
+    """``(start, replace_start, end)`` of the word being typed at code-point
+    column ``col`` (0 <= col <= len(line)) of ``line``: the one home of the
+    completion word boundary, which the LSP derives its ranges from and the
+    editors' native copies pin against (``python -m lispy.word_boundary``).
+
+    The word is the reader's own: the symbol or number token (run_tokens)
+    that ends at or holds ``col``, less the prefixes token_parse peels
+    (token_prefixes), so the word typed is the leaf the code holds. A macro
+    name is no Python name, so every character the reader lets into a symbol
+    is a word character (``->>``, ``swap!``, ``a~b``), and openings and quote
+    marks before it are separate tokens (``(->>``, ``'x``, ``~@x``).
+
+    - ``start``: where the leaf starts; with ``col`` inside the peeled
+      prefixes (``-|-x``), where the token starts, the whole token being the
+      word, so nothing of it is left to glue onto what replaces the word.
+    - ``replace_start``: after the last ``.`` between ``start`` and ``col``,
+      since a completion offers the part after the last dot.
+    - ``end``: the first ``.`` after ``col`` in the token, else the token's end.
+
+    No word (an opening or a quote mark at ``col``, ``(|``) is the empty span
+    at ``col``."""
+    run_start = col
+    while run_start > 0 and not symbol_stop_p(line[run_start - 1]):
+        run_start -= 1
+    for start, end, tktype in run_tokens(line, run_start):
+        if end > col or (end == col and tktype in _WORD_TOKENS):
+            break
+    else:
+        return col, col, col
+    if tktype not in _WORD_TOKENS:
+        return col, col, col
+    _, leaf, _ = token_prefixes(line[start:end], tktype)
+    leaf_start = end - len(leaf)
+    if col >= leaf_start:
+        start = leaf_start
+    dot = line.find(".", col, end)
+    return start, start + line[start:col].rfind(".") + 1, end if dot < 0 else dot
+
+
+def word_parts(line, start, end):
+    """``(start, end)`` of each ``.``-separated part of the leaf
+    (token_prefixes) of every symbol token the reader reads in ``line`` from
+    ``start`` (a token start) to ``end``, clipped at ``end``: where a name can
+    be spelled there (``-x`` spells ``x``, ``self.my-x`` spells ``self`` and
+    ``my-x``)."""
+    pos = start
+    while pos < end:
+        if symbol_stop_p(line[pos]):
+            pos += 1
+            continue
+        for tk_start, tk_end, tktype in run_tokens(line, pos):
+            pos = tk_end
+            if tktype != "symbol":
+                continue
+            _, leaf, _ = token_prefixes(line[tk_start:tk_end], tktype)
+            part = tk_end - len(leaf)
+            for piece in leaf.split("."):
+                if part >= end:
+                    return
+                yield part, min(part + len(piece), end)
+                part += len(piece) + 1
 
 
 def _signed_complex_p(token):

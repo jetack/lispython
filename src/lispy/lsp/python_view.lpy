@@ -40,10 +40,10 @@
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.errors [LispyCompileError compile-errors])
 (from lispy.core.nodes [Bracket Expression GluedHead Paren Symbol Wrapper atom-text])
-(from lispy.core.parser [parse source-offset tokenize])
+(from lispy.core.parser [completion-word-span parse source-offset tokenize word-parts])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
-(from lispy.core.compiler.literal [hyphen-spelling identifier-p name-key])
+(from lispy.core.compiler.literal [hyphen-spelling name-key python-name-p])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
@@ -62,6 +62,12 @@
    mangling): the LSP compares names by it, since my-attr and my_attr are
    one Python name."
   (return (. (Symbol text) name)))
+
+(def _spells-p [word name]
+  "Whether .lpy text word spells Python name name: a name the compiler
+   accepts (python-name-p) whose py-name is name, so the operator - never
+   spells the name _."
+  (return (and (python-name-p word) (== (py-name word) name))))
 
 ;; name-key (from compiler/literal.py) is how the LSP compares identifiers
 ;; (references, completion, macro heads): the compiler's own name identity,
@@ -189,60 +195,24 @@
             (frozenset (filter None (map str.strip (.split rules ",")))))))
   (return found))
 
-;; Characters that end a symbol token where a name is read back from the
-;; source: whitespace, the attribute dot, brackets, quotes, `,` and `;`.
-(= _NAME-STOPS ".()[]{}\"'`,;")
-
-(def _name-char-p [ch]
-  (return (not (or (.isspace ch) (in ch _NAME-STOPS)))))
-
-(def _name-start [text end]
-  "Where the run of name characters ending at code-point column end starts."
-  (= start end)
-  (while (and (> start 0) (_name-char-p (sub text (- start 1))))
-    (-= start 1))
-  (return start))
-
-;; The prefixes a form can carry before its symbol (keyword :, the wrappers
-;; * ** ^, the quote marks ' ` ~ ~@): never part of a name, so the partial word
-;; at the cursor starts after them and they stay in the source.
-(= _SYMBOL-PREFIXES ":*^~@'`")
-
-(def _partial-start [text end]
-  "Where the partial identifier ending at code-point column end starts: the
-   run of name characters back from end, less its leading prefixes."
-  (= start (_name-start text end))
-  (while (and (< start end) (in (sub text start) _SYMBOL-PREFIXES))
-    (+= start 1))
-  (return start))
-
-(def _name-end [text start]
-  "Where the run of name characters starting at code-point column start ends."
-  (= end start)
-  (while (and (< end (len text)) (_name-char-p (sub text end)))
-    (+= end 1))
-  (return end))
+;; Every word read back from the source (the partial word at the cursor, a
+;; word spelling a Python name) is the reader's (completion-word-span,
+;; word-parts in core/parser.py), never a character table of its own.
 
 (def partial-span [text col]
   "The partial word at code-point column col of line text, as view-at-cursor
    reads it: (start, end), where start..col is what was typed before the
-   cursor and col..end the rest of the name run after it."
-  (return (, (_partial-start text col) (_name-end text col))))
+   cursor after its last dot and col..end the rest of the name run after it
+   (completion-word-span)."
+  (= [_ start end] (completion-word-span text col))
+  (return (, start end)))
 
-(def glued-base [text start]
-  "The dotted name written glued to the dot right before code-point column
-   start of line text (a.b for a.b.c|, start at c), or None when no dot is
-   there or no name runs into it (x .c, (.c x), a..c)."
-  (if (or (<= start 0) (!= (sub text (- start 1)) "."))
-      (return None))
-  (= end (- start 1))
-  (= begin end)
-  (while (and (> begin 0) (or (_name-char-p (sub text (- begin 1)))
-                              (== (sub text (- begin 1)) ".")))
-    (-= begin 1))
-  (while (and (< begin end) (in (sub text begin) _SYMBOL-PREFIXES))
-    (+= begin 1))
-  (= base (sub text [: begin end]))
+(def glued-base [text col]
+  "The dotted name written glued to the dot before the word at code-point
+   column col of line text (a.b for a.b.c|), or None when no dot is there
+   or no name runs into it (x .c, (.c x), a..c)."
+  (= [start replace-start _] (completion-word-span text col))
+  (= base (sub text [: start (max start (- replace-start 1))]))
   (if (or (not base) (in "" (.split base ".")))
       (return None))
   (return base))
@@ -386,19 +356,19 @@
    The spelling sits at no fixed place: a dotted symbol or (. x a) ends the
    node with it, a method call (.ff x) starts it right after the dot, a
    keyword parameter after its colon, and a macro may put anything there;
-   so each place is tried and the one whose py-name matches wins.  span
+   so each place is tried and the one that spells name (_spells-p) wins.  span
    lies inside lines (_in-buffer-p)."
   (= [[line col] [end-line end-col]] span)
   (= text (sub lines (- line 1)))
-  (if (and (== line end-line) (== (py-name (sub text [: col end-col])) name))
+  (if (and (== line end-line) (_spells-p (sub text [: col end-col]) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))
-  (= start (_name-start end-text end-col))
-  (if (and (< start end-col) (== (py-name (sub end-text [: start end-col])) name))
+  (= start (sub (completion-word-span end-text end-col) 1))
+  (if (and (< start end-col) (_spells-p (sub end-text [: start end-col]) name))
       (return (, (, end-line start) (, end-line end-col))))
   (= start (ife (and (< col (len text)) (in (sub text col) ".:")) (+ col 1) col))
-  (= end (_name-end text start))
-  (if (and (< start end) (== (py-name (sub text [: start end])) name))
+  (= end (sub (completion-word-span text start) 2))
+  (if (and (< start end) (_spells-p (sub text [: start end]) name))
       (return (, (, line start) (, line end))))
   (return None))
 
@@ -531,26 +501,19 @@
     (return (tuple (.split source "\n")))))
 
 (def spelled-in [lines start end name]
-  "The .lpy span of the first name run between start and end in lines
-   (source-lines) whose py-name is name, or None.  A run is a stretch of _name-char-p
-   characters (a dot splits runs) less its leading _SYMBOL-PREFIXES."
+  "The .lpy span of the first word between start and end in lines
+   (source-lines) that spells name (_spells-p), or None: each word is a
+   .-part of the leaf of a symbol token the reader reads there (word-parts:
+   (- -x) spells x)."
   (for line in (range (sub start 0) (+ (sub end 0) 1))
     (if (> line (len lines))
         (break))
     (= text (sub lines (- line 1)))
     (= col (ife (== line (sub start 0)) (sub start 1) 0))
     (= stop (ife (== line (sub end 0)) (min (sub end 1) (len text)) (len text)))
-    (while (< col stop)
-      (if (not (_name-char-p (sub text col)))
-          (do (+= col 1)
-              (continue)))
-      (= run-end (min (_name-end text col) stop))
-      (= run-start col)
-      (while (and (< run-start run-end) (in (sub text run-start) _SYMBOL-PREFIXES))
-        (+= run-start 1))
-      (if (and (< run-start run-end) (== (py-name (sub text [: run-start run-end])) name))
-          (return (, (, line run-start) (, line run-end))))
-      (= col run-end)))
+    (for [part-start part-end] (word-parts text col stop)
+      (if (_spells-p (sub text [: part-start part-end]) name)
+          (return (, (, line part-start) (, line part-end))))))
   (return None))
 
 (def lpy-range [view source start end]
@@ -881,12 +844,12 @@
 (def _view-at-cursor [source line col :package "" :name "__main__" :search-dirs (,)]
   "(view, epoch): view-at-cursor's view and the earliest macro environment
    its compiles ran under (None when none ran).  The PythonView of source for a request at 1-based line, code-point col,
-   or None.  The partial word before the cursor (name characters back to a
-   dot, space, bracket, quote, comma or ;, less a leading prefix such as :
-   or *) is replaced by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
-   (. obj ) ) still compiles, and so is the rest of its name run after the
-   cursor (my-|x), which would otherwise glue onto the sentinel and is what
-   a completion there replaces; when the whole buffer does not, the text
+   or None.  The partial word at the cursor (partial-span: the reader's
+   word of completion-word-span after its last dot, through to the next dot
+   or the token's end, so my-|x and -|-x leave nothing of the token to glue
+   onto it) is replaced by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
+   (. obj ) ) still compiles, the rest of the word being what a completion
+   there replaces; when the whole buffer does not, the text
    before the cursor with its open forms closed is compiled instead, and
    while that is refused at an open form around the cursor ((== (sub gr|
    with one operand, (when x| with no body), that form is unwrapped: its
@@ -953,14 +916,16 @@
   (= index (.index view.text CURSOR-SENTINEL))
   (= gen-line (+ (.count view.text "\n" 0 index) 1))
   (= gen-col (- index (+ (.rfind view.text "\n" 0 index) 1)))
-  (= restored (ife partial (py-name partial) ""))
-  ;; The sentinel compiled as an identifier, so only an identifier may take
-  ;; its place: anything else (a keyword such as class, an operator symbol
-  ;; such as a+b) would make Python text the buffer never compiles to, or none
-  ;; that parses.  An empty partial leaves what the user is typing (x.)
-  ;; unparsable, as it is.
-  (if (and partial (not (identifier-p restored)))
+  ;; The sentinel compiled as an identifier, so only a Python name
+  ;; (python-name-p) may take its place: any other word (a keyword such as
+  ;; class, an operator or macro name such as - or ->>) gives no view, so no
+  ;; backend is asked about a name the buffer does not hold (- is no _), and
+  ;; cursor-word's offset back over the word stays the word's Python name.
+  ;; An empty partial leaves what the user is typing (x.) unparsable, as it
+  ;; is.
+  (if (and partial (not (python-name-p partial)))
       (return (, None macro-epoch)))
+  (= restored (py-name partial))
   (= view.text (+ (sub view.text [: None index]) restored
                   (sub view.text [: (+ index (len CURSOR-SENTINEL)) None])))
   (.shift view.map

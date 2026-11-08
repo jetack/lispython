@@ -1061,6 +1061,11 @@ class Literal(Node):
         return self._classname_call(self.operands_generate(in_quasi))
 
 
+# The spellings a symbol rewrites into its Python name (Symbol.name), applied
+# in this order: ``->`` before ``-``, or ``->`` would become ``_>``.
+NAME_MANGLE = (("->", "_to_"), ("-", "_"), ("?", "_p"))
+
+
 class Symbol(Literal):
     def __init__(self, value, **kwargs):
         super().__init__(**kwargs)
@@ -1069,7 +1074,10 @@ class Symbol(Literal):
 
     @property
     def name(self):
-        return self.value.replace("->", "_to_").replace("-", "_").replace("?", "_p")
+        name = self.value
+        for spelling, python in NAME_MANGLE:
+            name = name.replace(spelling, python)
+        return name
 
     def __repr__(self):
         return "Sym(" + self.value + ")"

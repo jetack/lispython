@@ -47,6 +47,7 @@ from lispy.core.parser import (
     _STRING_TYPES,
     _T_STRING_PREFIXES,
     _token_patterns,
+    leading_signs,
     special_literals,
 )
 
@@ -84,12 +85,7 @@ def _symbol_tokens(text, start, after_paren):
         if len(text) >= 2 and text[0] in "^*":
             width = 2 if text.startswith("**") else 1
         else:
-            rest = text.lstrip("+-")
-            width = (
-                len(text) - len(rest)
-                if text[0] in "+-" and rest and (rest[0].isalnum() or rest[0] in "_.")
-                else 0
-            )
+            width = len(leading_signs(text))
         if width:
             yield start, Operator, text[:width]
             [text, start, after_paren] = [text[width:], start + width, False]
