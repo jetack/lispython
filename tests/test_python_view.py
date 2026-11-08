@@ -291,6 +291,56 @@ class TestCursor:
         assert view.fallback is True
         assert view.text == "def f(grid):\n    gr"
 
+    @pytest.mark.parametrize(
+        ["src", "text", "before"],
+        [
+            (
+                "(def f [grid] (when (all (map (fn [row] (> (len ro|",
+                "def f(grid):\n    all(map(lambda row: len(ro)))",
+                "lambda row: len(ro",
+            ),
+            (
+                "(def f [grid] (try (for x in grid (print x|",
+                "def f(grid):\n    for x in grid:\n        print(x)",
+                "        print(x",
+            ),
+        ],
+    )
+    def test_the_unwrap_keeps_the_forms_inside_the_refused_one(self, src, text, before):
+        # Regression TASK-1181: the unwrap blanked every form between the
+        # refused one and the cursor, so the fn's row and the for's x were
+        # gone and the backend's final answer never offered them.
+        view = pv.view_at_cursor(*at_bar(src))
+        assert view.text == text
+        line, col = view.cursor
+        assert view.text.split("\n")[line - 1][:col].endswith(before)
+
+    @pytest.mark.parametrize("partial", ["", "re"])
+    def test_a_glued_base_survives_the_unwrap(self, partial):
+        # Regression TASK-1185: the base grid. was blanked with the refused
+        # form, so the view asked for the scope's names, not grid's members.
+        view = pv.view_at_cursor(*at_bar(f"(def f [grid] (when (== grid.{partial}|"))
+        assert view.attribute is True
+        line, col = view.cursor
+        assert view.text.split("\n")[line - 1][:col] == f"    grid.{partial}"
+
+    def test_the_unwrap_reads_into_a_quasiquote(self):
+        # Defect: the walk for the child holding the cursor skips quote
+        # forms, so a cursor in an unquote finds no child and gives no view.
+        view = pv.view_at_cursor(*at_bar("(def f [grid] (when `(f ~gr|"))
+        line, col = view.cursor
+        assert view.text.startswith("def f(grid):\n")
+        assert view.text.split("\n")[line - 1][:col].endswith(" gr")
+
+    @pytest.mark.parametrize(
+        ["src", "text"], [("[(when x|", "[x]"), ("((when x|", "x()")]
+    )
+    def test_the_innermost_refused_form_is_unwrapped(self, src, text):
+        # Defect: the outer form, whose head the inner form's bracket is,
+        # is unwrapped first, and the inner one in the next round, so the
+        # list or call around the cursor is lost.
+        assert pv.view_at_cursor(*at_bar(src)).text == text
+
     def test_a_lone_carriage_return_never_loops_the_unwrap(self, monkeypatch):
         # Defect: a lone CR is a line break to the lexer but not to a split
         # on \n, so the blanked span missed the refused bracket and every
@@ -317,8 +367,6 @@ class TestCursor:
             "(def f [grid y|",
             "(async-def f [grid y|",
             "(defmacro m [grid y|",
-            "(def f [:x 1 :y|",
-            "(def f [:x|",
             "(def f [*ar|",
             "(def f[T|",
             "(class A[T|",
@@ -333,6 +381,11 @@ class TestCursor:
             "(def f [grid] ((lambda [x|",
             "(def f [grid] [(lambda [x|",
             "(def f [grid] {(lambda [x|",
+            # A parameter in a quasiquote's unquote.
+            "(def f [grid] (when (lambda [x] `(a ~(fn [gr|",
+            # In the body of a def or lambda the unwrap drops, its
+            # parameters are names.
+            "(fn [x] x y|",
         ],
     )
     def test_a_cursor_where_a_dropped_form_binds_a_name_is_none(self, src):
@@ -346,7 +399,8 @@ class TestCursor:
         [
             ("(def f [grid] (lambda [a :b gr|", "def f(grid):\n    gr"),
             ("(def f [grid] (lambda [a ^gr|", "def f(grid):\n    gr"),
-            ("(def f [grid] (lambda [a :b (g gr|", "def f(grid):\n    gr"),
+            # The default's own form stays around the cursor.
+            ("(def f [grid] (lambda [a :b (g gr|", "def f(grid):\n    g(gr)"),
             ("(class A [Ba|", "Ba"),
         ],
     )

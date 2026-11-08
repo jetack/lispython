@@ -583,6 +583,63 @@ def test_a_form_refused_around_the_cursor_still_asks_the_backend(
     assert "grid" in labels
 
 
+# Mid-edit, a (> ...) with one operand is refused inside the fn whose
+# parameter row is being typed, and a (== ...) with one operand around an
+# attribute of grid.
+REFUSED_IN_FN = """(def f [grid]
+  (when (all (map (fn [row] (> (len ro|))) grid))
+    (pass)))
+"""
+REFUSED_AROUND_ATTRIBUTE = """(def f []
+  (= grid [])
+  (when (== grid.|)
+    (pass)))
+"""
+
+
+def asked_labels(complete, real_backends, backend_project, monkeypatch, source):
+    """The labels complete gives at source's | and the backend's own answer
+    to that request, with the session's backend running."""
+    monkeypatch.setattr(server, "MERGE_TIMEOUT", 30)
+    client = real_backends.available_client((backend_project / "main.lpy").as_uri())
+    complete(CLASS.format("self.|"))  # starts the backend
+    assert wait_running(client)
+    answers = []
+    asked = client.request
+
+    async def request(method, params, **kwargs):
+        answers.append(await asked(method, params, **kwargs))
+        return answers[-1]
+
+    monkeypatch.setattr(client, "request", request)
+    labels = set(by_label(complete(source)[2]))
+    assert answers
+    return labels, backend_labels(answers[0])
+
+
+def test_a_form_refused_inside_a_fn_keeps_its_parameter(
+    complete, real_backends, backend_project, monkeypatch
+):
+    # Regression TASK-1181: the unwrap of the refused (> ...) dropped the fn
+    # too, so the backend, whose answer is final, never offered row.
+    labels, answered = asked_labels(
+        complete, real_backends, backend_project, monkeypatch, REFUSED_IN_FN
+    )
+    assert "row" in answered and "row" in labels
+
+
+def test_an_attribute_inside_a_refused_form_gets_the_bases_members(
+    complete, real_backends, backend_project, monkeypatch
+):
+    # Regression TASK-1185: the unwrap blanked the base grid., so grid. was
+    # answered with the scope's names (grid itself) instead of a list's.
+    labels, _ = asked_labels(
+        complete, real_backends, backend_project, monkeypatch, REFUSED_AROUND_ATTRIBUTE
+    )
+    assert "append" in labels
+    assert not {"grid", "print"} & labels
+
+
 def test_parameters_are_in_the_fallback_list(off_complete):
     # Defect: the local list knows a def's or lambda's parameters by no
     # name, so a buffer with no backend never offers them; or it offers a
