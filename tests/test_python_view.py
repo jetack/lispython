@@ -1546,7 +1546,8 @@ class TestMacroModules:
 
     def test_a_qualified_macro_keeps_its_dotted_spelling(self, package):
         # What a qualified-macro completion labels from: name-key and
-        # spelling differ only in the hyphen.
+        # spelling differ only in the hyphen. A relative require qualifies by
+        # the module's last part, the name from . import mac binds.
         (package.pkg / "mac.lpy").write_text("(defmacro my-mac [] 1)")
         view = pv.compile_view(
             "(require .mac)\n(= yy 1)",
@@ -1554,7 +1555,7 @@ class TestMacroModules:
             name=package.name + ".mod",
             import_root=str(package.root),
         )
-        assert view.macros[".mac.my_mac"] == ".mac.my-mac"
+        assert view.macros["mac.my_mac"] == "mac.my-mac"
 
     def test_diagnostics_see_an_edited_macro_module(self, package):
         # The document's own import root (module-names) puts its package on

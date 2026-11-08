@@ -83,6 +83,15 @@ def define_macro(sexp, scope, include_meta=True):
 
 def require_macro(sexp, scope, include_meta=True):
     transformed = require_transform(sexp)
+    module = sexp.list[1]
+    if atom_text(module).startswith(".") and not scope.get("__package__"):
+        # importlib.import_module would raise a bare TypeError here, before
+        # importing anything; Python's own wording for the same refusal.
+        raise LispyCompileError(
+            f"(require ...) cannot import {atom_text(module)}: attempted "
+            "relative import with no known parent package",
+            module,
+        )
     try:
         body = macroexpand_then_compile(
             [transformed], scope, include_meta=include_meta, check_bindings=False

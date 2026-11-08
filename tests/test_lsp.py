@@ -21,6 +21,7 @@ from lispy import form_docs
 from lispy.core import nodes
 from lispy.core.compiler import features, literal
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
+from lispy.core.macro import macroexpand_then_compile
 from lispy.core.parser import parse
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
@@ -331,6 +332,148 @@ class TestRequireSelection:
         tree = parse("(require lispy.macros)\n(cond)")
         assert server.builtin_macro_doc(tree, "cond") is None
         assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
+
+    def test_an_aliased_require_qualifies_by_the_alias(self):
+        # Defects: the alias is ignored (the macros stay module.name), or it
+        # is compared by its raw spelling, so my_m.twice misses (... as my-m).
+        source = "(require macmod as my-m)\n(my-m.twice 1)"
+        assert self._find(source, "my-m.twice") is not None
+        assert self._find(source, "my_m.twice") is not None
+        assert self._find(source, "macmod.twice") is None
+
+    def test_a_relative_require_qualifies_by_the_last_part(self):
+        # Defect: (require ..pkg.macmod) answers for ..pkg.macmod.twice, a
+        # name no code can spell, and not for macmod.twice.
+        source = "(require ..pkg.macmod)\n(macmod.twice 1)"
+        assert self._find(source, "macmod.twice") is not None
+        assert self._find(source, "..pkg.macmod.twice") is None
+
+    def test_hover_through_an_aliased_require_of_the_built_in_macros(self):
+        # With no view the syntax scan decides; it must read the alias.
+        source = "(require lispy.macros as lm)\n(lm.cond x 1)"
+        hover = run_hover(ls_with(source), position(1, 5))
+        assert "(cond test" in hover.contents.value
+
+    def test_definition_through_an_aliased_require(self, workspace):
+        source = "(require macmod as m)\n(m.twice 1)"
+        [loc] = self._definition(workspace, source, 1, 4)
+        assert loc.uri.endswith("macmod.lpy")
+
+    @pytest.fixture
+    def package(self, tmp_path, monkeypatch):
+        """A package pkg (holding macmod.lpy) under a directory whose name
+        has a space, which a file: URI percent-encodes, beside a top-level
+        macmod.lpy outside any package; the workspace folder is that
+        directory's parent."""
+        monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
+        monkeypatch.setattr(server, "FILE_TREES", {})
+        root = tmp_path / "my proj"
+        pkg = root / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "macmod.lpy").write_text(self.MACROS)
+        (root / "macmod.lpy").write_text(self.MACROS)
+        return pkg
+
+    @staticmethod
+    def _definition_in(source, uri, folder, line, character):
+        document = SimpleNamespace(source=source, uri=uri)
+        ls = SimpleNamespace(
+            workspace=SimpleNamespace(
+                get_text_document=lambda uri: document,
+                folders={"root": SimpleNamespace(uri=folder.as_uri())},
+            )
+        )
+        return run_definition(ls, position(line, character))
+
+    def test_definition_through_a_relative_require(self, package):
+        # Defects: the relative module is looked up from the workspace root
+        # (or not at all), or the document's file: URI is read undecoded
+        # (my%20proj), so the definition is not found.
+        source = "(require .macmod)\n(macmod.thrice 1)"
+        uri = (package / "mod.lpy").as_uri()
+        assert "%20" in uri
+        [loc] = self._definition_in(source, uri, package.parent.parent, 1, 9)
+        assert loc.uri == (package / "macmod.lpy").as_uri()
+        assert loc.range.start.line == 1
+
+    @pytest.mark.parametrize(
+        "form", ["(from .macmod [thrice])", "(from . [macmod])", "(require .macmod)"]
+    )
+    def test_a_relative_import_target_resolves_in_the_package(self, package, form):
+        # Defect: a relative from (sharing the require's lookup) resolves
+        # from the workspace root, so it finds the top-level macmod.lpy or,
+        # for the package itself, nothing. (Definition never reaches this
+        # for a from: the name it binds is the buffer's own definition.)
+        (package / "__init__.lpy").write_text("")
+        [node] = parse(form)
+        origin = str(package / "mod.lpy")
+        folders = [SimpleNamespace(uri=package.parent.as_uri())]
+        got = server.find_import_target(node, folders, origin=origin)
+        expected = package / ("__init__.lpy" if "[macmod]" in form else "macmod.lpy")
+        assert got == str(expected)
+
+    @pytest.mark.parametrize("form", ["(require pkg.dual)", "(require .dual)"])
+    def test_a_package_wins_over_a_module_file_of_its_name(self, package, form):
+        # Defect: dual.lpy is taken where Python's FileFinder imports the
+        # package dual/ (its __init__.lpy).
+        (package / "dual").mkdir()
+        (package / "dual" / "__init__.lpy").write_text("")
+        (package / "dual.lpy").write_text("")
+        [node] = parse(form)
+        origin = str(package / "mod.lpy")
+        folders = [SimpleNamespace(uri=package.parent.as_uri())]
+        got = server.find_import_target(node, folders, origin=origin)
+        assert got == str(package / "dual" / "__init__.lpy")
+
+    @pytest.mark.parametrize("init", ["__init__.py", "__init__.pyc"])
+    def test_a_package_of_another_suffix_hides_the_module_file(self, package, init):
+        # Defect: only __init__.lpy counts as the package, so dual.lpy is
+        # opened where Python imports the package dual/ (a .py one here),
+        # whose code is not that file's.
+        (package / "dual").mkdir()
+        (package / "dual" / init).write_text("")
+        (package / "dual.lpy").write_text("")
+        [node] = parse("(require .dual)")
+        origin = str(package / "mod.lpy")
+        assert server.find_import_target(node, [], origin=origin) is None
+
+    @pytest.mark.parametrize("spelling", ["ok?", "->foo"])
+    def test_a_required_module_is_looked_up_by_its_import_name(self, package, spelling):
+        # Defect: the lookup mangles the name by a rule of its own (each -
+        # as _), so it misses the file the import of ok? (ok_p) reads.
+        [stmt] = list(
+            macroexpand_then_compile(
+                parse(f"(import {spelling})"), {"__macro_namespace": {}}
+            )
+        )
+        target = package / f"{stmt.names[0].name}.lpy"
+        target.write_text("")
+        [node] = parse(f"(require .{spelling})")
+        origin = str(package / "mod.lpy")
+        assert server.find_import_target(node, [], origin=origin) == str(target)
+
+    @pytest.mark.parametrize("form", ["(require ..macmod)", "(from ..macmod [x])"])
+    def test_a_relative_module_beyond_the_top_level_package_resolves_to_nothing(
+        self, package, form
+    ):
+        # Defect: each dot walks up one directory with no package boundary,
+        # so ..macmod from pkg/mod.lpy finds the top-level macmod.lpy, which
+        # Python's import never reaches.
+        [node] = parse(form)
+        origin = str(package / "mod.lpy")
+        folders = [SimpleNamespace(uri=package.parent.as_uri())]
+        assert server.find_import_target(node, folders, origin=origin) is None
+
+    def test_a_buffer_with_no_file_resolves_no_relative_module(
+        self, package, monkeypatch
+    ):
+        # Defect: an untitled: buffer's path is taken as its URI text, whose
+        # dirname is the server's working directory, so a relative module
+        # resolves against wherever the server runs.
+        monkeypatch.chdir(package)
+        source = "(require .macmod)\n(macmod.thrice 1)"
+        assert not self._definition_in(source, "untitled:x", package.parent, 1, 9)
 
 
 def test_local_completion_tags_special_forms_in_label_details_not_detail():

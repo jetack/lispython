@@ -3,8 +3,10 @@
 
 (require lispy.macros *)
 
-(from lispy.core.compiler.literal [identifier-p])
+(from lispy.core.compiler.literal [identifier-p module-import-name plain-name-p])
+(from lispy.core.errors [LispyCompileError])
 (from lispy.core.nodes *)
+(from lispy.core.nodes [atom-text])
 (from lispy.core.builtins [__all__ as MACRO-SCOPE-NAMES])
 
 ;; The generated code binds no lasting global of the module it runs in
@@ -65,22 +67,89 @@
 (= REQUIRE-ALL "all")
 (= REQUIRE-NAMED "named")
 
-(def require-selection [optional]
-  "Which macros a (require module ...) form registers, from the forms after
-   the module name, as (kind, names).  Absent: every macro, qualified by the
-   module name.  *: every macro, unqualified.  A list: exactly those names,
-   so an empty [] registers none.  The compiler and the LSP both read this."
-  (if (not optional)
-      (return (, REQUIRE-QUALIFIED None)))
-  (= [macro-names] optional)
-  (if (== (str macro-names) "*")
-      (return (, REQUIRE-ALL None)))
-  (return (, REQUIRE-NAMED [(str x) for x in macro-names])))
+(def require-error [node problem]
+  "The one shape of a malformed require's error, at node."
+  (return (LispyCompileError (+ "(require ...) " problem) node)))
+
+(def symbol-text-p [node text]
+  "Whether node is the bare symbol spelled text."
+  (return (and (is (type node) Symbol) (== (atom-text node) text))))
+
+(def require-qualifier [module]
+  "The name a qualified (require module) registers every macro under (as
+   qualifier.name): the name Python's import of module binds, its dotted
+   name when absolute, its last part when relative (.mac and ..pkg.mac
+   are mac, as from . import mac and from ..pkg import mac bind mac).  A
+   relative module of dots alone binds no name: an error at it."
+  (= text (atom-text module))
+  (if (not (.startswith text "."))
+      (return text))
+  (= last (sub (.split (.lstrip text ".") ".") -1))
+  (if (not last)
+      (raise (require-error
+               module
+               f"cannot qualify macros by {text}, which binds no name: use (require {text} as name), * or [names...]")))
+  (return last))
+
+(def require-parse [sexp]
+  "The one parse of (require module ...), read by the compiler and the LSP:
+   (kind, qualifier, names, module).  REQUIRE-QUALIFIED for (require module) and
+   (require module as alias): every macro, registered as qualifier.name,
+   the qualifier being alias, else require-qualifier's.  REQUIRE-ALL for *:
+   every macro, unqualified.  REQUIRE-NAMED for a list: exactly names, so
+   an empty [] registers none.  The qualifier is None unless qualified,
+   names None unless named.  module is the name the import takes: the
+   relative level's dots, then the dotted path mangled as the import forms
+   mangle theirs (module-import-name, which refuses a part that is no
+   name: mac., a..b, m.-, ok?.if).  A malformed require is a LispyCompileError at
+   the part at fault (require-error), as the import forms refuse theirs."
+  (= args (sub sexp.list [: 1 None]))
+  (if (== (len args) 0)
+      (raise (require-error sexp "expects a module name")))
+  (= module (sub args 0))
+  (if (isinstance module GluedHead)
+      (raise (.misuse-error module)))
+  (if (is-not (type module) Symbol)
+      (raise (require-error module f"expects a module name, got {module}")))
+  ;; The import forms' own rule, so (require ->foo) imports the module
+  ;; (import ->foo) does.
+  (= module-name (module-import-name module))
+  (= rest (sub args [: 1 None]))
+  (if (== (len rest) 0)
+      (return (, REQUIRE-QUALIFIED (require-qualifier module) None module-name)))
+  (= selection (sub rest 0))
+  (if (symbol-text-p selection "as")
+      (do (if (== (len rest) 1)
+              (raise (require-error selection "expects a name after as")))
+          (= alias (sub rest 1))
+          (if (not (plain-name-p alias))
+              (raise (require-error alias f"expects a name after as, got {alias}")))
+          (if (> (len rest) 2)
+              (raise (require-error
+                       (sub rest 2)
+                       f"takes no selection after an alias, which qualifies every macro, got {(sub rest 2)}")))
+          (return (, REQUIRE-QUALIFIED (atom-text alias) None module-name))))
+  (= star (symbol-text-p selection "*"))
+  (if (not (or star (isinstance selection Bracket)))
+      (raise (require-error
+               selection
+               f"expects as alias, * or [names...] after the module, got {selection}")))
+  (if (> (len rest) 1)
+      (raise (require-error
+               (sub rest 1)
+               (ife (symbol-text-p (sub rest 1) "as")
+                    "takes no alias after a selection: an alias qualifies every macro"
+                    f"takes one selection after the module, got {(sub rest 1)}"))))
+  (if star
+      (return (, REQUIRE-ALL None None module-name)))
+  (for name in selection
+    (if (is-not (type name) Symbol)
+        (raise (require-error name f"expects a macro name, got {name}"))))
+  (return (, REQUIRE-NAMED None [(atom-text name) for name in selection]
+             module-name)))
 
 (def require-transform [sexp]
-  (= [op module-name *optional] sexp.list)
-  (= [kind names] (require-selection optional))
-  (= module-name-str (.replace (str module-name) "-" "_"))
+  (= [kind qualifier names module-name-str] (require-parse sexp))
   (= is-relative (.startswith module-name-str "."))
   ;; The import runs in the emitted code itself, whose filename
   ;; (REQUIRE_FILENAME) tells the LSP a require asked for it.
@@ -91,7 +160,7 @@
   ;; One call registers the selection (register-required in
   ;; core/macro_table.py), so the emitted code binds no name in the requiring
   ;; module, where binding a name that is a macro there would be an error.
-  (= prefix (ife (== kind REQUIRE-QUALIFIED) (+ (str module-name) ".") ""))
+  (= prefix (ife (== kind REQUIRE-QUALIFIED) (+ qualifier ".") ""))
   (= selected (ife (== kind REQUIRE-NAMED) names `None))
   (return
     (mark-compiler-forms

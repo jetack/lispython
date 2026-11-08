@@ -8,6 +8,17 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `(require mod as m)` registers every macro of `mod` as `m.name`, with a
+  bare `as` as `import` takes. The LSP's completion after `m.`, hover and
+  go-to-definition follow the alias, and a relative require's macros.
+- LSP: go-to-definition without a backend resolves a relative module, of a
+  `require` or a `from`, as Python does: in the document's package, never
+  beyond its top-level package, and not at all for a buffer with no file.
+  A document path with a space or a non-ASCII character is read decoded.
+  It finds a module by the name its import takes, so `(from ok? [x])` and
+  `(import ->foo)` reach `ok_p.lpy` and `_to_foo.lpy`, and it picks the
+  file Python imports: a package's `__init__` (of any suffix) before a
+  module file of the same name, and nothing when that file is no `.lpy`.
 - nREPL: the `complete` reply carries `items`, LSP-shaped completion items in
   `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython
@@ -72,6 +83,22 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
+  as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
+  which no code could spell. Code calling `(.mac.name ...)` must call
+  `(mac.name ...)`. `(require .)` and `(require ..)` with no selection bind
+  no name and are a compile error; give them `as`, `*` or a list.
+- A `require` whose module is no symbol, `(require 1)` or `(require "m")`,
+  is a compile error at it; it used to be a "module not found" warning.
+- A relative `require` compiled with no package (a module outside any
+  package; `lpy -c` or the REPL run from a directory that is no package) is
+  a compile error at the module, "attempted relative import with no known
+  parent package", instead of Python's bare `TypeError`.
+- `require` imports a module by the name `import` gives it: `(require ok?)`
+  imports `ok_p` and `(require ->foo)` `_to_foo`, as `(import ok?)` and
+  `(import ->foo)` do, instead of `ok?` and `_>foo`. A malformed path
+  (`(require mac.)`, `a..b`, `m.-`, `.mac.`) is a compile error at the
+  module, worded as `from` words it.
 - A `defmacro` no longer binds any name in the module that defines it. It
   used to star-import `lispy.core.nodes` and `lispy.core.builtins` there,
   overwriting the module's own `Paren`, `Symbol` or `gensym` and leaving
@@ -225,6 +252,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A malformed `require` (`(require mod a b)`, `(require mod as)`,
+  `(require mod * as m)`, `(require)`, a non-name in its list) is a compile
+  error at the part at fault, instead of a Python `ValueError` or
+  `TypeError` with no position.
 - `l2py` translates as deep as `compile()` takes (statements, expressions,
   match patterns, nested f-strings and format specs), with the text
   `ast.unparse` would write, instead of stopping at a few hundred levels

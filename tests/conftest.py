@@ -154,8 +154,10 @@ def off_backends(make_backends, tmp_path):
 
 @pytest.fixture
 def lsp_document(backend_project, monkeypatch):
-    """lsp_document(marked, backends, **ls_attrs): lsp_buffer's buffer with
-    backends given (an off one, say), needing no real backend installed."""
+    """lsp_document(marked, backends, path=None, **ls_attrs): lsp_buffer's
+    buffer with backends given (an off one, say), needing no real backend
+    installed; path, if given, is the file the buffer is opened as instead
+    of backend_project's main.lpy."""
     from lsprotocol import types as lsp
     from pygls.workspace import TextDocument
 
@@ -164,9 +166,10 @@ def lsp_document(backend_project, monkeypatch):
     monkeypatch.setattr(server, "view_cache", python_view.ViewCache())
     monkeypatch.setattr(server, "completion_cache", server.CompletionCache())
     versions = itertools.count(1)
-    uri = (backend_project / "main.lpy").as_uri()
+    main = (backend_project / "main.lpy").as_uri()
 
-    def open_buffer(marked, backends, **ls_attrs):
+    def open_buffer(marked, backends, path=None, **ls_attrs):
+        uri = main if path is None else path.as_uri()
         monkeypatch.setattr(server, "backends", backends)
         # As the server wires its own Backends.
         monkeypatch.setattr(backends, "on_input_changed", server.backend_input_changed)

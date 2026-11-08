@@ -5,6 +5,8 @@
 (import contextvars)
 (import functools)
 (import glob)
+(import importlib.machinery)
+(import importlib.util)
 (import inspect)
 (import logging)
 (import os)
@@ -25,8 +27,9 @@
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
 ;; The one completion-spelling rule, shared with the nREPL, and the one
 ;; completion matching rule.
-(from lispy.core.compiler.literal [completion-label completion-prefix name-spellings])
-(from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
+(from lispy.core.compiler.literal [completion-label completion-prefix module-import-name
+                                   name-spellings])
+(from lispy.core.meta-functions [require-parse REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BINDABLE-FORMS BUILTIN-MACROS BUILTIN-MACRO-MODULES MACRO-TAG
@@ -106,10 +109,11 @@
 (= WORKSPACE-SYMBOLS {})
 
 (def uri-to-path [uri]
-  "Convert a file:// URI to a filesystem path."
-  (if (.startswith uri "file://")
-      (return (sub uri [: 7 None]))
-      (return uri)))
+  "The filesystem path of a file: URI, decoded (pygls to-fs-path: my%20proj
+   is my proj), else uri itself, a name for a buffer with no file (an
+   untitled: one)."
+  (= path (to-fs-path uri))
+  (return (ife (is path None) uri path)))
 
 (def path-to-uri [path]
   "Convert a filesystem path to a file:// URI."
@@ -149,8 +153,11 @@
              (isinstance node.op Symbol)
              (== node.op.value "require")
              (isinstance (sub node 1) Symbol))
-        (do (= module-name (. (sub node 1) value))
-            (index-installed-package module-name)))))
+        (try
+          ;; The name the require imports (require-parse's).
+          (index-installed-package (sub (require-parse node) 3))
+          (except [LispyCompileError]
+            (pass))))))
 
 (def index-file [uri]
   "Parse a .lpy file and add its definitions to the workspace index.
@@ -199,24 +206,71 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def resolve-module-to-file [module-name workspace-folders]
-  "Resolve a LisPython module name to a .lpy file path.
-   e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'"
-  (= parts (.split (.replace module-name "-" "_") "."))
-  (= rel-path (+ (osp.join *parts) ".lpy"))
+(def finder-suffixes []
+  "The file suffixes CPython's FileFinder tries, in its order (extension
+   modules, then source, then bytecode), read from importlib.machinery,
+   where the importer (core/importer.py) adds .lpy to the source ones."
+  (return (+ importlib.machinery.EXTENSION-SUFFIXES
+             importlib.machinery.SOURCE-SUFFIXES
+             importlib.machinery.BYTECODE-SUFFIXES)))
+
+(def module-file-under [module-name roots]
+  "The .lpy file the absolute import name module-name (already its Python
+   spelling, module-import-name) imports from the first of roots that
+   holds it, or None, as CPython's FileFinder picks the file: a package
+   directory's __init__ of any suffix before a module file, each in
+   finder-suffixes order.  The file Python would import there is the
+   answer, so a package or module that is no .lpy (x/__init__.py beside
+   x.lpy) gives None, never the .lpy it shadows."
+  (= rel-path (osp.join *(.split module-name ".")))
+  (= suffixes (finder-suffixes))
+  (for root in roots
+    (= base (osp.join root rel-path))
+    (= candidates (+ (ife (osp.isdir base)
+                          [(osp.join base (+ "__init__" suffix)) for suffix in suffixes]
+                          [])
+                     [(+ base suffix) for suffix in suffixes]))
+    (for candidate in candidates
+      (if (osp.isfile candidate)
+          (return (ife (.endswith candidate ".lpy") candidate None)))))
+  (return None))
+
+(def resolve-module-to-file [module workspace-folders :origin None]
+  "Resolve a LisPython module symbol to a .lpy file path, through the name
+   its import takes (module-import-name, the compiler's own; a symbol that
+   is no module name resolves to nothing).
+   e.g., lispy.tools -> '/path/to/src/lispy/tools.lpy'.  A relative name
+   resolves as Python resolves it from origin, the importing file's path:
+   in origin's package (module-names, the package-root rule) to an
+   absolute name (importlib.util.resolve-name), looked up under origin's
+   import root.  With no origin, or no package, or beyond the top-level
+   package, it resolves to nothing."
+  (if (not (isinstance module Symbol))
+      (return None))
+  (try
+    (= module-name (module-import-name module))
+    (except [LispyCompileError]
+      (return None)))
+  (if (.startswith module-name ".")
+      (do (if (is origin None)
+              (return None))
+          (= [_ package import-root] (module-names origin))
+          (try
+            (= absolute (importlib.util.resolve-name module-name package))
+            (except [(, ImportError ValueError)]
+              (return None)))
+          (return (module-file-under absolute [import-root]))))
   ;; 1. Workspace folders (direct or in src/)
+  (= roots [])
   (for folder in workspace-folders
     (= root (uri-to-path folder.uri))
-    (= candidate (osp.join root rel-path))
-    (if (osp.isfile candidate)
-        (return candidate))
-    (= candidate (osp.join root "src" rel-path))
-    (if (osp.isfile candidate)
-        (return candidate)))
+    (.extend roots [root (osp.join root "src")]))
+  (= found (module-file-under module-name roots))
+  (if found
+      (return found))
   ;; 2. Python's sys.path (finds installed packages, including lispython itself)
   (try
-    (do (import importlib.util)
-        (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+    (do (= spec (importlib.util.find-spec module-name))
         (if (and spec spec.origin (.endswith spec.origin ".lpy"))
             (return spec.origin))
         ;; Package without __init__.lpy but has submodule files
@@ -230,11 +284,12 @@
   (return None))
 
 (def index-installed-package [module-name]
+  ;; module-name is an import name, already in its Python spelling.
   "Index all .lpy files in an installed Python package (e.g., lispython).
    Used to make defmacros in required modules discoverable."
   (try
     (do (import importlib.util)
-        (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+        (= spec (importlib.util.find-spec module-name))
         (if (and spec spec.submodule-search-locations)
             (for search-path in spec.submodule-search-locations
               (for fpath in (glob.glob (osp.join search-path "**" "*.lpy") :recursive True)
@@ -246,16 +301,17 @@
 (= IMPORT-ONLY-HEADS (, "import" "lazy-import"))
 (= IMPORT-HEADS (+ IMPORT-ONLY-HEADS FROM-HEADS))
 
-(def find-import-target [node workspace-folders]
-  "Given an import/from/require node, resolve where the imported name is defined."
+(def find-import-target [node workspace-folders :origin None]
+  "Given an import/from/require node, resolve where the imported name is
+   defined; origin is the importing file's path, from which a relative
+   module resolves."
   (= form (. node op value))
   (cond
     (in form FROM-HEADS)
     (do ;; (from module [names...])
         (if (< (len node) 3)
             (return None))
-        (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (= fpath (resolve-module-to-file (sub node 1) workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -264,8 +320,7 @@
     (do ;; (import module)
         (if (< (len node) 2)
             (return None))
-        (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (= fpath (resolve-module-to-file (sub node 1) workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -274,8 +329,7 @@
     (do ;; (require module *)
         (if (< (len node) 2)
             (return None))
-        (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (= fpath (resolve-module-to-file (sub node 1) workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -293,25 +347,30 @@
 
 (def require-registered-name [node name]
   "The name, in the required module, of the macro a (require ...) node
-   registers as `name`, or None when it registers no such name. The
-   compiler's own rule (require-selection) decides; the buffer may be
-   mid-edit, so a require the compiler would reject registers nothing."
+   registers as `name` (one name by name-key: my_mod.my_mac is
+   my-mod.my-mac), or None when it registers no such name. The compiler's
+   own rule (require-parse) decides; the buffer may be mid-edit, so a
+   require the compiler would reject registers nothing."
   (try
-    (= [kind names] (require-selection (sub node.list [: 2 None])))
-    (except [(, TypeError ValueError)]
+    (= [kind qualifier names _] (require-parse node))
+    (except [LispyCompileError]
       (return None)))
+  (= key (name-key name))
   (cond
-    ;; (require module): macros are registered as module.name
+    ;; (require module), (require .mod), (require module as alias): macros
+    ;; are registered as qualifier.name
     (== kind REQUIRE-QUALIFIED)
-    (do (= prefix (ife (> (len node) 1) (+ (str (sub node 1)) ".") None))
-        (if (and prefix (.startswith name prefix))
-            (return (sub name [: (len prefix) None]))))
+    (do (if (.startswith key (+ (name-key qualifier) "."))
+            (return (.join "." (sub (.split name ".")
+                                    [: (+ (.count qualifier ".") 1) None])))))
     ;; (require module *): every macro, names unknown without importing
     (== kind REQUIRE-ALL)
     (return name)
     ;; (require module [a b]): exactly those; [] imports nothing
-    (in name names)
-    (return name))
+    True
+    (for registered in names
+      (if (== (name-key registered) key)
+          (return registered))))
   (return None))
 
 (def find-import-for-name [tree name]
@@ -1442,7 +1501,8 @@
                   []))
   (= import-node (find-import-for-name tree name))
   (if import-node
-      (do (= fpath (find-import-target import-node folders))
+      (do (= fpath (find-import-target import-node folders
+                                          :origin (to-fs-path doc.uri)))
           (if fpath
               (do (= target-uri (path-to-uri fpath))
                   ;; Make sure the target file is indexed
@@ -1452,14 +1512,12 @@
                   (= target-tree (.get FILE-TREES target-uri))
                   (if target-tree
                       (do (= target-defs (collect-definitions target-tree target-uri))
-                          ;; (require module) registers module.name; the target
-                  ;; file defines the bare name.
-                  (= prefix (+ (str (sub import-node 1)) "."))
-                  (= result (.get target-defs
-                                  (ife (and (== import-node.op.value "require")
-                                            (.startswith name prefix))
-                                       (sub name [: (len prefix) None])
-                                       name)))
+                          ;; (require module) registers qualifier.name; the
+                          ;; target file defines the bare name.
+                          (= result (.get target-defs
+                                          (ife (== import-node.op.value "require")
+                                               (require-registered-name import-node name)
+                                               name)))
                           (if result
                               (return result))))))))
 
@@ -2111,8 +2169,9 @@
 (def required-module-p [source line base]
   "Whether a (require mod) form in source (its partial parses,
    buffer-texts at the 1-based line; quoted forms are none) registers
-   qualified macros (require-selection's rule) under base: mod's name-key
-   is base's.  The cheap syntax gate a completion with no backend reads
+   qualified macros (require-parse's rule) under base: the require's
+   qualifier (mod, the last part of a relative .pkg.mod, or an alias) has
+   base's name-key.  The cheap syntax gate a completion with no backend reads
    before compiling a cursor view for base.  Limits: a require a macro
    writes is missed, so its macros are not offered with no backend."
   (= key (name-key base))
@@ -2131,10 +2190,10 @@
               (not (isinstance (sub node 1) Symbol)))
           (continue))
       (try
-        (= [kind _] (require-selection (sub node.list [: 2 None])))
-        (except [(, TypeError ValueError)]
+        (= [kind qualifier _ _] (require-parse node))
+        (except [LispyCompileError]
           (continue)))
-      (if (and (== kind REQUIRE-QUALIFIED) (== (name-key (. (sub node 1) value)) key))
+      (if (and (== kind REQUIRE-QUALIFIED) (== (name-key qualifier) key))
           (return True))))
   (return False))
 

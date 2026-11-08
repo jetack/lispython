@@ -2,6 +2,9 @@ import os.path as osp
 import sys
 import types
 
+import pytest
+
+from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand_then_compile
 from lispy.tools import l2py_s, parse
 
@@ -57,3 +60,144 @@ class TestRequireMacroList:
     def test_star_registers_all_unqualified(self, monkeypatch):
         got = self._registered(monkeypatch, "(require require_list_fake *)")
         assert got == {"a", "b"}
+
+
+class TestRequireQualifier:
+    """A qualified require registers every macro as qualifier.name, the
+    qualifier being the name Python's import binds: an absolute module's
+    dotted name, a relative module's last part, or the alias."""
+
+    @staticmethod
+    def _registered(monkeypatch, require_form, package, module):
+        mod = types.ModuleType(module)
+        setattr(mod, "__macro_namespace", {"a": lambda: 1, "b": lambda: 2})
+        monkeypatch.setitem(sys.modules, module, mod)
+        scope = {"__macro_namespace": {}, "__package__": package}
+        list(macroexpand_then_compile(parse(require_form), scope))
+        return set(scope["__macro_namespace"])
+
+    @pytest.mark.parametrize(
+        "form, package, module, keys",
+        [
+            ("(require reqq.mac)", None, "reqq.mac", {"reqq.mac.a", "reqq.mac.b"}),
+            ("(require .mac)", "reqq", "reqq.mac", {"mac.a", "mac.b"}),
+            ("(require ..sib.mac)", "reqq.sub", "reqq.sib.mac", {"mac.a", "mac.b"}),
+            ("(require reqq.mac as m)", None, "reqq.mac", {"m.a", "m.b"}),
+            ("(require .mac as m)", "reqq", "reqq.mac", {"m.a", "m.b"}),
+            ("(require . as m)", "reqq", "reqq", {"m.a", "m.b"}),
+            ("(require . *)", "reqq", "reqq", {"a", "b"}),
+            ("(require .mac [a])", "reqq", "reqq.mac", {"a"}),
+        ],
+        ids=[
+            "absolute",
+            "relative",
+            "nested relative",
+            "absolute alias",
+            "relative alias",
+            "package alias",
+            "package star",
+            "relative list",
+        ],
+    )
+    def test_qualifier(self, monkeypatch, form, package, module, keys):
+        assert self._registered(monkeypatch, form, package, module) == keys
+
+    @pytest.mark.parametrize(
+        "form, fault",
+        [
+            ("(require)", "(require)"),
+            ("(require 1)", "1"),
+            ('(require "m")', '"m"'),
+            ("(require .)", "."),
+            ("(require ..)", ".."),
+            ("(require m as)", "as"),
+            ("(require m as a.b)", "a.b"),
+            ("(require m as if)", "if"),
+            ("(require m as [a])", "[a]"),
+            ("(require m as c [a])", "[a]"),
+            ("(require m as c *)", "*"),
+            ("(require m * as c)", "as"),
+            ("(require m [a] as c)", "as"),
+            ("(require m [a] *)", "*"),
+            ("(require m a)", "a"),
+            ("(require m a b c)", "a"),
+            ("(require m :as c)", ":as"),
+            ("(require m [a 1])", "1"),
+        ],
+    )
+    def test_a_malformed_require_is_a_compile_error_at_its_fault(self, form, fault):
+        # Defect: a malformed require escapes as the ValueError or TypeError
+        # of its own destructuring, with no position, or registers keys no
+        # code can call (an alias kept as a selection).
+        source = f"(= x 1)\n  {form}"
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse(source), {"__macro_namespace": {}}))
+        assert info.value.msg.startswith("(require ...) ")
+        column = source.index(fault, source.index("(require")) - source.index("\n")
+        assert (info.value.lineno, info.value.offset) == (2, column)
+
+    @pytest.mark.parametrize("package", [None, ""], ids=["no package", "top level"])
+    @pytest.mark.parametrize("form", ["(require .mac)", "(require .. *)"])
+    def test_a_relative_require_outside_a_package_is_a_compile_error(
+        self, package, form
+    ):
+        # Defect: importlib.import_module's bare TypeError ("the 'package'
+        # argument is required") escapes with no position.
+        scope = {"__macro_namespace": {}}
+        if package is not None:
+            scope["__package__"] = package
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse(f"(= x 1)\n  {form}"), scope))
+        assert "no known parent package" in info.value.msg
+        assert (info.value.lineno, info.value.offset) == (2, 12)
+
+    @staticmethod
+    def _error(source):
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse(source), {"__macro_namespace": {}}))
+        return (info.value.msg, info.value.lineno, info.value.offset)
+
+    @pytest.mark.parametrize(
+        "module", ["mac.", "a..b", "m.-", "a.if", ".mac.", "..mac..x", ".ok?.if"]
+    )
+    def test_a_malformed_module_path_is_refused_as_the_import_forms_refuse_it(
+        self, module
+    ):
+        # Defects: the path is not checked (mac. reaches importlib), .mac.
+        # is read as a package alone (whose message suggests a fix that
+        # fails again), or require checks a path by a rule of its own, so
+        # it refuses or words a path otherwise than (from ...) does.
+        # The from form is padded so its module starts in the same column.
+        assert self._error(f"(require {module})") == self._error(
+            f"(from    {module} [x])"
+        )
+
+    @pytest.mark.parametrize("spelling", ["ok?", "->foo", "my-mod", "a.ok?"])
+    def test_a_require_imports_the_module_import_would(self, monkeypatch, spelling):
+        # Defect: require mangles the module name by a rule of its own (each
+        # - as _), so (require ok?) imports "ok?" and (require ->foo) "_>foo",
+        # while (import ok?) imports ok_p and (import ->foo) _to_foo.
+        [stmt] = list(
+            macroexpand_then_compile(
+                parse(f"(import {spelling})"), {"__macro_namespace": {}}
+            )
+        )
+        module = stmt.names[0].name
+        registered = self._registered(
+            monkeypatch, f"(require {spelling})", None, module
+        )
+        assert registered == {f"{spelling}.a", f"{spelling}.b"}
+
+    def test_a_relative_require_imports_the_module_from_would(self, monkeypatch):
+        registered = self._registered(
+            monkeypatch, "(require .ok?)", "reqq", "reqq.ok_p"
+        )
+        assert registered == {"ok?.a", "ok?.b"}
+
+    def test_a_package_alone_names_the_fix(self):
+        # Python binds no name for from . import, so neither may a require:
+        # the message must say what does.
+        scope = {"__macro_namespace": {}}
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse("(require .)"), scope))
+        assert "as" in info.value.msg and "*" in info.value.msg
