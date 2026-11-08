@@ -2199,7 +2199,7 @@
    macros must not be offered there); else None."
   (= text (line-text doc.source line))
   (= col (min col (len text)))
-  (= base (glued-base text (sub (partial-span text col) 0)))
+  (= base (glued-base text col))
   (if (or (is base None) (not (code-symbol-p doc.source line col)))
       (return None))
   (return base))

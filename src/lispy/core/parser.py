@@ -7,6 +7,7 @@ from lispy.core.compiler.features import require
 from lispy.core.compiler.literal import (
     PLAIN_STRING_PREFIXES,
     check_plain_string_prefix,
+    leading_signs,
     number_parts,
     string_literal_value,
 )
@@ -1227,13 +1228,12 @@ def token_parse(token, tktype, position_info):
             token = token[width:]
             tktype = _operand_type(token, tktype)
             continue
-        rest = token.lstrip("+-")
-        if token[0] in "+-" and rest and (rest[0].isalnum() or rest[0] in "_."):
-            signs = token[: len(token) - len(rest)]
+        signs = leading_signs(token)
+        if signs:
             prefixes.append(["signs", position_info, signs])
             position_info = {**position_info}
             position_info["col_offset"] += len(signs)
-            token = rest
+            token = token[len(signs) :]
             continue
         node = Symbol(token, **position_info)
         break

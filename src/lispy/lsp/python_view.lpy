@@ -43,7 +43,8 @@
 (from lispy.core.parser [parse source-offset tokenize])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
-(from lispy.core.compiler.literal [hyphen-spelling identifier-p name-key])
+(from lispy.core.compiler.literal [completion-word-span hyphen-spelling identifier-p
+                                   leading-signs name-char-p name-key name-run-end])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
@@ -189,60 +190,25 @@
             (frozenset (filter None (map str.strip (.split rules ",")))))))
   (return found))
 
-;; Characters that end a symbol token where a name is read back from the
-;; source: whitespace, the attribute dot, brackets, quotes, `,` and `;`.
-(= _NAME-STOPS ".()[]{}\"'`,;")
-
-(def _name-char-p [ch]
-  (return (not (or (.isspace ch) (in ch _NAME-STOPS)))))
-
-(def _name-start [text end]
-  "Where the run of name characters ending at code-point column end starts."
-  (= start end)
-  (while (and (> start 0) (_name-char-p (sub text (- start 1))))
-    (-= start 1))
-  (return start))
-
-;; The prefixes a form can carry before its symbol (keyword :, the wrappers
-;; * ** ^, the quote marks ' ` ~ ~@): never part of a name, so the partial word
-;; at the cursor starts after them and they stay in the source.
-(= _SYMBOL-PREFIXES ":*^~@'`")
-
-(def _partial-start [text end]
-  "Where the partial identifier ending at code-point column end starts: the
-   run of name characters back from end, less its leading prefixes."
-  (= start (_name-start text end))
-  (while (and (< start end) (in (sub text start) _SYMBOL-PREFIXES))
-    (+= start 1))
-  (return start))
-
-(def _name-end [text start]
-  "Where the run of name characters starting at code-point column start ends."
-  (= end start)
-  (while (and (< end (len text)) (_name-char-p (sub text end)))
-    (+= end 1))
-  (return end))
+;; Every word read back from the source (the partial word at the cursor, a
+;; name run spelling a Python name) takes its characters and its start from
+;; the compiler's name rule (name-char-p, completion-word-span), never a
+;; character table of its own.
 
 (def partial-span [text col]
   "The partial word at code-point column col of line text, as view-at-cursor
    reads it: (start, end), where start..col is what was typed before the
-   cursor and col..end the rest of the name run after it."
-  (return (, (_partial-start text col) (_name-end text col))))
+   cursor after its last dot and col..end the rest of the name run after it
+   (completion-word-span)."
+  (= [_ start end] (completion-word-span text col))
+  (return (, start end)))
 
-(def glued-base [text start]
-  "The dotted name written glued to the dot right before code-point column
-   start of line text (a.b for a.b.c|, start at c), or None when no dot is
-   there or no name runs into it (x .c, (.c x), a..c)."
-  (if (or (<= start 0) (!= (sub text (- start 1)) "."))
-      (return None))
-  (= end (- start 1))
-  (= begin end)
-  (while (and (> begin 0) (or (_name-char-p (sub text (- begin 1)))
-                              (== (sub text (- begin 1)) ".")))
-    (-= begin 1))
-  (while (and (< begin end) (in (sub text begin) _SYMBOL-PREFIXES))
-    (+= begin 1))
-  (= base (sub text [: begin end]))
+(def glued-base [text col]
+  "The dotted name written glued to the dot before the word at code-point
+   column col of line text (a.b for a.b.c|), or None when no dot is there
+   or no name runs into it (x .c, (.c x), a..c)."
+  (= [start replace-start _] (completion-word-span text col))
+  (= base (sub text [: start (max start (- replace-start 1))]))
   (if (or (not base) (in "" (.split base ".")))
       (return None))
   (return base))
@@ -393,11 +359,11 @@
   (if (and (== line end-line) (== (py-name (sub text [: col end-col])) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))
-  (= start (_name-start end-text end-col))
+  (= start (sub (completion-word-span end-text end-col) 1))
   (if (and (< start end-col) (== (py-name (sub end-text [: start end-col])) name))
       (return (, (, end-line start) (, end-line end-col))))
   (= start (ife (and (< col (len text)) (in (sub text col) ".:")) (+ col 1) col))
-  (= end (_name-end text start))
+  (= end (name-run-end text start))
   (if (and (< start end) (== (py-name (sub text [: start end])) name))
       (return (, (, line start) (, line end))))
   (return None))
@@ -532,8 +498,10 @@
 
 (def spelled-in [lines start end name]
   "The .lpy span of the first name run between start and end in lines
-   (source-lines) whose py-name is name, or None.  A run is a stretch of _name-char-p
-   characters (a dot splits runs) less its leading _SYMBOL-PREFIXES."
+   (source-lines) whose py-name is name, or None.  A run is a stretch of
+   name-char-p characters (a dot splits runs) less the leading signs the
+   reader peels off a token (leading-signs: (- -x) spells x), which a part
+   after a dot never has."
   (for line in (range (sub start 0) (+ (sub end 0) 1))
     (if (> line (len lines))
         (break))
@@ -541,13 +509,13 @@
     (= col (ife (== line (sub start 0)) (sub start 1) 0))
     (= stop (ife (== line (sub end 0)) (min (sub end 1) (len text)) (len text)))
     (while (< col stop)
-      (if (not (_name-char-p (sub text col)))
+      (if (not (name-char-p text col))
           (do (+= col 1)
               (continue)))
-      (= run-end (min (_name-end text col) stop))
+      (= run-end (min (name-run-end text col) stop))
       (= run-start col)
-      (while (and (< run-start run-end) (in (sub text run-start) _SYMBOL-PREFIXES))
-        (+= run-start 1))
+      (if (or (== col 0) (!= (sub text (- col 1)) "."))
+          (+= run-start (len (leading-signs (sub text [: col (+ run-end 1)])))))
       (if (and (< run-start run-end) (== (py-name (sub text [: run-start run-end])) name))
           (return (, (, line run-start) (, line run-end))))
       (= col run-end)))

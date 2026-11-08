@@ -949,6 +949,29 @@ def item(label):
     return lsp.CompletionItem(label=label, kind=lsp.CompletionItemKind.Variable)
 
 
+PEELED_SIGN = "(= foo 1)\n(- -fo|)"
+
+
+def test_a_peeled_sign_is_no_part_of_the_typed_word(off_complete):
+    # Defect: the word typed keeps the reader's unary sign (-fo in (- -fo),
+    # which reads (- foo)), so no name matches it and nothing is offered.
+    items = by_label(off_complete(PEELED_SIGN)[2])
+    assert items["foo"].filter_text == "foo"
+
+
+@once
+def test_a_peeled_signs_edit_starts_after_it(merged, backend_requests):
+    # Defect: accepting the item overwrites the unary sign before the word.
+    backend_requests.answer["value"] = [item("foo")]
+    line, character, items = merged(PEELED_SIGN)
+    edit = by_label(items)["foo"].text_edit
+    assert (edit.insert.start.character, edit.replace.end.character) == (
+        character - 2,
+        character,
+    )
+    assert edit.insert.start.line == line
+
+
 KEYSTROKES = ["my-v", "my_v", "my_val-x", "my-val_x", "MY-V"]
 
 
