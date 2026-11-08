@@ -368,3 +368,17 @@ def test_a_defmacro_parameter_is_a_binding_on_import(tmp_path, monkeypatch):
     sys.modules.pop("defmacro_param_mod", None)
     assert info.value.msg.startswith("cannot bind 'cond': it is the built-in macro")
     assert (info.value.lineno, info.value.offset) == (3, 16)
+
+
+@pytest.mark.parametrize("tool", ["String", "gensym", "Paren"])
+def test_a_macro_named_like_a_macro_tool_allows_later_defmacros(tool):
+    # The next defmacro's generated function imports every macro tool
+    # (import_aliases leaves the compiler's own [names] unchecked), and the
+    # macro still expands in a defmacro body.
+    src = (
+        f"(defmacro {tool} [x] (return x))\n"
+        "(defmacro m [] (return `(+ 1 2)))\n"
+        f"(defmacro n [] (return ({tool} 'y)))\n"
+        "(print (m) (n))"
+    )
+    assert translate(src) == "print(1 + 2, y)"

@@ -1,4 +1,5 @@
 WARNING = "This script should be edited in .lpy file, not translated .py file."
+from lispy.core.builtins import __all__ as MACRO_SCOPE_NAMES
 from lispy.core.compiler.literal import identifier_p
 from lispy.core.nodes import *
 
@@ -35,12 +36,21 @@ def defmacro_transform(sexp):
     newname = Symbol("___defmacro_temp___" + macroname)
     if not identifier_p(newname.name):
         newname = Symbol("___defmacro_temp___")
+    scopename = Symbol("___defmacro_scope___" + macroname)
+    if not identifier_p(scopename.name):
+        scopename = Symbol("___defmacro_scope___")
+    tools = [Symbol(name) for name in MACRO_SCOPE_NAMES]
     return mark_compiler_forms(
         Paren(
             Symbol("do"),
-            Paren(Symbol("from"), Symbol("lispy.core.nodes"), Symbol("*")),
-            Paren(Symbol("from"), Symbol("lispy.core.builtins"), Symbol("*")),
-            Paren(Symbol("def"), newname, *body),
+            Paren(
+                Symbol("def"),
+                scopename,
+                Bracket(),
+                Paren(Symbol("from"), Symbol("lispy.core.builtins"), Bracket(*tools)),
+                Paren(Symbol("def"), newname, *body),
+                Paren(Symbol("return"), newname),
+            ),
             Paren(
                 Symbol("="),
                 Paren(
@@ -50,9 +60,9 @@ def defmacro_transform(sexp):
                     ),
                     macroname,
                 ),
-                newname,
+                Paren(scopename),
             ),
-            Paren(Symbol("del"), newname),
+            Paren(Symbol("del"), scopename),
         ),
         body,
     )

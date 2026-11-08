@@ -1,19 +1,61 @@
 from lispy.core.compiler.literal import identifier_p as _identifier_p
 from lispy.core.nodes import (
     Annotation,
+    Brace,
     Bracket,
+    Constant,
     DoubleStarred,
     Expression,
     FStrExpr,
+    GluedHead,
     Keyword,
+    Literal,
+    MetaIndicator,
+    Node,
     Paren,
     QuasiQuote,
     Quote,
     Starred,
+    String,
     Symbol,
     Unquote,
+    UnquoteSplice,
     Wrapper,
 )
+
+# The one home of the names a defmacro body sees: defmacro-transform
+# (core_meta_functions.lpy) imports exactly these in a function around the
+# body, never binding them in the user's module, and
+# (from lispy.core.builtins *) brings the same names into a module for its
+# macro helpers. A quasiquote compiles to calls of node classes by bare name
+# (Node.classname), so every node class with a classname must be listed, or
+# a quasiquote in a macro body fails.
+__all__ = [
+    "Node",
+    "Expression",
+    "Paren",
+    "Bracket",
+    "Brace",
+    "Wrapper",
+    "FStrExpr",
+    "Annotation",
+    "Keyword",
+    "Starred",
+    "DoubleStarred",
+    "GluedHead",
+    "Literal",
+    "Symbol",
+    "String",
+    "Constant",
+    "MetaIndicator",
+    "Quote",
+    "QuasiQuote",
+    "Unquote",
+    "UnquoteSplice",
+    "gensym",
+    "replace_symbol",
+]
+
 
 _gensym_counter = 0
 

@@ -5,12 +5,17 @@
 
 (from lispy.core.compiler.literal [identifier-p])
 (from lispy.core.nodes *)
+(from lispy.core.builtins [__all__ as MACRO-SCOPE-NAMES])
 
-;; The generated code reaches every module it needs through __import__, never
-;; an import statement, so it binds no global of the module it runs in: a
-;; user's own importlib stays theirs, and a macro named importlib does not
-;; clash with the next defmacro.  Fresh nodes per use, since compiling may
-;; change a node in place.
+;; The generated code binds no lasting global of the module it runs in
+;; (defmacro's scope function is deleted right after it runs): it reaches
+;; every module it needs through __import__ (read from a function's
+;; __builtins__), so a user's own importlib stays theirs and a macro named
+;; importlib does not clash with the next defmacro.  The one import statement
+;; is defmacro's import of the macro tools, local to its scope function, and
+;; it stays a statement so the Python backend resolves the names to their
+;; declarations.  Fresh nodes per use, since compiling may change a node in
+;; place.
 (def builtin [name]
   "The generated code's form for the builtin NAME, read from a function's
    __builtins__, never by a global lookup: the user module can rebind a global
@@ -26,23 +31,34 @@
 (def defmacro-transform [sexp]
   (= [op macroname *body] sexp.list)
   (= macroname (str macroname))
-  ;; The temp def is a Python name: a macro named ->> or ++ gets the bare
-  ;; prefix (it is deleted right after registering, so names never clash).
+  ;; The generated defs are Python names: a macro named ->> or ++ gets the
+  ;; bare prefix (each is deleted or local, so names never clash).
   (= newname (Symbol (+ "___defmacro_temp___" macroname)))
   (if (not (identifier-p newname.name))
       (= newname (Symbol "___defmacro_temp___")))
-  ;; The runtime table is a MacroTable too, so the module's code registers by
-  ;; name as the compiler does (why: core/macro_table.py).  The module is
+  (= scopename (Symbol (+ "___defmacro_scope___" macroname)))
+  (if (not (identifier-p scopename.name))
+      (= scopename (Symbol "___defmacro_scope___")))
+  ;; The body is defined inside a function that first imports the macro
+  ;; tools (MACRO-SCOPE-NAMES, lispy.core.builtins) by an explicit list, so it
+  ;; and the node-class calls its quasiquotes compile to read them as closure
+  ;; cells: a function-local import binds none of them in the user's module,
+  ;; where they would overwrite the user's own Paren or gensym, and the Python
+  ;; backend resolves each name to its real declaration (types, docs).  The
+  ;; runtime table is a MacroTable too, so the module's code registers by
+  ;; name as the compiler does (why: core/macro_table.py).  Modules are
   ;; reached by attribute, never bound in the module: a binding deleted after
   ;; use is missing meanwhile for code running in the same scope.  Only the
   ;; parameter list and body forms are the user's; they still expand.
+  (= tools [(Symbol name) for name in MACRO-SCOPE-NAMES])
   (return (mark-compiler-forms
-            `(do (from lispy.core.nodes *)
-                 (from lispy.core.builtins *)
-                 (def ~newname ~@body)
+            `(do (def ~scopename []
+                   (from lispy.core.builtins [~@tools])
+                   (def ~newname ~@body)
+                   (return ~newname))
                  (= (sub (.scope-table ~(macro-table) (~(builtin "globals"))) ~macroname)
-                    ~newname)
-                 (del ~newname))
+                    (~scopename))
+                 (del ~scopename))
             body)))
 
 (= REQUIRE-QUALIFIED "qualified")
