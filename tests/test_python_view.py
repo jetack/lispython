@@ -2554,3 +2554,11 @@ class TestSpelledConstants:
         src = '(defmacro nan [] (return (float "nan")))\n(print (nan) x)'
         line, col = locate(src, "(nan)")
         self.check(src, "1e309-1e309", ((line, col), (line, col + 5)))
+
+
+def test_an_operator_never_spells_a_name():
+    # Defect: a name run is matched by its mangled text alone, so the
+    # operator - is taken for the name _ (Symbol.name of - is _).
+    assert pv.spelled_in(["(- a b)"], (1, 0), (1, 7), "_") is None
+    assert pv.spelled_in(["(- -x _)"], (1, 0), (1, 8), "x") == ((1, 4), (1, 5))
+    assert pv.spelled_in(["(- -x _)"], (1, 0), (1, 8), "_") == ((1, 6), (1, 7))

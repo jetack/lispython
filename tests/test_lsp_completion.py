@@ -1010,11 +1010,27 @@ def test_the_fallback_list_is_filtered_on_the_server(answer_at, off_backends, ty
 
 @once
 def test_a_leading_separator_is_matched_as_written(answer_at, off_backends):
-    # Defect: a _ that starts the word matches a -, so _ offers every
-    # operator macro. (A - alone is the operator, an empty word:
-    # completion_word_span.)
-    labels = set(by_label(answer_at("(= _hidden 1)\n(_|)", off_backends).items))
+    # Defect: a - or _ that starts the word matches the other one, so - (an
+    # operator macro being typed) offers every _private name, and _ every
+    # operator; or a lone - is no word, so every label is offered.
+    source = "(= _hidden 1)\n({}|)"
+    labels = set(by_label(answer_at(source.format("-"), off_backends).items))
+    assert "->" in labels and "_hidden" not in labels
+    labels = set(by_label(answer_at(source.format("_"), off_backends).items))
     assert "_hidden" in labels and "->" not in labels
+
+
+def test_a_lone_sign_is_the_word_a_completion_replaces():
+    # Defect: the - typed before a name that starts with it is left out of
+    # the word, so accepting -> from (- gives (-->.
+    text = "(-)"
+    insert, replace, typed = server.completion_ranges(
+        SimpleNamespace(source=text), 1, 2
+    )
+    assert typed == "-"
+    assert (insert.start.character, insert.end.character) == (1, 2)
+    applied = text[: replace.start.character] + "->" + text[replace.end.character :]
+    assert applied == "(->)"
 
 
 @once

@@ -37,11 +37,19 @@ SPANS = [
     ("(- -fo|", (4, 4, 6)),
     ("-|foo", (1, 1, 4)),
     ("-.x|", (1, 2, 3)),
-    # A sign run alone is the operator; a caret inside a peeled run is
-    # outside the name.
-    ("-|", (1, 1, 1)),
-    ("--|", (2, 2, 2)),
-    ("-|-x", (1, 1, 1)),
+    ("-_a|", (1, 1, 3)),
+    # A combining mark is a name character but no letter or digit: no peel.
+    ("-\u0301x|", (0, 0, 3)),
+    # A superscript digit is alnum (the reader peels before it) but no name
+    # character.
+    ("-|\u00b2", (1, 1, 1)),
+    ("-\u00b2|", (2, 2, 2)),
+    # A sign run with no name character after it is typed as the prefix of a
+    # name that starts with it (->), and so is a peeled run the caret is in.
+    ("-|", (0, 0, 1)),
+    ("(-|", (1, 1, 2)),
+    ("--|", (0, 0, 2)),
+    ("-|-x", (0, 0, 2)),
     # Whatever the reader lets into a symbol beyond the name rule ends the
     # word.
     ("a~b|", (2, 2, 3)),
@@ -73,6 +81,9 @@ SPANS = [
     (".method|", (0, 1, 7)),
     ("(.c|", (1, 2, 3)),
     ("a.-|", (0, 2, 3)),
+    ("a.-x|", (0, 2, 4)),
+    ("x.|", (0, 2, 2)),
+    ("a-|>b", (0, 0, 4)),
     # Unicode identifier characters, astral ones included (code points).
     ("한국|", (0, 0, 2)),
     ("x한|", (0, 0, 2)),
@@ -89,8 +100,9 @@ def span_at(marked):
 def test_completion_word_span(marked, expected):
     # Defects: the reader's symbol characters taken as name characters (a~b
     # one word, **= cut to =); a peeled sign kept in the word (-fo, which
-    # matches no name); a > counted outside -> (a>b one word); the dotted
-    # word's head left in the replaced word.
+    # matches no name); a lone - dropped from the word (every label offered,
+    # and -> accepted from (- gives (-->); a > counted outside -> (a>b one
+    # word); the dotted word's head left in the replaced word.
     assert span_at(marked) == expected
 
 

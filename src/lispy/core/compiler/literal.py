@@ -566,6 +566,9 @@ def completion_prefix(typed, label):
 
 # The signs the reader peels off the front of a token (leading_signs).
 SIGNS = "+-"
+# Besides a letter or digit (str.isalnum), what may follow a sign run for the
+# reader to peel it (leading_signs).
+SIGN_PEEL_FOLLOWERS = "_."
 
 
 def leading_signs(token):
@@ -577,7 +580,7 @@ def leading_signs(token):
     The one home of the rule: the reader (token_parse), the highlighter and
     the completion word (completion_word_span) all peel through it."""
     rest = token.lstrip(SIGNS)
-    if rest != token and rest and (rest[0].isalnum() or rest[0] in "_."):
+    if rest != token and rest and (rest[0].isalnum() or rest[0] in SIGN_PEEL_FOLLOWERS):
         return token[: len(token) - len(rest)]
     return ""
 
@@ -619,9 +622,12 @@ def completion_word_span(line, col):
     - ``start``: where the dotted word before ``col`` starts, walking back over
       name characters (name_char_p) and ``.``, less the leading signs the
       reader peels (leading_signs: ``-fo`` is ``(- fo)``, so its word is
-      ``fo``). A sign run that is all there is (``-``, ``--``) is the
-      operator, and a caret inside a peeled run is outside the name: both give
-      an empty word at ``col``.
+      ``fo``). A sign run with no name character after it (``-``, ``--``)
+      is the word itself, typed as the prefix of a name that starts with it
+      (``->``, ``-?``): it is no name, but only labels starting with ``-``
+      match it, and accepting ``->`` from ``(-`` gives ``(->``. A caret
+      inside a peeled run (``-|-x``) is likewise typing the run: the word is
+      the run, ending where the run ends.
     - ``replace_start``: after the last ``.`` between ``start`` and ``col``,
       since a completion offers the part after the last dot (``heapq.nl``
       completes ``nl``).
@@ -640,10 +646,8 @@ def completion_word_span(line, col):
     signs = leading_signs(line[start : end + 1])
     if signs:
         if start + len(signs) > col:
-            return col, col, col
+            return start, start, start + len(signs)
         start += len(signs)
-    elif start < end and not line[start:end].strip("-"):
-        return col, col, col
     return start, start + line[start:col].rfind(".") + 1, end
 
 

@@ -13,7 +13,12 @@ No pygls or lsprotocol import: this runs wherever lispython does.
 import json
 import sys
 
-from lispy.core.compiler.literal import SIGNS, completion_word_span, name_char_p
+from lispy.core.compiler.literal import (
+    SIGN_PEEL_FOLLOWERS,
+    SIGNS,
+    completion_word_span,
+    name_char_p,
+)
 from lispy.core.nodes import NAME_MANGLE
 
 VERSION = 1
@@ -37,6 +42,15 @@ CASE_INPUTS = (
     "--x|",
     "-|foo",
     "-|-x",
+    "-x|",
+    "-_a|",
+    "-\u0301x|",
+    "-\u00b2|",
+    "-|\u00b2",
+    "(-|",
+    "a-|>b",
+    "a.-x|",
+    "x.|",
     "-|",
     "--|",
     "(- -fo|",
@@ -107,15 +121,21 @@ def rule():
         if not ("a" + ch).isidentifier() and ch not in standalone
     }
     return {
-        "nameChars": 'c where ("a" + c).isidentifier(), or name punctuation',
+        # ("a" + c).isidentifier() is exactly Unicode XID_Continue.
+        "nameChars": "XID_Continue, plus namePunctuation and punctuationOnlyInside",
         "mangle": [list(pair) for pair in NAME_MANGLE],
         "namePunctuation": standalone,
         "punctuationOnlyInside": in_context,
         "dot": ".",
-        "signs": [ch for ch in SIGNS if name_char_p(ch, 0)],
-        "signRunPeeledBefore": 'c where c.isalnum() or c in "_."',
-        "allSignsWord": "empty at the caret (the operator)",
-        "caretInsidePeeledSigns": "empty at the caret",
+        # The reader peels + and - alike, but + is no name character, so only
+        # these can start the run a peel applies to.
+        "nameStartSigns": [ch for ch in SIGNS if name_char_p(ch, 0)],
+        "signRunPeeledBefore": {
+            "alnum": "Python str.isalnum: General Category L* or N*",
+            "chars": list(SIGN_PEEL_FOLLOWERS),
+        },
+        "unpeeledSignRun": "the word is the run, as the prefix of a name (->)",
+        "caretInsidePeeledSigns": "the word is the sign run, start to run end",
         "start": "back over name chars and dots, less peeled leading signs",
         "replaceStart": "after the last dot between start and caret",
         "end": "forward over name chars from the caret (no dot)",

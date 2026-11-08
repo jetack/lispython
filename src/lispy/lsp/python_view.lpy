@@ -44,7 +44,8 @@
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
 (from lispy.core.compiler.literal [completion-word-span hyphen-spelling identifier-p
-                                   leading-signs name-char-p name-key name-run-end])
+                                   leading-signs name-char-p name-key name-run-end
+                                   python-name-p])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
@@ -63,6 +64,12 @@
    mangling): the LSP compares names by it, since my-attr and my_attr are
    one Python name."
   (return (. (Symbol text) name)))
+
+(def _spells-p [word name]
+  "Whether .lpy text word spells Python name name: a name the compiler
+   accepts (python-name-p) whose py-name is name, so the operator - never
+   spells the name _."
+  (return (and (python-name-p word) (== (py-name word) name))))
 
 ;; name-key (from compiler/literal.py) is how the LSP compares identifiers
 ;; (references, completion, macro heads): the compiler's own name identity,
@@ -352,19 +359,19 @@
    The spelling sits at no fixed place: a dotted symbol or (. x a) ends the
    node with it, a method call (.ff x) starts it right after the dot, a
    keyword parameter after its colon, and a macro may put anything there;
-   so each place is tried and the one whose py-name matches wins.  span
+   so each place is tried and the one that spells name (_spells-p) wins.  span
    lies inside lines (_in-buffer-p)."
   (= [[line col] [end-line end-col]] span)
   (= text (sub lines (- line 1)))
-  (if (and (== line end-line) (== (py-name (sub text [: col end-col])) name))
+  (if (and (== line end-line) (_spells-p (sub text [: col end-col]) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))
   (= start (sub (completion-word-span end-text end-col) 1))
-  (if (and (< start end-col) (== (py-name (sub end-text [: start end-col])) name))
+  (if (and (< start end-col) (_spells-p (sub end-text [: start end-col]) name))
       (return (, (, end-line start) (, end-line end-col))))
   (= start (ife (and (< col (len text)) (in (sub text col) ".:")) (+ col 1) col))
   (= end (name-run-end text start))
-  (if (and (< start end) (== (py-name (sub text [: start end])) name))
+  (if (and (< start end) (_spells-p (sub text [: start end]) name))
       (return (, (, line start) (, line end))))
   (return None))
 
@@ -498,7 +505,7 @@
 
 (def spelled-in [lines start end name]
   "The .lpy span of the first name run between start and end in lines
-   (source-lines) whose py-name is name, or None.  A run is a stretch of
+   (source-lines) that spells name (_spells-p), or None.  A run is a stretch of
    name-char-p characters (a dot splits runs) less the leading signs the
    reader peels off a token (leading-signs: (- -x) spells x), which a part
    after a dot never has."
@@ -516,7 +523,7 @@
       (= run-start col)
       (if (or (== col 0) (!= (sub text (- col 1)) "."))
           (+= run-start (len (leading-signs (sub text [: col (+ run-end 1)])))))
-      (if (and (< run-start run-end) (== (py-name (sub text [: run-start run-end])) name))
+      (if (and (< run-start run-end) (_spells-p (sub text [: run-start run-end]) name))
           (return (, (, line run-start) (, line run-end))))
       (= col run-end)))
   (return None))
@@ -849,9 +856,9 @@
 (def _view-at-cursor [source line col :package "" :name "__main__" :search-dirs (,)]
   "(view, epoch): view-at-cursor's view and the earliest macro environment
    its compiles ran under (None when none ran).  The PythonView of source for a request at 1-based line, code-point col,
-   or None.  The partial word before the cursor (name characters back to a
-   dot, space, bracket, quote, comma or ;, less a leading prefix such as :
-   or *) is replaced by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
+   or None.  The partial word before the cursor (partial-span, the
+   completion word of completion-word-span after its last dot) is replaced
+   by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
    (. obj ) ) still compiles, and so is the rest of its name run after the
    cursor (my-|x), which would otherwise glue onto the sentinel and is what
    a completion there replaces; when the whole buffer does not, the text
