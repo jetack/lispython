@@ -46,6 +46,7 @@ from lispy.core.parser import (
     _FIELD_BRACES,
     _STRING_TYPES,
     _T_STRING_PREFIXES,
+    TOKEN_PREFIXES,
     _token_patterns,
     leading_signs,
     special_literals,
@@ -82,17 +83,19 @@ def _symbol_tokens(text, start, after_paren):
         if text in _MACROS:
             yield start, Keyword.Pseudo, text
             return
-        if len(text) >= 2 and text[0] in "^*":
-            width = 2 if text.startswith("**") else 1
-        else:
-            width = len(leading_signs(text))
+        prefix = ""
+        if len(text) >= 2:
+            prefix = next((p for p in TOKEN_PREFIXES if text.startswith(p)), "")
+        if prefix == ":":
+            # A keyword is one token, never an operator and a name.
+            yield start, String.Symbol, text
+            return
+        width = len(prefix or leading_signs(text))
         if width:
             yield start, Operator, text[:width]
             [text, start, after_paren] = [text[width:], start + width, False]
             continue
-        if len(text) >= 2 and text[0] == ":":
-            kind = String.Symbol
-        elif text in _BUILTINS:
+        if text in _BUILTINS:
             kind = _BUILTINS[text]
         else:
             kind = Name.Function if after_paren else Name
