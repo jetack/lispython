@@ -333,21 +333,43 @@ class TestCursor:
         assert view.text.split("\n")[line - 1][:col].endswith(" gr")
 
     @pytest.mark.parametrize(
-        ["src", "before"],
+        ["src", "text"],
         [
-            # Defect: the ~ is left before the blanks, where a lone ~ is the
-            # invert symbol, so the child is no longer unquoted.
-            ("(def f [grid] (when `(a ~(when gr|", " gr"),
-            ("(def f [grid] (when `(a ~(> (len gr|", "len(gr"),
-            # Defect: the walk never finds a refused form inside an unquote.
-            ("(def f [grid] (when `(a ~(fn [row] (> (len ro|", "lambda row: len(ro"),
+            ("(def f [grid] (when `(a ~(when gr|", "    Paren(Symbol('a'), gr)"),
+            ("(def f [grid] (when `(a ~(> (len gr|", "    Paren(Symbol('a'), len(gr))"),
         ],
     )
-    def test_a_refused_form_in_an_unquote_stays_unquoted(self, src, before):
+    def test_a_refused_form_in_an_unquote_stays_unquoted(self, src, text):
+        # Defect: the ~ is left before the blanks, where a lone ~ is the
+        # invert symbol, so the child is no longer unquoted (or no view).
         view = pv.view_at_cursor(*at_bar(src))
-        line, col = view.cursor
-        assert view.text.startswith("def f(grid):\n")
-        assert view.text.split("\n")[line - 1][:col].endswith(before)
+        assert view.text == "def f(grid):\n" + text
+
+    def test_quote_marks_written_back_keep_the_map(self):
+        # The child starts a line one column in: the ~ fits before it.
+        src = "(def f [grid] (when `(a ~(when\n gr|"
+        view = pv.view_at_cursor(*at_bar(src))
+        assert view.text == "def f(grid):\n    Paren(Symbol('a'), gr)"
+        assert view.map.to_lpy(view.cursor[0], view.cursor[1] - 2) == (2, 1)
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "(def f [grid] (when `(a ~(when\ngr|",
+            "(def f [grid] (when `(a ~(when\r\ngr|",
+            "(def f [grid] (when `(a ~@(when\n gr|",
+        ],
+    )
+    def test_quote_marks_never_overwrite_a_line_break(self, src):
+        # Defect: the marks written before a child at the start of a line
+        # overwrite the line break, so every later position moves and the
+        # word maps to the line above (or nowhere). With no room for them
+        # the marks are dropped, which leaves the word quoted: no view.
+        view = pv.view_at_cursor(*at_bar(src))
+        word = (2, src.split("\n")[-1].index("gr"))
+        assert view is None or (
+            view.map.to_lpy(view.cursor[0], view.cursor[1] - 2) == word
+        )
 
     @pytest.mark.parametrize(
         ["src", "line", "attribute"],
@@ -444,6 +466,11 @@ class TestCursor:
             # The default's own form stays around the cursor.
             ("(def f [grid] (lambda [a :b (g gr|", "def f(grid):\n    g(gr)"),
             ("(class A [Ba|", "Ba"),
+            # A return annotation is no body: it is read around the def.
+            ("(def f [grid] (def g [x] ^gr|", "def f(grid):\n    gr"),
+            ("(def f [grid] (async-def g [x] ^gr|", "def f(grid):\n    gr"),
+            ("(def f [grid] (def g [x] ^(sub list gr|", "def f(grid):\n    list[gr]"),
+            ("(def f [grid] (def g [x] ^grid.|", "def f(grid):\n    grid."),
         ],
     )
     def test_a_default_annotation_or_base_is_read_around_the_form(self, src, text):

@@ -875,12 +875,17 @@
   ;; The quote marks are glued tokens before the bracket, shorter than the
   ;; blanked bracket and head, so they fit before the child with every
   ;; position after them unmoved; a ~ left before blanks would read as the
-  ;; invert symbol.
+  ;; invert symbol.  Where the child starts a line too close to its start
+  ;; for them, writing them would overwrite the line break and move every
+  ;; later position, so they are dropped with the form.
   (= marks-start (offset *marked))
   (= marks (sub prefix [: marks-start start]))
   (= blanked (_blank-span prefix marks-start child-start))
-  (return (+ (sub blanked [: None (- child-start (len marks))]) marks
-             (sub blanked [: child-start None]))))
+  (= marks-at (- child-start (len marks)))
+  (if (or (in "\n" (sub blanked [: marks-at child-start]))
+          (in "\r" (sub blanked [: marks-at child-start])))
+      (return blanked))
+  (return (+ (sub blanked [: None marks-at]) marks (sub blanked [: child-start None]))))
 
 (def _binds-sentinel-p [form]
   "True when the cursor sentinel stands where form, a parsed Paren, binds a
@@ -899,8 +904,13 @@
   (if (or (is slot None) (<= (len form) slot)
           (not (isinstance (sub form slot) Bracket)))
       (return False))
-  ;; Unwrapping a def or lambda the cursor is inside loses its parameters.
-  (if (any ((_holds-sentinel part) for part in (sub form.list [: (+ slot 1) None])))
+  ;; Unwrapping a def or lambda the cursor is inside loses its parameters;
+  ;; a return annotation (^ right after the params) is no body, it is read
+  ;; in the scope around the def, as a default is.
+  (= body (sub form.list [: (+ slot 1) None]))
+  (if (and body (isinstance (sub body 0) Annotation))
+      (= body (sub body [: 1 None])))
+  (if (any ((_holds-sentinel part) for part in body))
       (return True))
   (if (not (_holds-sentinel (sub form slot)))
       (return False))
