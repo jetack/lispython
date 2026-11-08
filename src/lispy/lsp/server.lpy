@@ -5,6 +5,7 @@
 (import contextvars)
 (import functools)
 (import glob)
+(import importlib.util)
 (import inspect)
 (import logging)
 (import os)
@@ -106,10 +107,11 @@
 (= WORKSPACE-SYMBOLS {})
 
 (def uri-to-path [uri]
-  "Convert a file:// URI to a filesystem path."
-  (if (.startswith uri "file://")
-      (return (sub uri [: 7 None]))
-      (return uri)))
+  "The filesystem path of a file: URI, decoded (pygls to-fs-path: my%20proj
+   is my proj), else uri itself, a name for a buffer with no file (an
+   untitled: one)."
+  (= path (to-fs-path uri))
+  (return (ife (is path None) uri path)))
 
 (def path-to-uri [path]
   "Convert a filesystem path to a file:// URI."
@@ -199,48 +201,45 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def resolve-relative-module [module-name origin]
-  "The .lpy file the relative module-name (.mac, ..pkg.mac, .) names from
-   the file at path origin, as Python resolves it in origin's package, or
-   None (no origin, no such file)."
-  (if (is origin None)
-      (return None))
-  (= rest (.lstrip module-name "."))
-  (= base (osp.dirname origin))
-  (for _ in (range (- (len module-name) (len rest) 1))
-    (= base (osp.dirname base)))
-  (= parts (ife rest (.split (.replace rest "-" "_") ".") []))
-  (= target (osp.join base *parts))
-  ;; A module of dots alone is the package itself.
-  (= candidates (ife rest
-                     [(+ target ".lpy") (osp.join target "__init__.lpy")]
-                     [(osp.join target "__init__.lpy")]))
-  (for candidate in candidates
-    (if (osp.isfile candidate)
-        (return candidate)))
+(def module-file-under [module-name roots]
+  "The .lpy file of the absolute module-name under the first of roots that
+   holds one (module.lpy, else the package's __init__.lpy), or None."
+  (= rel-path (osp.join *(.split (.replace module-name "-" "_") ".")))
+  (for root in roots
+    (for candidate in [(+ (osp.join root rel-path) ".lpy")
+                       (osp.join root rel-path "__init__.lpy")]
+      (if (osp.isfile candidate)
+          (return candidate))))
   (return None))
 
 (def resolve-module-to-file [module-name workspace-folders :origin None]
   "Resolve a LisPython module name to a .lpy file path.
    e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'.  A relative name
-   resolves from origin, the importing file's path (resolve-relative-module)."
+   resolves as Python resolves it from origin, the importing file's path:
+   in origin's package (module-names, the package-root rule) to an
+   absolute name (importlib.util.resolve-name), looked up under origin's
+   import root.  With no origin, or no package, or beyond the top-level
+   package, it resolves to nothing."
   (if (.startswith module-name ".")
-      (return (resolve-relative-module module-name origin)))
-  (= parts (.split (.replace module-name "-" "_") "."))
-  (= rel-path (+ (osp.join *parts) ".lpy"))
+      (do (if (is origin None)
+              (return None))
+          (= [_ package import-root] (module-names origin))
+          (try
+            (= absolute (importlib.util.resolve-name module-name package))
+            (except [(, ImportError ValueError)]
+              (return None)))
+          (return (module-file-under absolute [import-root]))))
   ;; 1. Workspace folders (direct or in src/)
+  (= roots [])
   (for folder in workspace-folders
     (= root (uri-to-path folder.uri))
-    (= candidate (osp.join root rel-path))
-    (if (osp.isfile candidate)
-        (return candidate))
-    (= candidate (osp.join root "src" rel-path))
-    (if (osp.isfile candidate)
-        (return candidate)))
+    (.extend roots [root (osp.join root "src")]))
+  (= found (module-file-under module-name roots))
+  (if found
+      (return found))
   ;; 2. Python's sys.path (finds installed packages, including lispython itself)
   (try
-    (do (import importlib.util)
-        (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
+    (do (= spec (importlib.util.find-spec (.replace module-name "-" "_")))
         (if (and spec spec.origin (.endswith spec.origin ".lpy"))
             (return spec.origin))
         ;; Package without __init__.lpy but has submodule files
@@ -1474,7 +1473,7 @@
   (= import-node (find-import-for-name tree name))
   (if import-node
       (do (= fpath (find-import-target import-node folders
-                                          :origin (uri-to-path doc.uri)))
+                                          :origin (to-fs-path doc.uri)))
           (if fpath
               (do (= target-uri (path-to-uri fpath))
                   ;; Make sure the target file is indexed

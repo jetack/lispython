@@ -123,6 +123,12 @@ class TestRequireQualifier:
             ("(require m a b c)", "a"),
             ("(require m :as c)", ":as"),
             ("(require m [a 1])", "1"),
+            ("(require mac.)", "mac."),
+            ("(require a..b)", "a..b"),
+            ("(require m.-)", "m.-"),
+            ("(require a.if)", "a.if"),
+            ("(require .mac.)", ".mac."),
+            ("(require ..mac..x *)", "..mac..x"),
         ],
     )
     def test_a_malformed_require_is_a_compile_error_at_its_fault(self, form, fault):
@@ -135,6 +141,21 @@ class TestRequireQualifier:
         assert info.value.msg.startswith("(require ...) ")
         column = source.index(fault, source.index("(require")) - source.index("\n")
         assert (info.value.lineno, info.value.offset) == (2, column)
+
+    @pytest.mark.parametrize("package", [None, ""], ids=["no package", "top level"])
+    @pytest.mark.parametrize("form", ["(require .mac)", "(require .. *)"])
+    def test_a_relative_require_outside_a_package_is_a_compile_error(
+        self, package, form
+    ):
+        # Defect: importlib.import_module's bare TypeError ("the 'package'
+        # argument is required") escapes with no position.
+        scope = {"__macro_namespace": {}}
+        if package is not None:
+            scope["__package__"] = package
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse(f"(= x 1)\n  {form}"), scope))
+        assert "no known parent package" in info.value.msg
+        assert (info.value.lineno, info.value.offset) == (2, 12)
 
     def test_a_package_alone_names_the_fix(self):
         # Python binds no name for from . import, so neither may a require:

@@ -3,7 +3,7 @@
 
 (require lispy.macros *)
 
-(from lispy.core.compiler.literal [identifier-p plain-name-p])
+(from lispy.core.compiler.literal [identifier-p plain-name-p python-name-p])
 (from lispy.core.errors [LispyCompileError])
 (from lispy.core.nodes *)
 (from lispy.core.nodes [atom-text])
@@ -107,6 +107,11 @@
   (if (isinstance module GluedHead)
       (raise (.misuse-error module)))
   (if (is-not (type module) Symbol)
+      (raise (require-error module f"expects a module name, got {module}")))
+  ;; Leading dots are a relative module's level; every part after them is a
+  ;; name (python-name-p), so mac., a..b, m.- and .mac. are refused here.
+  (= path (.lstrip (atom-text module) "."))
+  (if (and path (not (all (map python-name-p (.split path ".")))))
       (raise (require-error module f"expects a module name, got {module}")))
   (= rest (sub args [: 1 None]))
   (if (== (len rest) 0)

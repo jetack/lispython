@@ -11,6 +11,10 @@ follows [Semantic Versioning](https://semver.org/).
 - `(require mod as m)` registers every macro of `mod` as `m.name`, with a
   bare `as` as `import` takes. The LSP's completion after `m.`, hover and
   go-to-definition follow the alias, and a relative require's macros.
+- LSP: go-to-definition without a backend resolves a relative module, of a
+  `require` or a `from`, as Python does: in the document's package, never
+  beyond its top-level package, and not at all for a buffer with no file.
+  A document path with a space or a non-ASCII character is read decoded.
 - nREPL: the `complete` reply carries `items`, LSP-shaped completion items in
   `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython
@@ -80,6 +84,14 @@ follows [Semantic Versioning](https://semver.org/).
   which no code could spell. Code calling `(.mac.name ...)` must call
   `(mac.name ...)`. `(require .)` and `(require ..)` with no selection bind
   no name and are a compile error; give them `as`, `*` or a list.
+- A `require` whose module is no module name is a compile error at it:
+  `(require 1)`, `(require "m")`, and a malformed path (`(require mac.)`,
+  `(require a..b)`, `(require m.-)`, `(require .mac.)`). The first two used
+  to be a "module not found" warning.
+- A relative `require` in a module outside any package (`lpy -c`, a
+  top-level script) is a compile error at the module, "attempted relative
+  import with no known parent package", instead of Python's bare
+  `TypeError`.
 - A `defmacro` no longer binds any name in the module that defines it. It
   used to star-import `lispy.core.nodes` and `lispy.core.builtins` there,
   overwriting the module's own `Paren`, `Symbol` or `gensym` and leaving

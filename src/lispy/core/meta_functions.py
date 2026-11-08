@@ -1,6 +1,6 @@
 WARNING = "This script should be edited in .lpy file, not translated .py file."
 from lispy.core.builtins import __all__ as MACRO_SCOPE_NAMES
-from lispy.core.compiler.literal import identifier_p, plain_name_p
+from lispy.core.compiler.literal import identifier_p, plain_name_p, python_name_p
 from lispy.core.errors import LispyCompileError
 from lispy.core.nodes import *
 from lispy.core.nodes import atom_text
@@ -119,6 +119,9 @@ def require_parse(sexp):
     if isinstance(module, GluedHead):
         raise module.misuse_error()
     if type(module) is not Symbol:
+        raise require_error(module, f"expects a module name, got {module}")
+    path = atom_text(module).lstrip(".")
+    if path and (not all(map(python_name_p, path.split(".")))):
         raise require_error(module, f"expects a module name, got {module}")
     rest = args[1:]
     if len(rest) == 0:

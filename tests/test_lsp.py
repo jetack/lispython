@@ -358,25 +358,79 @@ class TestRequireSelection:
         [loc] = self._definition(workspace, source, 1, 4)
         assert loc.uri.endswith("macmod.lpy")
 
-    def test_definition_through_a_relative_require(self, tmp_path, monkeypatch):
-        # Defect: the relative module is looked up from the workspace root
-        # (or not at all), so its macro's definition is not found.
+    @pytest.fixture
+    def package(self, tmp_path, monkeypatch):
+        """A package pkg (holding macmod.lpy) under a directory whose name
+        has a space, which a file: URI percent-encodes, beside a top-level
+        macmod.lpy outside any package; the workspace folder is that
+        directory's parent."""
         monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
         monkeypatch.setattr(server, "FILE_TREES", {})
-        pkg = tmp_path / "pkg"
-        pkg.mkdir()
+        root = tmp_path / "my proj"
+        pkg = root / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
         (pkg / "macmod.lpy").write_text(self.MACROS)
-        source = "(require .macmod)\n(macmod.thrice 1)"
-        document = SimpleNamespace(source=source, uri=(pkg / "mod.lpy").as_uri())
+        (root / "macmod.lpy").write_text(self.MACROS)
+        return pkg
+
+    @staticmethod
+    def _definition_in(source, uri, folder, line, character):
+        document = SimpleNamespace(source=source, uri=uri)
         ls = SimpleNamespace(
             workspace=SimpleNamespace(
                 get_text_document=lambda uri: document,
-                folders={"root": SimpleNamespace(uri=tmp_path.as_uri())},
+                folders={"root": SimpleNamespace(uri=folder.as_uri())},
             )
         )
-        [loc] = run_definition(ls, position(1, 9))
-        assert loc.uri == (pkg / "macmod.lpy").as_uri()
+        return run_definition(ls, position(line, character))
+
+    def test_definition_through_a_relative_require(self, package):
+        # Defects: the relative module is looked up from the workspace root
+        # (or not at all), or the document's file: URI is read undecoded
+        # (my%20proj), so the definition is not found.
+        source = "(require .macmod)\n(macmod.thrice 1)"
+        uri = (package / "mod.lpy").as_uri()
+        assert "%20" in uri
+        [loc] = self._definition_in(source, uri, package.parent.parent, 1, 9)
+        assert loc.uri == (package / "macmod.lpy").as_uri()
         assert loc.range.start.line == 1
+
+    @pytest.mark.parametrize(
+        "form", ["(from .macmod [thrice])", "(from . [macmod])", "(require .macmod)"]
+    )
+    def test_a_relative_import_target_resolves_in_the_package(self, package, form):
+        # Defect: a relative from (sharing the require's lookup) resolves
+        # from the workspace root, so it finds the top-level macmod.lpy or,
+        # for the package itself, nothing. (Definition never reaches this
+        # for a from: the name it binds is the buffer's own definition.)
+        (package / "__init__.lpy").write_text("")
+        [node] = parse(form)
+        origin = str(package / "mod.lpy")
+        folders = [SimpleNamespace(uri=package.parent.as_uri())]
+        got = server.find_import_target(node, folders, origin=origin)
+        expected = package / ("__init__.lpy" if "[macmod]" in form else "macmod.lpy")
+        assert got == str(expected)
+
+    def test_a_relative_module_beyond_the_top_level_package_resolves_to_nothing(
+        self, package
+    ):
+        # Defect: each dot walks up one directory with no package boundary,
+        # so ..macmod from pkg/mod.lpy finds the top-level macmod.lpy, which
+        # Python's import never reaches.
+        source = "(require ..macmod)\n(macmod.thrice 1)"
+        uri = (package / "mod.lpy").as_uri()
+        assert not self._definition_in(source, uri, package.parent.parent, 1, 9)
+
+    def test_a_buffer_with_no_file_resolves_no_relative_module(
+        self, package, monkeypatch
+    ):
+        # Defect: an untitled: buffer's path is taken as its URI text, whose
+        # dirname is the server's working directory, so a relative module
+        # resolves against wherever the server runs.
+        monkeypatch.chdir(package)
+        source = "(require .macmod)\n(macmod.thrice 1)"
+        assert not self._definition_in(source, "untitled:x", package.parent, 1, 9)
 
 
 def test_local_completion_tags_special_forms_in_label_details_not_detail():
