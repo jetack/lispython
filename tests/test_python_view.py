@@ -776,9 +776,6 @@ class TestShadows:
         self.write(pkg / "__init__.py", "")
         self.write(pkg / "pvownhelper.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
         self.write(pkg / "a.lpy", "(require pvownhelper *)\n(= y (twice 2))")
-        assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project))[3][
-            0
-        ] == str(pkg)
         names = ["pvownhelper", "pvownpkg", "pvownpkg.pvownhelper", "pvowntools"]
         names.append("pvowntools.pvownpkg")
         names.append("pvowntools.pvownpkg.pvownhelper")
@@ -791,6 +788,9 @@ class TestShadows:
                 sys.modules.pop(name, None)
         shadow = root / "pvowntools" / "pvownpkg" / "a.py"
         assert shadow.read_text().endswith("y = 2 + 2")
+        assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project))[3][
+            0
+        ] == str(pkg)
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         project, root = tmp_path / "project", tmp_path / "view"
