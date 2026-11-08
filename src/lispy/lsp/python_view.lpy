@@ -39,7 +39,8 @@
 (from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.errors [LispyCompileError compile-errors])
-(from lispy.core.nodes [Bracket Expression GluedHead Paren Symbol Wrapper atom-text])
+(from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
+                         MetaIndicator Paren Starred Symbol Wrapper atom-text])
 (from lispy.core.parser [completion-word-span parse source-offset tokenize word-parts])
 (from lispy.core.macro [compile-unit])
 (from lispy.core.macro-table [MacroTable])
@@ -737,8 +738,9 @@
   "The entry of stack (open-forms) that compiled's compile error is placed
    at, at its bracket or its head, or None: no such error, or an error at
    any other form, which unwrapping the forms around the cursor never
-   mends.  The innermost match wins, since an inner form's bracket is the
-   head of the one around it ((lambda [x|)."
+   mends.  The innermost match wins: an inner form's bracket is the head
+   of the one around it, and unwrapping the outer one first would drop it
+   in the next round too ([(when x| is [x], never x)."
   (= error compiled.error)
   (if (or (!= compiled.stage COMPILE-STAGE)
           (not (isinstance error LispyCompileError))
@@ -763,56 +765,154 @@
 (= _DEF-HEADS (, "def" "async-def" "defmacro"))
 (= _TYPE-PARAMETER-HEADS (, "def" "async-def" "class" "type"))
 
-(def _in-parameter-list [prefix removed]
-  "True when the cursor sentinel in prefix stands where one of removed, the
-   open-forms entries a blank would drop, binds a name (_binds-sentinel-p):
-   unwrapping it would answer for the scope around it, where the name being
-   bound is no name yet."
+(def _param-slot [form]
+  "The slot of form, a parsed Paren, that holds the [params] bracket its
+   head binds (_DEF-HEADS, LAMBDA-HEADS), or None when its head binds
+   none."
+  (if (== (len form) 0)
+      (return None))
+  (= head (atom-text (sub form 0)))
+  (return (ife (in head _DEF-HEADS) 2 (ife (in head LAMBDA-HEADS) 1 None))))
+
+(def _header-slot [form]
+  "The slot of form, a parsed Paren, whose bracket is the form's own syntax,
+   never an expression: a def's or lambda's params (_param-slot) or a
+   class's bases; or None."
+  (= slot (_param-slot form))
+  (if (and (is slot None) (== (atom-text (sub form 0)) "class"))
+      (return 2))
+  (return slot))
+
+(def _sentinel-child [form]
+  "The direct child of form, a parsed Expression, that holds the cursor
+   sentinel (_holds-sentinel), or None."
+  (for child in form.list
+    (if (_holds-sentinel child)
+        (return child)))
+  (return None))
+
+(def _position [node]
+  "The (1-based line, column) a parsed node starts at, its reader prefixes
+   included."
+  (= info node.position-info)
+  (return (, (.get info "lineno") (.get info "col_offset"))))
+
+;; The wrappers whose prefix means something only in an argument or
+;; parameter list (* ** : ^): a child taking a refused form's place stands
+;; where an expression goes, so it is read without them.
+(= _LIST-ONLY-WRAPPERS (, Annotation DoubleStarred Keyword Starred))
+
+(def _unwrap [prefix refused sentinel-start]
+  "prefix with refused, an open-forms entry of prefix, unwrapped, or None.
+   The text from the form's bracket up to the start of its direct child
+   that holds the cursor sentinel (at sentinel-start) is blanked, the
+   prefixes and glue the reader gives that child included (' ~@ f[T]
+   grid.), so the child takes the form's place, every form inside it
+   stays and every position after it is unmoved.  A quote mark the form is
+   glued to (`(a ~(when x|) stays on the child, written just before it.
+   None when the reader places no such form or child, or the cursor stands
+   where a form the unwrap drops binds a name (_binds-sentinel-p):
+   unwrapping would answer for the scope around it, where that name is no
+   name."
+  ;; Only the refused form is dropped, never the forms between it and the
+  ;; cursor: blanking up to the sentinel dropped a fn, for or glued base
+  ;; there, and with it the names it binds or the attribute being typed.
   (= closers (open-form-closers prefix))
   (if (is closers None)
-      (return True))
-  (= openings (set ((sub entry 2) for entry in removed)))
-  (= pending (list (parse (+ prefix closers) :partial True)))
+      (return None))
+  (= closed (+ prefix closers))
+  (= opening (sub refused 2))
+  ;; Each node is walked with the position of the quote marks it is the
+  ;; value of (the outermost of a run: '~(), or None.
+  (= pending [(, node None) for node in (parse closed :partial True)])
+  (= form None)
+  (= marked None)
   (while pending
-    (= node (.pop pending))
+    (= [node marks] (.pop pending))
     (cond (isinstance node Expression)
-          ;; A form counts when it is dropped, or the bracket of its params
-          ;; or type parameters is (refused at its head: (def f [:x|).
-          (do (= parts (+ [node] (sub node.list [: 1 3])))
+          (do (if (and (is form None) (== (_position node) opening))
+                  (= [form marked] [node marks]))
+              ;; A form counts when it is dropped, or the bracket of its
+              ;; params or type parameters is (refused at its head:
+              ;; (def f [:x|).
+              (= parts [(_position node)])
+              (= slot (ife (isinstance node Paren) (_param-slot node) None))
+              (if (and (is-not slot None) (> (len node) slot))
+                  (.append parts (_position (sub node slot))))
               (if (and (>= (len node) 2) (isinstance (sub node 1) GluedHead))
-                  (.append parts (. (sub node 1) params)))
-              (if (and (isinstance node Paren)
-                       (any ((in (, (.get part.position-info "lineno")
-                                    (.get part.position-info "col_offset"))
-                                 openings)
-                             for part in parts))
+                  (.append parts (_position (. (sub node 1) params))))
+              (if (and (isinstance node Paren) (in opening parts)
                        (_binds-sentinel-p node))
-                  (return True))
-              (.extend pending node.list))
+                  (return None))
+              (.extend pending ((, child None) for child in node.list)))
           (isinstance node GluedHead)
-          (.extend pending [node.head node.params])
+          (.extend pending [(, node.head None) (, node.params None)])
+          (isinstance node MetaIndicator)
+          (.append pending (, node.value (ife (is marks None) (_position node) marks)))
           (isinstance node Wrapper)
-          (.append pending node.value)))
-  (return False))
+          (.append pending (, node.value None))))
+  (if (is form None)
+      (return None))
+  (= child (_sentinel-child form))
+  ;; A params or bases bracket is no expression ([a :b gr] is refused as a
+  ;; list), so its child holding the cursor (a default, an annotation, a
+  ;; base) takes the form's place.
+  (= slot (ife (and (isinstance form Paren) (> (len form) 0)) (_header-slot form) None))
+  (if (and (is-not child None) (is-not slot None) (> (len form) slot)
+           (is child (sub form slot)) (isinstance child Bracket))
+      (= child (_sentinel-child child)))
+  (while (isinstance child _LIST-ONLY-WRAPPERS)
+    (= child child.value))
+  (if (is child None)
+      (return None))
+  (= offset (source-offset closed))
+  (= start (sub refused 4))
+  (= child-start (offset *(_position child)))
+  (if (not (< start child-start (+ sentinel-start 1)))
+      (return None))
+  (if (is marked None)
+      (return (_blank-span prefix start child-start)))
+  ;; The quote marks are glued tokens before the bracket, shorter than the
+  ;; blanked bracket and head, so they fit before the child with every
+  ;; position after them unmoved; a ~ left before blanks would read as the
+  ;; invert symbol.  Where the child starts a line too close to its start
+  ;; for them, writing them would overwrite the line break and move every
+  ;; later position, so they are dropped with the form.
+  (= marks-start (offset *marked))
+  (= marks (sub prefix [: marks-start start]))
+  (= blanked (_blank-span prefix marks-start child-start))
+  (= marks-at (- child-start (len marks)))
+  (if (or (in "\n" (sub blanked [: marks-at child-start]))
+          (in "\r" (sub blanked [: marks-at child-start])))
+      (return blanked))
+  (return (+ (sub blanked [: None marks-at]) marks (sub blanked [: child-start None]))))
 
 (def _binds-sentinel-p [form]
   "True when the cursor sentinel stands where form, a parsed Paren, binds a
    name: a parameter's name (param-bindings; a list it refuses counts, the
-   name may be what is being typed), or anywhere in glued type parameters
-   (def f[T], class A[T]).  A default or annotation is read in the scope
-   around the form, so it never counts; nor do class bases."
+   name may be what is being typed), anywhere in glued type parameters
+   (def f[T], class A[T]), or anywhere in the body of a def or lambda,
+   where its parameters are names.  A default or annotation is read in the
+   scope around the form, so it never counts; nor do class bases."
   (if (== (len form) 0)
       (return False))
-  (= head (atom-text (sub form 0)))
-  (if (and (in head _TYPE-PARAMETER-HEADS) (>= (len form) 2)
+  (if (and (in (atom-text (sub form 0)) _TYPE-PARAMETER-HEADS) (>= (len form) 2)
            (isinstance (sub form 1) GluedHead)
            (_holds-sentinel (. (sub form 1) params)))
       (return True))
-  (= slot (ife (in head _DEF-HEADS) 2
-               (ife (in head LAMBDA-HEADS) 1 None)))
+  (= slot (_param-slot form))
   (if (or (is slot None) (<= (len form) slot)
-          (not (isinstance (sub form slot) Bracket))
-          (not (_holds-sentinel (sub form slot))))
+          (not (isinstance (sub form slot) Bracket)))
+      (return False))
+  ;; Unwrapping a def or lambda the cursor is inside loses its parameters;
+  ;; a return annotation (^ right after the params) is no body, it is read
+  ;; in the scope around the def, as a default is.
+  (= body (sub form.list [: (+ slot 1) None]))
+  (if (and body (isinstance (sub body 0) Annotation))
+      (= body (sub body [: 1 None])))
+  (if (any ((_holds-sentinel part) for part in body))
+      (return True))
+  (if (not (_holds-sentinel (sub form slot)))
       (return False))
   (try
     (return (any ((== (atom-text name) CURSOR-SENTINEL)
@@ -829,9 +929,10 @@
           (.extend pending node.list)
           (isinstance node GluedHead)
           (.extend pending [node.head node.params])
-          (isinstance node Wrapper)
+          (isinstance node (, Wrapper MetaIndicator))
           (.append pending node.value)
-          (and (isinstance node Symbol) (== (atom-text node) CURSOR-SENTINEL))
+          ;; The sentinel's own token may glue it to a base (grid.___).
+          (and (isinstance node Symbol) (in CURSOR-SENTINEL (atom-text node)))
           (return True)))
   (return False))
 
@@ -852,12 +953,15 @@
    there replaces; when the whole buffer does not, the text
    before the cursor with its open forms closed is compiled instead, and
    while that is refused at an open form around the cursor ((== (sub gr|
-   with one operand, (when x| with no body), that form is unwrapped: its
-   text up to the sentinel is blanked (_blank-span), so the sentinel stands
-   in the forms outside it, every position unmoved; never with the cursor
-   where a blanked form binds a name (_in-parameter-list), and a round that
-   blanks no open bracket gives up.  The
-   sentinel must come out as exactly one identifier of the generated Python
+   with one operand, (when x| with no body), that one form is unwrapped:
+   its text up to its child holding the cursor is blanked (_unwrap), so
+   that child, and every form inside it, stands in the form's place (under
+   the quote marks the form had, without a * ** : ^ prefix), every position
+   unmoved; never with the cursor where the
+   dropped form binds a name or inside a def or lambda it drops
+   (_binds-sentinel-p), and a round that blanks no open bracket gives up.
+   A word glued to a base (grid.re|) gives a view only as an attribute.
+   The sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
    partial's Python name and the map follows that edit, the generated
    partial standing for the whole .lpy word.  search-dirs is
@@ -868,7 +972,7 @@
   (= text (sub lines (- line 1)))
   (if (not (<= 0 col (len text)))
       (return (, None None)))
-  (= [start end] (partial-span text col))
+  (= [word-start start end] (completion-word-span text col))
   (= partial (sub text [: start col]))
   (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: end None])))
   (= marked (.join "\n" lines))
@@ -902,11 +1006,11 @@
                 (break))
             (= refused (_refused-open-form compiled stack))
             (if (or (is refused None)
-                    (not (<= 0 (sub refused 4) (- sentinel-start 1)))
-                    (_in-parameter-list prefix
-                                        (sub stack [: (.index stack refused) None])))
+                    (not (<= 0 (sub refused 4) (- sentinel-start 1))))
                 (return (, None macro-epoch)))
-            (= prefix (_blank-span prefix (sub refused 4) sentinel-start)))))
+            (= prefix (_unwrap prefix refused sentinel-start))
+            (if (is prefix None)
+                (return (, None macro-epoch))))))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
       (return (, None macro-epoch)))
@@ -936,6 +1040,10 @@
   (= view.cursor (, gen-line (+ gen-col (len restored))))
   (= view.partial partial)
   (= view.attribute (and (> index 0) (== (sub view.text (- index 1)) ".")))
+  ;; A word glued to a base (grid.re|) is an attribute: a view that lost
+  ;; the base would answer with the scope's names instead of its members.
+  (if (and (< word-start start) (not view.attribute))
+      (return (, None macro-epoch)))
   (= view.in-import in-import)
   (= view.fallback fallback)
   (return (, view macro-epoch)))
