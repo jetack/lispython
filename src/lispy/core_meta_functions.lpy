@@ -7,14 +7,15 @@
 (from lispy.core.nodes *)
 (from lispy.core.builtins [__all__ as MACRO-SCOPE-NAMES])
 
-;; The generated code binds no global of the module it runs in: it reaches
+;; The generated code binds no lasting global of the module it runs in
+;; (defmacro's scope function is deleted right after it runs): it reaches
 ;; every module it needs through __import__ (read from a function's
 ;; __builtins__), so a user's own importlib stays theirs and a macro named
 ;; importlib does not clash with the next defmacro.  The one import statement
-;; is defmacro's import of the macro tools, local to its scope function (no
-;; global bound), and it stays a statement so the Python backend resolves
-;; the names to their declarations.  Fresh nodes per use, since compiling may
-;; change a node in place.
+;; is defmacro's import of the macro tools, local to its scope function, and
+;; it stays a statement so the Python backend resolves the names to their
+;; declarations.  Fresh nodes per use, since compiling may change a node in
+;; place.
 (def builtin [name]
   "The generated code's form for the builtin NAME, read from a function's
    __builtins__, never by a global lookup: the user module can rebind a global
