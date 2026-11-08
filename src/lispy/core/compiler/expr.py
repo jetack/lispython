@@ -437,7 +437,26 @@ def param_name(arg):
 
 
 def def_args_parse(sexp, annotated=True):
-    """The ast.arguments of a def/async-def/lambda ``[args]`` bracket.
+    """The ast.arguments of a def/async-def/lambda ``[args]`` bracket
+    (``def_args_walk``, its annotations and defaults compiled)."""
+    return def_args_walk(sexp, annotated, expr_steps)
+
+
+def param_bindings(sexp):
+    """The Symbols a def/async-def/defmacro/lambda ``[args]`` bracket binds,
+    in source order: each parameter's name, never a default, an annotation,
+    ``/`` or a bare ``*``. Read off ``def_args_walk``, the compiler's own
+    pass, with nothing compiled; a list the compiler refuses raises
+    LispyCompileError as compiling it would."""
+    bound = []
+    trampoline(def_args_walk(sexp, True, lambda value: None, bound))
+    return bound
+
+
+def def_args_walk(sexp, annotated, value_steps, bound=None):
+    """The ast.arguments of a def/async-def/lambda ``[args]`` bracket, each
+    annotation and default the result of ``value_steps`` on its sexp; with
+    ``bound``, a list, each parameter's Symbol is appended to it.
 
     One pass in Python's order: positional parameters (those before a ``/``
     positional-only), one ``*`` or ``*args``, keyword-only parameters, one
@@ -464,13 +483,17 @@ def def_args_parse(sexp, annotated=True):
 
     def param(arg):
         name = param_name(arg)
+        if bound is not None:
+            bound.append(
+                arg.value if isinstance(arg, (Keyword, Starred, DoubleStarred)) else arg
+            )
         node = ast.arg(arg=name, **arg.position_info)
         if len(q) and isinstance(q[0], Annotation):
             if not annotated:
                 raise form_error(
                     q[0], "takes no annotations on its parameters", "lambda"
                 )
-            node.annotation = yield expr_steps(q.popleft())
+            node.annotation = yield value_steps(q.popleft())
         return node
 
     def refuse_bare_star():
@@ -505,7 +528,7 @@ def def_args_parse(sexp, annotated=True):
         elif star is None:
             node = yield param(arg)
             if keyword_arg_p(arg):
-                defaults.append((yield expr_steps(keyword_value(arg, q))))
+                defaults.append((yield value_steps(keyword_value(arg, q))))
             elif len(defaults):
                 # Positional-only and regular parameters share one defaults
                 # list, the last ones': a gap would shift every default.
@@ -517,7 +540,7 @@ def def_args_parse(sexp, annotated=True):
         else:
             kwonlyargs.append((yield param(arg)))
             kw_defaults.append(
-                (yield expr_steps(keyword_value(arg, q)))
+                (yield value_steps(keyword_value(arg, q)))
                 if keyword_arg_p(arg)
                 else None
             )

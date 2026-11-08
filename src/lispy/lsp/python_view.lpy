@@ -36,7 +36,7 @@
     (= fcntl None)
     (import msvcrt)))
 
-(from lispy.core.errors [compile-errors])
+(from lispy.core.errors [LispyCompileError compile-errors])
 (from lispy.core.nodes [Symbol])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.macro [compile-unit])
@@ -83,39 +83,43 @@
         (do (del (sub stack [: index None]))
             (return)))))
 
-(def open-form-closers [prefix :literals False]
-  "The closers of the forms still open at the end of prefix, innermost
-   first, or None when the lexer cannot read it or it ends inside an
-   f/t-string, which no bracket can close.  Appended to prefix, they make
-   a mid-edit buffer parse up to the cursor.  literals: close an open
-   f/t-string too (its fields' }, its quote), for a reader of the forms
-   inside a field; the cursor view never asks for it, its text must
-   compile to the Python the buffer means."
+(def open-forms [prefix :literals False]
+  "The forms still open at the end of prefix, outermost first, or None
+   when the lexer cannot read it or it ends inside an f/t-string, which no
+   bracket can close: each a list [kind closer opening head], kind \"b\" a
+   bracket, \"f\" a field's }, \"q\" a literal's quote; opening and head
+   are the (1-based line, code-point column) of a bracket and of the token
+   after it (None when there is none, and for a field or literal).
+   literals: keep an open f/t-string too (open-form-closers)."
   (try
     (= tokens (list (tokenize prefix)))
     (except [Exception]
       (return None)))
-  ;; Entries are (kind, closer): "b" a bracket, "f" a field's }, "q" a
-  ;; literal's quote.  A stray closer pops only a bracket; a field or literal
-  ;; end pops back to its own entry, if any, so a typo never misaligns
-  ;; the closers or empties the stack.
+  ;; A stray closer pops only a bracket; a field or literal end pops back
+  ;; to its own entry, if any, so a typo never misaligns the closers or
+  ;; empties the stack.
   (= stack [])
   (= open-literals 0)
-  (for [text tktype _ _] in tokens
+  (= awaiting-head None)
+  (for [text tktype info _] in tokens
+    (= position (, (sub info "lineno") (sub info "col_offset")))
+    (if (is-not awaiting-head None)
+        (do (= (sub awaiting-head 3) position)
+            (= awaiting-head None)))
     (cond
       (== tktype "error")
       (return None)
 
       (== tktype "interpolated-start")
       (do (+= open-literals 1)
-          (.append stack (, "q" (.lstrip text "fFtTrR"))))
+          (.append stack ["q" (.lstrip text "fFtTrR") None None]))
 
       (== tktype "interpolated-end")
       (do (-= open-literals 1)
           (_pop-through stack "q"))
 
       (== tktype "field-start")
-      (.append stack (, "f" "}"))
+      (.append stack ["f" "}" None None])
 
       (== tktype "field-end")
       (_pop-through stack "f")
@@ -125,13 +129,30 @@
       (do (= closer (.get _CLOSERS (sub text -1)))
           (if (is closer None)
               (return None))
-          (.append stack (, "b" closer)))
+          ;; A prefixed opener (#(, bad-prefix) starts where its text does;
+          ;; the bracket is its last character.
+          (= awaiting-head ["b" closer (, (sub position 0)
+                                          (+ (sub position 1) (len text) -1))
+                            None])
+          (.append stack awaiting-head))
 
       (and (== tktype "closing") stack (== (sub (sub stack -1) 0) "b"))
       (.pop stack)))
   (if (and open-literals (not literals))
       (return None))
-  (return (.join "" (reversed [closer for [_ closer] in stack]))))
+  (return stack))
+
+(def open-form-closers [prefix :literals False]
+  "The closers of the forms still open at the end of prefix (open-forms),
+   innermost first, or None when open-forms is.  Appended to prefix, they
+   make a mid-edit buffer parse up to the cursor.  literals: close an open
+   f/t-string too (its fields' }, its quote), for a reader of the forms
+   inside a field; the cursor view never asks for it, its text must
+   compile to the Python the buffer means."
+  (= stack (open-forms prefix :literals literals))
+  (if (is stack None)
+      (return None))
+  (return (.join "" (reversed [(sub entry 1) for entry in stack]))))
 
 ;; A suppression comment of tool (pyright, pyrefly) in a comment's text,
 ;; spaced as the tool takes one after its comment marker (a ; here, #
@@ -739,6 +760,33 @@
                 (+= found (.count (.split v ".") word)))))))
   (return found))
 
+(def _refused-open-form [compiled stack]
+  "The entry of stack (open-forms) that compiled's compile error is placed
+   at, at its bracket or its head, or None: no such error, or an error at
+   any other form, which unwrapping the forms around the cursor never
+   mends."
+  (= error compiled.error)
+  (if (or (!= compiled.stage COMPILE-STAGE)
+          (not (isinstance error LispyCompileError))
+          (is error.lineno None) (is error.offset None))
+      (return None))
+  (= position (, error.lineno (- error.offset 1)))
+  (for entry in stack
+    (if (and (== (sub entry 0) "b")
+             (in position (, (sub entry 2) (sub entry 3))))
+        (return entry)))
+  (return None))
+
+(def _blank-span [text start end]
+  "text with every character but a newline from start, a (1-based line,
+   code-point column), up to offset end replaced by a space, so every
+   position after it stays where it was."
+  (= [line col] start)
+  (= lines (.split text "\n"))
+  (= offset (+ (sum ((+ (len l) 1) for l in (sub lines [: None (- line 1)]))) col))
+  (= blanked (re.sub "[^\n]" " " (sub text [: offset end])))
+  (return (+ (sub text [: None offset]) blanked (sub text [: end None]))))
+
 (def view-at-cursor [source line col :package "" :name "__main__" :import-root None]
   "The PythonView of source at the cursor (_view-at-cursor)."
   (return (sub (_view-at-cursor source line col :package package :name name
@@ -754,7 +802,11 @@
    (. obj ) ) still compiles, and so is the rest of its name run after the
    cursor (my-|x), which would otherwise glue onto the sentinel and is what
    a completion there replaces; when the whole buffer does not, the text
-   before the cursor with its open forms closed is compiled instead.  The
+   before the cursor with its open forms closed is compiled instead, and
+   while that is refused at an open form around the cursor ((== (sub gr|
+   with one operand, (when x| with no body), that form is unwrapped: its
+   text up to the sentinel is blanked (_blank-span), so the sentinel stands
+   in the forms outside it, every position unmoved.  The
    sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
    partial's Python name and the map follows that edit, the generated
@@ -777,16 +829,28 @@
   (= macro-epoch compiled.epoch)
   (if (is view None)
       (do (= prefix (source-prefix marked line sentinel-end))
-          (= closers (open-form-closers prefix))
-          (if (is closers None)
-              (return (, None macro-epoch)))
-          (= compiled (compile-buffer (+ prefix closers) :package package :name name
-                                      :import-root import-root))
-          (= view compiled.view)
-          (if (or (is macro-epoch None)
-                  (and (is-not compiled.epoch None) (< compiled.epoch macro-epoch)))
-              (= macro-epoch compiled.epoch))
-          (= fallback True)))
+          (= sentinel-start (- (len prefix) (len CURSOR-SENTINEL)))
+          (= fallback True)
+          ;; Each round blanks at least one open bracket, so the rounds (each
+          ;; a compile running the user's macros) are bounded by the open
+          ;; forms around the cursor.
+          (while True
+            (= stack (open-forms prefix))
+            (if (is stack None)
+                (return (, None macro-epoch)))
+            (= compiled (compile-buffer
+                          (+ prefix (.join "" (reversed [(sub entry 1) for entry in stack])))
+                          :package package :name name :import-root import-root))
+            (if (or (is macro-epoch None)
+                    (and (is-not compiled.epoch None) (< compiled.epoch macro-epoch)))
+                (= macro-epoch compiled.epoch))
+            (= view compiled.view)
+            (if (is-not view None)
+                (break))
+            (= refused (_refused-open-form compiled stack))
+            (if (is refused None)
+                (return (, None macro-epoch)))
+            (= prefix (_blank-span prefix (sub refused 2) sentinel-start)))))
   (if (or (is view None) (!= (.count view.text CURSOR-SENTINEL) 1)
           (!= (_identifier-count view.tree CURSOR-SENTINEL) 1))
       (return (, None macro-epoch)))

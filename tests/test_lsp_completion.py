@@ -538,6 +538,67 @@ def test_a_buffer_that_does_not_compile_gives_the_fallback_list(
     assert "__class__" in labels and backend_requests.sent
 
 
+# Mid-edit with auto-paired parens: the (== ...) enclosing the cursor has
+# one operand and its (when ...) no body yet, so neither the buffer nor its
+# prefix with the open forms closed compiles.
+REFUSED_AROUND_CURSOR = """(def solution [grid]
+  (= m (len grid))
+  (for i (range m)
+    (when (== (sub grid i) 1)
+      (pass)))
+  (for i (range m)
+    (when (== (sub gr|))
+      (pass))))
+"""
+
+
+def backend_labels(answer):
+    items = answer.items if isinstance(answer, lsp.CompletionList) else answer or []
+    return {item.label for item in items}
+
+
+def test_a_form_refused_around_the_cursor_still_asks_the_backend(
+    complete, backend_requests, real_backends, backend_project, monkeypatch
+):
+    # Defect: a form around the cursor that the compiler refuses mid-edit
+    # leaves no cursor view, so the backend is never asked and the
+    # function's parameter grid is missing at gr|.
+    monkeypatch.setattr(server, "MERGE_TIMEOUT", 30)
+    client = real_backends.available_client((backend_project / "main.lpy").as_uri())
+    complete(CLASS.format("self.|"))  # starts the backend
+    assert wait_running(client)
+    answers = []
+    asked = client.request
+
+    async def request(method, params, **kwargs):
+        answers.append(await asked(method, params, **kwargs))
+        return answers[-1]
+
+    monkeypatch.setattr(client, "request", request)
+    backend_requests.sent.clear()
+    labels = set(by_label(complete(REFUSED_AROUND_CURSOR)[2]))
+    assert backend_requests.sent == [lsp.TEXT_DOCUMENT_COMPLETION]
+    # The backend saw the cursor inside solution, where grid is in scope.
+    assert "grid" in backend_labels(answers[0])
+    assert "grid" in labels
+
+
+def test_parameters_are_in_the_fallback_list(off_complete):
+    # Defect: the local list knows a def's or lambda's parameters by no
+    # name, so a buffer with no backend never offers them; or it offers a
+    # default value or an annotation as if the list bound it.
+    labels = set(by_label(off_complete(REFUSED_AROUND_CURSOR)[2]))
+    assert "grid" in labels
+    source = (
+        "(def f [pos / mid * :kw-only ^annot-type default-val **rest]\n"
+        "  (map (lambda [lam-arg] lam-arg) [])\n"
+        "  (|))\n"
+    )
+    labels = set(by_label(off_complete(source)[2]))
+    assert {"pos", "mid", "kw-only", "rest", "lam-arg"} <= labels
+    assert not {"default-val", "annot-type"} & labels
+
+
 @once
 def test_an_edit_during_the_request_never_moves_the_answer(complete, backend_requests):
     # Defect: the handler reads the live document after its awaits, so an
