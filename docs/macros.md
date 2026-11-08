@@ -59,14 +59,19 @@ Loads the macros of a module so the file can use them. Macros are compile-time o
 LisPy version
 ```lispython
 (require mod)          ; every macro, as mod.name
+(require pkg.mod as m) ; every macro, as m.name
+(require .mac)         ; every macro of the sibling module mac, as mac.name
 (require mod *)        ; every macro, unqualified
 (require mod [a b])    ; only a and b, unqualified
 (require mod [])       ; none
 ```
 - `(require mod)` registers each macro of `mod` under the qualified name `mod.name`, so it is called as `(mod.name ...)`.
+- `(require mod as m)` qualifies them by the alias instead: `(m.name ...)`. The alias is a bare `as`, as in `(import a.b as c)`; it takes no `*` or list.
+- A relative module (`.mac`, `..pkg.mac`) is imported from the requiring module's package and qualifies its macros by its last part, the name `from . import mac` binds: `(mac.name ...)`. `(require .)` and `(require ..)` bind no name, so they need `as`, `*` or a list.
 - `(require mod *)` registers every macro under its own name.
 - `(require mod [a b])` registers just the listed macros under their own names.
 - `(require mod [])` registers nothing.
+- Any other shape (`(require mod a b)`, `(require mod as)`, `(require mod * as m)`) is a compile error at the part at fault.
 
 A module that cannot be found is a warning (`could not load macros from 'mod' (module not found)`), not an error; a macro that was never registered then fails where it is used.
 

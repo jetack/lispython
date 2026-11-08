@@ -332,6 +332,52 @@ class TestRequireSelection:
         assert server.builtin_macro_doc(tree, "cond") is None
         assert "(cond test" in server.builtin_macro_doc(tree, "lispy.macros.cond")
 
+    def test_an_aliased_require_qualifies_by_the_alias(self):
+        # Defects: the alias is ignored (the macros stay module.name), or it
+        # is compared by its raw spelling, so my_m.twice misses (... as my-m).
+        source = "(require macmod as my-m)\n(my-m.twice 1)"
+        assert self._find(source, "my-m.twice") is not None
+        assert self._find(source, "my_m.twice") is not None
+        assert self._find(source, "macmod.twice") is None
+
+    def test_a_relative_require_qualifies_by_the_last_part(self):
+        # Defect: (require ..pkg.macmod) answers for ..pkg.macmod.twice, a
+        # name no code can spell, and not for macmod.twice.
+        source = "(require ..pkg.macmod)\n(macmod.twice 1)"
+        assert self._find(source, "macmod.twice") is not None
+        assert self._find(source, "..pkg.macmod.twice") is None
+
+    def test_hover_through_an_aliased_require_of_the_built_in_macros(self):
+        # With no view the syntax scan decides; it must read the alias.
+        source = "(require lispy.macros as lm)\n(lm.cond x 1)"
+        hover = run_hover(ls_with(source), position(1, 5))
+        assert "(cond test" in hover.contents.value
+
+    def test_definition_through_an_aliased_require(self, workspace):
+        source = "(require macmod as m)\n(m.twice 1)"
+        [loc] = self._definition(workspace, source, 1, 4)
+        assert loc.uri.endswith("macmod.lpy")
+
+    def test_definition_through_a_relative_require(self, tmp_path, monkeypatch):
+        # Defect: the relative module is looked up from the workspace root
+        # (or not at all), so its macro's definition is not found.
+        monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
+        monkeypatch.setattr(server, "FILE_TREES", {})
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "macmod.lpy").write_text(self.MACROS)
+        source = "(require .macmod)\n(macmod.thrice 1)"
+        document = SimpleNamespace(source=source, uri=(pkg / "mod.lpy").as_uri())
+        ls = SimpleNamespace(
+            workspace=SimpleNamespace(
+                get_text_document=lambda uri: document,
+                folders={"root": SimpleNamespace(uri=tmp_path.as_uri())},
+            )
+        )
+        [loc] = run_definition(ls, position(1, 9))
+        assert loc.uri == (pkg / "macmod.lpy").as_uri()
+        assert loc.range.start.line == 1
+
 
 def test_local_completion_tags_special_forms_in_label_details_not_detail():
     # Defect: the no-backend path drops the tag from labelDetails (the client

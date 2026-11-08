@@ -152,7 +152,7 @@ this module only reads them."""
    "not" (FormDoc EXPRESSION (tuple) "Logical NOT.")
    ;; The macro system
    "defmacro"  (FormDoc MACRO-SYSTEM (, "(defmacro name [args] body...)") "Define a compile-time macro. The macro receives unevaluated S-expressions and must return an S-expression.")
-   "require"   (FormDoc MACRO-SYSTEM (, "(require module)" "(require module *)" "(require module [names...])") "Import macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none.")})
+   "require"   (FormDoc MACRO-SYSTEM (, "(require module)" "(require module as alias)" "(require module *)" "(require module [names...])") "Import macros from a LisPython macro module at compile time. `(require module)` registers every macro as `module.name` (a relative `.pkg.mac` as `mac.name`, the name its import binds), `as alias` as `alias.name`, `*` registers every macro unqualified, and a list registers exactly those names — an empty `[]` registers none.")})
 
 ;; Documented names not meant to be typed as heads (`f"..."` is the reader's
 ;; spelling of the f-string head; the quote characters are prefixes): hover and

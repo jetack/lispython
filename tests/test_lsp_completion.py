@@ -9,6 +9,7 @@ The ``off_complete`` tests need no backend installed (lsp_document).
 
 import asyncio
 import importlib
+import sys
 import time
 from types import SimpleNamespace
 
@@ -352,6 +353,50 @@ def test_required_macros_follow_their_module_with_no_backend(off_complete):
     # Defect: the require gate compares the module's raw spelling, so a base
     # written lpy_macs (the same name as lpy-macs) compiles nothing.
     assert macro_style(off_complete("(require lpy-macs)\n(lpy_macs.|)")[2]) == LPY_MACS
+
+
+def test_aliased_required_macros_follow_the_alias_with_no_backend(off_complete):
+    # Defects: (require mod as m) qualifies the macros by the module name,
+    # not the alias, or the no-backend gate reads the module name, so m.|
+    # compiles nothing; or the alias is compared by its raw spelling, so
+    # my_m.| misses (require mod as my-m).
+    assert macro_style(off_complete("(require lpy-macs as m)\n(m.|)")[2]) == LPY_MACS
+    assert off_complete("(require lpy-macs as m)\n(lpy-macs.|)")[2] == []
+    source = "(require lpy-macs as my-m)\n(my_m.|)"
+    assert macro_style(off_complete(source)[2]) == LPY_MACS
+
+
+@pytest.fixture
+def macro_package(tmp_path, request):
+    """A package (named after the test, so no other test imported it) holding
+    lpy-macs' macros as mac.lpy; its modules are dropped afterwards."""
+    name = "relreq" + "".join(c for c in request.node.name if c.isalnum()).lower()
+    pkg = tmp_path / "src" / name
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mac.lpy").write_text(
+        "(defmacro twice [x] `(do ~x ~x))\n(defmacro thrice [x] `(do ~x ~x ~x))\n"
+    )
+    yield pkg
+    for key in list(sys.modules):
+        if key == name or key.startswith(name + "."):
+            del sys.modules[key]
+
+
+def test_relative_required_macros_follow_the_modules_last_part(
+    lsp_document, run_on_loop, off_backends, macro_package
+):
+    # Defect: (require .mac) registers its macros as .mac.name, which no
+    # Python spelling reaches, so mac.| (the name from . import mac binds)
+    # offers nothing.
+    def open_in_package(marked, backends, **kwargs):
+        path = macro_package / "mod.lpy"
+        opened = lsp_document(marked, backends, path=path, **kwargs)
+        open_in_package.document = lsp_document.document
+        return opened
+
+    complete = completer(open_in_package, run_on_loop, off_backends)
+    assert macro_style(complete("(require .mac)\n(mac.|)")[2]) == LPY_MACS
 
 
 def cache_full_view(document):

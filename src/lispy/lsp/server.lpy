@@ -26,7 +26,7 @@
 ;; The one completion-spelling rule, shared with the nREPL, and the one
 ;; completion matching rule.
 (from lispy.core.compiler.literal [completion-label completion-prefix name-spellings])
-(from lispy.core.meta-functions [require-selection REQUIRE-QUALIFIED REQUIRE-ALL])
+(from lispy.core.meta-functions [require-parse REQUIRE-QUALIFIED REQUIRE-ALL])
 ;; Hover, signature help and completion read the form docs from their one
 ;; home, which the docs site reads too.
 (from lispy.form-docs [BINDABLE-FORMS BUILTIN-MACROS BUILTIN-MACRO-MODULES MACRO-TAG
@@ -199,9 +199,33 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def resolve-module-to-file [module-name workspace-folders]
+(def resolve-relative-module [module-name origin]
+  "The .lpy file the relative module-name (.mac, ..pkg.mac, .) names from
+   the file at path origin, as Python resolves it in origin's package, or
+   None (no origin, no such file)."
+  (if (is origin None)
+      (return None))
+  (= rest (.lstrip module-name "."))
+  (= base (osp.dirname origin))
+  (for _ in (range (- (len module-name) (len rest) 1))
+    (= base (osp.dirname base)))
+  (= parts (ife rest (.split (.replace rest "-" "_") ".") []))
+  (= target (osp.join base *parts))
+  ;; A module of dots alone is the package itself.
+  (= candidates (ife rest
+                     [(+ target ".lpy") (osp.join target "__init__.lpy")]
+                     [(osp.join target "__init__.lpy")]))
+  (for candidate in candidates
+    (if (osp.isfile candidate)
+        (return candidate)))
+  (return None))
+
+(def resolve-module-to-file [module-name workspace-folders :origin None]
   "Resolve a LisPython module name to a .lpy file path.
-   e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'"
+   e.g., 'lispy.tools' -> '/path/to/src/lispy/tools.lpy'.  A relative name
+   resolves from origin, the importing file's path (resolve-relative-module)."
+  (if (.startswith module-name ".")
+      (return (resolve-relative-module module-name origin)))
   (= parts (.split (.replace module-name "-" "_") "."))
   (= rel-path (+ (osp.join *parts) ".lpy"))
   ;; 1. Workspace folders (direct or in src/)
@@ -246,8 +270,10 @@
 (= IMPORT-ONLY-HEADS (, "import" "lazy-import"))
 (= IMPORT-HEADS (+ IMPORT-ONLY-HEADS FROM-HEADS))
 
-(def find-import-target [node workspace-folders]
-  "Given an import/from/require node, resolve where the imported name is defined."
+(def find-import-target [node workspace-folders :origin None]
+  "Given an import/from/require node, resolve where the imported name is
+   defined; origin is the importing file's path, from which a relative
+   module resolves."
   (= form (. node op value))
   (cond
     (in form FROM-HEADS)
@@ -255,7 +281,7 @@
         (if (< (len node) 3)
             (return None))
         (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (= fpath (resolve-module-to-file module-name workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -265,7 +291,7 @@
         (if (< (len node) 2)
             (return None))
         (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (= fpath (resolve-module-to-file module-name workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -275,7 +301,7 @@
         (if (< (len node) 2)
             (return None))
         (= module-name (. (sub node 1) value))
-        (= fpath (resolve-module-to-file module-name workspace-folders))
+        (= fpath (resolve-module-to-file module-name workspace-folders :origin origin))
         (if fpath
             (return fpath))
         (return None))
@@ -293,25 +319,30 @@
 
 (def require-registered-name [node name]
   "The name, in the required module, of the macro a (require ...) node
-   registers as `name`, or None when it registers no such name. The
-   compiler's own rule (require-selection) decides; the buffer may be
-   mid-edit, so a require the compiler would reject registers nothing."
+   registers as `name` (one name by name-key: my_mod.my_mac is
+   my-mod.my-mac), or None when it registers no such name. The compiler's
+   own rule (require-parse) decides; the buffer may be mid-edit, so a
+   require the compiler would reject registers nothing."
   (try
-    (= [kind names] (require-selection (sub node.list [: 2 None])))
-    (except [(, TypeError ValueError)]
+    (= [kind qualifier names] (require-parse node))
+    (except [LispyCompileError]
       (return None)))
+  (= key (name-key name))
   (cond
-    ;; (require module): macros are registered as module.name
+    ;; (require module), (require .mod), (require module as alias): macros
+    ;; are registered as qualifier.name
     (== kind REQUIRE-QUALIFIED)
-    (do (= prefix (ife (> (len node) 1) (+ (str (sub node 1)) ".") None))
-        (if (and prefix (.startswith name prefix))
-            (return (sub name [: (len prefix) None]))))
+    (do (if (.startswith key (+ (name-key qualifier) "."))
+            (return (.join "." (sub (.split name ".")
+                                    [: (+ (.count qualifier ".") 1) None])))))
     ;; (require module *): every macro, names unknown without importing
     (== kind REQUIRE-ALL)
     (return name)
     ;; (require module [a b]): exactly those; [] imports nothing
-    (in name names)
-    (return name))
+    True
+    (for registered in names
+      (if (== (name-key registered) key)
+          (return registered))))
   (return None))
 
 (def find-import-for-name [tree name]
@@ -1442,7 +1473,8 @@
                   []))
   (= import-node (find-import-for-name tree name))
   (if import-node
-      (do (= fpath (find-import-target import-node folders))
+      (do (= fpath (find-import-target import-node folders
+                                          :origin (uri-to-path doc.uri)))
           (if fpath
               (do (= target-uri (path-to-uri fpath))
                   ;; Make sure the target file is indexed
@@ -1452,14 +1484,12 @@
                   (= target-tree (.get FILE-TREES target-uri))
                   (if target-tree
                       (do (= target-defs (collect-definitions target-tree target-uri))
-                          ;; (require module) registers module.name; the target
-                  ;; file defines the bare name.
-                  (= prefix (+ (str (sub import-node 1)) "."))
-                  (= result (.get target-defs
-                                  (ife (and (== import-node.op.value "require")
-                                            (.startswith name prefix))
-                                       (sub name [: (len prefix) None])
-                                       name)))
+                          ;; (require module) registers qualifier.name; the
+                          ;; target file defines the bare name.
+                          (= result (.get target-defs
+                                          (ife (== import-node.op.value "require")
+                                               (require-registered-name import-node name)
+                                               name)))
                           (if result
                               (return result))))))))
 
@@ -2111,8 +2141,9 @@
 (def required-module-p [source line base]
   "Whether a (require mod) form in source (its partial parses,
    buffer-texts at the 1-based line; quoted forms are none) registers
-   qualified macros (require-selection's rule) under base: mod's name-key
-   is base's.  The cheap syntax gate a completion with no backend reads
+   qualified macros (require-parse's rule) under base: the require's
+   qualifier (mod, the last part of a relative .pkg.mod, or an alias) has
+   base's name-key.  The cheap syntax gate a completion with no backend reads
    before compiling a cursor view for base.  Limits: a require a macro
    writes is missed, so its macros are not offered with no backend."
   (= key (name-key base))
@@ -2131,10 +2162,10 @@
               (not (isinstance (sub node 1) Symbol)))
           (continue))
       (try
-        (= [kind _] (require-selection (sub node.list [: 2 None])))
-        (except [(, TypeError ValueError)]
+        (= [kind qualifier _] (require-parse node))
+        (except [LispyCompileError]
           (continue)))
-      (if (and (== kind REQUIRE-QUALIFIED) (== (name-key (. (sub node 1) value)) key))
+      (if (and (== kind REQUIRE-QUALIFIED) (== (name-key qualifier) key))
           (return True))))
   (return False))
 

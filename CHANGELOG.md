@@ -8,6 +8,9 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `(require mod as m)` registers every macro of `mod` as `m.name`, with a
+  bare `as` as `import` takes. The LSP's completion after `m.`, hover and
+  go-to-definition follow the alias, and a relative require's macros.
 - nREPL: the `complete` reply carries `items`, LSP-shaped completion items in
   `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython
@@ -72,6 +75,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
+  as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
+  which no code could spell. Code calling `(.mac.name ...)` must call
+  `(mac.name ...)`. `(require .)` and `(require ..)` with no selection bind
+  no name and are a compile error; give them `as`, `*` or a list.
 - A `defmacro` no longer binds any name in the module that defines it. It
   used to star-import `lispy.core.nodes` and `lispy.core.builtins` there,
   overwriting the module's own `Paren`, `Symbol` or `gensym` and leaving
@@ -225,6 +233,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A malformed `require` (`(require mod a b)`, `(require mod as)`,
+  `(require mod * as m)`, `(require)`, a non-name in its list) is a compile
+  error at the part at fault, instead of a Python `ValueError` or
+  `TypeError` with no position.
 - `l2py` translates as deep as `compile()` takes (statements, expressions,
   match patterns, nested f-strings and format specs), with the text
   `ast.unparse` would write, instead of stopping at a few hundred levels

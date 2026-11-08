@@ -2,6 +2,9 @@ import os.path as osp
 import sys
 import types
 
+import pytest
+
+from lispy.core.errors import LispyCompileError
 from lispy.core.macro import macroexpand_then_compile
 from lispy.tools import l2py_s, parse
 
@@ -57,3 +60,86 @@ class TestRequireMacroList:
     def test_star_registers_all_unqualified(self, monkeypatch):
         got = self._registered(monkeypatch, "(require require_list_fake *)")
         assert got == {"a", "b"}
+
+
+class TestRequireQualifier:
+    """A qualified require registers every macro as qualifier.name, the
+    qualifier being the name Python's import binds: an absolute module's
+    dotted name, a relative module's last part, or the alias."""
+
+    @staticmethod
+    def _registered(monkeypatch, require_form, package, module):
+        mod = types.ModuleType(module)
+        setattr(mod, "__macro_namespace", {"a": lambda: 1, "b": lambda: 2})
+        monkeypatch.setitem(sys.modules, module, mod)
+        scope = {"__macro_namespace": {}, "__package__": package}
+        list(macroexpand_then_compile(parse(require_form), scope))
+        return set(scope["__macro_namespace"])
+
+    @pytest.mark.parametrize(
+        "form, package, module, keys",
+        [
+            ("(require reqq.mac)", None, "reqq.mac", {"reqq.mac.a", "reqq.mac.b"}),
+            ("(require .mac)", "reqq", "reqq.mac", {"mac.a", "mac.b"}),
+            ("(require ..sib.mac)", "reqq.sub", "reqq.sib.mac", {"mac.a", "mac.b"}),
+            ("(require reqq.mac as m)", None, "reqq.mac", {"m.a", "m.b"}),
+            ("(require .mac as m)", "reqq", "reqq.mac", {"m.a", "m.b"}),
+            ("(require . as m)", "reqq", "reqq", {"m.a", "m.b"}),
+            ("(require . *)", "reqq", "reqq", {"a", "b"}),
+            ("(require .mac [a])", "reqq", "reqq.mac", {"a"}),
+        ],
+        ids=[
+            "absolute",
+            "relative",
+            "nested relative",
+            "absolute alias",
+            "relative alias",
+            "package alias",
+            "package star",
+            "relative list",
+        ],
+    )
+    def test_qualifier(self, monkeypatch, form, package, module, keys):
+        assert self._registered(monkeypatch, form, package, module) == keys
+
+    @pytest.mark.parametrize(
+        "form, fault",
+        [
+            ("(require)", "(require)"),
+            ("(require 1)", "1"),
+            ('(require "m")', '"m"'),
+            ("(require .)", "."),
+            ("(require ..)", ".."),
+            ("(require m as)", "as"),
+            ("(require m as a.b)", "a.b"),
+            ("(require m as if)", "if"),
+            ("(require m as [a])", "[a]"),
+            ("(require m as c [a])", "[a]"),
+            ("(require m as c *)", "*"),
+            ("(require m * as c)", "as"),
+            ("(require m [a] as c)", "as"),
+            ("(require m [a] *)", "*"),
+            ("(require m a)", "a"),
+            ("(require m a b c)", "a"),
+            ("(require m :as c)", ":as"),
+            ("(require m [a 1])", "1"),
+        ],
+    )
+    def test_a_malformed_require_is_a_compile_error_at_its_fault(self, form, fault):
+        # Defect: a malformed require escapes as the ValueError or TypeError
+        # of its own destructuring, with no position, or registers keys no
+        # code can call (an alias kept as a selection).
+        source = f"(= x 1)\n  {form}"
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse(source), {"__macro_namespace": {}}))
+        assert info.value.msg.startswith("(require ...) ")
+        column = source.index(fault, source.index("(require")) - source.index("\n")
+        assert (info.value.lineno, info.value.offset) == (2, column)
+
+    def test_a_package_alone_names_the_fix(self):
+        # Python binds no name for from . import, so neither may a require:
+        # the message must say what does.
+        scope = {"__macro_namespace": {}}
+        with pytest.raises(LispyCompileError) as info:
+            list(macroexpand_then_compile(parse("(require .)"), scope))
+        assert "as" in info.value.msg and "*" in info.value.msg
