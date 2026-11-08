@@ -14,6 +14,7 @@ import pytest
 from pygls.workspace import TextDocument
 
 import lispy.tools as tools
+from lispy.core.compiler.literal import completion_prefix
 from lispy.core.compiler.utils import FORM_USAGE
 from lispy.form_docs import OWN_NAME_TAGS
 
@@ -415,6 +416,12 @@ def labels_after_head(prefix, reply):
     head = head + _dot
     assert reply["word"] == word
     assert [head + item["label"] for item in reply["items"]] == reply["completions"]
+    # The server filtered: every item's label starts with the typed word by
+    # the LSP's rule, and its filterText is that word plus the rest of the
+    # label, so a client's plain prefix match keeps every item.
+    for item in reply["items"]:
+        assert item["filterText"] == word + item["label"][len(word) :]
+        assert completion_prefix(word, item["label"]) == item["filterText"]
 
 
 def complete(prefix, scope):
@@ -516,7 +523,8 @@ def test_import_lispy_does_not_load_lsprotocol():
 
 # The items wire shape is a contract with lpy-mode and vsc-lispy, which read
 # it through their LSP completion path: LSP CompletionItemKind numbers, and
-# labelDetails only on a name lispython tags.
+# labelDetails only on a name lispython tags, and the filterText the server
+# filtered by: the word as typed plus the rest of the label.
 @pytest.mark.parametrize(
     ["prefix", "item"],
     [
@@ -524,26 +532,49 @@ def test_import_lispy_does_not_load_lsprotocol():
             "whi",
             {
                 "label": "while",
+                "filterText": "while",
                 "kind": 14,
                 "labelDetails": {"description": "special form"},
             },
         ],
-        ["con", {"label": "cond", "kind": 3, "labelDetails": {"description": "macro"}}],
+        [
+            "con",
+            {
+                "label": "cond",
+                "filterText": "cond",
+                "kind": 3,
+                "labelDetails": {"description": "macro"},
+            },
+        ],
         [
             "gen",
-            {"label": "gensym", "kind": 3, "labelDetails": {"description": "function"}},
+            {
+                "label": "gensym",
+                "filterText": "gensym",
+                "kind": 3,
+                "labelDetails": {"description": "function"},
+            },
         ],
-        ["eli", {"label": "elif", "kind": 14}],
-        ["in", {"label": "int", "kind": 7}],
-        ["le", {"label": "len", "kind": 3}],
-        ["my", {"label": "my-var", "kind": 6}],
-        ["my", {"label": "my-fn", "kind": 3}],
-        ["My", {"label": "MyClass", "kind": 7}],
-        ["os.ge", {"label": "getcwd", "kind": 3}],
-        ["os.pa", {"label": "pathsep", "kind": 6}],
+        ["eli", {"label": "elif", "filterText": "elif", "kind": 14}],
+        ["in", {"label": "int", "filterText": "int", "kind": 7}],
+        ["le", {"label": "len", "filterText": "len", "kind": 3}],
+        ["my", {"label": "my-var", "filterText": "my-var", "kind": 6}],
+        ["my", {"label": "my-fn", "filterText": "my-fn", "kind": 3}],
+        ["My", {"label": "MyClass", "filterText": "MyClass", "kind": 7}],
+        [
+            "MY_v",
+            {"label": "my-var", "filterText": "MY_var", "kind": 6},
+        ],
+        ["os.ge", {"label": "getcwd", "filterText": "getcwd", "kind": 3}],
+        ["os.pa", {"label": "pathsep", "filterText": "pathsep", "kind": 6}],
         [
             "twice",
-            {"label": "twice-of", "kind": 3, "labelDetails": {"description": "macro"}},
+            {
+                "label": "twice-of",
+                "filterText": "twice-of",
+                "kind": 3,
+                "labelDetails": {"description": "macro"},
+            },
         ],
     ],
 )
@@ -571,6 +602,25 @@ def test_nrepl_and_lsp_classify_lispythons_own_names_alike():
         }, name
 
 
+@pytest.mark.parametrize(
+    "prefix, text",
+    [
+        ("my_long-", "my_long-name"),
+        ("my-long_", "my-long_name"),
+        ("MY-l", "MY-long-name"),
+        ("my_long_n", "my_long_name"),
+    ],
+)
+def test_complete_matches_a_word_typed_in_any_spelling(scope, prefix, text):
+    # Defect: the nREPL filtering by a rule of its own (text or Python-name
+    # prefix, labels respelled to match), so a word mixing - and _ or in
+    # another case finds nothing, or a label other than the LSP's, and an
+    # editor merging both answers blinks or shows the name twice.
+    assert tools.nrepl_eval("(= my-long-name 1)", scope)["error"] is None
+    item = wire_items(prefix, scope)["my-long-name"]
+    assert item["filterText"] == text
+
+
 def test_a_session_defmacro_is_a_macro(scope):
     assert tools.nrepl_eval("(defmacro twice-of [x] `(* 2 ~x))", scope)["error"] is None
     assert complete("twice", scope)["twice-of"] == "macro"
@@ -593,20 +643,26 @@ def required_scope(require):
     return scope
 
 
-# A word typed with an interior _ (dx_nrepl) labels names as Python spells
-# them, so the macro is dx_mac there; after the dot (dx) its hyphen spelling.
+# Under a dotted prefix the head stays as typed and the rest is the label;
+# an undotted prefix labels the whole key by its hyphen spelling.
 @pytest.mark.parametrize(
-    "prefix, name", [("dx_nrepl_macro_mod.dx", "dx-mac"), ("dx_nrepl", "dx_mac")]
+    "prefix, name",
+    [
+        ("dx_nrepl_macro_mod.dx", "dx_nrepl_macro_mod.dx-mac"),
+        ("dx-nrepl-macro-mod.dx", "dx-nrepl-macro-mod.dx-mac"),
+        ("dx_nrepl", "dx-nrepl-macro-mod.dx-mac"),
+    ],
 )
 def test_a_qualified_required_macro_is_a_macro(macro_module, prefix, name):
     scope = required_scope(f"(require {macro_module})")
-    assert complete(prefix, scope)[f"{macro_module}.{name}"] == "macro"
+    assert complete(prefix, scope)[name] == "macro"
 
 
 def test_a_qualified_macro_item_under_a_dotted_prefix(macro_module):
     scope = required_scope(f"(require {macro_module})")
     assert wire_items(f"{macro_module}.dx", scope)["dx-mac"] == {
         "label": "dx-mac",
+        "filterText": "dx-mac",
         "kind": 3,
         "labelDetails": {"description": "macro"},
     }

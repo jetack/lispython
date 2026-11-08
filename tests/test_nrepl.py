@@ -543,29 +543,25 @@ def complete_labels(prefix, scope):
         ("_pri", "_priv-x", "_priv_x"),
         ("collections.OrderedDict.move", "move-to-end", None),
         ("my-v", "my-val", "my_val"),
-        # A typed _ asks for the Python spelling: an item carries no
-        # filterText, so the client filters labels by the typed my_v; a
-        # leading _ does not (every spelling of _priv_x starts with _pri).
-        ("my_v", "my_val", "my-val"),
-        ("my_", "my_val", "my-val"),
-        ("collections.OrderedDict.move_to", "move_to_end", "move-to-end"),
-        # A macro takes the default spelling too, and its Python spelling
-        # once a _ is typed.
+        # A typed _ matches a -: the label stays the LSP's, whatever the
+        # spelling typed.
+        ("my_v", "my-val", "my_val"),
+        ("my_", "my-val", "my_val"),
+        ("collections.OrderedDict.move_to", "move-to-end", "move_to_end"),
+        # A macro takes the default spelling too, however it is typed.
         ("my", "my-mac", "my_mac"),
-        ("my_m", "my_mac", "my-mac"),
-        # A key registered with - is Python spelled too while _ is typed:
-        # the client drops a label that does not start with top_m.
-        ("top_m", "top_mac", "top-mac"),
-        ("mac_m", "mac_mod.my_mac", "mac-mod.my-mac"),
+        ("my_m", "my-mac", "my_mac"),
+        ("top_m", "top-mac", "top_mac"),
+        ("mac_m", "mac-mod.my-mac", "mac_mod.my_mac"),
     ],
 )
 def test_complete_labels_names_by_the_hyphen_spelling(
     spelled_scope, prefix, label, absent
 ):
     # Defects: the nREPL drifting from the LSP's rule (hyphen_spelling), as
-    # its old unmangling did (a__b offered as a--b, another name); a _
-    # prefix that no label starts with, so the client shows nothing; a
-    # macro offered in a spelling other than the default; one name twice.
+    # its old unmangling did (a__b offered as a--b, another name); a label
+    # respelled after the typed word, which the LSP does not, so an editor
+    # merging both answers shows the name twice; one name twice.
     labels = complete_labels(prefix, spelled_scope)
     assert labels.count(label) == 1
     assert absent not in labels
@@ -630,18 +626,14 @@ def test_load_file_replaces_the_recorded_spellings(isolated, tmp_path):
     assert complete_labels("ok", tools.nrepl_file_scope(str(path))) == ["ok-p"]
 
 
-@pytest.mark.parametrize(
-    "prefix, label, dropped", [("ok-", "ok-p", "ok?"), ("_to", "_to-foo", "->foo")]
-)
-def test_a_label_starts_with_the_typed_word(isolated, prefix, label, dropped):
-    # Defect: the code spelling (ok?, ->foo) offered for a word typed in
-    # another spelling; an item has no filterText, so the client drops a
-    # label that does not start with the typed word and shows nothing.
+@pytest.mark.parametrize("prefix", ["ok-", "_to"])
+def test_a_code_spelled_name_matches_only_its_label(isolated, prefix):
+    # Defect: a second spelling (ok-p, _to-foo) offered for a word typed in
+    # another spelling, a label the LSP never gives the name, so an editor
+    # merging both answers shows the name twice.
     code = "(def ok? [] 1)\n(def ->foo [] 2)"
     assert dispatch(isolated, code=code)["error"] is None
-    labels = complete_labels(prefix, isolated)
-    assert label in labels
-    assert dropped not in labels
+    assert complete_labels(prefix, isolated) == []
 
 
 def test_a_failed_load_file_keeps_the_recorded_spellings(isolated, tmp_path):

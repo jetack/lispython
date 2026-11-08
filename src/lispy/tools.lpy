@@ -29,8 +29,8 @@
 (from lispy.core.nodes *)
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
-(from lispy.core.compiler.literal [completion-label hyphen-spelling name-key
-                                   name-spellings])
+(from lispy.core.compiler.literal [completion-label completion-prefix
+                                   hyphen-spelling name-key name-spellings])
 (from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.utils [compile-nesting-errors])
@@ -762,24 +762,30 @@
   (return (, None word)))
 
 (def _complete-result [head word classes]
-  "The complete reply over {label: (tag, runtime word)} for a prefix that is
-   head (its text through its last ., or empty) then word, every label once
-   in sorted order.  `items` is the contract, LSP-shaped: {label, kind} with
-   the LSP CompletionItemKind number, plus labelDetails.description only for
-   a tagged name (OWN-TAG-KINDS gives its kind, _RUNTIME-KINDS any other's).
-   A label is the text after head, as the LSP labels an item after a dot,
-   and `word` is the typed text each label replaces, so a client places an
-   item by replacing that many characters before the cursor in its own
-   string units.  `completions` is the full name list (head + label, in
-   items' order), read only by clients older than `items`."
+  "The complete reply over {label: (filterText, (tag, runtime word))} for a
+   prefix that is head (its text through its last ., or empty) then word,
+   every label once in sorted order.  `items` is the contract, LSP-shaped:
+   {label, kind, filterText} with the LSP CompletionItemKind number, plus
+   labelDetails.description only for a tagged name (OWN-TAG-KINDS gives its
+   kind, _RUNTIME-KINDS any other's).  A label is the text after head, as
+   the LSP labels an item after a dot, and `word` is the typed text each
+   label replaces, so a client places an item by replacing that many
+   characters before the cursor in its own string units.  filterText is
+   completion-prefix's (word as typed plus the rest of the label), so a
+   client's plain prefix match keeps exactly the server's items.
+   `completions` is the full name list (head + label, in items' order),
+   read only by clients older than `items`."
   (= labels (sorted classes))
   (= items [])
   (for label in labels
-    (= [tag kind-word] (sub classes label))
+    (= [text [tag kind-word]] (sub classes label))
     (if (is tag None)
-        (.append items {"label" label "kind" (sub _RUNTIME-KINDS kind-word)})
+        (.append items {"label" label
+                        "kind" (sub _RUNTIME-KINDS kind-word)
+                        "filterText" text})
         (.append items {"label" label
                         "kind" (sub OWN-TAG-KINDS tag)
+                        "filterText" text
                         "labelDetails" {"description" tag}})))
   (return {"op" "complete-result"
            "word" word
@@ -824,107 +830,72 @@
   (with [(nrepl-scope-lock scope)]
     (return (list (.get scope "__macro_namespace" {})))))
 
-(def _python-spelling-p [prefix]
-  "Whether completion labels each name as Python spells it (the Python name)
-   rather than by its hyphen or code spelling (hyphen-spelling,
-   completion-label): when the word being
-   typed, prefix's last .-part, holds no - and a _ past its leading ones
-   (my_v, my_; never _pri, whose hyphen spellings still start with it).  An
-   nREPL item carries no filterText and a client asks once per prefix,
-   filtering that reply by the typed word, so a label must start with it:
-   my_v would match no my-val."
-  (= word (sub (.split prefix ".") -1))
-  (return (and (in "_" (.lstrip word "_")) (not-in "-" word))))
-
-(def _prefix-match-p [text prefix py-prefix]
-  "Whether text (a name or macro key) starts with prefix as typed, or its
-   Python name with prefix's (py-prefix), so my-v and my_v both find my_val."
-  (return (or (.startswith text prefix)
-              (.startswith (_py-name text) py-prefix))))
-
-(def _typed-label [name spellings word]
-  "The label of runtime name name when word is the typed word: the first of
-   its code spelling (completion-label), hyphen spelling and Python name
-   that starts with word, since an nREPL item carries no filterText and the
-   client keeps only labels starting with the typed word (_to finds _to_foo,
-   whose code spelling ->foo it would drop).  When none does, the code
-   spelling, which the client then drops: a name matched only through its
-   Python name, such as _to_bar at the typed -> (py-name _to), has no
-   spelling starting with ->."
-  (= label (completion-label name spellings))
-  (for candidate in [label (hyphen-spelling name) (name-key name)]
-    (if (.startswith candidate word)
-        (return candidate)))
-  (return label))
-
 (def nrepl-complete [prefix scope]
-  "Return completions matching prefix, including dot-completion.  Every key
-   of the scope's macro table (defmacro, every require form) is a macro, so a
-   qualified macro (mod.name) is offered under a dotted prefix too.  Each
-   name is offered once (name-key of its full name), the first source naming
-   it winning: macros, lispython's own names, keywords, the scope, the
-   builtins.  Labels are the LSP's: the text after prefix's last . (the
-   typed head is dropped, the reply's word is what a label replaces); a
-   runtime name (scope, builtins, attributes) by completion-label over the
-   spellings of the code evaluated in the scope (ok? for ok_p, else the
-   hyphen spelling) when that starts with the typed word (_typed-label),
-   a macro key by the hyphen spelling it was registered
-   under; while the typed word is in Python spelling (_python-spelling-p)
-   every name is labelled by name-key, so a macro key registered as top-mac
-   is top_mac.  A name or macro key matches by its text or its Python name."
-  (= python-spelling (_python-spelling-p prefix))
+  "Return completions matching prefix, including dot-completion, filtered
+   on the server as the LSP filters (filtered-answer): an item stays when
+   its label starts with the typed word, prefix's last .-part, by
+   completion-prefix (case aside, - and _ after a letter or digit match
+   each other), which also gives its filterText.  Every key of the scope's
+   macro table (defmacro, every require form) is a macro, so a qualified
+   macro (mod.name) is offered under a dotted prefix too, when its leading
+   parts are the typed head's by name-key.  Each name is offered once
+   (name-key of its full name), the first source naming it winning:
+   macros, lispython's own names, keywords, the scope, the builtins.
+   Labels are the LSP's: the text after prefix's last . (the reply's word
+   is what a label replaces); a runtime name (scope, builtins, attributes)
+   by completion-label over the spellings of the code evaluated in the
+   scope (ok? for ok_p, else the hyphen spelling), a macro key by the
+   hyphen spelling of its parts after the head, own names and keywords as
+   they are."
   (with [(nrepl-scope-lock scope)]
     (= spellings (dict (nrepl-scope-spellings scope))))
-  (= macro-spell (fn [name] (ife python-spelling (name-key name) (hyphen-spelling name))))
-  (= spell (fn [name] (ife python-spelling
-                           (name-key name)
-                           (_typed-label name spellings word))))
-  (= py-prefix (_py-name prefix))
   (= parts (.split prefix "."))
   (= head-parts (sub parts [: -1]))
   ;; The typed text through the last ., which every candidate starts with.
   (= head (.join "" [(+ part ".") for part in head-parts]))
+  (= head-key (name-key (.join "." head-parts)))
   (= word (sub parts -1))
-  ;; name-key of the full name -> (label, (tag, runtime word)).
+  ;; name-key of the full name -> (label, (filterText, (tag, runtime word))).
   (= entries {})
-  (def add [label cls]
-    (.setdefault entries (name-key (+ head label)) (, label cls)))
+  (def offer [label cls]
+    (= text (completion-prefix word label))
+    (if (is-not text None)
+        (.setdefault entries (name-key (+ head label)) (, label (, text cls)))))
   (for key in (_scope-macro-names scope)
-    (if (_prefix-match-p key prefix py-prefix)
-        (add (macro-spell (.join "." (sub (.split key ".")
-                                          [: (len head-parts) None])))
-             (_tagged MACRO-TAG))))
+    (= key-parts (.split key "."))
+    (if (and (> (len key-parts) (len head-parts))
+             (or (not head-parts)
+                 (== (name-key (.join "." (sub key-parts [: (len head-parts)])))
+                     head-key)))
+        (offer (hyphen-spelling (.join "." (sub key-parts [: (len head-parts) None])))
+               (_tagged MACRO-TAG))))
   (if (in "." prefix)
       (do
         ;; Dot completion: resolve object, list its attributes
         (= obj (_resolve-obj (.join "." head-parts) scope))
         (if (is-not obj None)
-            (do (= py-attr (_py-name word))
-                (for attr in (dir obj)
-                  (if (.startswith attr py-attr)
-                      (add (spell attr)
-                           (_untagged (_attribute-kind obj attr))))))))
+            (for attr in (dir obj)
+              (offer (completion-label attr spellings)
+                     (_untagged (_attribute-kind obj attr))))))
       (do
         ;; Prefix completion from lispython's own names, keywords, scope
         ;; and builtins
         (for k in _OWN-NAME-TAGS
-          (if (.startswith k prefix)
-              (add k (_tagged (sub _OWN-NAME-TAGS k)))))
+          (offer k (_tagged (sub _OWN-NAME-TAGS k))))
         (for k in keyword.kwlist
-          (if (.startswith k prefix)
-              (add k (_untagged "keyword"))))
+          (offer k (_untagged "keyword")))
         (with [(nrepl-scope-lock scope)]
           (= names (list scope)))
         ;; A scope binding shadows the builtin of the same name.
         (for k in names
-          (if (_prefix-match-p k prefix py-prefix)
-              (add (spell k) (_untagged (_completion-kind (.get scope k))))))
+          (offer (completion-label k spellings)
+                 (_untagged (_completion-kind (.get scope k)))))
         (= builtins (ife (isinstance __builtins__ dict)
                          __builtins__
                          (vars __builtins__)))
         (for k in builtins
-          (if (_prefix-match-p k prefix py-prefix)
-              (add (spell k) (_untagged (_completion-kind (sub builtins k))))))))
+          (offer (completion-label k spellings)
+                 (_untagged (_completion-kind (sub builtins k)))))))
   (return (_complete-result head word (dict (.values entries)))))
 
 (def nrepl-docs [symbol scope]
