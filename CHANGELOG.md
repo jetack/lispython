@@ -90,9 +90,10 @@ follows [Semantic Versioning](https://semver.org/).
   stays the script `lpy scripts/tool.lpy` runs: its own directory (as `lpy`
   runs it) and its script root (`scripts/`, or `tools/` for
   `tools/mypkg/a.lpy` in a regular package) are on `sys.path` while its
-  macros run and among the backend's search paths, so a bare require or
-  import of a sibling still resolves. Go-to-definition's local fallback
-  (used only when the backend gives no answer) searches them first.
+  macros run and searched first by go-to-definition's local fallback (used
+  only when the backend gives no answer), so a bare require or import of a
+  sibling still resolves. The backend searches the script root and import
+  root, and the own directory only when it is no package directory.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call

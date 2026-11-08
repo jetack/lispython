@@ -1287,14 +1287,14 @@
    namespace packages count too, up to the nearest of project-import-roots,
    so ns/a.lpy with no ns/__init__ is ns.a from the project root.  The
    search dirs, a tuple, are the one home of the directories the module's
-   compile searches (on sys.path while its macros run, compile-buffer) and
-   the backend searches for it (ShadowManifest.import-roots), in this
-   order, each once: the file's own directory, which `lpy` and the nREPL's
-   load-file put on sys.path when they run the file as a script; then the
-   script root, the root its regular packages give with no search roots
-   (the l2py rule, package-root): scripts/ for scripts/x.lpy, tools/ for
-   tools/mypkg/a.lpy, so (require mypkg.mac) resolves; then the import
-   root."
+   compile searches (on sys.path while its macros run, compile-buffer; the
+   local definition fallback), in this order, each once: the file's own
+   directory, which `lpy` and the nREPL's load-file put on sys.path when
+   they run the file as a script; then the script root, the root its
+   regular packages give with no search roots (the l2py rule,
+   package-root): scripts/ for scripts/x.lpy, tools/ for tools/mypkg/a.lpy,
+   so (require mypkg.mac) resolves; then the import root.  The backend
+   searches backend-search-dirs of them."
   (= directory (osp.dirname (osp.abspath lpy-path)))
   (= roots (ife (is project-root None) [] (project-import-roots project-root)))
   (= [import-root parts] (package-root directory roots))
@@ -1305,6 +1305,24 @@
   (if (== stem "__init__")
       (return (, package package import-root search-dirs)))
   (return (, (.join "." (+ parts [stem])) package import-root search-dirs)))
+
+(def backend-search-dirs [names]
+  "The search dirs of module-names' result names that the backend searches
+   for the module (ShadowManifest.import-roots): all but the file's own
+   directory when that lies inside a regular package (it is not its own
+   script root)."
+  ;; The backend config (extraPaths, search-path) is project-wide, while
+  ;; `lpy` puts the own directory on sys.path only for the file it runs.  A
+  ;; package interior as a top-level root would shadow the stdlib and
+  ;; top-level names for every file (src/pkg/json.py answering `import
+  ;; json`) and make one module importable under two names (helper and
+  ;; pkg.helper).  A script directory that is no package is already the
+  ;; script root, a top-level root anyway.
+  (= search-dirs (sub names 3))
+  (= directory (sub search-dirs 0))
+  (if (== directory (sub (package-root directory) 0))
+      (return search-dirs))
+  (return (sub search-dirs [: 1 _])))
 
 ;; Directory names a source sweep never enters: dependencies and caches, not
 ;; the project's own modules.  Dot-directories and virtualenvs (a directory
@@ -1336,7 +1354,7 @@
    module-names, whether its shadow is written, the macro environment it
    compiled in (macro_modules.epoch)), so a file unchanged since, under the
    same macro environment, is not compiled again; and import-roots, the
-   sorted search dirs (module-names) of the written shadows' sources
+   sorted backend-search-dirs of the written shadows' sources
    (_search-paths)."
   (def __init__ [self]
     (= self.sources {})
@@ -1592,7 +1610,7 @@
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
     (= import-root (sub (sub names-of lpy-path) 2))
-    (.update import-roots (sub (sub names-of lpy-path) 3))
+    (.update import-roots (backend-search-dirs (sub names-of lpy-path)))
     ;; module-dirs: every import root with a shadow, whose other modules
     ;; are linked in (_mirror-py-files).
     (.add module-dirs import-root)

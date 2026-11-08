@@ -731,11 +731,11 @@ class TestShadows:
     def test_a_regular_package_in_a_plain_directory_keeps_its_script_root(
         self, tmp_path, monkeypatch
     ):
-        # Defect: the search dirs are the module's own directory and the
-        # import root only, so for pvtools/pvmypkg/a.lpy (a regular package
-        # in a namespace directory) pvtools/, its script root (the l2py
-        # rule), is neither on sys.path while its macros run nor a backend
-        # search path: (require pvmypkg.mac *) loads no macros.
+        # Defect: the search dirs lack the script root, so for
+        # pvtools/pvmypkg/a.lpy (a regular package in a namespace directory)
+        # pvtools/ (the l2py rule) is neither on sys.path while its macros
+        # run nor a backend search path: (require pvmypkg.mac *) loads no
+        # macros.
         project, root = tmp_path / "project", tmp_path / "view"
         tools = project / "pvtools"
         pkg = tools / "pvmypkg"
@@ -788,11 +788,12 @@ class TestShadows:
                 sys.modules.pop(name, None)
         shadow = root / "pvowntools" / "pvownpkg" / "a.py"
         assert shadow.read_text().endswith("y = 2 + 2")
-        assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project))[3][
-            0
-        ] == str(pkg)
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
+        # The package interior src/pkg is searched by the compile but is no
+        # backend search path: the backend config is project-wide, so it
+        # would resolve every file's `import helper` (or a src/pkg/json.py
+        # every `import json`) to that package's modules.
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pkg"
         self.write(pkg / "__init__.py", "from .helper import h")
@@ -801,7 +802,7 @@ class TestShadows:
         self.write(pkg / "notes.txt", "")
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
-        assert manifest.import_roots == [str(project / "src"), str(pkg)]
+        assert manifest.import_roots == [str(project / "src")]
         for name in ["__init__.py", "helper.py"]:
             assert os.readlink(root / "src" / "pkg" / name) == str(pkg / name)
 
@@ -809,13 +810,7 @@ class TestShadows:
             str(project), str(root), import_roots=manifest.import_roots
         )
         extra = json.loads(open(path).read())["extraPaths"]
-        assert extra == [
-            str(root / "src"),
-            str(root / "src" / "pkg"),
-            str(project / "src"),
-            str(project / "src" / "pkg"),
-            str(project),
-        ]
+        assert extra == [str(root / "src"), str(project / "src"), str(project)]
 
         (pkg / "helper.py").unlink()
         self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py
