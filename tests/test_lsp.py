@@ -562,6 +562,7 @@ class TestRequireSelection:
         )
         compiled = server.compile_document(link.as_uri(), None, self.NS_SOURCE)
         assert compiled.error is None
+        assert compiled.view.text.endswith(self.NS_EXPANDED)
 
     def test_definition_through_a_relative_require_in_a_namespace_package(
         self, namespace
