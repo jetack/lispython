@@ -25,7 +25,7 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.importer [finder-loader-details])
 (from lispy.core.macro [prelude-opted-out])
-(from lispy.core.parser [_WORD_TOKENS parse run-tokens tokenize])
+(from lispy.core.parser [_WORD_TOKENS parse run-tokens source-offset tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
@@ -597,24 +597,23 @@
     (- node.end_lineno 1)
     node.end_col_offset)))
 
-(def extract-error-position [exc src]
-  "Best-effort (0-based line, code-point col) of a parse or compile error,
-   None when neither the exception nor its message names one."
-  ;; Some Python exceptions carry lineno/offset
-  (= lineno (getattr exc "lineno" None))
-  (if (is-not lineno None)
-      (return (, (- lineno 1) (- (or (getattr exc "offset" None) 1) 1))))
-  ;; Try to extract from the message
-  (= msg (str exc))
-  (= m (re.search "line\\s+(\\d+)" msg re.IGNORECASE))
-  (if m
-      (do (= line (- (int (.group m 1)) 1))
-          (= col 0)
-          (= mc (re.search "col(?:umn)?\\s+(\\d+)" msg re.IGNORECASE))
-          (if mc
-              (= col (int (.group mc 1))))
-          (return (, line col))))
-  (return None))
+(def extract-error-position [exc]
+  "The (0-based line, code-point col) of exc, a SyntaxError of the buffer
+   (buffer-error-p), clamped to 0; None when it carries no line."
+  (if (is exc.lineno None)
+      (return None))
+  (return (, (max 0 (- exc.lineno 1)) (max 0 (- (or exc.offset 1) 1)))))
+
+(def reader-line [source line]
+  "source's 0-based line without its line break, the lines being the
+   reader's (source-offset: a lone CR ends one, as CRLF and LF do), which
+   an error's line counts; empty past the last line."
+  (= offset (source-offset source))
+  (try
+    (= [start end] [(offset (+ line 1) 0) (offset (+ line 2) 0)])
+    (except [IndexError]
+      (return "")))
+  (return (.rstrip (sub source [: start end]) "\r\n")))
 
 (def error-head-span [line col]
   "(start, end), code-point columns of line, of the error at col: an
@@ -639,12 +638,14 @@
 
 (def buffer-error-p [exc path]
   "Whether exc, an error of the compile of the buffer at path (uri-to-path),
-   lies in the buffer: anything but a SyntaxError, or one whose filename is
-   None (the buffer's compile errors carry none) or path.  A SyntaxError
-   from another file (a required module that fails to parse or compile)
-   names a line of that file, never of the buffer."
+   is a SyntaxError (LispyCompileError is one) of the buffer: its filename
+   None (the buffer's compile errors carry none) or path.  Only such an
+   error has a position in the buffer: a SyntaxError from another file (a
+   required module that fails to parse or compile) names a line of that
+   file, and any other exception's lineno or message names a line of
+   whatever it read (a macro's json.loads), never of the buffer."
   (if (not (isinstance exc SyntaxError))
-      (return True))
+      (return False))
   (= filename exc.filename)
   (return (or (is filename None)
               (== (osp.normcase (osp.abspath filename))
@@ -816,22 +817,20 @@
 
 (def error-diagnostic [exc source uri severity prefix :doc None]
   "The diagnostic of exc, the parse or compile error of source, document
-   uri's text, its message prefix + the error's.  An error in the buffer
-   (buffer-error-p) is ranged over the head of the form it names
-   (error-head-span) with a SyntaxError's bare msg, whose str adds a (file,
-   line N) the range already gives; an error with no position, or one in
-   another file, keeps its str (naming that file and line) and is the first
-   character of source.  The range is in doc's client units (client-position),
-   in code points when there is no doc."
+   uri's text, its message prefix + the error's.  A SyntaxError of the
+   buffer (buffer-error-p) is ranged over the head of the form it names
+   (error-head-span, on the reader's line, reader-line) with its bare msg,
+   whose str adds a (file, line N) the range already gives; any other error,
+   or one with no line, keeps its str (naming another file and its line)
+   and is the first character of source.  The range is in doc's client
+   units (client-position), in code points when there is no doc."
   (= own (buffer-error-p exc (uri-to-path uri)))
-  (= pos (ife own (extract-error-position exc source) None))
+  (= pos (ife own (extract-error-position exc) None))
   (if (is pos None)
       (= [line start end] [0 0 1])
-      (do (= line (max 0 (sub pos 0)))
-          ;; A CRLF line's \r is no character a head could sit on.
-          (= text (.removesuffix (line-text source (+ line 1)) "\r"))
-          (= [start end] (error-head-span text (max 0 (sub pos 1))))))
-  (= message (ife (and own (isinstance exc SyntaxError) exc.msg) exc.msg (str exc)))
+      (do (= [line col] pos)
+          (= [start end] (error-head-span (reader-line source line) col))))
+  (= message (ife (and own exc.msg) exc.msg (str exc)))
   (= rng (ife (is doc None)
               (make-range line start line end)
               (lsp.Range :start (client-position doc (+ line 1) start)

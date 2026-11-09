@@ -188,6 +188,34 @@ def test_an_error_with_no_position_marks_one_character():
     assert (rng.start.line, rng.start.character, rng.end.character) == (0, 0, 1)
 
 
+def test_another_exceptions_line_is_not_a_buffer_position():
+    # Defect: a macro's JSONDecodeError carries lineno 4, a line of the JSON
+    # text it parsed, which the diagnostic took as the buffer's fourth line
+    # and underlined (= d 4) there.
+    source = (
+        '(defmacro bad [] (import json) (json.loads "{\\n\\n\\n  bad}"))\n'
+        "(= b 2)\n"
+        "(= c 3)\n"
+        "(= d 4)\n"
+        "(bad)"
+    )
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character, rng.end.character) == (0, 0, 1)
+    assert "line 4" in diagnostic.message
+
+
+def test_a_lone_carriage_return_ends_the_measured_line():
+    # Defect: the head was measured on the line split at LF alone, while the
+    # reader (and the error's line) also ends a line at a lone CR, so
+    # (while on the second line was measured on another line's text.
+    source = "(f x)\r  (while)"
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    rng = diagnostic.range
+    assert rng.start.line == 1
+    assert source.split("\r")[1][rng.start.character : rng.end.character] == "(while"
+
+
 def test_a_diagnostic_range_counts_in_the_editors_units():
     # Defect: lispython's own diagnostic went out in code points, so a
     # UTF-16 editor underlined one unit early per astral character before
