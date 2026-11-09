@@ -778,6 +778,75 @@ class TestRequireSelection:
         got = self._target_in(workspace, "(require lspedpkg.mac)")
         assert got == str(elsewhere / "lspedpkg" / "mac.lpy")
 
+    def test_a_finder_before_the_path_lookup_is_never_asked(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: every sys.meta_path finder is asked, so an import hook
+        # placed before PathFinder (setuptools' _distutils_hack imports
+        # setuptools, or drops distutils from sys.modules, when asked) acts
+        # on a go-to-definition.
+        asked = []
+
+        class EarlyHook:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                # Only the lookup's own names: the test's process may
+                # import other modules meanwhile.
+                if name.startswith("lspearly"):
+                    asked.append(name)
+                return None
+
+        monkeypatch.setattr(sys, "meta_path", [EarlyHook, *sys.meta_path])
+        (tmp_path / "lspearly").mkdir()
+        (tmp_path / "lspearly" / "mac.lpy").write_text("")
+        got = self._target_in(tmp_path, "(require lspearly.mac)")
+        assert got == str(tmp_path / "lspearly" / "mac.lpy")
+        assert self._target_in(tmp_path, "(require lspearlymissing)") is None
+        assert asked == []
+
+    def test_a_path_hook_entry_serves_a_namespace_package(self, tmp_path, monkeypatch):
+        # Defect: a sys.path entry that is no directory is skipped, so the
+        # namespace package an editable install serves from its path-hook
+        # entry (setuptools' __editable__...__path_hook__) is not found, and
+        # neither is a module under it.
+        sub = tmp_path / "src" / "lspedns" / "sub"
+        sub.mkdir(parents=True)
+        (sub / "__init__.py").write_text("")
+        (sub / "mac.lpy").write_text("")
+        hook_entry = "__editable__.lspdemo-0.1.finder.__path_hook__"
+
+        class EditableFinder:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                if name == "lspedns.sub":
+                    return importlib.util.spec_from_file_location(
+                        name, sub / "__init__.py", submodule_search_locations=[str(sub)]
+                    )
+                return None
+
+        class NamespaceFinder:
+            @staticmethod
+            def hook(entry):
+                if entry == hook_entry:
+                    return NamespaceFinder
+                raise ImportError
+
+            @staticmethod
+            def find_spec(name, target=None):
+                if name == "lspedns":
+                    spec = importlib.machinery.ModuleSpec(name, None, is_package=True)
+                    spec.submodule_search_locations = [hook_entry]
+                    return spec
+                return None
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, EditableFinder])
+        monkeypatch.setattr(sys, "path_hooks", [*sys.path_hooks, NamespaceFinder.hook])
+        monkeypatch.setattr(sys, "path", [*sys.path, hook_entry])
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        got = self._target_in(workspace, "(require lspedns.sub.mac)")
+        assert got == str(sub / "mac.lpy")
+
     def test_a_built_in_module_hides_a_file_of_its_name(self, tmp_path):
         # Defect: a workspace sys.lpy is taken where Python imports the
         # built-in module sys, which no file holds.

@@ -226,20 +226,34 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
+(def _hook-finder [entry]
+  "The finder sys.path-hooks gives the path entry entry, as PathFinder asks
+   them (each hook in order, an ImportError passing to the next), or None:
+   no hook takes it, or one fails otherwise.  Never cached, so
+   sys.path-importer-cache is neither read nor filled."
+  (for hook in (list sys.path-hooks)
+    (try
+      (return (hook entry))
+      (except [ImportError]
+        (continue))
+      (except [Exception]
+        (return None))))
+  (return None))
+
 (def path-entry-spec [name entries]
   "The ModuleSpec of the absolute import name name that a path-based
-   lookup (CPython's PathFinder over FileFinders) finds over entries, the
-   directories of one search path, or None: per directory a fresh
+   lookup (CPython's PathFinder) finds over entries, one search path, or
+   None: per entry its finder, the first entry holding a module or regular
+   package winning, and a namespace package, its portions merged across
+   every entry, only when none holds one.  A directory's finder is a fresh
    FileFinder with CPython's loaders in their order (finder-loader-details,
-   read now, so .lpy is the first source suffix), the first directory
-   holding a module or regular package winning, and a namespace package,
-   its portions merged across every directory, only when none holds one.
-   Unlike PathFinder it asks no sys.path-hooks finder and no
-   sys.path-importer-cache: an entry that is no directory is skipped (a
-   zip archive holds no file to open), and the finder is fresh, because
-   the cache keeps a directory's listing past a file written into it.  ''
-   is the working directory, as PathFinder takes it, and skipped when that
-   is gone, as PathFinder skips it."
+   read now, so .lpy is the first source suffix), never the one
+   sys.path-importer-cache keeps, because that keeps a directory's
+   listing past a file written into it; any other str entry takes the
+   finder sys.path-hooks gives it (_hook-finder: an editable install
+   serves a namespace package from such an entry), a finder that raises
+   finding nothing.  '' is the working directory, as PathFinder takes it,
+   and skipped when that is gone, as PathFinder skips it."
   (= portions [])
   (for entry in entries
     (if (not (isinstance entry str))
@@ -248,42 +262,60 @@
       (= directory (ife (== entry "") (os.getcwd) entry))
       (except [OSError]
         (continue)))
-    (if (not (osp.isdir directory))
+    (= finder (ife (osp.isdir directory)
+                   (importlib.machinery.FileFinder directory *(finder-loader-details))
+                   (_hook-finder directory)))
+    (if (is finder None)
         (continue))
-    (= spec (.find-spec (importlib.machinery.FileFinder directory
-                                                        *(finder-loader-details))
-                        name))
+    (try
+      (= spec (.find-spec finder name))
+      (except [Exception]
+        (continue)))
     (cond (is spec None)
           (continue)
           (is-not spec.loader None)
           (return spec)
-          (.extend portions spec.submodule-search-locations)))
+          (try
+            (.extend portions (or spec.submodule-search-locations []))
+            (except [Exception]
+              (continue)))))
   (if (not portions)
       (return None))
   (= spec (importlib.machinery.ModuleSpec name None :is-package True))
   (= spec.submodule-search-locations portions)
   (return spec))
 
+(= SIDE-EFFECT-FREE-FINDERS (, importlib.machinery.BuiltinImporter
+                               importlib.machinery.FrozenImporter))
+
 (def meta-path-spec [name entries parent-locations]
   "The ModuleSpec CPython's import gives the absolute import name name, one
    part of a walk (module-spec-on), or None: sys.meta-path's finders asked
-   in their order, PathFinder's slot standing for path-entry-spec over
-   entries, the walk's own search path (last when sys.meta-path holds no
-   PathFinder, since entries are what the module's compile searches).
-   Every other finder is asked as the import system asks it,
-   (find-spec name parent-locations), None for a top-level name, so the
-   built-in and frozen modules win (sys is no file) and a finder an
-   editable install adds still finds its package; one that raises finds
-   nothing."
+   in their order as the import system asks them, (find-spec name
+   parent-locations), None for a top-level name, with PathFinder's slot
+   standing for path-entry-spec over entries, the walk's own search path.
+   The built-in and frozen importers are asked (sys is no file), and so is
+   every finder after PathFinder, where an editable install appends the
+   one that finds its package; one that raises finds nothing.  The one
+   departure from the import system: any other finder before PathFinder
+   is skipped, because such finders are import hooks that act when asked
+   (setuptools' _distutils_hack, first on sys.meta-path, imports
+   setuptools when asked for distutils and drops modules from
+   sys.modules when asked for pip).  With no PathFinder on sys.meta-path
+   the walk still runs, last, since entries are what the module's compile
+   searches, and nothing else but the built-in and frozen importers is
+   asked."
   (= walked False)
   (for finder in (list sys.meta-path)
-    (if (is finder importlib.machinery.PathFinder)
-        (do (= walked True)
-            (= spec (path-entry-spec name entries)))
-        (try
-          (= spec (.find-spec finder name parent-locations))
-          (except [Exception]
-            (= spec None))))
+    (cond (is finder importlib.machinery.PathFinder)
+          (do (= walked True)
+              (= spec (path-entry-spec name entries)))
+          (or walked (in finder SIDE-EFFECT-FREE-FINDERS))
+          (try
+            (= spec (.find-spec finder name parent-locations))
+            (except [Exception]
+              (= spec None)))
+          (= spec None))
     (if (is-not spec None)
         (return spec)))
   (return (ife walked None (path-entry-spec name entries))))
@@ -334,7 +366,9 @@
   (= spec (module-spec-on module-name entries))
   (if (or (is spec None) (is spec.loader None))
       (return None))
-  (if (and spec.origin (.endswith spec.origin ".lpy"))
+  ;; A finder may give any origin: only a .lpy file on disk is one to open.
+  (if (and (isinstance spec.origin str) (.endswith spec.origin ".lpy")
+           (osp.isfile spec.origin))
       (return spec.origin))
   (if spec.submodule-search-locations
       (do (= init (osp.join (sub spec.submodule-search-locations 0) "init.lpy"))
