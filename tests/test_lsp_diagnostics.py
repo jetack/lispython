@@ -365,15 +365,17 @@ def test_a_change_compiles_once(fake_served, monkeypatch):
     calls = []
 
     def counting(real):
-        def compile_unit(*args, **kwargs):
+        def compile_unit_forms(*args, **kwargs):
             calls.append(True)
             return real(*args, **kwargs)
 
-        return compile_unit
+        return compile_unit_forms
 
-    monkeypatch.setattr(pv, "compile_unit", counting(pv.compile_unit))
+    monkeypatch.setattr(pv, "compile_unit_forms", counting(pv.compile_unit_forms))
     monkeypatch.setattr(
-        lispy.core.macro, "compile_unit", counting(lispy.core.macro.compile_unit)
+        lispy.core.macro,
+        "compile_unit_forms",
+        counting(lispy.core.macro.compile_unit_forms),
     )
     uri = editor.uri
     client = backends.client_for(uri)

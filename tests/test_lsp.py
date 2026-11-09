@@ -732,10 +732,10 @@ class TestRequireSelection:
         source = "(require .mac *)\n(= y (twice 1))"
         doc = SimpleNamespace(uri=(pkg / "x.lpy").as_uri(), version=1, source=source)
         try:
-            assert server.compile_document(doc.uri, 1, source).error is not None
+            assert server.compile_document(doc.uri, 1, source).failures
             (pkg / "__init__.py").write_text("")
             compiled = server.compile_document(doc.uri, 1, source)
-            assert compiled.error is None
+            assert compiled.failures == []
             assert compiled.view.text.endswith("y = 1 + 1")
             assert server.compiled_view(doc) is compiled.view
             (pkg / "__init__.py").unlink()

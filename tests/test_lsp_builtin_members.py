@@ -382,9 +382,12 @@ def test_the_local_builtin_answer_spells_names_as_completion_does(
 def test_a_buffer_that_does_not_compile_gives_the_local_answer(
     hover, signature_help, backend_requests
 ):
-    # An earlier refused form: neither the buffer nor its prefix compiles,
-    # so there is no view and no request; the builtin answer stands.
-    assert_local_print(hover("(def)\n(pri|nt 1)"), signature_help("(def)\n(print |)"))
+    # A refused form before the cursor in the form holding it: neither the
+    # buffer nor its prefix compiles there, so there is no view and no
+    # request; the builtin answer stands.
+    assert_local_print(
+        hover("(do (def)\n  (pri|nt 1))"), signature_help("(do (def)\n  (print |))")
+    )
     assert backend_requests.sent == []
 
 

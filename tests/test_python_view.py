@@ -219,16 +219,24 @@ class TestLpyRange:
 
 
 class TestFailures:
+    def test_a_parse_error_is_no_view(self):
+        assert pv.compile_view("(print 1") is None
+
     @pytest.mark.parametrize(
         "src",
         [
-            "(print 1",  # parse error
-            "(= 1 2)",  # compile error
-            "(defmacro boom [] (raise (ValueError)))\n(boom)",  # macro fails
+            "(= 1 2)\n(= y 3)",  # compile error
+            "(defmacro boom [] (raise (ValueError)))\n(boom)\n(= y 3)",  # macro fails
         ],
     )
-    def test_compile_failure_is_none(self, src):
-        assert pv.compile_view(src) is None
+    def test_a_failed_form_is_left_out_of_the_view(self, src):
+        # Defect: one form that fails to compile costs the whole buffer its
+        # view (so the backend publishes nothing for it), or is not reported.
+        compiled = pv.compile_buffer(src)
+        assert compiled.view.text.endswith("\ny = 3") or compiled.view.text == "y = 3"
+        [(form, error)] = compiled.failures
+        assert form.lineno == src.count("\n")
+        assert isinstance(error, Exception)
 
 
 class TestCursor:
@@ -1394,9 +1402,12 @@ class TestShadows:
         self.write(root / "pyrightconfig.json", "{}")
         manifest = pv.ShadowManifest()
         shadows = pv.write_shadows(str(project), str(root), manifest=manifest).shadows
-        mod, top = root / "pkg" / "mod.py", root / "top.py"
-        assert shadows == sorted([str(mod), str(top)])
+        mod, top, bad = root / "pkg" / "mod.py", root / "top.py", root / "bad.py"
+        # A module whose only form fails still has its (empty) shadow, so
+        # an import of it resolves.
+        assert shadows == sorted([str(mod), str(top), str(bad)])
         assert mod.read_text() == "my_x = 1"
+        assert bad.read_text() == ""
 
         calls = []
         real = pv.compile_buffer
@@ -1413,12 +1424,13 @@ class TestShadows:
         assert mod.stat().st_mtime_ns == stamp
 
         (project / "top.lpy").unlink()
-        self.write(project / "pkg" / "mod.lpy", "(= 1 1)")  # stops compiling
+        (project / "bad.lpy").unlink()
+        self.write(project / "pkg" / "mod.lpy", "(= 1 1")  # stops parsing
         os.utime(project / "pkg" / "mod.lpy", ns=(stamp + 2 * 10**9,) * 2)
         assert (
             pv.write_shadows(str(project), str(root), manifest=manifest).shadows == []
         )
-        assert not mod.exists() and not top.exists()
+        assert not mod.exists() and not top.exists() and not bad.exists()
         assert (root / "pyrightconfig.json").read_text() == "{}"
 
     def test_view_path(self, tmp_path):
@@ -2039,7 +2051,8 @@ class TestMacroModules:
             )
 
         try:
-            assert view(first) is None
+            # The require failed and was left out: twice stays a call.
+            assert view(first).text.endswith("yy = twice(2)")
             assert view(second).text.endswith("yy = 2 * 2 * 2")
             (first / (name + ".lpy")).write_text(
                 "(defmacro twice [x] (return `(- ~x ~x)))"
@@ -2084,7 +2097,8 @@ class TestMacroModules:
         # by the file it was read from, so fixing that file is seen.
         text = self.consumer(kind, package, tmp_path)
         (package.pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x))")
-        assert text() is None
+        # The require failed and was left out: twice stays a call.
+        assert text().endswith("yy = twice(2)")
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert "yy = 2 * 2 * 2" in text()
 
@@ -2538,10 +2552,15 @@ def fresh_with_p(node):
     )
 
 
+# core/macro.py's compile entry points: compile-unit and its form-by-form
+# variant, which the LSP's compile uses.
+COMPILE_UNIT_HEADS = ("compile-unit", "compile-unit-forms")
+
+
 def compile_unit_calls(path):
     """(nearest enclosing def's name or None, whether inside the body of a
-    (with [(fresh-modules ...)] ...) form) of every (compile-unit ...) call
-    in the lispython source at path."""
+    (with [(fresh-modules ...)] ...) form) of every call of a compile entry
+    point (COMPILE_UNIT_HEADS) in the lispython source at path."""
     stack = [(form, None, False) for form in parser.parse(path.read_text())]
     found = []
     while stack:
@@ -2550,7 +2569,7 @@ def compile_unit_calls(path):
             head = nodes.atom_text(node[0])
             if head == "def" and len(node) > 1:
                 def_name = nodes.atom_text(node[1])
-            elif head == "compile-unit":
+            elif head in COMPILE_UNIT_HEADS:
                 found.append((def_name, fresh))
             if fresh_with_p(node):
                 stack.extend((child, def_name, True) for child in node[2:])

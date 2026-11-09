@@ -40,6 +40,7 @@
                        OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
+                             FROM-HEADS GENERATED-PREFIX IMPORT-HEADS IMPORT-ONLY-HEADS
                              PARSE-STAGE ViewCache compile-buffer glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
@@ -430,10 +431,6 @@
                 (index-file (path-to-uri fpath))))))
     (except [Exception]
       (pass))))
-
-(= FROM-HEADS (, "from" "lazy-from"))
-(= IMPORT-ONLY-HEADS (, "import" "lazy-import"))
-(= IMPORT-HEADS (+ IMPORT-ONLY-HEADS FROM-HEADS))
 
 (def find-import-target [node workspace-folders :origin None]
   "Given an import/from/require node, resolve where the imported name is
@@ -840,21 +837,25 @@
 
 (def compute-diagnostics [source uri :compiled None :doc None]
   "lispython's own diagnostics of source, document uri's text: its parse
-   error, an Error, or its compile error, a Warning, since macro expansion
-   depends on the runtime environment (imports must resolve); a module the
-   compile cannot import is none.  compiled is source's CompiledBuffer
-   (compile-document), compiled here when None; doc, uri's document holding
-   source, gives the client's position units (code points without one)."
+   error, an Error, alone; else one Warning per top-level form that failed
+   (CompiledBuffer failures, in source order) and for a failed unit start
+   (COMPILE-STAGE), Warnings since macro expansion depends on the runtime
+   environment (imports must resolve); a module the compile cannot import
+   is none.  compiled is source's CompiledBuffer (compile-document),
+   compiled here when None; doc, uri's document holding source, gives the
+   client's position units (code points without one)."
   (if (is compiled None)
       (= compiled (compile-document uri None source)))
-  (= exc compiled.error)
-  (cond (== compiled.stage PARSE-STAGE)
-        (return [(error-diagnostic exc source uri lsp.DiagnosticSeverity.Error
-                                   "Parse error: " :doc doc)])
-        (and (== compiled.stage COMPILE-STAGE) (not (isinstance exc ModuleNotFoundError)))
-        (return [(error-diagnostic exc source uri lsp.DiagnosticSeverity.Warning
-                                   "Compile warning: " :doc doc)]))
-  (return (list)))
+  (if (== compiled.stage PARSE-STAGE)
+      (return [(error-diagnostic compiled.error source uri lsp.DiagnosticSeverity.Error
+                                 "Parse error: " :doc doc)]))
+  (= errors [error for [_ error] in compiled.failures])
+  (if (== compiled.stage COMPILE-STAGE)
+      (.append errors compiled.error))
+  (return [(error-diagnostic error source uri lsp.DiagnosticSeverity.Warning
+                             "Compile warning: " :doc doc)
+           for error in errors
+           if (not (isinstance error ModuleNotFoundError))]))
 
 ;; Seconds a change's diagnostics wait for the backend's, once its view
 ;; reached a running backend: past it lispython's own are published alone,
@@ -1178,8 +1179,9 @@
 
 (async-def publish-run [run]
   "Publish run's diagnostics if it is still its document's latest: lispython's
-   own, and the backend's only when the buffer made a view (a parse or
-   compile error wins: the backend's last set is for another text) and they
+   own, and the backend's only when the buffer made a view (a parse error
+   wins: the backend's last set is for another text; a form that failed is
+   only left out of the view, compile-buffer) and they
    were published for that view's text (mapped-backend-diagnostics)."
   (+= run.published 1)
   (= number run.published)
@@ -2976,11 +2978,13 @@
    (completion-prefix), each with that filterText, as an incomplete
    CompletionList: the one pass every completion answer goes through,
    whichever builder made its items (backend, own items, macros, the
-   fallback lists)."
+   fallback lists).  A name the LSP generated into the view
+   (GENERATED-PREFIX: a failed form's Any import) is never offered."
   (= kept [])
   (for item in items
     (= text (completion-prefix typed item.label))
-    (if (is-not text None)
+    (if (and (is-not text None)
+             (not (.startswith (name-key item.label) GENERATED-PREFIX)))
         (do (= item.filter-text text)
             (.append kept item))))
   (return (lsp.CompletionList :is-incomplete True :items kept)))

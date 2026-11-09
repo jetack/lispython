@@ -6,6 +6,7 @@ a unit whose first form is ``(require lispy.macros <selection>)`` keeps just
 that selection; macros a module defines never reach another module.
 """
 
+import ast
 import importlib
 import json
 import linecache
@@ -19,7 +20,8 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy import tools
-from lispy.core.macro import UnitStart, compile_unit
+from lispy.core.errors import LispyCompileError
+from lispy.core.macro import UnitStart, compile_unit, compile_unit_forms
 from lispy.core.parser import parse
 
 BIN = Path(sys.executable).parent
@@ -529,3 +531,72 @@ def test_only_compile_unit_reaches_macroexpand_then_compile():
         and pattern.search(path.read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+def test_only_the_lsp_compiles_form_by_form():
+    # Policy: compile_unit_forms goes on past a failed form, which only the
+    # LSP's view wants; lpy, the importer, l2py, the REPL and the nREPL stop
+    # at the first error (compile_unit). Allowlist: its module and the LSP's
+    # one compile (python_view's compile-buffer).
+    allowed = {"lispy/core/macro.py", "lispy/lsp/python_view.lpy"}
+    pattern = re.compile(r"compile[-_]unit[-_]forms")
+    users = [
+        path.relative_to(SRC).as_posix()
+        for path in sorted(SRC.rglob("*"))
+        if path.suffix in (".py", ".lpy")
+        and pattern.search(path.read_text(encoding="utf-8"))
+    ]
+    assert set(users) <= allowed and "lispy/lsp/python_view.lpy" in users
+
+
+# --- form by form (the LSP) --------------------------------------------------
+
+FORM_BY_FORM = (
+    "(require lispy.macros [when])\n"
+    "(defmacro twice [x] (return `(+ ~x ~x)))\n"
+    "(when (twice 1) (inc 2))\n"
+    "(= y (twice 3))\n"
+)
+
+
+def test_form_by_form_compiles_as_the_whole_unit():
+    # Defects: the form-by-form compile starts its unit otherwise than
+    # compile_unit (the opt-out read from each form, the prelude seeded per
+    # form, a defmacro forgotten by the next form), so the LSP's view is not
+    # the module lpy runs.
+    results = list(compile_unit_forms(parse(FORM_BY_FORM), {}))
+    assert [error for _, _, error in results] == [None] * 4
+    whole = ast.Module(compile_unit(parse(FORM_BY_FORM), {}), type_ignores=[])
+    by_form = ast.Module(
+        [stmt for _, statements, _ in results for stmt in statements], type_ignores=[]
+    )
+    assert ast.dump(by_form) == ast.dump(whole)
+    # inc is opted out, so it stays a call.
+    assert "inc(2)" in ast.unparse(by_form)
+
+
+def test_form_by_form_goes_on_past_a_failed_form():
+    # Defect: a failed form ends the compile (the LSP then has no view), or
+    # the forms after it lose the macros defined before it.
+    src = "(defmacro twice [x] (return `(+ ~x ~x)))\n(while)\n(= y (twice 3))"
+    [(_, _, first), (form, statements, error), (_, last, _)] = compile_unit_forms(
+        parse(src), {}
+    )
+    assert first is None
+    assert (form.lineno, statements, type(error)) == (2, None, LispyCompileError)
+    assert ast.unparse(ast.Module(last, type_ignores=[])) == "y = 3 + 3"
+
+
+@needs_scripts
+def test_lpy_and_l2py_stop_at_the_first_failed_form(tmp_path):
+    # Defect: a build compiles past a failed form (as the LSP does), so it
+    # runs the forms after it or reports every failure.
+    (tmp_path / "two.lpy").write_text('(while)\n(print "ran")\n(def f)\n')
+    for args in ([LPY, "two.lpy"], [L2PY, "two.lpy"]):
+        r = run(args, tmp_path)
+        assert r.returncode != 0
+        assert "ran" not in r.stdout
+        [error] = [line for line in r.stderr.splitlines() if "error:" in line]
+        assert error.endswith(
+            "two.lpy:1:1: error: (while ...) is missing its test: (while test body...)"
+        ), r.stderr
