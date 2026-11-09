@@ -892,8 +892,9 @@
    name: a parameter's name (param-bindings; a list it refuses counts, the
    name may be what is being typed), anywhere in glued type parameters
    (def f[T], class A[T]), or anywhere in the body of a def or lambda,
-   where its parameters are names.  A default or annotation is read in the
-   scope around the form, so it never counts; nor do class bases."
+   where its parameters are names.  A default or a def's return
+   annotation (a lambda has none) is read in the scope around the form, so it
+   never counts; nor do class bases."
   (if (== (len form) 0)
       (return False))
   (if (and (in (atom-text (sub form 0)) _TYPE-PARAMETER-HEADS) (>= (len form) 2)
@@ -904,11 +905,13 @@
   (if (or (is slot None) (<= (len form) slot)
           (not (isinstance (sub form slot) Bracket)))
       (return False))
-  ;; Unwrapping a def or lambda the cursor is inside loses its parameters;
-  ;; a return annotation (^ right after the params) is no body, it is read
-  ;; in the scope around the def, as a default is.
+  ;; Unwrapping a def or lambda the cursor is inside loses its parameters.
+  ;; Only a def's ^ right after the params is its return annotation, read in
+  ;; the scope around the def, as a default is; after a lambda head
+  ;; (LAMBDA-HEADS) the ^ form is the body.
   (= body (sub form.list [: (+ slot 1) None]))
-  (if (and body (isinstance (sub body 0) Annotation))
+  (if (and body (in (atom-text (sub form 0)) _DEF-HEADS)
+           (isinstance (sub body 0) Annotation))
       (= body (sub body [: 1 None])))
   (if (any ((_holds-sentinel part) for part in body))
       (return True))
