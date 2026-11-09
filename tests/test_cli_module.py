@@ -18,13 +18,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def run_m(cwd: Path, **env_extra: str) -> subprocess.CompletedProcess[str]:
+def run_m(
+    cwd: Path, module: str = "cwdmod", **env_extra: str
+) -> subprocess.CompletedProcess[str]:
     env = {
         k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
     }
     env.update(env_extra)
     return subprocess.run(
-        [str(LPY), "-m", "cwdmod"],
+        [str(LPY), "-m", module],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -68,3 +70,21 @@ def test_m_honours_safe_path(tmp_path: Path):
     assert r.returncode != 0
     assert "ran-from-cwd" not in r.stdout
     assert "cwdmod" in r.stderr
+
+
+@pytest.mark.parametrize(
+    ("arg", "file"), [("ok?", "ok_p.lpy"), ("->foo", "_to_foo.lpy")]
+)
+def test_m_names_the_module_as_import_does(tmp_path: Path, arg: str, file: str):
+    (tmp_path / file).write_text('(print "ran-mangled")\n')
+    r = run_m(tmp_path, arg)
+    assert r.returncode == 0, r.stderr
+    assert "ran-mangled" in r.stdout
+
+
+def test_m_refuses_a_part_that_is_no_name(tmp_path: Path):
+    r = run_m(tmp_path, "class")
+    assert r.returncode == 1
+    assert r.stderr.startswith("<command line>:")
+    assert "class" in r.stderr
+    assert "Traceback" not in r.stderr
