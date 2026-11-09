@@ -749,7 +749,8 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
         ("(def f [abc]\n  abc|)\n", "abc"),
         ("(for heap| in [1] 1)\n(= heap 2)\n(= )\n", "heap"),
         ("(import os)\n(= os.environ| 1)\n", "environ"),
-        ("(= __file__| 1)\n", "__file__"),
+        ("(= __path__| 1)\n", "__path__"),
+        ('(from os.path *)\n(+= sep| "x")\n', "sep"),
     ],
     ids=[
         "bound elsewhere",
@@ -758,7 +759,8 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
         "reference",
         "defined after, fallback view",
         "existing member stored",
-        "module global",
+        "implicit dunder",
+        "augmented target",
     ],
 )
 def test_a_real_name_equal_to_the_word_being_typed_stays(merged, source, word):
@@ -766,8 +768,8 @@ def test_a_real_name_equal_to_the_word_being_typed_stays(merged, source, word):
     # word, so a name that exists without it (bound elsewhere, a builtin,
     # the module member an import names, a parameter, a definition after
     # the cursor that only the buffer's list knows over a fallback view, a
-    # module's real member being stored to, a module's implicit global) is
-    # lost.
+    # module's real member being stored to, an implicit dunder a backend
+    # adds, a star-imported name an augmented assignment reads) is lost.
     assert word in by_label(merged(source)[2])
 
 

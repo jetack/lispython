@@ -28,7 +28,6 @@
 (import tempfile)
 (import threading)
 (import time)
-(import types)
 (import tomllib)
 
 (try
@@ -765,22 +764,28 @@
                         "MatchAs" "MatchStar" "TypeVar" "ParamSpec" "TypeVarTuple"]
            if (hasattr ast name))))
 
-;; The globals every module has though no statement of it binds them.
-(= _MODULE-GLOBALS (frozenset [*(vars (types.ModuleType "_"))
-                               "__file__" "__cached__" "__builtins__"]))
+(def _dunder-p [name]
+  "True when name is a dunder (__x__)."
+  (return (and (> (len name) 4) (.startswith name "__") (.endswith name "__"))))
 
 (def _bindings [node]
   "The names node, an ast node, binds, each as (name, pure): pure when the
-   occurrence only binds, False for an import's name with no alias, which
-   binds it and names a module or member too.  The one home of the binding
-   set _self-bound-p reads: a stored name, a parameter, an import's alias
-   or name (its first dotted part), a def, class, except, capture or type
-   parameter's name, a mapping pattern's rest.  A keyword argument,
-   global, nonlocal or del names an existing name, and an attribute is
-   never one: whether a store creates a member or sets one a receiver
-   already has needs the receiver's type, which only the backend knows."
+   occurrence only binds, False when it names an existing name too: an
+   import's name with no alias (a module or member) and an augmented
+   assignment's target, which reads the name before it binds it.  The one
+   home of the binding set _self-bound-p reads: a stored name, a
+   parameter, an import's alias or name (its first dotted part), a def,
+   class, except, capture or type parameter's name, a mapping pattern's
+   rest.  A keyword argument, global, nonlocal or del names an existing
+   name, and an attribute is never one: whether a store creates a member
+   or sets one a receiver already has needs the receiver's type, which
+   only the backend knows."
   (cond (isinstance node ast.Name)
         (return (ife (isinstance node.ctx ast.Store) [(, node.id True)] []))
+        ;; Its target Name is walked too, as a pure store; this impure entry
+        ;; beside it tells the sentinel test the name must exist already.
+        (and (isinstance node ast.AugAssign) (isinstance node.target ast.Name))
+        (return [(, node.target.id False)])
         (isinstance node ast.arg)
         (return [(, node.arg True)])
         (isinstance node ast.alias)
@@ -798,27 +803,36 @@
 (def _self-bound-p [tree restored]
   "True when the word at the cursor, restored (its Python name) standing
    for the sentinel in tree, is a name only its own occurrence binds: the
-   sentinel is a pure binding occurrence (_bindings), no other occurrence
-   in tree binds restored, in any scope, and it is neither a builtin nor a
-   module's implicit global (_MODULE-GLOBALS).  A backend offers such a
+   sentinel's occurrence is a pure binding (_bindings) and no impure one,
+   no other occurrence in tree binds restored, in any scope (an augmented
+   assignment elsewhere counts: it needs the name to exist), and it is
+   neither a builtin nor a dunder.  A dunder never counts, because every
+   backend adds its own implicit ones per scope (__path__, __qualname__,
+   __class__), so no list of them stays right.  A backend offers such a
    name because the generated Python, with the word restored, binds it, so
    its item is the word being typed, never a name the buffer has; a mere
    reference elsewhere ((print ab)) names nothing more.  Limits: a
    star-imported name equal to a word typed where it is bound is not told
    apart (the tree does not hold it), and is not offered there, the word
-   being typed in full already; a stored attribute is never self-bound
-   (_bindings), so the backend's own self.x item at (= self.x| ...) stays
-   offered, because a real member must never be dropped."
-  (if (or (not restored) (in restored (vars builtins)) (in restored _MODULE-GLOBALS))
+   being typed in full already; over a fallback view a later binding of a
+   kind collect-definitions does not collect (with-as, except-as, walrus,
+   match capture, comprehension target) is not offered back either
+   (buffer-definition-names in server.lpy); a stored attribute is never
+   self-bound (_bindings), so the backend's own self.x item at
+   (= self.x| ...) stays offered, because a real member must never be
+   dropped."
+  (if (or (not restored) (in restored (vars builtins)) (_dunder-p restored))
       (return False))
-  (= sentinel False)
+  (= pure-seen False)
   (for node in (ast.walk tree)
     (for [name pure] in (_bindings node)
       (cond (== name restored)
             (return False)
-            (and pure (== name CURSOR-SENTINEL))
-            (= sentinel True))))
-  (return sentinel))
+            (== name CURSOR-SENTINEL)
+            (if pure
+                (= pure-seen True)
+                (return False)))))
+  (return pure-seen))
 
 (def _refused-open-form [compiled stack]
   "The entry of stack (open-forms) that compiled's compile error is placed
