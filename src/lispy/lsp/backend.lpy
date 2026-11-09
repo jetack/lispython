@@ -551,8 +551,8 @@
     ;; text in the backend, which no request may ever send.
     (for lpy-uri in (list self._full)
       (._sync-full self lpy-uri))
-    ;; A new process reads every file anew, saves made while none ran
-    ;; included, so every answer kept from the old one is stale.
+    ;; The new process holds none of the old one's state, so no answer kept
+    ;; from before this start may serve it: drop every entry.
     (._tell-input-changed self None)
     ;; Only now: a start that failed or was shut down tells nobody of the
     ;; view it wrote, since no backend ever used it.
