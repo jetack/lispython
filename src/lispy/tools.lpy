@@ -30,7 +30,8 @@
 (from lispy.core.importer [package-root])
 (from lispy.core.parser [parse])
 (from lispy.core.compiler.literal [completion-label completion-prefix
-                                   hyphen-spelling name-key name-spellings])
+                                   hyphen-spelling module-import-name name-key
+                                   name-spellings])
 (from lispy.core.macro [UnitStart compile-unit macroexpand seed-prelude])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.utils [compile-nesting-errors])
@@ -1192,7 +1193,12 @@
             ;; python -m prepends the cwd unless -P / PYTHONSAFEPATH is set
             (if (not sys.flags.safe-path)
                 (sys.path.insert 0 (os.getcwd)))
-            (runpy.run-module (.replace mname "-" "_") :run-name "__main__" :alter-sys True))
+            ;; the module name is the one `import` gives (module-import-name)
+            (with [(compile-errors "<command line>" mname)]
+              (= modname (module-import-name
+                          (Symbol mname :lineno 1 :end-lineno 1 :col-offset 0
+                                  :end-col-offset (len mname)))))
+            (runpy.run-module modname :run-name "__main__" :alter-sys True))
 
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)

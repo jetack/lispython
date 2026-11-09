@@ -443,7 +443,7 @@ def module_import_name(sexp):
     ``importlib.import_module`` reads it: a relative module's dots, then its
     module_path (``->foo`` is ``_to_foo``, ``.ok?`` is ``.ok_p``). A part
     that is no name is module_path's LispyCompileError. The one home of that
-    name for require and the LSP's module lookup."""
+    name for require, ``lpy -m`` and the LSP's module lookup."""
     path, level = module_path(sexp, relative=True)
     return "." * level + (path or "")
 

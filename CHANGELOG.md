@@ -83,6 +83,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `lpy -m` names its module the way `import` does, so `ok?` and `->foo`
+  run `ok_p.lpy` and `_to_foo.lpy` rather than a plain `-` to `_` swap's
+  `ok?` and `_>foo`, and a part that is no name (a keyword such as `class`)
+  is refused with a positioned compile error,
+  `<command line>:1:1: error: ...`.
 - LSP: a `.lpy` in a plain subdirectory of a workspace folder (no
   `__init__`) is named as a module of that namespace package
   (`scripts/tool.lpy` is `scripts.tool`, imported from the folder), so its
