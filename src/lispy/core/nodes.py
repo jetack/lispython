@@ -564,6 +564,9 @@ def _data_node(data):
 def _child_form_keys(node):
     """Attributes of ``node`` that hold one child form, which a macro may set
     to Python data like any element of an Expression's list."""
+    # Never an FStrExpr's format_spec (unlike wrapper_form_keys): data a macro
+    # puts there is not converted, so a non-node spec reaches check_field's
+    # "format spec must be None or an (f-string ...) form" error.
     if isinstance(node, (Wrapper, MetaIndicator)):
         return ("value",)
     if isinstance(node, GluedHead):
@@ -944,6 +947,16 @@ class FStrExpr(Wrapper):
         return self.value.name
 
 
+def wrapper_form_keys(node):
+    """Attributes of the Wrapper ``node`` holding its child forms, in source
+    order: ``value``, then an f/t-string field's format spec when it has one.
+    Macro expansion, name_spellings, mark_compiler_forms and replace_symbol
+    walk a wrapper through it, so they never miss the spec's own fields."""
+    if isinstance(node, FStrExpr) and node.format_spec is not None:
+        return ("value", "format_spec")
+    return ("value",)
+
+
 class Annotation(Wrapper):
     source_prefix = "^"
 
@@ -1193,6 +1206,8 @@ def mark_compiler_forms(root, user_forms=()):
         if isinstance(node, Expression):
             node.compiler_form = True
             stack.extend(node.list)
-        elif isinstance(node, (Wrapper, MetaIndicator)):
+        elif isinstance(node, Wrapper):
+            stack.extend(getattr(node, key) for key in wrapper_form_keys(node))
+        elif isinstance(node, MetaIndicator):
             stack.append(node.value)
     return root
