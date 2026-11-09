@@ -17,6 +17,7 @@ source marks the cursor; it is removed first.
 """
 
 import importlib
+import time
 
 import pytest
 from lsprotocol import types as lsp
@@ -89,13 +90,21 @@ def test_definition_in_a_user_py_module(navigate, backend_project):
 def test_references_across_lpy_files(navigate, backend_project):
     # Defects: the other file's references stay in its shadow, the buffer's
     # come back under the shadow's uri, or columns are generated ones.
-    found = set(spans(navigate(server.references, OTHER + "(other-f|n 2)")))
-    assert {
+    expected = {
         ("other.lpy", 0, 5, 0, 13),
         ("other.lpy", 2, 1, 2, 9),
         ("main.lpy", 0, 13, 0, 21),
         ("main.lpy", 1, 1, 1, 9),
-    } <= found
+    }
+    # Re-asks: a backend answers cross-file references only from what it has
+    # analysed so far, so the first answer after a start or reload can be partial.
+    deadline = time.monotonic() + 30
+    while True:
+        found = set(spans(navigate(server.references, OTHER + "(other-f|n 2)")))
+        if expected <= found or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    assert expected <= found
     assert all(name in ("other.lpy", "main.lpy") for name, *_ in found)
 
 
