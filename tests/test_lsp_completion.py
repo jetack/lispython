@@ -685,6 +685,86 @@ def merged(complete, real_backends, backend_project, monkeypatch):
     return complete
 
 
+SCREENSHOT = (
+    "(from leetcode *)\n\n(from heapq [heappush heap|])\n\n"
+    "(def solution [k arrival load]\n  (= ))\n"
+)
+
+
+@pytest.mark.parametrize(
+    "source, word",
+    [
+        (SCREENSHOT, "heap"),
+        ("(from heapq [heappush as heap|])\n", "heap"),
+        ("(import heapq as he|)\n", "he"),
+        ("(def f [ab|]\n  1)\n", "ab"),
+        ("(fn [ab|] 1)\n", "ab"),
+        ("(for ab| in [1] 1)\n", "ab"),
+        ("(= ab| 1)\n", "ab"),
+        ("(with [(open 1) as ab|] 1)\n", "ab"),
+        ("(try 1 (except [Exception as ab|] 1))\n", "ab"),
+        ("(class A []\n  (def f [self]\n    (= self.ab| 1)))\n", "ab"),
+    ],
+    ids=[
+        "fallback view",
+        "from alias",
+        "import alias",
+        "def param",
+        "fn param",
+        "for target",
+        "assignment",
+        "with as",
+        "except as",
+        "stored attribute",
+    ],
+)
+def test_the_word_being_typed_is_never_offered_as_its_own_name(merged, source, word):
+    # Defect: a name read off text in which the word at the cursor binds
+    # itself is offered: over a fallback view the buffer's definitions are
+    # collected with the partial word in place ((from heapq [heappush heap|])
+    # defines heap), and over a cursor view the backend offers the binding
+    # the restored word makes (def f [ab|] offers ab).
+    items = by_label(merged(source)[2])
+    assert word not in items
+    if source is SCREENSHOT:
+        assert "heappop" in items  # the backend did answer
+
+
+def test_the_general_list_never_offers_the_word_being_typed(off_complete):
+    # Defect: with no backend the buffer's definitions are read with the
+    # partial word in place, so (from heapq [heappush heap|]) offers heap;
+    # and a real name equal to that word, bound elsewhere, must stay.
+    assert "heap" not in by_label(off_complete("(from heapq [heappush heap|])\n")[2])
+    items = by_label(off_complete("(= heap 1)\n(for heap| in [1] 1)\n")[2])
+    assert "heap" in items
+
+
+@pytest.mark.parametrize(
+    "source, word",
+    [
+        ("(= heap 1)\n(for heap| in [1] 1)\n", "heap"),
+        ("(= abs| 1)\n", "abs"),
+        ("(from heapq [heappush|])\n", "heappush"),
+        ("(def f [abc]\n  abc|)\n", "abc"),
+        ("(for heap| in [1] 1)\n(= heap 2)\n(= )\n", "heap"),
+    ],
+    ids=[
+        "bound elsewhere",
+        "builtin",
+        "imported name",
+        "reference",
+        "defined after, fallback view",
+    ],
+)
+def test_a_real_name_equal_to_the_word_being_typed_stays(merged, source, word):
+    # Defect: the self-binding filter drops every item named as the typed
+    # word, so a name that exists without it (bound elsewhere, a builtin,
+    # the module member an import names, a parameter, or a definition after
+    # the cursor that only the buffer's list knows over a fallback view) is
+    # lost.
+    assert word in by_label(merged(source)[2])
+
+
 def test_merged_completion_offers_the_backends_names_as_the_buffer_spells_them(
     merged,
 ):

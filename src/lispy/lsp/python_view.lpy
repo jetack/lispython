@@ -463,8 +463,10 @@
    as typed, attribute, True when that word is an attribute name in the
    generated Python (a dot right before it: x.a, (. x a), a.b.c),
    in-import, True when the word is a name inside an import statement
-   (a module, a dotted part of one, an imported name or its alias), and
-   fallback, True when only the text before the cursor compiled; its tree
+   (a module, a dotted part of one, an imported name or its alias),
+   self-bound, True when the word is a name only its own occurrence binds
+   (_self-bound-p), so a backend's item of that name is the word itself,
+   and fallback, True when only the text before the cursor compiled; its tree
    is None, since its text was edited after the parse (and may not parse:
    x.).  macros maps the name (name-key) of every macro the buffer's
    compile had registered once expanded to the spelling it was registered
@@ -486,6 +488,7 @@
     (= self.partial None)
     (= self.attribute False)
     (= self.in-import False)
+    (= self.self-bound False)
     (= self.fallback False))
 
   (deco property
@@ -734,6 +737,68 @@
                 (+= found (.count (.split v ".") word)))))))
   (return found))
 
+(def marked-source [source line col]
+  "(marked, word-start, start, end, partial) at 1-based line, code-point col
+   of source, or None when that is outside it: marked is source with the
+   word at the cursor (completion-word-span's start..end on that line, the
+   rest of the word after the caret included) replaced by CURSOR-SENTINEL,
+   partial the word as typed up to the caret.  The one home of that
+   replacement: the cursor view compiles marked, and the buffer's
+   definitions are read off it (buffer-definition-names in server.lpy), so
+   neither takes the word being typed for a name the buffer has."
+  (= lines (.split source "\n"))
+  (if (not (<= 1 line (len lines)))
+      (return None))
+  (= text (sub lines (- line 1)))
+  (if (not (<= 0 col (len text)))
+      (return None))
+  (= [word-start start end] (completion-word-span text col))
+  (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: end None])))
+  (return (, (.join "\n" lines) word-start start end (sub text [: start col]))))
+
+;; The node types whose name field, a str, is a name the node binds; the
+;; type parameters are 3.12+, so each is looked up by name.
+(= _BINDING-NAME-NODES
+   (tuple ((getattr ast name)
+           for name in ["FunctionDef" "AsyncFunctionDef" "ClassDef" "ExceptHandler"
+                        "MatchAs" "MatchStar" "TypeVar" "ParamSpec" "TypeVarTuple"]
+           if (hasattr ast name))))
+
+(def _binds-sentinel [node]
+  "True when node, an ast node, binds the cursor sentinel itself: a stored
+   name or attribute, a parameter, an import's alias (never the imported
+   name, which refers to a module or member), a def, class, except, capture
+   or type parameter's name, a mapping pattern's rest.  A keyword
+   argument, global, nonlocal or del names an existing name."
+  (cond (isinstance node ast.Name)
+        (return (and (== node.id CURSOR-SENTINEL) (isinstance node.ctx ast.Store)))
+        (isinstance node ast.Attribute)
+        (return (and (== node.attr CURSOR-SENTINEL) (isinstance node.ctx ast.Store)))
+        (isinstance node ast.arg)
+        (return (== node.arg CURSOR-SENTINEL))
+        (isinstance node ast.alias)
+        (return (== node.asname CURSOR-SENTINEL))
+        (isinstance node _BINDING-NAME-NODES)
+        (return (== node.name CURSOR-SENTINEL))
+        (isinstance node ast.MatchMapping)
+        (return (== node.rest CURSOR-SENTINEL)))
+  (return False))
+
+(def _self-bound-p [tree restored]
+  "True when the word at the cursor, restored (its Python name) standing
+   for the sentinel in tree, is a name only its own occurrence binds: the
+   sentinel is a binding occurrence (_binds-sentinel), restored is no other
+   identifier of tree (_identifier-count) and no builtin.  A backend offers
+   such a name because the generated Python, with the word restored, binds
+   it, so its item is the word being typed, never a name the buffer has.
+   Limit: a star-imported name equal to a word typed where it is bound is
+   not told apart (the tree does not hold it), and is not offered there;
+   the word is typed in full already."
+  (return (and restored
+               (not-in restored (vars builtins))
+               (== (_identifier-count tree restored) 0)
+               (any ((_binds-sentinel node) for node in (ast.walk tree))))))
+
 (def _refused-open-form [compiled stack]
   "The entry of stack (open-forms) that compiled's compile error is placed
    at, at its bracket or its head, or None: no such error, or an error at
@@ -951,7 +1016,7 @@
    or None.  The partial word at the cursor (partial-span: the reader's
    word of completion-word-span after its last dot, through to the next dot
    or the token's end, so my-|x and -|-x leave nothing of the token to glue
-   onto it) is replaced by CURSOR-SENTINEL so a buffer mid-edit (my-x.  or
+   onto it) is replaced by CURSOR-SENTINEL (marked-source) so a buffer mid-edit (my-x.  or
    (. obj ) ) still compiles, the rest of the word being what a completion
    there replaces; when the whole buffer does not, the text
    before the cursor with its open forms closed is compiled instead, and
@@ -967,18 +1032,13 @@
    The sentinel must come out as exactly one identifier of the generated Python
    (a cursor in a string literal gives None); it is replaced by the
    partial's Python name and the map follows that edit, the generated
-   partial standing for the whole .lpy word.  search-dirs is
+   partial standing for the whole .lpy word; self-bound is read off the
+   tree while it still holds the sentinel (_self-bound-p).  search-dirs is
    compile-buffer's."
-  (= lines (.split source "\n"))
-  (if (not (<= 1 line (len lines)))
+  (= cursor (marked-source source line col))
+  (if (is cursor None)
       (return (, None None)))
-  (= text (sub lines (- line 1)))
-  (if (not (<= 0 col (len text)))
-      (return (, None None)))
-  (= [word-start start end] (completion-word-span text col))
-  (= partial (sub text [: start col]))
-  (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: end None])))
-  (= marked (.join "\n" lines))
+  (= [marked word-start start end partial] cursor)
   (= sentinel-end (+ start (len CURSOR-SENTINEL)))
   (= fallback False)
   (= compiled (compile-buffer marked :package package :name name :search-dirs search-dirs))
@@ -1033,6 +1093,7 @@
   (if (and partial (not (python-name-p partial)))
       (return (, None macro-epoch)))
   (= restored (py-name partial))
+  (= view.self-bound (_self-bound-p view.tree restored))
   (= view.text (+ (sub view.text [: None index]) restored
                   (sub view.text [: (+ index (len CURSOR-SENTINEL)) None])))
   (.shift view.map
