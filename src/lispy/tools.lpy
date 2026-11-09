@@ -47,18 +47,18 @@
          :file sys.stderr))
 
 (def detect-package-name [:path None]
-  "The package of path's directory (default the working directory), by
-   __init__.py or __init__.lpy (package-root), adding the package's import
-   root to sys.path."
+  "(package name, import root) of path's directory (default the working
+   directory), by __init__.py or __init__.lpy (package-root): a directory that
+   is no package is its own import root, with an empty name.  Pure."
   (= dir-path (ife (is path None)
                    (os.getcwd)
                    (osp.dirname (osp.abspath path))))
-  (= [current parts] (package-root dir-path))
-  (if (and parts (not (in current sys.path)))
-      (sys.path.insert 0 current))
-  (return (.join "." parts)))
+  (= [root parts] (package-root dir-path))
+  (return (, (.join "." parts) root)))
 
-(= MAIN-PACKAGE (detect-package-name))
+(= [MAIN-PACKAGE _main-root] (detect-package-name))
+(if (and MAIN-PACKAGE (not (in _main-root sys.path)))
+    (sys.path.insert 0 _main-root))
 
 (def main-scope []
   "A new __main__ scope in the working directory's package.  SCOPE, the one
@@ -145,16 +145,15 @@
 
 (def l2py-f [file-path :include-meta False :no-lispy False :format True]
   "Translate lispy file to Python source string (standalone with sys.path setup)"
-  ;; A translation leaves the process's modules and sys.path as it found them:
-  ;; dropping lispython's own .lpy modules splits the process into two copies
-  ;; of them (macro_modules is the one home of dropping modules).
-  (= pkg (detect-package-name :path file-path))
+  ;; A translation never drops or replaces a loaded module, since dropping
+  ;; lispython's own .lpy modules splits the process into two copies of them
+  ;; (macro_modules is the one home of dropping modules), and its import root
+  ;; is on sys.path only while it runs.
+  (= [pkg root] (detect-package-name :path file-path))
   (= added-dir None)
-  (if (not pkg)
-      (do (= script-dir (osp.dirname (osp.abspath file-path)))
-          (if (not (in script-dir sys.path))
-              (do (sys.path.insert 0 script-dir)
-                  (= added-dir script-dir)))))
+  (if (not (in root sys.path))
+      (do (sys.path.insert 0 root)
+          (= added-dir root)))
   (try
     (with [(open file-path "rb") as f]
       (= src (.decode (f.read) "utf-8")))
