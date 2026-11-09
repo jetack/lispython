@@ -17,6 +17,7 @@ source marks the cursor; it is removed first.
 """
 
 import importlib
+import time
 
 import pytest
 from lsprotocol import types as lsp
@@ -89,14 +90,20 @@ def test_definition_in_a_user_py_module(navigate, backend_project):
 def test_references_across_lpy_files(navigate, backend_project):
     # Defects: the other file's references stay in its shadow, the buffer's
     # come back under the shadow's uri, or columns are generated ones.
-    found = set(spans(navigate(server.references, OTHER + "(other-f|n 2)")))
-    assert {
-        ("other.lpy", 0, 5, 0, 13),
-        ("other.lpy", 2, 1, 2, 9),
-        ("main.lpy", 0, 13, 0, 21),
-        ("main.lpy", 1, 1, 1, 9),
-    } <= found
-    assert all(name in ("other.lpy", "main.lpy") for name, *_ in found)
+    in_other = {("other.lpy", 0, 5, 0, 13), ("other.lpy", 2, 1, 2, 9)}
+    in_main = {("main.lpy", 0, 13, 0, 21), ("main.lpy", 1, 1, 1, 9)}
+    # Re-asks only for other.lpy's part: the backend answers only from what it
+    # has analysed, so that part may be partial right after a start or reload.
+    # The buffer's own part was just synced, so it is asserted on every answer.
+    deadline = time.monotonic() + 30
+    while True:
+        found = set(spans(navigate(server.references, OTHER + "(other-f|n 2)")))
+        assert all(name in ("other.lpy", "main.lpy") for name, *_ in found)
+        assert in_main <= found
+        if in_other <= found or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    assert in_other <= found
 
 
 MACRO_BUFFER = "(defmacro swap [a b] `(= [~a ~b] [~b ~a]))\n(= my-x 1)\n(print my-|x)\n"

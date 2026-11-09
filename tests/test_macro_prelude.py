@@ -131,13 +131,19 @@ def test_a_module_macro_does_not_leak_into_a_later_module(tmp_path):
 
 
 @pytest.fixture
-def import_dir(tmp_path, monkeypatch):
-    """tmp_path on sys.path; modules imported from it are dropped after."""
-    monkeypatch.syspath_prepend(str(tmp_path))
+def forget_new_modules():
+    """Modules imported during the test are dropped after."""
     before = set(sys.modules)
-    yield tmp_path
+    yield
     for name in set(sys.modules) - before:
         del sys.modules[name]
+
+
+@pytest.fixture
+def import_dir(tmp_path, monkeypatch, forget_new_modules):
+    """tmp_path on sys.path; modules imported from it are dropped after."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return tmp_path
 
 
 def runtime_macros(module):
@@ -161,6 +167,34 @@ def test_runtime_namespace_holds_only_the_modules_own_macros(import_dir):
     assert (user.v, runtime_macros(user)) == (6, {"twice"})
     expected = set(getattr(lispy.macros, "__macro_namespace"))
     assert (everything.v, runtime_macros(everything)) == (2, expected)
+
+
+@pytest.mark.parametrize("package", ["", "l2_pkg"])
+def test_l2py_f_leaves_modules_and_sys_path_as_it_found_them(
+    tmp_path, forget_new_modules, package
+):
+    # Defect: l2py_f dropped every .lpy module from sys.modules (lispython's own
+    # included, splitting the process into two copies of them) and left the
+    # import root (the script directory, or a package's parent) on sys.path.
+    module_dir = tmp_path / package
+    module_dir.mkdir(exist_ok=True)
+    if package:
+        (module_dir / "__init__.py").write_text("")
+    (module_dir / "l2_mac.lpy").write_text("(defmacro twice [x] (return `(* 2 ~x)))\n")
+    script = module_dir / "l2_main.lpy"
+    mac = f"{package}.l2-mac" if package else "l2-mac"
+    script.write_text(f"(require {mac} *)\n(twice 3)\n")
+    tools.l2py_s("(inc 1)")
+    before = dict(sys.modules)
+    path_before = list(sys.path)
+    assert str(tmp_path) not in sys.path  # the call itself must find l2_mac
+
+    out = tools.l2py_f(str(script), no_lispy=True, format=False)
+
+    assert out == "2 * 3\n"
+    changed = sorted(k for k, v in before.items() if sys.modules.get(k) is not v)
+    assert changed == []
+    assert sys.path == path_before
 
 
 def test_the_prelude_emits_no_code():
