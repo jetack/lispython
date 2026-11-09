@@ -25,7 +25,7 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.importer [finder-loader-details])
 (from lispy.core.macro [prelude-opted-out])
-(from lispy.core.parser [parse tokenize])
+(from lispy.core.parser [_WORD_TOKENS parse run-tokens source-offset tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
@@ -597,24 +597,59 @@
     (- node.end_lineno 1)
     node.end_col_offset)))
 
-(def extract-error-position [exc src]
-  "Best-effort extraction of line/col from a parse or compile error."
-  ;; Some Python exceptions carry lineno/offset
-  (= lineno (getattr exc "lineno" None))
-  (if (is-not lineno None)
-      (do (= col (- (or (getattr exc "offset" None) 1) 1))
-          (return (, (- lineno 1) col (- lineno 1) col))))
-  ;; Try to extract from the message
-  (= msg (str exc))
-  (= m (re.search "line\\s+(\\d+)" msg re.IGNORECASE))
-  (if m
-      (do (= line (- (int (.group m 1)) 1))
-          (= col 0)
-          (= mc (re.search "col(?:umn)?\\s+(\\d+)" msg re.IGNORECASE))
-          (if mc
-              (= col (int (.group mc 1))))
-          (return (, line col line col))))
-  (return None))
+(def extract-error-position [exc]
+  "The (0-based line, code-point col) of exc, a SyntaxError of the buffer
+   (buffer-error-p), clamped to 0; None when it carries no line."
+  (if (is exc.lineno None)
+      (return None))
+  (return (, (max 0 (- exc.lineno 1)) (max 0 (- (or exc.offset 1) 1)))))
+
+(def reader-line [source line]
+  "source's 0-based line without its line break, the lines being the
+   reader's (source-offset: a lone CR ends one, as CRLF and LF do), which
+   an error's line counts; empty past the last line."
+  (= offset (source-offset source))
+  (try
+    (= [start end] [(offset (+ line 1) 0) (offset (+ line 2) 0)])
+    (except [IndexError]
+      (return "")))
+  (return (.rstrip (sub source [: start end]) "\r\n")))
+
+(def error-head-span [line col]
+  "(start, end), code-point columns of line, of the error at col: an
+   opening bracket with the reader's symbol or number token right after it
+   ((while, [x), or the symbol or number token at col (run-tokens; the
+   reader's leaf when col is past a prefix), else the one character at col
+   (a string opening, a closing bracket, a quote mark: (\"abc\" is its
+   bracket alone), and the line's last character at or past its end (col
+   to col + 1 on an empty line, which a client clamps to the line).  Only
+   the head, on the start line: the body the user is still typing then
+   never lies inside the range, and a non-empty range spares the client a
+   guess (eglot underlines a zero-width one a character early, VS Code a
+   word of its choosing)."
+  (if (>= col (len line))
+      (return (ife line (, (- (len line) 1) (len line)) (, col (+ col 1)))))
+  (= head (ife (in (sub line col) "([{") (+ col 1) col))
+  (for [start end tktype] in (run-tokens line head)
+    (if (in tktype _WORD_TOKENS)
+        (return (, col end)))
+    (break))
+  (return (, col (+ col 1))))
+
+(def buffer-error-p [exc path]
+  "Whether exc, an error of the compile of the buffer at path (uri-to-path),
+   is a SyntaxError (LispyCompileError is one) of the buffer: its filename
+   None (the buffer's compile errors carry none) or path.  Only such an
+   error has a position in the buffer: a SyntaxError from another file (a
+   required module that fails to parse or compile) names a line of that
+   file, and any other exception's lineno or message names a line of
+   whatever it read (a macro's json.loads), never of the buffer."
+  (if (not (isinstance exc SyntaxError))
+      (return False))
+  (= filename exc.filename)
+  (return (or (is filename None)
+              (== (osp.normcase (osp.abspath filename))
+                  (osp.normcase (osp.abspath path))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Compiles that may never return
@@ -780,28 +815,45 @@
                      :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
-(def error-diagnostic [exc source severity message]
-  (= pos (extract-error-position exc source))
+(def error-diagnostic [exc source uri severity prefix :doc None]
+  "The diagnostic of exc, the parse or compile error of source, document
+   uri's text, its message prefix + the error's.  A SyntaxError of the
+   buffer (buffer-error-p) is ranged over the head of the form it names
+   (error-head-span, on the reader's line, reader-line) with its bare msg,
+   whose str adds a (file, line N) the range already gives; any other error,
+   or one with no line, keeps its str (naming another file and its line)
+   and is the first character of source.  The range is in doc's client
+   units (client-position), in code points when there is no doc."
+  (= own (buffer-error-p exc (uri-to-path uri)))
+  (= pos (ife own (extract-error-position exc) None))
   (if (is pos None)
-      (= pos (, 0 0 0 0)))
-  (return (lsp.Diagnostic :range (make-range *pos) :severity severity :source "lpy-lsp"
-                          :message message)))
+      (= [line start end] [0 0 1])
+      (do (= [line col] pos)
+          (= [start end] (error-head-span (reader-line source line) col))))
+  (= message (ife (and own exc.msg) exc.msg (str exc)))
+  (= rng (ife (is doc None)
+              (make-range line start line end)
+              (lsp.Range :start (client-position doc (+ line 1) start)
+                         :end (client-position doc (+ line 1) end))))
+  (return (lsp.Diagnostic :range rng :severity severity :source "lpy-lsp"
+                          :message (+ prefix message))))
 
-(def compute-diagnostics [source uri :compiled None]
+(def compute-diagnostics [source uri :compiled None :doc None]
   "lispython's own diagnostics of source, document uri's text: its parse
    error, an Error, or its compile error, a Warning, since macro expansion
    depends on the runtime environment (imports must resolve); a module the
    compile cannot import is none.  compiled is source's CompiledBuffer
-   (compile-document), compiled here when None."
+   (compile-document), compiled here when None; doc, uri's document holding
+   source, gives the client's position units (code points without one)."
   (if (is compiled None)
       (= compiled (compile-document uri None source)))
   (= exc compiled.error)
   (cond (== compiled.stage PARSE-STAGE)
-        (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Error
-                                   f"Parse error: {exc}")])
+        (return [(error-diagnostic exc source uri lsp.DiagnosticSeverity.Error
+                                   "Parse error: " :doc doc)])
         (and (== compiled.stage COMPILE-STAGE) (not (isinstance exc ModuleNotFoundError)))
-        (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Warning
-                                   f"Compile warning: {exc}")]))
+        (return [(error-diagnostic exc source uri lsp.DiagnosticSeverity.Warning
+                                   "Compile warning: " :doc doc)]))
   (return (list)))
 
 ;; Seconds a change's diagnostics wait for the backend's, once its view
@@ -1021,7 +1073,7 @@
   (if (not (_current-p run))
       (return))
   (= doc run.doc)
-  (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled))
+  (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled :doc doc))
   (= run.view compiled.view)
   (if (and (is-not run.view None)
            (.document-changed backends doc.uri doc.source run.view))

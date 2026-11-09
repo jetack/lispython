@@ -139,6 +139,110 @@ def test_diagnostics_still_report_the_error(buffer):
     assert diagnostic.range.start.line == 2
 
 
+@pytest.mark.parametrize(
+    ("source", "line", "underlined"),
+    [
+        # An indented form on a later line, the reported case: the body is
+        # being typed after the head.
+        ("(for i in (range 3)\n  (while (and busy)))", 1, "(while"),
+        ("(def f [x])", 0, "(def"),
+        ("(+ 1 2))", 0, ")"),
+    ],
+)
+def test_lispython_diagnostics_underline_the_form_head(source, line, underlined):
+    # Defect: a zero-width range at the form, which eglot places a character
+    # early and VS Code widens to a word of its own, and a message carrying
+    # str(SyntaxError)'s "(line N)" suffix.
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    start, end = diagnostic.range.start, diagnostic.range.end
+    assert start.line == end.line == line
+    assert source.split("\n")[line][start.character : end.character] == underlined
+    assert not re.search(r"(\(|, )line \d+\)$", diagnostic.message)
+
+
+def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
+    # Defect: a required module's compile error carries that module's line
+    # (3, its (while)), which the buffer's diagnostic took as its own: it
+    # underlined the buffer's third form, (=, with a bare message naming no
+    # file.
+    (tmp_path / "lspbrokenreq.lpy").write_text("(= a 1)\n(= b 2)\n(while)\n")
+    source = "(require lspbrokenreq)\n(= a 1)\n(= b 2)"
+    try:
+        [diagnostic] = server.compute_diagnostics(
+            source, (tmp_path / "main.lpy").as_uri()
+        )
+    finally:
+        sys.modules.pop("lspbrokenreq", None)
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character) == (0, 0)
+    assert (rng.end.line, rng.end.character) == (0, 1)
+    assert "lspbrokenreq.lpy" in diagnostic.message
+
+
+def test_an_error_with_no_position_marks_one_character():
+    # Defect: an error naming no position took the head of the first form,
+    # (defmacro, as if that form were at fault.
+    source = '(defmacro boom [] (raise (ValueError "boom")))\n(boom)'
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character, rng.end.character) == (0, 0, 1)
+
+
+def test_another_exceptions_line_is_not_a_buffer_position():
+    # Defect: a macro's JSONDecodeError carries lineno 4, a line of the JSON
+    # text it parsed, which the diagnostic took as the buffer's fourth line
+    # and underlined (= d 4) there.
+    source = (
+        '(defmacro bad [] (import json) (json.loads "{\\n\\n\\n  bad}"))\n'
+        "(= b 2)\n"
+        "(= c 3)\n"
+        "(= d 4)\n"
+        "(bad)"
+    )
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character, rng.end.character) == (0, 0, 1)
+    assert "line 4" in diagnostic.message
+
+
+def test_a_lone_carriage_return_ends_the_measured_line():
+    # Defect: the head was measured on the line split at LF alone, while the
+    # reader (and the error's line) also ends a line at a lone CR, so
+    # (while on the second line was measured on another line's text.
+    source = "(f x)\r  (while)"
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    rng = diagnostic.range
+    assert rng.start.line == 1
+    assert source.split("\r")[1][rng.start.character : rng.end.character] == "(while"
+
+
+def test_a_diagnostic_range_counts_in_the_editors_units():
+    # Defect: lispython's own diagnostic went out in code points, so a
+    # UTF-16 editor underlined one unit early per astral character before
+    # the form (here the head (while starts at code point 10, unit 11).
+    from pygls.workspace import PositionCodec, TextDocument
+
+    source = '(= s "😀") (while)'
+    doc = TextDocument(URI, source, position_codec=PositionCodec(encoding="utf-16"))
+    [diagnostic] = server.compute_diagnostics(source, URI, doc=doc)
+    assert (diagnostic.range.start.character, diagnostic.range.end.character) == (
+        11,
+        17,
+    )
+
+
+def test_a_diagnostic_never_underlines_a_crlf_lines_carriage_return():
+    # Defect: the line's text kept CRLF's \r, so an error at the end of the
+    # line underlined the invisible \r instead of the line's last character.
+    source = "(f x\r\n(g)\r\n"
+    exc = SyntaxError("boom", (None, 1, 5, "(f x", 1, 5))
+    diagnostic = server.error_diagnostic(
+        exc, source, URI, lsp.DiagnosticSeverity.Error, "Parse error: "
+    )
+    rng = diagnostic.range
+    assert source.split("\n")[0][rng.start.character : rng.end.character] == "x"
+
+
 def test_a_diagnostics_parse_warning_names_the_document_file():
     with pytest.warns(SyntaxWarning) as rec:
         server.compute_diagnostics('(print f"{(g \\"a\\")}")', URI)
