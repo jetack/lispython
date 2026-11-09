@@ -87,5 +87,5 @@ def test_m_refuses_a_part_that_is_no_name(tmp_path: Path):
     r = run_m(tmp_path, "class")
     assert r.returncode == 1
     assert r.stderr.startswith("<command line>:1:1: error:")
-    assert "class" in r.stderr
+    assert r.stderr.splitlines()[1:] == ["class", "^"]
     assert "Traceback" not in r.stderr
