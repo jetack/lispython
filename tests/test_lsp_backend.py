@@ -223,8 +223,24 @@ def gone(pid):
     try:
         with open(f"/proc/{pid}/stat") as f:
             return f.read().rsplit(")", 1)[1].split()[0] == "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # A process that exits between open and read makes read raise ESRCH.
         return True
+
+
+def test_gone_treats_an_exit_between_open_and_read_as_gone(monkeypatch):
+    class Exiting:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr("builtins.open", lambda *a, **k: Exiting())
+    assert gone(2**22 + 1)
 
 
 async def wait_gone(pid, timeout=5):
