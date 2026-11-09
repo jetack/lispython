@@ -39,9 +39,10 @@
 (from lispy.form-docs [BINDABLE-FORMS BUILTIN-MACROS BUILTIN-MACRO-MODULES MACRO-TAG
                        OWN-NAME-TAGS OWN-TAG-KINDS SPECIAL-FORM-DOCS
                        TYPE-ALIAS-DOC hover-markdown])
-(from lispy.lsp.python-view [COMPILE-STAGE DEFAULT-PYREFLY-PRESET PARSE-STAGE
-                             ViewCache compile-buffer glued-base hyphen-spelling
-                             lpy-diagnostic-range lpy-range module-names name-key
+(from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
+                             PARSE-STAGE ViewCache compile-buffer glued-base
+                             hyphen-spelling lpy-diagnostic-range lpy-range
+                             marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
                              pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor])
@@ -1992,7 +1993,7 @@
               (.append items (own-item name tag kind))))))
   (return items))
 
-(def general-items [doc :line None]
+(def general-items [doc :line None :col None]
   "The completion items offered with no Python backend's answer:
    lispython's own (lispython-items), the Python builtins (builtin-names),
    then the buffer's definitions (buffer-definition-names), each name once
@@ -2004,7 +2005,7 @@
   (for [label kind] in [*[(, (hyphen-spelling name) kind)
                           for [name kind] in (builtin-names)]
                         *[(, name lsp.CompletionItemKind.Variable)
-                          for name in (buffer-definition-names doc line)]]
+                          for name in (buffer-definition-names doc line :col col)]]
     ;; One item per name (name-key), so a buffer's my_x and my-x are one.
     (if (not-in (name-key label) seen)
         (do (.add seen (name-key label))
@@ -2027,7 +2028,7 @@
            (attribute-context-p doc.source line col))
       (do (= view (ife (is base None) None (compiled-view doc)))
           (return (ife (is view None) [] (qualified-macro-items view base)))))
-  (return (general-items doc :line line)))
+  (return (general-items doc :line line :col col)))
 
 ;; ---------------------------------------------------------------------------
 ;; Completion through the Python backend
@@ -2252,24 +2253,35 @@
         :text-edit (completion-edit ranges label insert-replace))))
   (return result))
 
-(def buffer-definition-names [doc line]
+(def buffer-definition-names [doc line :col None]
   "The names doc's definitions bind (collect-definitions), in source order
    and as completion offers them: each labelled as a backend item of its
    Python name is (completion-label over buffer-spellings at line), so one
    name gives one label, a defmacro's included.  The one home of that list,
    over the partial parses of buffer-texts at the 1-based line (None: no
-   cursor)."
+   cursor).  With the code-point col too they are read with the word at the
+   cursor replaced by the sentinel (marked-source, as the cursor view
+   compiles it), because that word binds a name only because it is being
+   typed ((from heapq [heappush heap|]) binds heap): a name offered there
+   must exist without it."
+  (= source doc.source)
+  (if (and (is-not line None) (is-not col None))
+      (do (= cursor (marked-source source line col))
+          (if (is-not cursor None)
+              (= source (sub cursor 0)))))
   (= names {})
-  (for text in (buffer-texts doc.source line)
+  (for text in (buffer-texts source line)
     (try
       (.update names (collect-definitions (parse text :partial True) doc.uri
                                          :params True))
       (except [Exception]
         (pass))))
   (= spellings (buffer-spellings doc.source :line line))
-  (return [(completion-label (py-name name) spellings) for name in names]))
+  ;; The sentinel may be glued (grid.___), so any name holding it goes.
+  (return [(completion-label (py-name name) spellings) for name in names
+           if (not-in CURSOR-SENTINEL name)]))
 
-(def merged-items [doc line view items]
+(def merged-items [doc line col view items]
   "lispython's own items (lispython-items, then each macro of the view under
    the hyphen spelling of its registered key, view.macros) followed by
    items, the backend's (backend-items), whose name (name-key) none of them
@@ -2277,7 +2289,7 @@
    special form or macro wins over whatever the backend offers by that
    name.  Over a fallback view (only the text before the cursor compiled)
    the buffer's definitions the backend could not see
-   (buffer-definition-names at the 1-based line) follow."
+   (buffer-definition-names at the 1-based line and code-point col) follow."
   (= merged (lispython-items))
   (= taken (set [(name-key item.label) for item in merged]))
   ;; view.macros is keyed by name-key, as taken is, and holds the spelling.
@@ -2292,7 +2304,7 @@
   (if view.fallback
       (.extend rest [(lsp.CompletionItem :label name
                                          :kind lsp.CompletionItemKind.Variable)
-                     for name in (buffer-definition-names doc line)]))
+                     for name in (buffer-definition-names doc line :col col)]))
   (for item in rest
     (= name (name-key item.label))
     (if (not-in name taken)
@@ -2612,6 +2624,19 @@
             generation))
   (return answer))
 
+(def without-self-binding [view items]
+  "items, the backend's (backend-items) over view, less the word at the
+   cursor itself when view.self-bound: the backend offers a name the word
+   binds only because it is being typed ((def f [ab|]), (import heapq as
+   he|)), never one the buffer has.  Compared with view.partial, the word
+   the backend saw, never the word typed now, because a kept answer
+   (completion-cache) serves the later keystrokes of that word; by
+   name-key, so the hyphen label of the item is the same name."
+  (if (not view.self-bound)
+      (return items))
+  (= word (name-key view.partial))
+  (return [item for item in items if (!= (name-key item.label) word)]))
+
 (async-def backend-completion [doc line col base insert-replace]
   "The completion items over a Python view of doc, with the backend's help
    when there is one, or None when there is none (no view, no items), and
@@ -2651,8 +2676,8 @@
                                       (ife attribute None MERGE-TIMEOUT) attribute)))
   (if (is view None)
       (return None))
-  (= found (backend-items doc line col items insert-replace
-                         (buffer-spellings doc.source :line line)))
+  (= found (without-self-binding view (backend-items doc line col items insert-replace
+                                                    (buffer-spellings doc.source :line line))))
   (= macros (qualified-macro-items view base))
   (cond macros
         (do (= taken (set [(name-key item.label) for item in macros]))
@@ -2661,7 +2686,7 @@
         (not found)
         (return None)
         (not view.attribute)
-        (= found (merged-items doc line view found)))
+        (= found (merged-items doc line col view found)))
   (return found))
 
 (def document-snapshot [doc]
