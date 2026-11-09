@@ -150,6 +150,16 @@
   (= folders (ife (is folders None) (workspace-folders) folders))
   (return (module-names path :project-root (project-root-of path folders))))
 
+(def uri-module-names [uri]
+  "document-module-names of document uri's file, or for a buffer with no
+   file (untitled:) a script's: __main__ in no package, searching nothing.
+   The one naming of a document's full view, which compile-document
+   compiles under and compiled-view looks up by."
+  (= path (to-fs-path uri))
+  (return (ife (is path None)
+               (, "__main__" "" None (,))
+               (document-module-names path))))
+
 ;; The Python backend of each workspace project (lispy.lsp.backend).  Its
 ;; document hooks never raise; only an open starts a backend, and only when
 ;; its diagnostics are forwarded.
@@ -688,10 +698,7 @@
    compiles again all the same and caches the result.  It runs
    the buffer's macros, so callers on the loop run it in a thread, reading
    view-cache's generation before the hand-off."
-  (= path (to-fs-path uri))
-  (= [name package _ search-dirs] (ife (is path None)
-                                      (, "__main__" "" None (,))
-                                      (document-module-names path)))
+  (= [name package _ search-dirs] (uri-module-names uri))
   (if (is version None)
       (return (compile-buffer source :package package :name name :search-dirs search-dirs
                               :filename (uri-to-path uri))))
@@ -1488,10 +1495,13 @@
 
 (def compiled-view [doc]
   "The full view of snapshot doc's version, compiled under the macro
-   environment of now (ViewCache.cached-view), or None: none compiled
-   yet, or the compile failed.  Hover and signature help read it, never
-   compile: they answer locally before any backend."
-  (return (.cached-view view-cache doc.uri doc.version)))
+   environment and the naming of now (ViewCache.cached-view,
+   uri-module-names: a stat of the files around it, cheap on the loop), or
+   None: none compiled yet, or the compile failed.  Hover and signature
+   help read it, never compile: they answer locally before any backend."
+  (= [name package _ search-dirs] (uri-module-names doc.uri))
+  (return (.cached-view view-cache doc.uri doc.version :package package :name name
+                        :search-dirs search-dirs)))
 
 (def builtin-hover [target]
   "The builtin-info hover of Symbol target, or None: the answer when no
@@ -2414,14 +2424,17 @@
    snapshot doc: typed, the word typed before the cursor (partial-span, as
    completion-ranges reads it); key, what a backend answer there depends on
    besides that word: the line, the word's start, the text before the word
-   and after the cursor, and whether it is an attribute."
+   and after the cursor, whether it is an attribute, and the naming its
+   cursor view compiles under (uri-module-names, which follows the files
+   and workspace folders around the document)."
   (= lines (.split doc.source "\n"))
   (= text (line-text doc.source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
   (= before (.join "\n" [*(sub lines [: None (max 0 (- line 1))]) (sub text [: None start])]))
   (= after (.join "\n" [(sub text [: col None]) *(sub lines [: line None])]))
-  (return (, (, line start before after attribute) (sub text [: start col]))))
+  (return (, (, line start before after attribute (uri-module-names doc.uri))
+             (sub text [: start col]))))
 
 (class CachedCompletion []
   "A backend completion answer kept for the next keystrokes of its word:

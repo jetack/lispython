@@ -411,7 +411,7 @@ def cache_full_view(document):
         package=package,
         search_dirs=search_dirs,
     )
-    assert server.view_cache.cached_view(document.uri, document.version) is not None
+    assert server.compiled_view(document) is not None
 
 
 def test_required_macros_come_from_the_full_view_with_no_cursor_view(

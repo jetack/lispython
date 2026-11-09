@@ -1051,16 +1051,22 @@
   (= view.fallback fallback)
   (return (, view macro-epoch)))
 
+(def _naming [name package search-dirs]
+  "The module naming a compile runs under, as a ViewCache key holds it."
+  (return (, name package (tuple search-dirs))))
+
 (class ViewCache []
-  "The latest view of each document, by version and macro environment
-   (the epoch its compile ran under: a hit needs macro_modules.epoch to be
-   that one now, so the modules its requires imported are unchanged), and
-   cursor for view-at-cursor: one
-   entry per uri, so the cache never outgrows the open documents.  A None
-   result is cached like any other.  Views are made in
-   worker threads while forget runs on the LSP's loop, so a view stores
-   its result only when no forget came since it began (generation, one
-   counter for every uri: a close elsewhere only costs a cache miss),
+  "The latest view of each document, by version, macro environment (the
+   epoch its compile ran under: a hit needs macro_modules.epoch to be that
+   one now, so the modules its requires imported are unchanged) and module
+   naming (name, package and search dirs, module-names': a hit needs the
+   ones the caller would compile under now, since they follow the files
+   and workspace folders around the document, not its text), and cursor
+   for view-at-cursor: one entry per uri, so the cache never outgrows the
+   open documents.  A None result is cached like any other.  Views are
+   made in worker threads while forget runs on the LSP's loop, so a view
+   stores its result only when no forget came since it began (generation,
+   one counter for every uri: a close elsewhere only costs a cache miss),
    checked and stored under lock with forget, so a closed document's
    entry is never stored after it was dropped.  A caller that hands the
    view to a thread reads generation on its own thread first and passes
@@ -1072,11 +1078,12 @@
     (= self._generation 0))
 
   (def _store [self table uri key result generation]
-    "Keep result as uri's entry in table under key, (version, epoch, ...),
-     unless the document was forgotten since generation, or the entry is of
-     a newer (version, epoch): a slow compile (one given up on) returning
-     late must not cost the newer entry a recompile.  An entry of the same
-     (version, epoch) is replaced (a fresh compile)."
+    "Keep result as uri's entry in table under key, (version, epoch, naming,
+     ...), unless the document was forgotten since generation, or the entry
+     is of a newer (version, epoch): a slow compile (one given up on)
+     returning late must not cost the newer entry a recompile.  An entry of
+     the same (version, epoch) is replaced (a fresh compile, or one under
+     the naming of now)."
     (with [self._lock]
       (= old (.get table uri))
       (if (and (== generation self._generation)
@@ -1102,27 +1109,30 @@
 
   (def compiled [self uri version source :package "" :name "__main__" :search-dirs (,)
                  :filename None :generation None :fresh False]
-    "The CompiledBuffer of uri's source at version (compile-buffer), compiled
-     once per version: the diagnostics of a change and every request on the
-     same version share it.  fresh compiles again, replacing the entry."
+    "The CompiledBuffer of uri's source at version (compile-buffer) under
+     the naming given, compiled once per version and naming: the
+     diagnostics of a change and every request on the same version share
+     it.  fresh compiles again, replacing the entry."
     (if (is generation None)
         (= generation self._generation))
-    (= hit (._hit self self._views uri (, version (epoch))))
+    (= naming (_naming name package search-dirs))
+    (= hit (._hit self self._views uri (, version (epoch) naming)))
     (if (and (not fresh) (is-not hit None))
         (return (sub hit 1)))
     (= result (compile-buffer source :package package :name name :search-dirs search-dirs
                               :filename filename))
     (if (is-not result.epoch None)
-        (._store self self._views uri (, version result.epoch) result generation))
+        (._store self self._views uri (, version result.epoch naming) result generation))
     (return result))
 
-  (def cached-view [self uri version]
+  (def cached-view [self uri version :package "" :name "__main__" :search-dirs (,)]
     "uri's full view at version as compiled under the macro environment of
-     now (epoch), or None: none compiled yet, or it failed.  It never
-     compiles, so a request on the loop may read it."
+     now (epoch) and the naming given, or None: none compiled yet, or it
+     failed.  It never compiles, so a request on the loop may read it."
     (if (is version None)
         (return None))
-    (= hit (._hit self self._views uri (, version (epoch))))
+    (= hit (._hit self self._views uri
+                  (, version (epoch) (_naming name package search-dirs))))
     (if (is hit None)
         (return None))
     (return (. (sub hit 1) view)))
@@ -1138,13 +1148,14 @@
                        :generation None]
     (if (is generation None)
         (= generation self._generation))
-    (= hit (._hit self self._cursor-views uri (, version (epoch) line col)))
+    (= naming (_naming name package search-dirs))
+    (= hit (._hit self self._cursor-views uri (, version (epoch) naming line col)))
     (if (is-not hit None)
         (return (sub hit 1)))
     (= [result macro-epoch] (_view-at-cursor source line col :package package :name name
                                              :search-dirs search-dirs))
     (if (is-not macro-epoch None)
-        (._store self self._cursor-views uri (, version macro-epoch line col) result
+        (._store self self._cursor-views uri (, version macro-epoch naming line col) result
                  generation))
     (return result))
 

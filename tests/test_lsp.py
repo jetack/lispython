@@ -606,6 +606,39 @@ class TestRequireSelection:
         source = "(require .macmod)\n(macmod.thrice 1)"
         assert not self._definition_in(source, "untitled:x", package.parent, 1, 9)
 
+    def test_a_cached_view_follows_the_documents_module_naming(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: the view cache keys a document's compile by version and
+        # macro epoch alone, so once an __init__.py makes its directory a
+        # package (or removes it), a request on the same version answers
+        # from the compile under the old name and package: the relative
+        # require still fails, or a view whose require no longer resolves
+        # is still served.
+        monkeypatch.setattr(server, "view_cache", pv.ViewCache())
+        monkeypatch.setattr(server, "workspace_folders", lambda: [])
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        modules = ["lspnamingpkg", "lspnamingpkg.mac"]
+        for name in modules:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        pkg = tmp_path / "lspnamingpkg"
+        pkg.mkdir()
+        (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+        source = "(require .mac *)\n(= y (twice 1))"
+        doc = SimpleNamespace(uri=(pkg / "x.lpy").as_uri(), version=1, source=source)
+        try:
+            assert server.compile_document(doc.uri, 1, source).error is not None
+            (pkg / "__init__.py").write_text("")
+            compiled = server.compile_document(doc.uri, 1, source)
+            assert compiled.error is None
+            assert compiled.view.text.endswith("y = 1 + 1")
+            assert server.compiled_view(doc) is compiled.view
+            (pkg / "__init__.py").unlink()
+            assert server.compiled_view(doc) is None
+        finally:
+            for name in modules:
+                sys.modules.pop(name, None)
+
     @staticmethod
     def _target_in(folder, form, origin=None):
         [node] = parse(form)
