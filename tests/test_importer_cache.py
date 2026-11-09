@@ -6,6 +6,7 @@ cache (under a private PYTHONPYCACHEPREFIX) whenever that cache is trusted.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -53,6 +54,7 @@ def modules(tmp_path):
         return out
 
     write.run = run
+    write.env = env
     write.dir = directory
     return write
 
@@ -209,3 +211,50 @@ def test_a_reload_failing_partway_keeps_the_stamp_of_the_code_that_ran(modules):
     assert out["result"] == 1
     assert "RELOAD FAILED: x refused" in out["stderr"]
     assert modules.run("w")["result"] == 2
+
+
+def test_an_edit_to_lispython_itself_recompiles(modules, tmp_path):
+    # An editable checkout keeps its version while its compiler changes, so
+    # the cache is keyed on lispython's own sources, never on the version.
+    import lispy
+
+    lib = tmp_path / "lib"
+    shutil.copytree(
+        os.path.dirname(lispy.__file__),
+        lib / "lispy",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    modules.env["PYTHONPATH"] = os.pathsep.join([str(lib), modules.env["PYTHONPATH"]])
+    modules("a.lpy", "(= result 4242)")
+    shows = "import lispy, sys; print(lispy.__file__, file=sys.stderr)\n"
+    first = modules.run(before=shows)
+    assert first["stderr"].startswith(str(lib)), first["stderr"]
+    assert first["result"] == 4242 and first["cached"]
+    with open(lib / "lispy" / "core" / "compiler" / "literal.py", "a") as f:
+        f.write(
+            "\n\n_org = literal_value\n\n\n"
+            "def literal_value(*a, **k):\n"
+            "    v = _org(*a, **k)\n"
+            "    return 1 if v == 4242 else v\n"
+        )
+    second = modules.run(before=shows)
+    assert second["stderr"].startswith(str(lib)), second["stderr"]
+    assert second["result"] == 1
+
+
+def test_lispython_sources_with_equal_stamps_still_differ(monkeypatch, tmp_path):
+    # Wheels carry fixed zip timestamps, so two lispython versions can share
+    # every file's mtime and size; the cache key must still tell them apart.
+    from lispy.core import importer
+
+    package = tmp_path / "lispy"
+    (package / "core").mkdir(parents=True)
+    source = package / "core" / "literal.py"
+    source.write_text("VALUE = 1\n")
+    stamp = os.stat(source).st_mtime_ns
+    monkeypatch.setattr(importer, "_LISPY_DIR", str(package))
+    first = importer._compiler_fingerprint()
+    source.write_text("VALUE = 2\n")
+    os.utime(source, ns=(stamp, stamp))
+    assert os.stat(source).st_size == len("VALUE = 1\n")
+    assert importer._compiler_fingerprint() != first

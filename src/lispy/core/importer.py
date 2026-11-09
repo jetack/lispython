@@ -1,5 +1,6 @@
 import ast
 import builtins
+import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -215,8 +216,11 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
 #  - every .py/.lpy source read while it compiled (a thread-local window
 #    around the compile, fed by path_stats, which SourceFileLoader.get_code
 #    calls before it reads a source), outside the standard library,
-#    site-packages and lispython itself (the version in the header covers
-#    lispython): this catches a module a macro imports as it expands.
+#    site-packages and lispython itself (the header covers lispython: a
+#    digest of the contents of every .py/.lpy in its package, so an edit
+#    to the compiler, the prelude or the builtins in a checkout recompiles
+#    every module, while an installed version string would not change):
+#    this catches a module a macro imports as it expands.
 #    A nested .lpy import merges its whole record into every enclosing window.
 # Entries are distinct (real path, st_mtime_ns, st_size) triples, so one path
 # may appear with two stamps; such a record never validates again.
@@ -244,6 +248,9 @@ _READ_STAMPS = {}
 # A side table, never a key in the module's dict (its globals are the user's).
 _MODULE_RECORDS = weakref.WeakKeyDictionary()
 _cache_header = None
+# Real path of lispython's package directory: excluded from every record,
+# since the header's fingerprint covers it.
+_LISPY_DIR = osp.dirname(osp.dirname(osp.realpath(__file__)))
 _TEMP_ATTEMPTS = 3
 _excluded_dirs = None
 
@@ -271,17 +278,63 @@ def lpy_record(path):
 
 def _header():
     """What a cache must have been written under: the bytecode magic and the
-    lispython version, read once."""
+    fingerprint of lispython's own sources (_compiler_fingerprint), computed
+    once per process."""
     global _cache_header
     if _cache_header is None:
-        try:
-            from importlib.metadata import version
-
-            lispy_version = version("lispython")
-        except Exception:
-            lispy_version = "unknown"
-        _cache_header = (bytes(importlib.util.MAGIC_NUMBER), lispy_version)
+        _cache_header = (bytes(importlib.util.MAGIC_NUMBER), _compiler_fingerprint())
     return _cache_header
+
+
+def _compiler_fingerprint():
+    """A digest of the contents of every .py and .lpy file in lispython's
+    package (path relative to _LISPY_DIR and bytes, sorted by path).  It is
+    deliberately a superset of what shapes compiled output (the compiler, the
+    prelude, the builtins and every other module alike), so that no
+    hand-kept list of the files that matter can drift from the code.  An
+    unreadable file or directory folds in a marker instead of its bytes, and
+    nothing here raises.
+
+    Content, where dependency records use stamps: a record stats many user
+    files on every import, while this is one fixed, small set (a few dozen
+    files, under a MB) read once per process, about a millisecond; and
+    content is the only key that holds across installs, because wheels carry
+    fixed zip timestamps, so two versions whose changed files kept their
+    sizes share every stamp."""
+    entries = []
+
+    def unreadable(error):
+        # error.filename may be None, which relpath rejects.
+        marker = (
+            osp.relpath(error.filename, _LISPY_DIR)
+            if error.filename
+            else "<unreadable>"
+        )
+        entries.append((marker, None))
+
+    for directory, dirs, files in os.walk(_LISPY_DIR, onerror=unreadable):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for name in files:
+            if name.endswith((".py", ".lpy")):
+                path = osp.join(directory, name)
+                entries.append((osp.relpath(path, _LISPY_DIR), path))
+    entries.sort(key=lambda entry: (entry[0], entry[1] is not None))
+    digest = hashlib.blake2b(digest_size=16)
+    for relative, path in entries:
+        content = None
+        if path is not None:
+            try:
+                with open(path, "rb") as source:
+                    content = source.read()
+            except OSError:
+                pass
+        # Each entry is framed by its path and length, so no two file sets
+        # feed the digest the same bytes.
+        size = -1 if content is None else len(content)
+        digest.update(repr((relative, size)).encode())
+        if content is not None:
+            digest.update(content)
+    return digest.hexdigest()
 
 
 def _stamp(path):
@@ -300,7 +353,7 @@ def _excluded(real):
         # asked here: its paths import modules, whose reads land here).
         _excluded_dirs = (
             osp.dirname(osp.realpath(os.__file__)),
-            osp.dirname(osp.dirname(osp.realpath(__file__))),
+            _LISPY_DIR,
         )
     parts = real.split(os.sep)
     if "site-packages" in parts or "dist-packages" in parts:
