@@ -102,6 +102,28 @@ def test_a_prefixed_number_is_the_readers_number(lexer, src, expected):
     assert tokens(lexer, f"(f {src})")[2:-1] == expected
 
 
+@pytest.mark.parametrize(
+    ["src", "expected"],
+    [
+        ["-1", [(Operator, "-"), (Number.Integer, "1")]],
+        ["--1", [(Operator, "--"), (Number.Integer, "1")]],
+        ["+-1.5", [(Operator, "+-"), (Number.Float, "1.5")]],
+        ["-0x1f", [(Operator, "-"), (Number.Hex, "0x1f")]],
+        ["-1j", [(Operator, "-"), (Number, "1j")]],
+        ["-1+2j", [(Number, "-1+2j")]],
+        ["1", [(Number.Integer, "1")]],
+    ],
+)
+def test_a_number_token_peels_its_signs(lexer, src, expected):
+    # Defect: a number token was coloured whole ("-1", "--1") though the
+    # reader peels its signs; only a signed complex stays one token.
+    assert tokens(lexer, f"(f {src})")[2:-1] == expected
+
+
+def test_a_number_at_a_form_head(lexer):
+    assert tokens(lexer, "(-1 x)")[1:3] == [(Operator, "-"), (Number.Integer, "1")]
+
+
 def test_quote_operators(lexer):
     src = "(return `(do ~@body (while ~pred 'x)))"
     for text in ["`", "~@", "~", "'"]:
@@ -113,7 +135,6 @@ def test_quote_operators(lexer):
     ["text", "kind"],
     [
         ["42", Number.Integer],
-        ["-1", Number.Integer],
         ["1_000", Number.Integer],
         ["1.5", Number.Float],
         ["1e-3", Number.Float],

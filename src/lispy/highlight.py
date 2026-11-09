@@ -78,12 +78,12 @@ def _named_kind(text, after_paren):
     return None
 
 
-def _symbol_tokens(text, start, after_paren):
-    """(index, token type, text) of a symbol token, classified as the reader
+def _symbol_tokens(text, start, after_paren, tktype="symbol"):
+    """(index, token type, text) of a symbol or number token, classified as the reader
     reads it: each prefix token_prefixes peels (^, *, **, signs) is an
     operator before the rest, a ``:`` prefix makes the whole token a keyword,
     and a leaf the reader re-types as a number (``*1``, ``*-1+2j``) is one."""
-    prefixes, leaf, tktype = token_prefixes(text, "symbol")
+    prefixes, leaf, tktype = token_prefixes(text, tktype)
     for prefix in prefixes:
         kind = _named_kind(text, after_paren)
         if kind is not None:
@@ -110,7 +110,7 @@ def _symbol(lexer, match):
 
 
 def _number(lexer, match):
-    yield match.start(), _number_kind(match.group()), match.group()
+    yield from _symbol_tokens(match.group(), match.start(), False, "number")
 
 
 def _number_kind(text):
