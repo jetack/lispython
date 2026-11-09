@@ -812,17 +812,21 @@
                      :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
-(def error-diagnostic [exc source uri severity prefix :doc None]
+(def error-diagnostic [exc source uri severity prefix :doc None :form None]
   "The diagnostic of exc, the parse or compile error of source, document
    uri's text, its message prefix + the error's.  A SyntaxError of the
    buffer (buffer-error-p) is ranged over the head of the form it names
    (error-head-span, on the reader's line, reader-line) with its bare msg,
    whose str adds a (file, line N) the range already gives; any other error,
    or one with no line, keeps its str (naming another file and its line)
-   and is the first character of source.  The range is in doc's client
-   units (client-position), in code points when there is no doc."
+   and is ranged over the head of form, the top-level form that raised it,
+   when given (a macro's ValueError, a required module's error at its
+   require), else the first character of source.  The range is in doc's
+   client units (client-position), in code points when there is no doc."
   (= own (buffer-error-p exc (uri-to-path uri)))
   (= pos (ife own (extract-error-position exc) None))
+  (if (and (is pos None) (is-not form None) form.lineno)
+      (= pos (, (- form.lineno 1) form.col-offset)))
   (if (is pos None)
       (= [line start end] [0 0 1])
       (do (= [line col] pos)
@@ -838,8 +842,9 @@
 (def compute-diagnostics [source uri :compiled None :doc None]
   "lispython's own diagnostics of source, document uri's text: its parse
    error, an Error, alone; else one Warning per top-level form that failed
-   (CompiledBuffer failures, in source order) and for a failed unit start
-   (COMPILE-STAGE), Warnings since macro expansion depends on the runtime
+   (CompiledBuffer failures, in source order; an error naming no buffer
+   position is placed at its form's head, error-diagnostic) and for a
+   failed unit start (COMPILE-STAGE), Warnings since macro expansion depends on the runtime
    environment (imports must resolve); a module the compile cannot import
    is none.  compiled is source's CompiledBuffer (compile-document),
    compiled here when None; doc, uri's document holding source, gives the
@@ -849,12 +854,12 @@
   (if (== compiled.stage PARSE-STAGE)
       (return [(error-diagnostic compiled.error source uri lsp.DiagnosticSeverity.Error
                                  "Parse error: " :doc doc)]))
-  (= errors [error for [_ error] in compiled.failures])
+  (= failures (list compiled.failures))
   (if (== compiled.stage COMPILE-STAGE)
-      (.append errors compiled.error))
+      (.append failures (, None compiled.error)))
   (return [(error-diagnostic error source uri lsp.DiagnosticSeverity.Warning
-                             "Compile warning: " :doc doc)
-           for error in errors
+                             "Compile warning: " :doc doc :form form)
+           for [form error] in failures
            if (not (isinstance error ModuleNotFoundError))]))
 
 ;; Seconds a change's diagnostics wait for the backend's, once its view
