@@ -296,15 +296,21 @@ def _compiler_fingerprint():
     nothing here raises.
 
     Content, where dependency records use stamps: a record stats many user
-    files on every import, while this is one fixed, small set (31 files,
-    740 KB) read once per process, measured at 1.0 ms warm; and content is
-    the only key that holds across installs, because wheels carry fixed zip
-    timestamps, so two versions whose changed files kept their sizes share
-    every stamp."""
+    files on every import, while this is one fixed, small set (a few dozen
+    files, under a MB) read once per process, about a millisecond; and
+    content is the only key that holds across installs, because wheels carry
+    fixed zip timestamps, so two versions whose changed files kept their
+    sizes share every stamp."""
     entries = []
 
     def unreadable(error):
-        entries.append((osp.relpath(error.filename or "", _LISPY_DIR), None))
+        # error.filename may be None, which relpath rejects.
+        marker = (
+            osp.relpath(error.filename, _LISPY_DIR)
+            if error.filename
+            else "<unreadable>"
+        )
+        entries.append((marker, None))
 
     for directory, dirs, files in os.walk(_LISPY_DIR, onerror=unreadable):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
