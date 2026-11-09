@@ -622,7 +622,8 @@
    ((while, [x), or the symbol or number token at col (run-tokens; the
    reader's leaf when col is past a prefix), else the one character at col
    (a string opening, a closing bracket, a quote mark: (\"abc\" is its
-   bracket alone), and the line's last character at or past its end.  Only
+   bracket alone), and the line's last character at or past its end (col
+   to col + 1 on an empty line, which a client clamps to the line).  Only
    the head, on the start line: the body the user is still typing then
    never lies inside the range, and a non-empty range spares the client a
    guess (eglot underlines a zero-width one a character early, VS Code a
@@ -636,13 +637,18 @@
     (break))
   (return (, col (+ col 1))))
 
-(def error-message [exc]
-  "exc's message for a diagnostic: a SyntaxError's (LispyCompileError is
-   one) own msg, which has none of str's (file, line N) suffix the range
-   already places; any other exception's str."
-  (if (and (isinstance exc SyntaxError) exc.msg)
-      (return exc.msg))
-  (return (str exc)))
+(def buffer-error-p [exc path]
+  "Whether exc, an error of the compile of the buffer at path (uri-to-path),
+   lies in the buffer: anything but a SyntaxError, or one whose filename is
+   None (the buffer's compile errors carry none) or path.  A SyntaxError
+   from another file (a required module that fails to parse or compile)
+   names a line of that file, never of the buffer."
+  (if (not (isinstance exc SyntaxError))
+      (return True))
+  (= filename exc.filename)
+  (return (or (is filename None)
+              (== (osp.normcase (osp.abspath filename))
+                  (osp.normcase (osp.abspath path))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Compiles that may never return
@@ -808,31 +814,47 @@
                      :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
-(def error-diagnostic [exc source severity message]
-  "The diagnostic of exc, source's parse or compile error, ranged over the
-   head of the form it names (error-head-span; the start of source when
-   the error names no position), in code-point columns as every lispython
-   diagnostic."
-  (= [line col] (or (extract-error-position exc source) (, 0 0)))
-  (= [start end] (error-head-span (line-text source (+ line 1)) col))
-  (return (lsp.Diagnostic :range (make-range line start line end) :severity severity
-                          :source "lpy-lsp" :message message)))
+(def error-diagnostic [exc source uri severity prefix :doc None]
+  "The diagnostic of exc, the parse or compile error of source, document
+   uri's text, its message prefix + the error's.  An error in the buffer
+   (buffer-error-p) is ranged over the head of the form it names
+   (error-head-span) with a SyntaxError's bare msg, whose str adds a (file,
+   line N) the range already gives; an error with no position, or one in
+   another file, keeps its str (naming that file and line) and is the first
+   character of source.  The range is in doc's client units (client-position),
+   in code points when there is no doc."
+  (= own (buffer-error-p exc (uri-to-path uri)))
+  (= pos (ife own (extract-error-position exc source) None))
+  (if (is pos None)
+      (= [line start end] [0 0 1])
+      (do (= line (max 0 (sub pos 0)))
+          ;; A CRLF line's \r is no character a head could sit on.
+          (= text (.removesuffix (line-text source (+ line 1)) "\r"))
+          (= [start end] (error-head-span text (max 0 (sub pos 1))))))
+  (= message (ife (and own (isinstance exc SyntaxError) exc.msg) exc.msg (str exc)))
+  (= rng (ife (is doc None)
+              (make-range line start line end)
+              (lsp.Range :start (client-position doc (+ line 1) start)
+                         :end (client-position doc (+ line 1) end))))
+  (return (lsp.Diagnostic :range rng :severity severity :source "lpy-lsp"
+                          :message (+ prefix message))))
 
-(def compute-diagnostics [source uri :compiled None]
+(def compute-diagnostics [source uri :compiled None :doc None]
   "lispython's own diagnostics of source, document uri's text: its parse
    error, an Error, or its compile error, a Warning, since macro expansion
    depends on the runtime environment (imports must resolve); a module the
    compile cannot import is none.  compiled is source's CompiledBuffer
-   (compile-document), compiled here when None."
+   (compile-document), compiled here when None; doc, uri's document holding
+   source, gives the client's position units (code points without one)."
   (if (is compiled None)
       (= compiled (compile-document uri None source)))
   (= exc compiled.error)
   (cond (== compiled.stage PARSE-STAGE)
-        (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Error
-                                   f"Parse error: {(error-message exc)}")])
+        (return [(error-diagnostic exc source uri lsp.DiagnosticSeverity.Error
+                                   "Parse error: " :doc doc)])
         (and (== compiled.stage COMPILE-STAGE) (not (isinstance exc ModuleNotFoundError)))
-        (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Warning
-                                   f"Compile warning: {(error-message exc)}")]))
+        (return [(error-diagnostic exc source uri lsp.DiagnosticSeverity.Warning
+                                   "Compile warning: " :doc doc)]))
   (return (list)))
 
 ;; Seconds a change's diagnostics wait for the backend's, once its view
@@ -1052,7 +1074,7 @@
   (if (not (_current-p run))
       (return))
   (= doc run.doc)
-  (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled))
+  (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled :doc doc))
   (= run.view compiled.view)
   (if (and (is-not run.view None)
            (.document-changed backends doc.uri doc.source run.view))
