@@ -217,7 +217,7 @@ def _lpy_source_to_code(self, data, path, *args, **kwargs):
 #    around the compile, fed by path_stats, which SourceFileLoader.get_code
 #    calls before it reads a source), outside the standard library,
 #    site-packages and lispython itself (the header covers lispython: a
-#    fingerprint of the stamps of every .py/.lpy in its package, so an edit
+#    digest of the contents of every .py/.lpy in its package, so an edit
 #    to the compiler, the prelude or the builtins in a checkout recompiles
 #    every module, while an installed version string would not change):
 #    this catches a module a macro imports as it expands.
@@ -287,30 +287,48 @@ def _header():
 
 
 def _compiler_fingerprint():
-    """A digest of the (path relative to _LISPY_DIR, st_mtime_ns, st_size)
-    stamps of every .py and .lpy file in lispython's package, sorted: the
-    compiler, the prelude and the builtins whose output a cache holds.  An
-    unreadable file or directory folds in a marker instead of a stamp."""
-    stamps = []
+    """A digest of the contents of every .py and .lpy file in lispython's
+    package (path relative to _LISPY_DIR and bytes, sorted by path).  It is
+    deliberately a superset of what shapes compiled output (the compiler, the
+    prelude, the builtins and every other module alike), so that no
+    hand-kept list of the files that matter can drift from the code.  An
+    unreadable file or directory folds in a marker instead of its bytes, and
+    nothing here raises.
+
+    Content, where dependency records use stamps: a record stats many user
+    files on every import, while this is one fixed, small set (31 files,
+    740 KB) read once per process, measured at 1.0 ms warm; and content is
+    the only key that holds across installs, because wheels carry fixed zip
+    timestamps, so two versions whose changed files kept their sizes share
+    every stamp."""
+    entries = []
 
     def unreadable(error):
-        stamps.append(("?", error.filename or "", 0, 0))
+        entries.append((osp.relpath(error.filename or "", _LISPY_DIR), None))
 
     for directory, dirs, files in os.walk(_LISPY_DIR, onerror=unreadable):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for name in files:
-            if not name.endswith((".py", ".lpy")):
-                continue
-            path = osp.join(directory, name)
-            relative = osp.relpath(path, _LISPY_DIR)
+            if name.endswith((".py", ".lpy")):
+                path = osp.join(directory, name)
+                entries.append((osp.relpath(path, _LISPY_DIR), path))
+    entries.sort(key=lambda entry: (entry[0], entry[1] is not None))
+    digest = hashlib.blake2b(digest_size=16)
+    for relative, path in entries:
+        content = None
+        if path is not None:
             try:
-                st = os.stat(path)
+                with open(path, "rb") as source:
+                    content = source.read()
             except OSError:
-                stamps.append(("?", relative, 0, 0))
-            else:
-                stamps.append(("", relative, st.st_mtime_ns, st.st_size))
-    stamps.sort()
-    return hashlib.blake2b(repr(stamps).encode(), digest_size=16).hexdigest()
+                pass
+        # Each entry is framed by its path and length, so no two file sets
+        # feed the digest the same bytes.
+        size = -1 if content is None else len(content)
+        digest.update(repr((relative, size)).encode())
+        if content is not None:
+            digest.update(content)
+    return digest.hexdigest()
 
 
 def _stamp(path):

@@ -240,3 +240,21 @@ def test_an_edit_to_lispython_itself_recompiles(modules, tmp_path):
     second = modules.run(before=shows)
     assert second["stderr"].startswith(str(lib)), second["stderr"]
     assert second["result"] == 1
+
+
+def test_lispython_sources_with_equal_stamps_still_differ(monkeypatch, tmp_path):
+    # Wheels carry fixed zip timestamps, so two lispython versions can share
+    # every file's mtime and size; the cache key must still tell them apart.
+    from lispy.core import importer
+
+    package = tmp_path / "lispy"
+    (package / "core").mkdir(parents=True)
+    source = package / "core" / "literal.py"
+    source.write_text("VALUE = 1\n")
+    stamp = os.stat(source).st_mtime_ns
+    monkeypatch.setattr(importer, "_LISPY_DIR", str(package))
+    first = importer._compiler_fingerprint()
+    source.write_text("VALUE = 2\n")
+    os.utime(source, ns=(stamp, stamp))
+    assert os.stat(source).st_size == len("VALUE = 1\n")
+    assert importer._compiler_fingerprint() != first
