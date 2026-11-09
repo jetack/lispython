@@ -5,12 +5,14 @@
 (import contextvars)
 (import functools)
 (import glob)
+(import importlib.machinery)
 (import importlib.util)
 (import inspect)
 (import logging)
 (import os)
 (import os.path as osp)
 (import re)
+(import sys)
 (import pathlib)
 (import threading)
 
@@ -21,7 +23,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
-(from lispy.core.importer [finder-suffixes])
+(from lispy.core.importer [finder-loader-details])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
@@ -148,6 +150,16 @@
   (= folders (ife (is folders None) (workspace-folders) folders))
   (return (module-names path :project-root (project-root-of path folders))))
 
+(def uri-module-names [uri]
+  "document-module-names of document uri's file, or for a buffer with no
+   file (untitled:) a script's: __main__ in no package, searching nothing.
+   The one naming of a document's full view, which compile-document
+   compiles under and compiled-view looks up by."
+  (= path (to-fs-path uri))
+  (return (ife (is path None)
+               (, "__main__" "" None (,))
+               (document-module-names path))))
+
 ;; The Python backend of each workspace project (lispy.lsp.backend).  Its
 ;; document hooks never raise; only an open starts a backend, and only when
 ;; its diagnostics are forwarded.
@@ -214,40 +226,171 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def module-file-under [module-name roots]
-  "The .lpy file the absolute import name module-name (already its Python
-   spelling, module-import-name) imports from the first of roots that
-   holds it, or None, as CPython's FileFinder picks the file: a package
-   directory's __init__ of any suffix before a module file, each in
-   finder-suffixes order.  The file Python would import there is the
-   answer, so a package or module that is no .lpy (x/__init__.py beside
-   x.lpy) gives None, never the .lpy it shadows."
-  (= rel-path (osp.join *(.split module-name ".")))
-  (= suffixes (finder-suffixes))
-  (for root in roots
-    (= base (osp.join root rel-path))
-    (= candidates (+ (ife (osp.isdir base)
-                          [(osp.join base (+ "__init__" suffix)) for suffix in suffixes]
-                          [])
-                     [(+ base suffix) for suffix in suffixes]))
-    (for candidate in candidates
-      (if (osp.isfile candidate)
-          (return (ife (.endswith candidate ".lpy") candidate None)))))
+(def _hook-finder [entry]
+  "The finder sys.path-hooks gives the path entry entry, as PathFinder asks
+   them (each hook in order, an ImportError passing to the next), or None:
+   no hook takes it, or one fails otherwise.  Never cached, so
+   sys.path-importer-cache is neither read nor filled."
+  (for hook in (list sys.path-hooks)
+    (try
+      (return (hook entry))
+      (except [ImportError]
+        (continue))
+      (except [Exception]
+        (return None))))
+  (return None))
+
+(def path-entry-spec [name entries]
+  "The ModuleSpec of the absolute import name name that a path-based
+   lookup (CPython's PathFinder) finds over entries, one search path, or
+   None: per entry its finder, the first entry holding a module or regular
+   package winning, and a namespace package, its portions merged across
+   every entry, only when none holds one.  A directory's finder is a fresh
+   FileFinder with CPython's loaders in their order (finder-loader-details,
+   read now, so .lpy is the first source suffix), never the one
+   sys.path-importer-cache keeps, because that keeps a directory's
+   listing past a file written into it; any other str entry takes the
+   finder sys.path-hooks gives it (_hook-finder: an editable install
+   serves a namespace package from such an entry), a finder that raises
+   finding nothing.  '' is the working directory, as PathFinder takes it,
+   and skipped when that is gone, as PathFinder skips it."
+  (= portions [])
+  (for entry in entries
+    (if (not (isinstance entry str))
+        (continue))
+    (try
+      (= directory (ife (== entry "") (os.getcwd) entry))
+      (except [OSError]
+        (continue)))
+    (= finder (ife (osp.isdir directory)
+                   (importlib.machinery.FileFinder directory *(finder-loader-details))
+                   (_hook-finder directory)))
+    (if (is finder None)
+        (continue))
+    (try
+      (= spec (.find-spec finder name))
+      (except [Exception]
+        (continue)))
+    (cond (is spec None)
+          (continue)
+          (is-not spec.loader None)
+          (return spec)
+          (try
+            (.extend portions (or spec.submodule-search-locations []))
+            (except [Exception]
+              (continue)))))
+  (if (not portions)
+      (return None))
+  (= spec (importlib.machinery.ModuleSpec name None :is-package True))
+  (= spec.submodule-search-locations portions)
+  (return spec))
+
+(= SIDE-EFFECT-FREE-FINDERS (, importlib.machinery.BuiltinImporter
+                               importlib.machinery.FrozenImporter))
+
+(def meta-path-spec [name entries parent-locations]
+  "The ModuleSpec CPython's import gives the absolute import name name, one
+   part of a walk (module-spec-on), or None: sys.meta-path's finders asked
+   in their order as the import system asks them, (find-spec name
+   parent-locations), None for a top-level name, with PathFinder's slot
+   standing for path-entry-spec over entries, the walk's own search path.
+   The built-in and frozen importers are asked (sys is no file), and so is
+   every finder after PathFinder, where an editable install appends the
+   one that finds its package; one that raises finds nothing.  The one
+   departure from the import system: any other finder before PathFinder
+   is skipped, because such finders are import hooks that act when asked
+   (setuptools' _distutils_hack, first on sys.meta-path, imports
+   setuptools when asked for distutils and drops modules from
+   sys.modules when asked for pip).  With no PathFinder on sys.meta-path
+   the walk still runs, last, since entries are what the module's compile
+   searches, and nothing else but the built-in and frozen importers is
+   asked."
+  (= walked False)
+  (for finder in (list sys.meta-path)
+    (cond (is finder importlib.machinery.PathFinder)
+          (do (= walked True)
+              (= spec (path-entry-spec name entries)))
+          (or walked (in finder SIDE-EFFECT-FREE-FINDERS))
+          (try
+            (= spec (.find-spec finder name parent-locations))
+            (except [Exception]
+              (= spec None)))
+          (= spec None))
+    (if (is-not spec None)
+        (return spec)))
+  (return (ife walked None (path-entry-spec name entries))))
+
+(def module-spec-on [module-name entries]
+  "The ModuleSpec CPython's import gives the absolute import name
+   module-name (already its Python spelling, module-import-name) when
+   entries is the top-level search path, or None, found part by part as the
+   import system finds it: a, a.b, ... each through meta-path-spec, the
+   path-based part over the previous part's submodule-search-locations, so
+   a plain module ends the walk (util.lpy beside a directory util/ hides
+   util/x.lpy, and util.x is no module).  Nothing is imported, because the
+   import system's own lookups run code: importlib.util.find-spec imports
+   every parent package of a dotted name, and PathFinder cannot look up a
+   namespace portion of one with its parent missing from sys.modules
+   (_NamespacePath reads sys.modules[parent]: a KeyError on CPython
+   3.11-3.14, a ModuleNotFoundError on 3.15), and would read the parent's
+   path from there, not from the walk.  The other meta-path finders are
+   given the walk's parent locations, as the import system gives them the
+   parent's __path__, and import no parent themselves."
+  (= name None)
+  (= spec None)
+  (for part in (.split module-name ".")
+    (= parent-locations (ife (is name None) None entries))
+    (= name (ife (is name None) part f"{name}.{part}"))
+    (= spec (meta-path-spec name entries parent-locations))
+    (if (or (is spec None) (is spec.submodule-search-locations None))
+        (return (ife (== name module-name) spec None)))
+    ;; A finder's _NamespacePath reads its parent from sys.modules when
+    ;; iterated, and raises with that parent not imported.
+    (try
+      (= entries (list spec.submodule-search-locations))
+      (except [Exception]
+        (return None))))
+  (return spec))
+
+(def module-file-on [module-name entries]
+  "The .lpy file the absolute import name module-name imports when entries
+   is the top-level search path (module-spec-on), or None.  The file Python
+   imports is the answer, so a module or package that is no .lpy
+   (x/__init__.py beside x.lpy, a workspace's lispy/tools.py over the
+   installed tools.lpy, a built-in module) gives None, never a .lpy it
+   hides; so does a namespace package, which has no file.  One rule
+   stands beside it, wherever the package is found: a regular package
+   whose __init__ is no .lpy answers with the init.lpy it holds, if any,
+   the layout of lispy.macros (an __init__.py doing from .init import *),
+   whose code that file is."
+  (= spec (module-spec-on module-name entries))
+  (if (or (is spec None) (is spec.loader None))
+      (return None))
+  ;; A finder may give any origin: only a .lpy file on disk is one to open.
+  (if (and (isinstance spec.origin str) (.endswith spec.origin ".lpy")
+           (osp.isfile spec.origin))
+      (return spec.origin))
+  (if spec.submodule-search-locations
+      (do (= init (osp.join (sub spec.submodule-search-locations 0) "init.lpy"))
+          (if (osp.isfile init)
+              (return init))))
   (return None))
 
 (def resolve-module-to-file [module workspace-folders :origin None]
   "Resolve a LisPython module symbol to a .lpy file path, through the name
-   its import takes (module-import-name, the compiler's own; a symbol that
-   is no module name resolves to nothing).
+   its import takes (module-import-name, the compiler's own; a node that is
+   no module name resolves to nothing).
    e.g., lispy.tools -> '/path/to/src/lispy/tools.lpy'.  A relative name
    resolves as Python resolves it from origin, the importing file's path:
    in origin's package (module-names, the package-root rule) to an
-   absolute name (importlib.util.resolve-name), looked up under origin's
-   import root.  With no origin, or no package, or beyond the top-level
-   package, it resolves to nothing.  An absolute name is looked up first
-   in origin's search dirs (module-names), in the order its compile puts
-   them on sys.path, so scripts/x.lpy finds its sibling helper.lpy, then
-   under every workspace folder (project-import-roots), then on sys.path."
+   absolute name (importlib.util.resolve-name), looked up from origin's
+   import root alone.  With no origin, or no package, or beyond the
+   top-level package, it resolves to nothing.  An absolute name is looked
+   up on a search path of origin's search dirs (module-names), in the
+   order its compile puts them on sys.path, so scripts/x.lpy finds its
+   sibling helper.lpy, then every workspace folder's project-import-roots,
+   then sys.path (installed packages, lispython itself).  Either lookup is
+   module-file-on, which imports nothing."
   (if (not (isinstance module Symbol))
       (return None))
   (try
@@ -263,38 +406,23 @@
             (= absolute (importlib.util.resolve-name module-name package))
             (except [(, ImportError ValueError)]
               (return None)))
-          (return (module-file-under absolute [import-root]))))
-  ;; 1. origin's search dirs, then the workspace folders (direct or in src/)
-  (= roots (ife (is origin None)
-                []
-                (list (sub (document-module-names origin :folders workspace-folders) 3))))
+          (return (module-file-on absolute [import-root]))))
+  (= entries (ife (is origin None)
+                  []
+                  (list (sub (document-module-names origin :folders workspace-folders) 3))))
   (for folder in workspace-folders
-    (.extend roots (project-import-roots (uri-to-path folder.uri))))
-  (= found (module-file-under module-name roots))
-  (if found
-      (return found))
-  ;; 2. Python's sys.path (finds installed packages, including lispython itself)
-  (try
-    (do (= spec (importlib.util.find-spec module-name))
-        (if (and spec spec.origin (.endswith spec.origin ".lpy"))
-            (return spec.origin))
-        ;; Package without __init__.lpy but has submodule files
-        (if (and spec spec.submodule-search-locations)
-            (for search-path in spec.submodule-search-locations
-              (= candidate (osp.join search-path "init.lpy"))
-              (if (osp.isfile candidate)
-                  (return candidate)))))
-    (except [Exception]
-      (pass)))
-  (return None))
+    (.extend entries (project-import-roots (uri-to-path folder.uri))))
+  (.extend entries sys.path)
+  (return (module-file-on module-name entries)))
 
 (def index-installed-package [module-name]
   ;; module-name is an import name, already in its Python spelling.
-  "Index all .lpy files in an installed Python package (e.g., lispython).
-   Used to make defmacros in required modules discoverable."
+  "Index all .lpy files in an installed Python package (e.g., lispython),
+   the one module-spec-on finds for module-name on sys.path, so finding it
+   imports nothing.  Used to make defmacros in required modules
+   discoverable."
   (try
-    (do (import importlib.util)
-        (= spec (importlib.util.find-spec module-name))
+    (do (= spec (module-spec-on module-name sys.path))
         (if (and spec spec.submodule-search-locations)
             (for search-path in spec.submodule-search-locations
               (for fpath in (glob.glob (osp.join search-path "**" "*.lpy") :recursive True)
@@ -643,10 +771,7 @@
    compiles again all the same and caches the result.  It runs
    the buffer's macros, so callers on the loop run it in a thread, reading
    view-cache's generation before the hand-off."
-  (= path (to-fs-path uri))
-  (= [name package _ search-dirs] (ife (is path None)
-                                      (, "__main__" "" None (,))
-                                      (document-module-names path)))
+  (= [name package _ search-dirs] (uri-module-names uri))
   (if (is version None)
       (return (compile-buffer source :package package :name name :search-dirs search-dirs
                               :filename (uri-to-path uri))))
@@ -1443,10 +1568,13 @@
 
 (def compiled-view [doc]
   "The full view of snapshot doc's version, compiled under the macro
-   environment of now (ViewCache.cached-view), or None: none compiled
-   yet, or the compile failed.  Hover and signature help read it, never
-   compile: they answer locally before any backend."
-  (return (.cached-view view-cache doc.uri doc.version)))
+   environment and the naming of now (ViewCache.cached-view,
+   uri-module-names: a stat of the files around it, cheap on the loop), or
+   None: none compiled yet, or the compile failed.  Hover and signature
+   help read it, never compile: they answer locally before any backend."
+  (= [name package _ search-dirs] (uri-module-names doc.uri))
+  (return (.cached-view view-cache doc.uri doc.version :package package :name name
+                        :search-dirs search-dirs)))
 
 (def builtin-hover [target]
   "The builtin-info hover of Symbol target, or None: the answer when no
@@ -2369,14 +2497,17 @@
    snapshot doc: typed, the word typed before the cursor (partial-span, as
    completion-ranges reads it); key, what a backend answer there depends on
    besides that word: the line, the word's start, the text before the word
-   and after the cursor, and whether it is an attribute."
+   and after the cursor, whether it is an attribute, and the naming its
+   cursor view compiles under (uri-module-names, which follows the files
+   and workspace folders around the document)."
   (= lines (.split doc.source "\n"))
   (= text (line-text doc.source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
   (= before (.join "\n" [*(sub lines [: None (max 0 (- line 1))]) (sub text [: None start])]))
   (= after (.join "\n" [(sub text [: col None]) *(sub lines [: line None])]))
-  (return (, (, line start before after attribute) (sub text [: start col]))))
+  (return (, (, line start before after attribute (uri-module-names doc.uri))
+             (sub text [: start col]))))
 
 (class CachedCompletion []
   "A backend completion answer kept for the next keystrokes of its word:

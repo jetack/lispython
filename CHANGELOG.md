@@ -11,14 +11,6 @@ follows [Semantic Versioning](https://semver.org/).
 - `(require mod as m)` registers every macro of `mod` as `m.name`, with a
   bare `as` as `import` takes. The LSP's completion after `m.`, hover and
   go-to-definition follow the alias, and a relative require's macros.
-- LSP: go-to-definition without a backend resolves a relative module, of a
-  `require` or a `from`, as Python does: in the document's package, never
-  beyond its top-level package, and not at all for a buffer with no file.
-  A document path with a space or a non-ASCII character is read decoded.
-  It finds a module by the name its import takes, so `(from ok? [x])` and
-  `(import ->foo)` reach `ok_p.lpy` and `_to_foo.lpy`, and it picks the
-  file Python imports: a package's `__init__` (of any suffix) before a
-  module file of the same name, and nothing when that file is no `.lpy`.
 - nREPL: the `complete` reply carries `items`, LSP-shaped completion items in
   `completions` order: `{"label", "kind"}` with the LSP CompletionItemKind
   number, plus `"labelDetails": {"description": <tag>}` for a name lispython
@@ -269,6 +261,23 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- LSP: go-to-definition without a backend resolves a relative module, of a
+  `require` or a `from`, as Python does: in the document's package, never
+  beyond its top-level package, and not at all for a buffer with no file.
+  A document path with a space or a non-ASCII character is read decoded.
+  It finds a module by the name its import takes, so `(from ok? [x])` and
+  `(import ->foo)` reach `ok_p.lpy` and `_to_foo.lpy`, and it picks the
+  file Python imports: a built-in or frozen module, then a package's
+  `__init__` (of any suffix) before a module file of the same name, and
+  nothing when that file is no `.lpy`, except a regular package that holds
+  an `init.lpy` (the layout of `lispy.macros`), which answers with that
+  file. Every dotted part is looked up as Python's import looks it up (its
+  FileFinder and path hooks, and the `sys.meta_path` finders an editable
+  install adds), so a module Python imports from the workspace that is no
+  `.lpy` is never replaced by an installed one. The lookup itself imports
+  nothing, for go-to-definition and the index of a file's requires alike,
+  and it consults only the import hooks Python consults after its own path
+  search.
 - The LSP and the nREPL resolve a relative `require` or `from` in a
   namespace package (a directory with no `__init__`) as the importer does:
   `ns/a.lpy` is `ns.a`, so `(require .mac)` compiles and go-to-definition

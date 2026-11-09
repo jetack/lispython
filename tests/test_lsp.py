@@ -7,6 +7,8 @@ parse, so the error itself is reported.
 
 import asyncio
 import importlib
+import importlib.machinery
+import importlib.util
 import pathlib
 import re
 import sys
@@ -604,6 +606,269 @@ class TestRequireSelection:
         monkeypatch.chdir(package)
         source = "(require .macmod)\n(macmod.thrice 1)"
         assert not self._definition_in(source, "untitled:x", package.parent, 1, 9)
+
+    def test_a_cached_view_follows_the_documents_module_naming(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: the view cache keys a document's compile by version and
+        # macro epoch alone, so once an __init__.py makes its directory a
+        # package (or removes it), a request on the same version answers
+        # from the compile under the old name and package: the relative
+        # require still fails, or a view whose require no longer resolves
+        # is still served.
+        monkeypatch.setattr(server, "view_cache", pv.ViewCache())
+        monkeypatch.setattr(server, "workspace_folders", lambda: [])
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        modules = ["lspnamingpkg", "lspnamingpkg.mac"]
+        for name in modules:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        pkg = tmp_path / "lspnamingpkg"
+        pkg.mkdir()
+        (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+        source = "(require .mac *)\n(= y (twice 1))"
+        doc = SimpleNamespace(uri=(pkg / "x.lpy").as_uri(), version=1, source=source)
+        try:
+            assert server.compile_document(doc.uri, 1, source).error is not None
+            (pkg / "__init__.py").write_text("")
+            compiled = server.compile_document(doc.uri, 1, source)
+            assert compiled.error is None
+            assert compiled.view.text.endswith("y = 1 + 1")
+            assert server.compiled_view(doc) is compiled.view
+            (pkg / "__init__.py").unlink()
+            assert server.compiled_view(doc) is None
+        finally:
+            for name in modules:
+                sys.modules.pop(name, None)
+
+    @staticmethod
+    def _target_in(folder, form, origin=None):
+        [node] = parse(form)
+        folders = [SimpleNamespace(uri=folder.as_uri())]
+        return server.find_import_target(node, folders, origin=origin)
+
+    def test_a_workspace_module_that_is_no_lpy_hides_an_installed_one(self, tmp_path):
+        # Defect: the workspace lookup finds lispy/tools.py, the module the
+        # import reads there, and falls through to sys.path, which opens the
+        # installed lispy/tools.lpy, code that import never runs.
+        (tmp_path / "lispy").mkdir()
+        (tmp_path / "lispy" / "__init__.py").write_text("")
+        (tmp_path / "lispy" / "tools.py").write_text("")
+        assert self._target_in(tmp_path, "(require lispy.tools)") is None
+        # With no such workspace module the installed .lpy files answer,
+        # init.lpy standing for the package whose __init__.py re-exports it.
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        tools = self._target_in(empty, "(require lispy.tools)")
+        assert tools == str(
+            pathlib.Path(lispy.macros.__file__).parents[1] / "tools.lpy"
+        )
+        macros = self._target_in(empty, "(require lispy.macros)")
+        assert macros == str(pathlib.Path(lispy.macros.__file__).parent / "init.lpy")
+
+    def test_a_module_file_ends_the_lookup_of_a_dotted_name(self, tmp_path):
+        # Defect: the parents of a dotted name are joined as directories, so
+        # util/x.lpy is opened where Python imports the module util.lpy and
+        # lspnsutil.x is no module at all.
+        (tmp_path / "lspnsutil").mkdir()
+        (tmp_path / "lspnsutil" / "x.lpy").write_text("")
+        (tmp_path / "lspnsutil.lpy").write_text("")
+        assert self._target_in(tmp_path, "(require lspnsutil.x)") is None
+        # With no module file beside it the directory is a namespace package.
+        (tmp_path / "lspnsutil.lpy").unlink()
+        got = self._target_in(tmp_path, "(require lspnsutil.x)")
+        assert got == str(tmp_path / "lspnsutil" / "x.lpy")
+
+    def test_an_extension_module_wins_over_a_source_file(self, tmp_path):
+        # Defect: the .lpy is tried first, where FileFinder imports the
+        # extension module of its name.
+        (tmp_path / "lspdual.lpy").write_text("")
+        (tmp_path / f"lspdual{importlib.machinery.EXTENSION_SUFFIXES[0]}").write_text(
+            ""
+        )
+        assert self._target_in(tmp_path, "(require lspdual)") is None
+
+    @pytest.mark.parametrize("form", ['(require "lispy.tools")', "(import [a])"])
+    def test_a_module_that_is_no_symbol_resolves_to_nothing(self, tmp_path, form):
+        assert self._target_in(tmp_path, form) is None
+
+    def test_namespace_portions_merge_across_search_dirs(self, namespace):
+        # Defect: the first directory holding the namespace package ends the
+        # search, so a portion under a later one is never found.
+        project = namespace.parent
+        (namespace / "lspnsmerged").mkdir()
+        (namespace / "lspnsmerged" / "a.lpy").write_text("")
+        (project / "lspnsmerged").mkdir()
+        (project / "lspnsmerged" / "b.lpy").write_text("")
+        origin = str(namespace / "a.lpy")
+        got = self._target_in(project, "(require lspnsmerged.b)", origin=origin)
+        assert got == str(project / "lspnsmerged" / "b.lpy")
+
+    def test_the_lookup_imports_no_parent_package(self, tmp_path, monkeypatch):
+        # Defect: an installed dotted name is found through
+        # importlib.util.find_spec, which imports (runs) its parent package
+        # in the server's process.
+        site = tmp_path / "site"
+        (site / "lspsideeffect").mkdir(parents=True)
+        (site / "lspsideeffect" / "__init__.py").write_text("")
+        (site / "lspsideeffect" / "mod.lpy").write_text("")
+        monkeypatch.setattr(sys, "path", [*sys.path, str(site)])
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        try:
+            got = self._target_in(workspace, "(require lspsideeffect.mod)")
+            assert "lspsideeffect" not in sys.modules
+        finally:
+            sys.modules.pop("lspsideeffect", None)
+        assert got == str(site / "lspsideeffect" / "mod.lpy")
+
+    def test_indexing_a_require_imports_no_parent_package(self, tmp_path, monkeypatch):
+        # Defect: indexing a file finds each required package through
+        # importlib.util.find_spec, which imports (runs) its parent package
+        # in the server's process.
+        monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
+        monkeypatch.setattr(server, "FILE_TREES", {})
+        monkeypatch.setattr(server, "WORKSPACE_SYMBOLS", {})
+        monkeypatch.setattr(server, "workspace_folders", lambda: [])
+        site = tmp_path / "site"
+        macs = site / "lspindexside" / "macs"
+        macs.mkdir(parents=True)
+        (site / "lspindexside" / "__init__.py").write_text("")
+        (macs / "__init__.lpy").write_text(self.MACROS)
+        monkeypatch.setattr(sys, "path", [*sys.path, str(site)])
+        target = tmp_path / "target.lpy"
+        target.write_text("(require lspindexside.macs)\n")
+        try:
+            server.index_file(target.as_uri())
+            assert "lspindexside" not in sys.modules
+        finally:
+            sys.modules.pop("lspindexside", None)
+        assert "thrice" in server.WORKSPACE_INDEX
+
+    def test_a_meta_path_finder_finds_a_module(self, tmp_path, monkeypatch):
+        # Defect: only the path-based lookup is modelled, so a module an
+        # editable install maps through its sys.meta_path finder, which
+        # Python imports, resolves to nothing; or the finder's package is
+        # not walked into for a dotted name.
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / "lspedpkg").mkdir(parents=True)
+        (elsewhere / "lspedmod.lpy").write_text("")
+        (elsewhere / "lspedpkg" / "__init__.py").write_text("")
+        (elsewhere / "lspedpkg" / "mac.lpy").write_text("")
+
+        class EditableFinder:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                if name == "lspedmod":
+                    origin = elsewhere / "lspedmod.lpy"
+                    return importlib.util.spec_from_file_location(name, origin)
+                if name == "lspedpkg":
+                    package = elsewhere / "lspedpkg"
+                    return importlib.util.spec_from_file_location(
+                        name,
+                        package / "__init__.py",
+                        submodule_search_locations=[str(package)],
+                    )
+                return None
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, EditableFinder])
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        got = self._target_in(workspace, "(require lspedmod)")
+        assert got == str(elsewhere / "lspedmod.lpy")
+        got = self._target_in(workspace, "(require lspedpkg.mac)")
+        assert got == str(elsewhere / "lspedpkg" / "mac.lpy")
+
+    def test_a_finder_before_the_path_lookup_is_never_asked(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: every sys.meta_path finder is asked, so an import hook
+        # placed before PathFinder (setuptools' _distutils_hack imports
+        # setuptools, or drops distutils from sys.modules, when asked) acts
+        # on a go-to-definition.
+        asked = []
+
+        class EarlyHook:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                # Only the lookup's own names: the test's process may
+                # import other modules meanwhile.
+                if name.startswith("lspearly"):
+                    asked.append(name)
+                return None
+
+        monkeypatch.setattr(sys, "meta_path", [EarlyHook, *sys.meta_path])
+        (tmp_path / "lspearly").mkdir()
+        (tmp_path / "lspearly" / "mac.lpy").write_text("")
+        got = self._target_in(tmp_path, "(require lspearly.mac)")
+        assert got == str(tmp_path / "lspearly" / "mac.lpy")
+        assert self._target_in(tmp_path, "(require lspearlymissing)") is None
+        assert asked == []
+
+    def test_a_path_hook_entry_serves_a_namespace_package(self, tmp_path, monkeypatch):
+        # Defect: a sys.path entry that is no directory is skipped, so the
+        # namespace package an editable install serves from its path-hook
+        # entry (setuptools' __editable__...__path_hook__) is not found, and
+        # neither is a module under it.
+        sub = tmp_path / "src" / "lspedns" / "sub"
+        sub.mkdir(parents=True)
+        (sub / "__init__.py").write_text("")
+        (sub / "mac.lpy").write_text("")
+        hook_entry = "__editable__.lspdemo-0.1.finder.__path_hook__"
+
+        class EditableFinder:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                if name == "lspedns.sub":
+                    return importlib.util.spec_from_file_location(
+                        name, sub / "__init__.py", submodule_search_locations=[str(sub)]
+                    )
+                return None
+
+        class NamespaceFinder:
+            @staticmethod
+            def hook(entry):
+                if entry == hook_entry:
+                    return NamespaceFinder
+                raise ImportError
+
+            @staticmethod
+            def find_spec(name, target=None):
+                if name == "lspedns":
+                    spec = importlib.machinery.ModuleSpec(name, None, is_package=True)
+                    spec.submodule_search_locations = [hook_entry]
+                    return spec
+                return None
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, EditableFinder])
+        monkeypatch.setattr(sys, "path_hooks", [*sys.path_hooks, NamespaceFinder.hook])
+        monkeypatch.setattr(sys, "path", [*sys.path, hook_entry])
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        got = self._target_in(workspace, "(require lspedns.sub.mac)")
+        assert got == str(sub / "mac.lpy")
+
+    def test_a_built_in_module_hides_a_file_of_its_name(self, tmp_path):
+        # Defect: a workspace sys.lpy is taken where Python imports the
+        # built-in module sys, which no file holds.
+        (tmp_path / "sys.lpy").write_text("")
+        assert self._target_in(tmp_path, "(require sys)") is None
+
+    def test_a_working_directory_that_is_gone_is_skipped(self, tmp_path, monkeypatch):
+        # Defect: the '' entry of sys.path is read through os.getcwd, which
+        # raises once the directory is gone, out of the definition handler.
+        # The module lies on sys.path past '', so the lookup reaches it.
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        site = tmp_path / "site"
+        site.mkdir()
+        (site / "lspgonemod.lpy").write_text("")
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        monkeypatch.setattr(sys, "path", ["", *sys.path, str(site)])
+        got = self._target_in(workspace, "(require lspgonemod)")
+        assert got == str(site / "lspgonemod.lpy")
 
 
 def test_local_completion_tags_special_forms_in_label_details_not_detail():

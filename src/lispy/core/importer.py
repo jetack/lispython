@@ -32,15 +32,23 @@ def has_init_file(dir_path):
     )
 
 
+def finder_loader_details():
+    """The (loader, suffixes) pairs CPython builds a path entry's FileFinder
+    with, in its order (extension modules, then source, then bytecode), the
+    suffix lists read from importlib.machinery at each call, where this
+    module adds .lpy to the source ones."""
+    machinery = importlib.machinery
+    return [
+        (machinery.ExtensionFileLoader, machinery.EXTENSION_SUFFIXES),
+        (machinery.SourceFileLoader, machinery.SOURCE_SUFFIXES),
+        (machinery.SourcelessFileLoader, machinery.BYTECODE_SUFFIXES),
+    ]
+
+
 def finder_suffixes():
-    """The file suffixes CPython's FileFinder tries, in its order (extension
-    modules, then source, then bytecode), read from importlib.machinery at
-    each call, where this module adds .lpy to the source ones."""
-    return (
-        importlib.machinery.EXTENSION_SUFFIXES
-        + importlib.machinery.SOURCE_SUFFIXES
-        + importlib.machinery.BYTECODE_SUFFIXES
-    )
+    """The file suffixes CPython's FileFinder tries, in its order
+    (finder_loader_details)."""
+    return [suffix for _, suffixes in finder_loader_details() for suffix in suffixes]
 
 
 def _same_dir_key(path):
