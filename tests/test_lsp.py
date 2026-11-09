@@ -7,6 +7,7 @@ parse, so the error itself is reported.
 
 import asyncio
 import importlib
+import importlib.machinery
 import pathlib
 import re
 import sys
@@ -604,6 +605,87 @@ class TestRequireSelection:
         monkeypatch.chdir(package)
         source = "(require .macmod)\n(macmod.thrice 1)"
         assert not self._definition_in(source, "untitled:x", package.parent, 1, 9)
+
+    @staticmethod
+    def _target_in(folder, form, origin=None):
+        [node] = parse(form)
+        folders = [SimpleNamespace(uri=folder.as_uri())]
+        return server.find_import_target(node, folders, origin=origin)
+
+    def test_a_workspace_module_that_is_no_lpy_hides_an_installed_one(self, tmp_path):
+        # Defect: the workspace lookup finds lispy/tools.py, the module the
+        # import reads there, and falls through to sys.path, which opens the
+        # installed lispy/tools.lpy, code that import never runs.
+        (tmp_path / "lispy").mkdir()
+        (tmp_path / "lispy" / "__init__.py").write_text("")
+        (tmp_path / "lispy" / "tools.py").write_text("")
+        assert self._target_in(tmp_path, "(require lispy.tools)") is None
+        # With no such workspace module the installed .lpy files answer,
+        # init.lpy standing for the package whose __init__.py re-exports it.
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        tools = self._target_in(empty, "(require lispy.tools)")
+        assert tools == str(
+            pathlib.Path(lispy.macros.__file__).parents[1] / "tools.lpy"
+        )
+        macros = self._target_in(empty, "(require lispy.macros)")
+        assert macros == str(pathlib.Path(lispy.macros.__file__).parent / "init.lpy")
+
+    def test_a_module_file_ends_the_lookup_of_a_dotted_name(self, tmp_path):
+        # Defect: the parents of a dotted name are joined as directories, so
+        # util/x.lpy is opened where Python imports the module util.lpy and
+        # lspnsutil.x is no module at all.
+        (tmp_path / "lspnsutil").mkdir()
+        (tmp_path / "lspnsutil" / "x.lpy").write_text("")
+        (tmp_path / "lspnsutil.lpy").write_text("")
+        assert self._target_in(tmp_path, "(require lspnsutil.x)") is None
+        # With no module file beside it the directory is a namespace package.
+        (tmp_path / "lspnsutil.lpy").unlink()
+        got = self._target_in(tmp_path, "(require lspnsutil.x)")
+        assert got == str(tmp_path / "lspnsutil" / "x.lpy")
+
+    def test_an_extension_module_wins_over_a_source_file(self, tmp_path):
+        # Defect: the .lpy is tried first, where FileFinder imports the
+        # extension module of its name.
+        (tmp_path / "lspdual.lpy").write_text("")
+        (tmp_path / f"lspdual{importlib.machinery.EXTENSION_SUFFIXES[0]}").write_text(
+            ""
+        )
+        assert self._target_in(tmp_path, "(require lspdual)") is None
+
+    @pytest.mark.parametrize("form", ['(require "lispy.tools")', "(import [a])"])
+    def test_a_module_that_is_no_symbol_resolves_to_nothing(self, tmp_path, form):
+        assert self._target_in(tmp_path, form) is None
+
+    def test_namespace_portions_merge_across_search_dirs(self, namespace):
+        # Defect: the first directory holding the namespace package ends the
+        # search, so a portion under a later one is never found.
+        project = namespace.parent
+        (namespace / "lspnsmerged").mkdir()
+        (namespace / "lspnsmerged" / "a.lpy").write_text("")
+        (project / "lspnsmerged").mkdir()
+        (project / "lspnsmerged" / "b.lpy").write_text("")
+        origin = str(namespace / "a.lpy")
+        got = self._target_in(project, "(require lspnsmerged.b)", origin=origin)
+        assert got == str(project / "lspnsmerged" / "b.lpy")
+
+    def test_the_lookup_imports_no_parent_package(self, tmp_path, monkeypatch):
+        # Defect: an installed dotted name is found through
+        # importlib.util.find_spec, which imports (runs) its parent package
+        # in the server's process.
+        site = tmp_path / "site"
+        (site / "lspsideeffect").mkdir(parents=True)
+        (site / "lspsideeffect" / "__init__.py").write_text("")
+        (site / "lspsideeffect" / "mod.lpy").write_text("")
+        monkeypatch.setattr(sys, "path", [*sys.path, str(site)])
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        try:
+            got = self._target_in(workspace, "(require lspsideeffect.mod)")
+            assert "lspsideeffect" not in sys.modules
+        finally:
+            sys.modules.pop("lspsideeffect", None)
+        assert got == str(site / "lspsideeffect" / "mod.lpy")
 
 
 def test_local_completion_tags_special_forms_in_label_details_not_detail():

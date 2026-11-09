@@ -5,12 +5,14 @@
 (import contextvars)
 (import functools)
 (import glob)
+(import importlib.machinery)
 (import importlib.util)
 (import inspect)
 (import logging)
 (import os)
 (import os.path as osp)
 (import re)
+(import sys)
 (import pathlib)
 (import threading)
 
@@ -21,7 +23,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
-(from lispy.core.importer [finder-suffixes])
+(from lispy.core.importer [finder-loader-details])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [parse tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
@@ -214,40 +216,99 @@
       (index-file (path-to-uri fpath))))
   (logger.info f"Indexed {(len WORKSPACE-INDEX)} symbols from workspace"))
 
-(def module-file-under [module-name roots]
-  "The .lpy file the absolute import name module-name (already its Python
-   spelling, module-import-name) imports from the first of roots that
-   holds it, or None, as CPython's FileFinder picks the file: a package
-   directory's __init__ of any suffix before a module file, each in
-   finder-suffixes order.  The file Python would import there is the
-   answer, so a package or module that is no .lpy (x/__init__.py beside
-   x.lpy) gives None, never the .lpy it shadows."
-  (= rel-path (osp.join *(.split module-name ".")))
-  (= suffixes (finder-suffixes))
-  (for root in roots
-    (= base (osp.join root rel-path))
-    (= candidates (+ (ife (osp.isdir base)
-                          [(osp.join base (+ "__init__" suffix)) for suffix in suffixes]
-                          [])
-                     [(+ base suffix) for suffix in suffixes]))
-    (for candidate in candidates
-      (if (osp.isfile candidate)
-          (return (ife (.endswith candidate ".lpy") candidate None)))))
+(def path-entry-spec [name entries]
+  "The ModuleSpec of the absolute import name name that CPython's PathFinder
+   finds over entries, the directories of one search path, or None: per
+   directory a fresh FileFinder with CPython's loaders in their order
+   (finder-loader-details, read now, so .lpy is the first source suffix),
+   the first directory holding a module or regular package winning, and a
+   namespace package, its portions merged across every directory, only
+   when none holds one.  An entry that is no directory is skipped (the
+   path hooks' zip archives hold no file to open) and '' is the working
+   directory, as PathFinder takes it.  A fresh finder per call, because
+   sys.path-importer-cache keeps a directory's listing past a file written
+   into it."
+  (= portions [])
+  (for entry in entries
+    (if (not (isinstance entry str))
+        (continue))
+    (= directory (ife (== entry "") (os.getcwd) entry))
+    (if (not (osp.isdir directory))
+        (continue))
+    (= spec (.find-spec (importlib.machinery.FileFinder directory
+                                                        *(finder-loader-details))
+                        name))
+    (cond (is spec None)
+          (continue)
+          (is-not spec.loader None)
+          (return spec)
+          (.extend portions spec.submodule-search-locations)))
+  (if (not portions)
+      (return None))
+  (= spec (importlib.machinery.ModuleSpec name None :is-package True))
+  (= spec.submodule-search-locations portions)
+  (return spec))
+
+(def module-spec-on [module-name entries]
+  "The ModuleSpec CPython's path-based import gives the absolute import
+   name module-name (already its Python spelling, module-import-name) when
+   entries is the top-level search path, or None, found part by part as the
+   import system finds it: a, a.b, ... each through path-entry-spec over
+   the previous part's submodule-search-locations, so a plain module ends
+   the walk (util.lpy beside a directory util/ hides util/x.lpy, and
+   util.x is no module).  Nothing is imported, because the import system's
+   own lookups run code: importlib.util.find-spec imports every parent
+   package of a dotted name, and PathFinder cannot look up a namespace
+   portion of one with its parent missing from sys.modules (_NamespacePath
+   reads sys.modules[parent]: a KeyError on CPython 3.11-3.14, a
+   ModuleNotFoundError on 3.15), and would read the parent's path from
+   there, not from the walk."
+  (= name None)
+  (= spec None)
+  (for part in (.split module-name ".")
+    (= name (ife (is name None) part f"{name}.{part}"))
+    (= spec (path-entry-spec name entries))
+    (if (or (is spec None) (is spec.submodule-search-locations None))
+        (return (ife (== name module-name) spec None)))
+    (= entries spec.submodule-search-locations))
+  (return spec))
+
+(def module-file-on [module-name entries]
+  "The .lpy file the absolute import name module-name imports when entries
+   is the top-level search path (module-spec-on), or None.  The file Python
+   imports is the answer, so a module or package that is no .lpy (x/__init__.py
+   beside x.lpy, a workspace's lispy/tools.py over the installed
+   tools.lpy) gives None, never a .lpy it hides; so does a namespace
+   package, which has no file.  The one exception is a regular package
+   whose __init__ is no .lpy but which holds init.lpy, the code its
+   __init__ re-exports (lispy.macros: from .init import *): the answer is
+   that init.lpy."
+  (= spec (module-spec-on module-name entries))
+  (if (or (is spec None) (is spec.loader None))
+      (return None))
+  (if (and spec.origin (.endswith spec.origin ".lpy"))
+      (return spec.origin))
+  (if spec.submodule-search-locations
+      (do (= init (osp.join (sub spec.submodule-search-locations 0) "init.lpy"))
+          (if (osp.isfile init)
+              (return init))))
   (return None))
 
 (def resolve-module-to-file [module workspace-folders :origin None]
   "Resolve a LisPython module symbol to a .lpy file path, through the name
-   its import takes (module-import-name, the compiler's own; a symbol that
-   is no module name resolves to nothing).
+   its import takes (module-import-name, the compiler's own; a node that is
+   no module name resolves to nothing).
    e.g., lispy.tools -> '/path/to/src/lispy/tools.lpy'.  A relative name
    resolves as Python resolves it from origin, the importing file's path:
    in origin's package (module-names, the package-root rule) to an
-   absolute name (importlib.util.resolve-name), looked up under origin's
-   import root.  With no origin, or no package, or beyond the top-level
-   package, it resolves to nothing.  An absolute name is looked up first
-   in origin's search dirs (module-names), in the order its compile puts
-   them on sys.path, so scripts/x.lpy finds its sibling helper.lpy, then
-   under every workspace folder (project-import-roots), then on sys.path."
+   absolute name (importlib.util.resolve-name), looked up from origin's
+   import root alone.  With no origin, or no package, or beyond the
+   top-level package, it resolves to nothing.  An absolute name is looked
+   up on a search path of origin's search dirs (module-names), in the
+   order its compile puts them on sys.path, so scripts/x.lpy finds its
+   sibling helper.lpy, then every workspace folder's project-import-roots,
+   then sys.path (installed packages, lispython itself).  Either lookup is
+   module-file-on, which imports nothing."
   (if (not (isinstance module Symbol))
       (return None))
   (try
@@ -263,30 +324,14 @@
             (= absolute (importlib.util.resolve-name module-name package))
             (except [(, ImportError ValueError)]
               (return None)))
-          (return (module-file-under absolute [import-root]))))
-  ;; 1. origin's search dirs, then the workspace folders (direct or in src/)
-  (= roots (ife (is origin None)
-                []
-                (list (sub (document-module-names origin :folders workspace-folders) 3))))
+          (return (module-file-on absolute [import-root]))))
+  (= entries (ife (is origin None)
+                  []
+                  (list (sub (document-module-names origin :folders workspace-folders) 3))))
   (for folder in workspace-folders
-    (.extend roots (project-import-roots (uri-to-path folder.uri))))
-  (= found (module-file-under module-name roots))
-  (if found
-      (return found))
-  ;; 2. Python's sys.path (finds installed packages, including lispython itself)
-  (try
-    (do (= spec (importlib.util.find-spec module-name))
-        (if (and spec spec.origin (.endswith spec.origin ".lpy"))
-            (return spec.origin))
-        ;; Package without __init__.lpy but has submodule files
-        (if (and spec spec.submodule-search-locations)
-            (for search-path in spec.submodule-search-locations
-              (= candidate (osp.join search-path "init.lpy"))
-              (if (osp.isfile candidate)
-                  (return candidate)))))
-    (except [Exception]
-      (pass)))
-  (return None))
+    (.extend entries (project-import-roots (uri-to-path folder.uri))))
+  (.extend entries sys.path)
+  (return (module-file-on module-name entries)))
 
 (def index-installed-package [module-name]
   ;; module-name is an import name, already in its Python spelling.
