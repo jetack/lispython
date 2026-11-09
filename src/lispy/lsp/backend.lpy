@@ -435,9 +435,11 @@
     ;; raises (_tell-view-prepared catches).
     (= self.on-view-prepared None)
     ;; Called on the loop once the backend's input changed: with an lpy uri
-    ;; once that buffer's full view was synced to it (_sync-full), with None
-    ;; once it was told files on disk changed (file-saved, saved); set by
-    ;; Backends.  Never raises (_tell-input-changed catches).
+    ;; once a text of that buffer was sent to it (_sync: a full view's or a
+    ;; cursor view's), with None once a start succeeded (_start: the new
+    ;; process reads the disk anew) or it was told files on disk changed
+    ;; (file-saved, saved); set by Backends.  Never raises
+    ;; (_tell-input-changed catches).
     (= self.on-input-changed None)
     ;; The view root's config file text the running process last read: at
     ;; its start (_spawn) or when told it changed (saved).
@@ -549,6 +551,9 @@
     ;; text in the backend, which no request may ever send.
     (for lpy-uri in (list self._full)
       (._sync-full self lpy-uri))
+    ;; A new process reads every file anew, saves made while none ran
+    ;; included, so every answer kept from the old one is stale.
+    (._tell-input-changed self None)
     ;; Only now: a start that failed or was shut down tells nobody of the
     ;; view it wrote, since no backend ever used it.
     (._tell-view-prepared self)
@@ -634,7 +639,9 @@
      not open in this process, didChange with the whole text when it
      changed, nothing otherwise; origin (see _docs) is kept with it either
      way, since one text can come from sources that place it differently.
-     False when the document has no backend uri."
+     on-input-changed hears of each text sent, never of an unchanged one,
+     whoever syncs it (a full view or a request's cursor view).  False when
+     the document has no backend uri, else True, sent or not."
     (= client self._client)
     (= doc (.get self._docs lpy-uri))
     (if (is doc None)
@@ -646,6 +653,7 @@
                 :text-document (lsp.TextDocumentItem :uri uri :language-id "python"
                                                      :version 1 :text text)))
             (= (sub self._docs lpy-uri) [uri 1 text origin])
+            (._tell-input-changed self lpy-uri)
             (return True)))
     (= (sub doc 3) origin)
     (if (!= (sub doc 2) text)
@@ -655,7 +663,8 @@
               (lsp.DidChangeTextDocumentParams
                 :text-document (lsp.VersionedTextDocumentIdentifier :uri (sub doc 0)
                                                                     :version (sub doc 1))
-                :content-changes [(lsp.TextDocumentContentChangeWholeDocument :text text)]))))
+                :content-changes [(lsp.TextDocumentContentChangeWholeDocument :text text)]))
+            (._tell-input-changed self lpy-uri)))
     (return True))
 
   (async-def request [self method params :uri None :text None :timeout None
@@ -738,8 +747,6 @@
       (except [Exception]
         (.debug logger "python backend: cannot sync %s" lpy-uri :exc-info True)
         (return False)))
-    (if synced
-        (._tell-input-changed self lpy-uri))
     (return synced))
 
   (def _tell-input-changed [self lpy-uri]
@@ -1031,8 +1038,8 @@
    buffer's diagnostics; on-view-prepared with a BackendClient once its
    start succeeded, over the view root's shadows and config file it wrote,
    or a save changed its config file; on-input-changed with an lpy uri once
-   that buffer's full view reached a backend, or None once a backend was
-   told files on disk changed."
+   a text of that buffer (a full or cursor view's) was sent to a backend,
+   or None once a backend started or was told files on disk changed."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)

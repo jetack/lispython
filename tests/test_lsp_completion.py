@@ -1241,14 +1241,106 @@ def test_a_buffer_pushed_to_the_backend_drops_the_other_kept_answers(
     try:
         sent = kept_answer(push_buffer(uri, path))
     finally:
-        if pushed == "other":
-            client = real_backends.available_client(uri)
-
-            async def close():
-                client.close_document(uri)
-
-            run_on_loop(close())
+        close_document(real_backends, run_on_loop, uri)
     assert sent == (2 if pushed == "other" else 1)
+
+
+def close_document(backends, run_on_loop, uri):
+    """Close buffer uri in its backend, so the session's backend holds no
+    text of it for the next test."""
+    client = backends.available_client(uri)
+
+    async def close():
+        client.close_document(uri)
+
+    run_on_loop(close())
+
+
+@once
+def test_a_sync_that_sends_nothing_keeps_the_other_kept_answers(
+    kept_answer, run_on_loop, real_backends, backend_project
+):
+    # Defect: pushing a buffer whose text the backend already holds (as
+    # after every request on it) drops the kept answers of every other
+    # document, though the backend's input did not change.
+    path = backend_project / "other.lpy"
+    uri = path.as_uri()
+    push = push_buffer(uri, path)
+    client = real_backends.available_client(uri)
+
+    async def push_first():
+        assert push(client)
+
+    try:
+        run_on_loop(push_first())
+        sent = kept_answer(push)
+    finally:
+        close_document(real_backends, run_on_loop, uri)
+    assert sent == 1
+
+
+@once
+def test_a_cursor_view_sent_to_the_backend_drops_the_other_kept_answers(
+    kept_answer, run_on_loop, real_backends, backend_project
+):
+    # Defect: a request on a buffer with no full view in the backend (it
+    # does not compile, or was opened before its backend existed) sends
+    # its cursor view's text, a change of the backend's input, with no
+    # invalidate, so the other documents keep answers over its old text.
+    uri = (backend_project / "other.lpy").as_uri()
+    text = f"def unseen_{time.monotonic_ns()}(): pass\n"
+
+    def hover(client):
+        params = lsp.HoverParams(
+            text_document=lsp.TextDocumentIdentifier(uri=client.backend_uri(uri)),
+            position=lsp.Position(line=0, character=4),
+        )
+        # The class's request: the fixture replaced the client's own.
+        return backend.BackendClient.request(
+            client, lsp.TEXT_DOCUMENT_HOVER, params, uri=uri, text=text
+        )
+
+    try:
+        sent = kept_answer(hover)
+    finally:
+        close_document(real_backends, run_on_loop, uri)
+    assert sent == 2
+
+
+@once
+def test_a_buffer_pushed_during_the_request_drops_its_answer(
+    merged, backend_requests, answer_at, run_on_loop, real_backends, backend_project
+):
+    # Defect: another buffer's text reaching the backend while a completion
+    # request waits for its answer is not seen by that request, which then
+    # keeps an answer over the backend's old input for the rest of the word.
+    path = backend_project / "other.lpy"
+    uri = path.as_uri()
+    push = push_buffer(uri, path)
+    client = real_backends.available_client(uri)
+    backend_requests.answer["value"] = [item("my_var")]
+    backend_requests.answer["during"] = lambda: push(client)
+    backend_requests.sent.clear()
+    try:
+        answer_at("(= my-var 1)\n(print my|)")
+        del backend_requests.answer["during"]
+        answer_at("(= my-var 1)\n(print my-v|)")
+    finally:
+        close_document(real_backends, run_on_loop, uri)
+    assert len(backend_requests.sent) == 2
+
+
+def test_a_kept_answer_never_serves_a_backend_that_is_not_running():
+    # Defect: an answer kept from a backend process outlives it: a save or
+    # an edit while it is dead or starting tells nobody, and the process
+    # that starts next reads every file anew.
+    cache = server.CompletionCache()
+    client = SimpleNamespace(running=True)
+    entry = server.CachedCompletion(client, "key", "my", 1, "answer")
+    cache.put("file:///a.lpy", entry, cache.generation("file:///a.lpy"))
+    assert cache.get("file:///a.lpy", client, "key", "my-v", 1) == "answer"
+    client.running = False
+    assert cache.get("file:///a.lpy", client, "key", "my-v", 1) is None
 
 
 @once
