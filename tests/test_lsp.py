@@ -126,6 +126,20 @@ def test_a_parameter_is_no_definition_of_a_module_name():
     assert [loc.range.start.line for loc in locations] == [0]
 
 
+@pytest.mark.parametrize("typed", ["", "_", "___lpy"])
+def test_a_name_the_view_generated_is_never_offered(typed):
+    # Defect: the failed forms' Any import (___lpy_any, labelled in hyphen
+    # spelling as every backend name is) and the cursor sentinel are module
+    # names of the view, so the backend offers them at a typed _.
+    items = [
+        lsp.CompletionItem(label=label)
+        for label in ["___lpy-any", "___lpy_cursor___", "_private"]
+    ]
+    kept = server.filtered_answer(typed, items).items
+    expected = {"": ["_private"], "_": ["_private"], "___lpy": []}[typed]
+    assert [item.label for item in kept] == expected
+
+
 def test_completion(buffer):
     # Right after the last line's (, so no typed word filters the list.
     items = run_completion(ls_with(buffer), position(2, 1))
