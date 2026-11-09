@@ -73,7 +73,8 @@ def test_m_honours_safe_path(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("arg", "file"), [("ok?", "ok_p.lpy"), ("->foo", "_to_foo.lpy")]
+    ("arg", "file"),
+    [("ok?", "ok_p.lpy"), ("->foo", "_to_foo.lpy"), ("my-mod", "my_mod.lpy")],
 )
 def test_m_names_the_module_as_import_does(tmp_path: Path, arg: str, file: str):
     (tmp_path / file).write_text('(print "ran-mangled")\n')
@@ -85,6 +86,6 @@ def test_m_names_the_module_as_import_does(tmp_path: Path, arg: str, file: str):
 def test_m_refuses_a_part_that_is_no_name(tmp_path: Path):
     r = run_m(tmp_path, "class")
     assert r.returncode == 1
-    assert r.stderr.startswith("<command line>:")
+    assert r.stderr.startswith("<command line>:1:1: error:")
     assert "class" in r.stderr
     assert "Traceback" not in r.stderr

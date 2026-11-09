@@ -1190,12 +1190,14 @@
         (== (sub sys.argv 1) "-m")
         (do (sys.argv.pop 1)
             (= mname (sys.argv.pop 1))
-            ;; the module name is the one `import` gives (module-import-name)
             ;; python -m prepends the cwd unless -P / PYTHONSAFEPATH is set
             (if (not sys.flags.safe-path)
                 (sys.path.insert 0 (os.getcwd)))
+            ;; the module name is the one `import` gives (module-import-name)
             (with [(compile-errors "<command line>" mname)]
-              (= modname (module-import-name (Symbol mname))))
+              (= modname (module-import-name
+                          (Symbol mname :lineno 1 :end-lineno 1 :col-offset 0
+                                  :end-col-offset (len mname)))))
             (runpy.run-module modname :run-name "__main__" :alter-sys True))
 
         (== (sub sys.argv 1) "-c")
