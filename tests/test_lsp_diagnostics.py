@@ -1362,6 +1362,101 @@ def test_a_real_backend_reports_on_the_lpy_word(
     assert (found.range.end.line, found.range.end.character) == (0, 21)
 
 
+def published_marks(
+    run_on_loop, real_backends, backend_project, monkeypatch, source, count
+):
+    """(lispython's, the backend's) diagnostics of source opened as main.lpy,
+    each as (line, the .lpy text it underlines), once the backend published
+    at least count of its own (30 s at most)."""
+    name = real_backends.name
+    monkeypatch.setattr(
+        real_backends, "on_diagnostics", server.backend_diagnostics_arrived
+    )
+    monkeypatch.setattr(server, "backends", real_backends)
+    fresh_server_state(monkeypatch)
+    editor = Editor((backend_project / "main.lpy").as_uri())
+
+    async def scenario():
+        try:
+            editor.open(source)
+            await until(
+                lambda: (
+                    editor.published
+                    and len(backend_diagnostics(editor.published[-1], name)) >= count
+                ),
+                timeout=30,
+            )
+            return editor.published[-1]
+        finally:
+            server.did_close(editor, SimpleNamespace(text_document=editor.document))
+
+    lines = source.split("\n")
+
+    def marks(diagnostics):
+        return sorted(
+            (
+                d.range.start.line,
+                lines[d.range.start.line][
+                    d.range.start.character : d.range.end.character
+                ],
+            )
+            for d in diagnostics
+        )
+
+    diagnostics = run_on_loop(scenario())
+    own = [d for d in diagnostics if d.source == "lpy-lsp"]
+    return marks(own), marks(backend_diagnostics(diagnostics, name))
+
+
+# A buffer with failed forms: a def with no body (whose signature the
+# compiler accepts), a class whose method has none, a user macro's call that
+# expands to a failing def, and uses of each beside an undefined name.
+FAILED_FORMS_BUFFER = (
+    "(def f [x])\n"
+    "(class C []\n"
+    "  (def m [self]))\n"
+    "(defmacro mk [name] (return `(def ~name [] (while))))\n"
+    "(mk q)\n"
+    "(= c ^C (C 1))\n"
+    "(print (f 1) (. (C) attr) c q undefined-name)\n"
+    "(f 1 2)\n"
+)
+
+
+def test_a_failed_form_keeps_the_rest_of_the_buffers_backend_diagnostics(
+    run_on_loop, real_backends, backend_project, monkeypatch
+):
+    # Defects: one failed form costs the whole buffer its view, so the
+    # backend reports nothing for it (undefined-name is lost); a failed
+    # def or class leaves its name undefined at every use, a false
+    # diagnostic on f, C and ^C; the class placeholder is a variable, which
+    # an annotation refuses; a call of the failed def with too many
+    # arguments is no longer reported; a failed macro call declares a name
+    # its expansion might bind (q is undefined: the form is left out).
+    own, found = published_marks(
+        run_on_loop, real_backends, backend_project, monkeypatch, FAILED_FORMS_BUFFER, 3
+    )
+    assert own == [(0, "(def"), (2, "(def"), (4, "(mk")]
+    assert found == [(6, "q"), (6, "undefined-name"), (7, "2")]
+
+
+def test_an_importer_of_a_failed_module_sees_its_names(
+    run_on_loop, real_backends, backend_project, monkeypatch
+):
+    # Defect: a module none of whose forms compiles has no shadow, so every
+    # importer gets a false unresolved import and loses the arity check of
+    # its failed def's calls (broken_mod.lpy, conftest's backend_project).
+    source = (
+        "(from broken-mod [broken-fn BrokenCls])\n"
+        "(print (broken-fn 1) (BrokenCls) undefined-name)\n"
+        "(broken-fn 1 2)\n"
+    )
+    _, found = published_marks(
+        run_on_loop, real_backends, backend_project, monkeypatch, source, 2
+    )
+    assert found == [(1, "undefined-name"), (2, "2")]
+
+
 # ---------------------------------------------------------------------------
 # ; pyright: ignore, ; pyrefly: ignore
 # ---------------------------------------------------------------------------

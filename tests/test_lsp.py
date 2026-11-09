@@ -160,6 +160,24 @@ def test_lispython_diagnostics_underline_the_form_head(source, line, underlined)
     assert not re.search(r"(\(|, )line \d+\)$", diagnostic.message)
 
 
+def test_each_failed_form_has_its_own_diagnostic():
+    # Defect: the compile stops at the first failed form, so a later one
+    # is reported only once the first is fixed, or a later form's failure
+    # replaces the first's.
+    source = "(while)\n(= y 1)\n(for i in (range 3)\n  (def f [x]))"
+    lines = source.split("\n")
+    found = [
+        (
+            d.range.start.line,
+            lines[d.range.start.line][d.range.start.character : d.range.end.character],
+            d.severity,
+        )
+        for d in server.compute_diagnostics(source, URI)
+    ]
+    warning = server.lsp.DiagnosticSeverity.Warning
+    assert found == [(0, "(while", warning), (3, "(def", warning)]
+
+
 def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
     # Defect: a required module's compile error carries that module's line
     # (3, its (while)), which the buffer's diagnostic took as its own: it
