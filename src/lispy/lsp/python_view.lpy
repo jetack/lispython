@@ -28,6 +28,7 @@
 (import tempfile)
 (import threading)
 (import time)
+(import types)
 (import tomllib)
 
 (try
@@ -764,40 +765,60 @@
                         "MatchAs" "MatchStar" "TypeVar" "ParamSpec" "TypeVarTuple"]
            if (hasattr ast name))))
 
-(def _binds-sentinel [node]
-  "True when node, an ast node, binds the cursor sentinel itself: a stored
-   name or attribute, a parameter, an import's alias (never the imported
-   name, which refers to a module or member), a def, class, except, capture
-   or type parameter's name, a mapping pattern's rest.  A keyword
-   argument, global, nonlocal or del names an existing name."
+;; The globals every module has though no statement of it binds them.
+(= _MODULE-GLOBALS (frozenset [*(vars (types.ModuleType "_"))
+                               "__file__" "__cached__" "__builtins__"]))
+
+(def _bindings [node]
+  "The names node, an ast node, binds, each as (name, pure): pure when the
+   occurrence only binds, False for an import's name with no alias, which
+   binds it and names a module or member too.  The one home of the binding
+   set _self-bound-p reads: a stored name, a parameter, an import's alias
+   or name (its first dotted part), a def, class, except, capture or type
+   parameter's name, a mapping pattern's rest.  A keyword argument,
+   global, nonlocal or del names an existing name, and an attribute is
+   never one: whether a store creates a member or sets one a receiver
+   already has needs the receiver's type, which only the backend knows."
   (cond (isinstance node ast.Name)
-        (return (and (== node.id CURSOR-SENTINEL) (isinstance node.ctx ast.Store)))
-        (isinstance node ast.Attribute)
-        (return (and (== node.attr CURSOR-SENTINEL) (isinstance node.ctx ast.Store)))
+        (return (ife (isinstance node.ctx ast.Store) [(, node.id True)] []))
         (isinstance node ast.arg)
-        (return (== node.arg CURSOR-SENTINEL))
+        (return [(, node.arg True)])
         (isinstance node ast.alias)
-        (return (== node.asname CURSOR-SENTINEL))
-        (isinstance node _BINDING-NAME-NODES)
-        (return (== node.name CURSOR-SENTINEL))
-        (isinstance node ast.MatchMapping)
-        (return (== node.rest CURSOR-SENTINEL)))
-  (return False))
+        (do (if (is-not node.asname None)
+                (return [(, node.asname True)]))
+            (if (== node.name "*")
+                (return []))
+            (return [(, (sub (.split node.name ".") 0) False)]))
+        (and (isinstance node _BINDING-NAME-NODES) (isinstance node.name str))
+        (return [(, node.name True)])
+        (and (isinstance node ast.MatchMapping) (isinstance node.rest str))
+        (return [(, node.rest True)]))
+  (return []))
 
 (def _self-bound-p [tree restored]
   "True when the word at the cursor, restored (its Python name) standing
    for the sentinel in tree, is a name only its own occurrence binds: the
-   sentinel is a binding occurrence (_binds-sentinel), restored is no other
-   identifier of tree (_identifier-count) and no builtin.  A backend offers
-   such a name because the generated Python, with the word restored, binds
-   it, so its item is the word being typed, never a name the buffer has.
-   Limit: a star-imported name equal to a word typed where it is bound is
-   not told apart (the tree does not hold it), and is not offered there;
-   the word is typed in full already."
-  (return (and restored
-               (not-in restored (vars builtins))
-               (== (_identifier-count tree restored) 0)
-               (any ((_binds-sentinel node) for node in (ast.walk tree))))))
+   sentinel is a pure binding occurrence (_bindings), no other occurrence
+   in tree binds restored, in any scope, and it is neither a builtin nor a
+   module's implicit global (_MODULE-GLOBALS).  A backend offers such a
+   name because the generated Python, with the word restored, binds it, so
+   its item is the word being typed, never a name the buffer has; a mere
+   reference elsewhere ((print ab)) names nothing more.  Limits: a
+   star-imported name equal to a word typed where it is bound is not told
+   apart (the tree does not hold it), and is not offered there, the word
+   being typed in full already; a stored attribute is never self-bound
+   (_bindings), so the backend's own self.x item at (= self.x| ...) stays
+   offered, because a real member must never be dropped."
+  (if (or (not restored) (in restored (vars builtins)) (in restored _MODULE-GLOBALS))
+      (return False))
+  (= sentinel False)
+  (for node in (ast.walk tree)
+    (for [name pure] in (_bindings node)
+      (cond (== name restored)
+            (return False)
+            (and pure (== name CURSOR-SENTINEL))
+            (= sentinel True))))
+  (return sentinel))
 
 (def _refused-open-form [compiled stack]
   "The entry of stack (open-forms) that compiled's compile error is placed

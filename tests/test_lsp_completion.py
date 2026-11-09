@@ -703,7 +703,7 @@ SCREENSHOT = (
         ("(= ab| 1)\n", "ab"),
         ("(with [(open 1) as ab|] 1)\n", "ab"),
         ("(try 1 (except [Exception as ab|] 1))\n", "ab"),
-        ("(class A []\n  (def f [self]\n    (= self.ab| 1)))\n", "ab"),
+        ("(= ab| 1)\n(print ab)\n", "ab"),
     ],
     ids=[
         "fallback view",
@@ -715,7 +715,7 @@ SCREENSHOT = (
         "assignment",
         "with as",
         "except as",
-        "stored attribute",
+        "referenced later",
     ],
 )
 def test_the_word_being_typed_is_never_offered_as_its_own_name(merged, source, word):
@@ -723,7 +723,8 @@ def test_the_word_being_typed_is_never_offered_as_its_own_name(merged, source, w
     # itself is offered: over a fallback view the buffer's definitions are
     # collected with the partial word in place ((from heapq [heappush heap|])
     # defines heap), and over a cursor view the backend offers the binding
-    # the restored word makes (def f [ab|] offers ab).
+    # the restored word makes (def f [ab|] offers ab); a later reference
+    # ((print ab)) binds nothing, so it must not count as another binding.
     items = by_label(merged(source)[2])
     assert word not in items
     if source is SCREENSHOT:
@@ -747,6 +748,8 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
         ("(from heapq [heappush|])\n", "heappush"),
         ("(def f [abc]\n  abc|)\n", "abc"),
         ("(for heap| in [1] 1)\n(= heap 2)\n(= )\n", "heap"),
+        ("(import os)\n(= os.environ| 1)\n", "environ"),
+        ("(= __file__| 1)\n", "__file__"),
     ],
     ids=[
         "bound elsewhere",
@@ -754,13 +757,16 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
         "imported name",
         "reference",
         "defined after, fallback view",
+        "existing member stored",
+        "module global",
     ],
 )
 def test_a_real_name_equal_to_the_word_being_typed_stays(merged, source, word):
     # Defect: the self-binding filter drops every item named as the typed
     # word, so a name that exists without it (bound elsewhere, a builtin,
-    # the module member an import names, a parameter, or a definition after
-    # the cursor that only the buffer's list knows over a fallback view) is
+    # the module member an import names, a parameter, a definition after
+    # the cursor that only the buffer's list knows over a fallback view, a
+    # module's real member being stored to, a module's implicit global) is
     # lost.
     assert word in by_label(merged(source)[2])
 
