@@ -86,7 +86,8 @@ follows [Semantic Versioning](https://semver.org/).
 - `lpy -m` names its module the way `import` does, so `ok?` and `->foo`
   run `ok_p.lpy` and `_to_foo.lpy` rather than a plain `-` to `_` swap's
   `ok?` and `_>foo`, and a part that is no name (a keyword such as `class`)
-  is refused.
+  is refused with a positioned compile error,
+  `<command line>:1:1: error: ...`.
 - LSP: a `.lpy` in a plain subdirectory of a workspace folder (no
   `__init__`) is named as a module of that namespace package
   (`scripts/tool.lpy` is `scripts.tool`, imported from the folder), so its
@@ -268,8 +269,6 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `lpy -m class` reports a positioned compile error
-  (`<command line>:1:1: error: ...`) instead of a runpy traceback.
 - The LSP and the nREPL resolve a relative `require` or `from` in a
   namespace package (a directory with no `__init__`) as the importer does:
   `ns/a.lpy` is `ns.a`, so `(require .mac)` compiles and go-to-definition
