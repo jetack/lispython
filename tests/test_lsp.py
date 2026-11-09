@@ -139,6 +139,27 @@ def test_diagnostics_still_report_the_error(buffer):
     assert diagnostic.range.start.line == 2
 
 
+@pytest.mark.parametrize(
+    ("source", "line", "underlined"),
+    [
+        # An indented form on a later line, the reported case: the body is
+        # being typed after the head.
+        ("(for i in (range 3)\n  (while (and busy)))", 1, "(while"),
+        ("(def f [x])", 0, "(def"),
+        ("(+ 1 2))", 0, ")"),
+    ],
+)
+def test_lispython_diagnostics_underline_the_form_head(source, line, underlined):
+    # Defect: a zero-width range at the form, which eglot places a character
+    # early and VS Code widens to a word of its own, and a message carrying
+    # str(SyntaxError)'s "(line N)" suffix.
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    start, end = diagnostic.range.start, diagnostic.range.end
+    assert start.line == end.line == line
+    assert source.split("\n")[line][start.character : end.character] == underlined
+    assert not re.search(r"(\(|, )line \d+\)$", diagnostic.message)
+
+
 def test_a_diagnostics_parse_warning_names_the_document_file():
     with pytest.warns(SyntaxWarning) as rec:
         server.compute_diagnostics('(print f"{(g \\"a\\")}")', URI)

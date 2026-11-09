@@ -25,7 +25,7 @@
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.importer [finder-loader-details])
 (from lispy.core.macro [prelude-opted-out])
-(from lispy.core.parser [parse tokenize])
+(from lispy.core.parser [_WORD_TOKENS parse run-tokens tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
@@ -598,12 +598,12 @@
     node.end_col_offset)))
 
 (def extract-error-position [exc src]
-  "Best-effort extraction of line/col from a parse or compile error."
+  "Best-effort (0-based line, code-point col) of a parse or compile error,
+   None when neither the exception nor its message names one."
   ;; Some Python exceptions carry lineno/offset
   (= lineno (getattr exc "lineno" None))
   (if (is-not lineno None)
-      (do (= col (- (or (getattr exc "offset" None) 1) 1))
-          (return (, (- lineno 1) col (- lineno 1) col))))
+      (return (, (- lineno 1) (- (or (getattr exc "offset" None) 1) 1))))
   ;; Try to extract from the message
   (= msg (str exc))
   (= m (re.search "line\\s+(\\d+)" msg re.IGNORECASE))
@@ -613,8 +613,36 @@
           (= mc (re.search "col(?:umn)?\\s+(\\d+)" msg re.IGNORECASE))
           (if mc
               (= col (int (.group mc 1))))
-          (return (, line col line col))))
+          (return (, line col))))
   (return None))
+
+(def error-head-span [line col]
+  "(start, end), code-point columns of line, of the error at col: an
+   opening bracket with the reader's symbol or number token right after it
+   ((while, [x), or the symbol or number token at col (run-tokens; the
+   reader's leaf when col is past a prefix), else the one character at col
+   (a string opening, a closing bracket, a quote mark: (\"abc\" is its
+   bracket alone), and the line's last character at or past its end.  Only
+   the head, on the start line: the body the user is still typing then
+   never lies inside the range, and a non-empty range spares the client a
+   guess (eglot underlines a zero-width one a character early, VS Code a
+   word of its choosing)."
+  (if (>= col (len line))
+      (return (ife line (, (- (len line) 1) (len line)) (, col (+ col 1)))))
+  (= head (ife (in (sub line col) "([{") (+ col 1) col))
+  (for [start end tktype] in (run-tokens line head)
+    (if (in tktype _WORD_TOKENS)
+        (return (, col end)))
+    (break))
+  (return (, col (+ col 1))))
+
+(def error-message [exc]
+  "exc's message for a diagnostic: a SyntaxError's (LispyCompileError is
+   one) own msg, which has none of str's (file, line N) suffix the range
+   already places; any other exception's str."
+  (if (and (isinstance exc SyntaxError) exc.msg)
+      (return exc.msg))
+  (return (str exc)))
 
 ;; ---------------------------------------------------------------------------
 ;; Compiles that may never return
@@ -781,11 +809,14 @@
                      :generation generation :fresh fresh)))
 
 (def error-diagnostic [exc source severity message]
-  (= pos (extract-error-position exc source))
-  (if (is pos None)
-      (= pos (, 0 0 0 0)))
-  (return (lsp.Diagnostic :range (make-range *pos) :severity severity :source "lpy-lsp"
-                          :message message)))
+  "The diagnostic of exc, source's parse or compile error, ranged over the
+   head of the form it names (error-head-span; the start of source when
+   the error names no position), in code-point columns as every lispython
+   diagnostic."
+  (= [line col] (or (extract-error-position exc source) (, 0 0)))
+  (= [start end] (error-head-span (line-text source (+ line 1)) col))
+  (return (lsp.Diagnostic :range (make-range line start line end) :severity severity
+                          :source "lpy-lsp" :message message)))
 
 (def compute-diagnostics [source uri :compiled None]
   "lispython's own diagnostics of source, document uri's text: its parse
@@ -798,10 +829,10 @@
   (= exc compiled.error)
   (cond (== compiled.stage PARSE-STAGE)
         (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Error
-                                   f"Parse error: {exc}")])
+                                   f"Parse error: {(error-message exc)}")])
         (and (== compiled.stage COMPILE-STAGE) (not (isinstance exc ModuleNotFoundError)))
         (return [(error-diagnostic exc source lsp.DiagnosticSeverity.Warning
-                                   f"Compile warning: {exc}")]))
+                                   f"Compile warning: {(error-message exc)}")]))
   (return (list)))
 
 ;; Seconds a change's diagnostics wait for the backend's, once its view
