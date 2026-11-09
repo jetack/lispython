@@ -480,6 +480,24 @@ def test_crashed_backend_restarts_once(project, tmp_path, fake_argv, spawned):
     assert len(spawned) == 2
 
 
+def test_a_start_tells_that_the_backends_input_changed(project, tmp_path, fake_argv):
+    # Defect: a backend process that starts (first or after a crash) reads
+    # every file anew, saves made while none ran included, yet nobody hears
+    # of it, so answers kept from before it serve the rest of a word.
+    client, hover = fake_client(project, tmp_path, fake_argv)
+    told = []
+    client.on_input_changed = told.append
+
+    async def scenario():
+        try:
+            await hover()
+        finally:
+            await client.shutdown()
+
+    run_bounded(scenario())
+    assert None in told
+
+
 def test_cancelled_requests_never_cost_a_start(project, tmp_path, fake_argv, spawned):
     # Defect: cancelling a request (the editor's $/cancelRequest) while the
     # backend starts cancels the start: each cancel uses up a spawn and can

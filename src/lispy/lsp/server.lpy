@@ -2398,10 +2398,12 @@
    anew from them each time (backend-items, filtered-answer).  An answer
    also depends on every other file the backend reads, so invalidate drops
    it once the backend's input changed (backend-input-changed) or a
-   document closed.  generation tells an answer still in flight whether an
-   invalidate that did not spare its uri came meanwhile.  Only the
-   completion handler, did-close and the backend's hooks use it, all on
-   the loop."
+   document closed.  That hook fires when a text is sent, not when the
+   backend has analysed it, so an answer it gives over its older state may
+   still be kept for the rest of a word.  generation tells an answer still
+   in flight whether an invalidate that did not spare its uri came
+   meanwhile.  Only the completion handler, did-close and the backend's
+   hooks use it, all on the loop."
   (def __init__ [self]
     (= self._entries {})
     ;; generation(uri) is _invalidations less the invalidations that spared
@@ -2414,10 +2416,12 @@
     (return (- self._invalidations (.get self._spared uri 0))))
 
   (def get [self uri client key typed epoch]
-    "The cached answer of uri when client, key and epoch are its and typed
+    "The cached answer of uri when client, key and epoch are its, client
+     still runs (a process it starts reads its input anew), and typed
      extends, as written, the word it was fetched for, else None."
     (= entry (.get self._entries uri))
-    (if (or (is entry None) (is-not entry.client client) (!= entry.key key)
+    (if (or (is entry None) (is-not entry.client client) (not client.running)
+            (!= entry.key key)
             (is epoch None) (!= entry.epoch epoch)
             (not (.startswith typed entry.typed)))
         (return None))
@@ -2441,9 +2445,9 @@
                           {}))))
 
 (def backend-input-changed [uri]
-  "Backends' on-input-changed: the backend now holds the full view of
-   buffer uri, whose own entry its key already tells, or (None) was told
-   files on disk changed."
+  "Backends' on-input-changed: a text of buffer uri was sent to the
+   backend, which uri's own entry's key already tells, or (None) a backend
+   started or was told files on disk changed."
   (.invalidate completion-cache :keep uri))
 
 (= backends.on-input-changed backend-input-changed)
