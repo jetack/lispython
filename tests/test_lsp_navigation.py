@@ -188,13 +188,13 @@ def test_backend_off_gives_the_local_answers(navigate, off_backends):
 def test_a_buffer_that_does_not_compile_gives_the_local_answers(
     navigate, backend_requests
 ):
-    # An earlier refused form: there is no Python view, so no request, and
-    # the local answers stand.
-    marked = "(def)\n" + OTHER + "(other-f|n 2)"
-    assert spans(navigate(server.definition, marked)) == [("main.lpy", 1, 13, 1, 21)]
+    # A refused form before the cursor in the form holding it: there is no
+    # Python view, so no request, and the local answers stand.
+    marked = OTHER + "(do (def)\n  (other-f|n 2))"
+    assert spans(navigate(server.definition, marked)) == [("main.lpy", 0, 13, 0, 21)]
     assert spans(navigate(server.references, marked)) == [
-        ("main.lpy", 1, 13, 1, 21),
-        ("main.lpy", 2, 1, 2, 9),
+        ("main.lpy", 0, 13, 0, 21),
+        ("main.lpy", 2, 3, 2, 11),
     ]
     assert backend_requests.sent == []
 

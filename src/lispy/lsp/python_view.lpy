@@ -37,14 +37,17 @@
     (import msvcrt)))
 
 (from lispy.core.builtins [LAMBDA-HEADS])
-(from lispy.core.compiler.expr [param-bindings])
+(from lispy.core.compiler.expr [def-args-walk param-bindings])
+(from lispy.core.compiler.stmt [import-bindings])
 (from lispy.core.errors [LispyCompileError compile-errors])
 (from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
                          MetaIndicator Paren Starred Symbol Wrapper atom-text])
 (from lispy.core.parser [completion-word-span parse source-offset tokenize word-parts])
-(from lispy.core.macro [compile-unit])
-(from lispy.core.macro-table [MacroTable])
-(from lispy.core.compiler.literal [hyphen-spelling name-key python-name-p])
+(from lispy.core.macro [compile-unit-forms])
+(from lispy.core.macro-table [MacroTable find-macro])
+(from lispy.core.compiler.literal [hyphen-spelling name-key python-name python-name-p
+                                   symbol-name])
+(from lispy.core.utils [trampoline])
 (from lispy.core.unparse [unparse])
 (from lispy.core.importer [has-init-file package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
@@ -647,22 +650,212 @@
 (class CompiledBuffer []
   "What compile-buffer made of a buffer: view, its PythonView, or None; and
    when that is None, stage, where it failed, and error, the exception.
-   PARSE-STAGE is the reader, COMPILE-STAGE macro expansion and the
-   compiler (what diagnostics report); VIEW-STAGE is the unparse or the
-   re-parse of the generated module, which no diagnostic names.  epoch is
-   the macro environment it compiled under (macro_modules.epoch)."
-  (def __init__ [self view :stage None :error None :epoch None]
+   PARSE-STAGE is the reader; COMPILE-STAGE the unit's start (the prelude's
+   seeding) or the module tracking around the forms, never one form's
+   compile; VIEW-STAGE is the unparse or the re-parse of the generated
+   module, which no diagnostic names.  failures, in source order, are the
+   (form, exception) of each top-level form that failed to expand or
+   compile: the view holds every other form (compile-buffer), and
+   diagnostics report each.  epoch is the macro environment it compiled
+   under (macro_modules.epoch)."
+  (def __init__ [self view :stage None :error None :epoch None :failures (,)]
     (= self.epoch epoch)
     (= self.view view)
     (= self.stage stage)
-    (= self.error error)))
+    (= self.error error)
+    (= self.failures (list failures))))
+
+;; Every name the LSP writes into a view starts with GENERATED-PREFIX
+;; (CURSOR-SENTINEL, ANY-ALIAS), so none is a name the user wrote, and a
+;; backend completion item naming one is dropped (filtered-answer in
+;; server.lpy).
+(= GENERATED-PREFIX "___lpy_")
+;; The name a failed form's placeholders annotate with: typing.Any, imported
+;; under it once per view that has a placeholder (_with-any-import).
+(= ANY-ALIAS (+ GENERATED-PREFIX "any"))
+
+;; Placeholders stand in for a top-level form that failed (compile-buffer),
+;; so the names it plainly binds stay defined for the backend, in this
+;; buffer and through its shadow in every module importing it: a half-typed
+;; (def f [x] has no false "f is not defined" at its uses.  Only a name the
+;; syntax itself gives is declared, read by the compiler's own rules
+;; (symbol-name, python-name, import-bindings, def-args-walk); a failed call
+;; of a user macro binds nothing knowable, so it is left out.  Only a
+;; declared name carries a position, its symbol's .lpy span, so the map has
+;; a name entry there; the rest (the AnnAssign, its annotation, the Any
+;; import, every def and class placeholder) carry none, so a backend
+;; diagnostic on them (basedpyright's reportExplicitAny, reportAny on a
+;; parameter) maps nowhere and is dropped (lpy-diagnostic-range).  The
+;; shapes, checked on basedpyright and pyrefly:
+;; - name: Any = ...  A bare `name: Any` leaves a module-level name unbound
+;;   (basedpyright reports "is unbound" at a later use), so it has a value.
+;; - a class is `class C(Any): ...`, positionless: a declared `C: Any` is a
+;;   variable, which basedpyright refuses in an annotation (^C: "Variable
+;;   not allowed in type expression"); with the Any base, (C 1), (. (C) a)
+;;   and ^C get no diagnostic on either.  Its name has no entry: a
+;;   positioned ClassDef would be the innermost entry around its base, so a
+;;   diagnostic there (reportAny) would land on the user's C, and a
+;;   positioned `C = C` after it is reportConstantRedefinition there.
+;; - an undecorated def whose parameter list the compiler accepts keeps its
+;;   signature, every parameter and the return Any, positionless for the
+;;   same reason as a class: a call with a wrong arity is still reported
+;;   (as Python's checkers report one to a def with no body), a right one is
+;;   not.  A decorated def is `name: Any = ...`, since its decorators may
+;;   change the signature.
+(= _DEFINITION-HEADS (, "def" "async-def" "class"))
+(= FROM-HEADS (, "from" "lazy-from"))
+(= IMPORT-ONLY-HEADS (, "import" "lazy-import"))
+(= IMPORT-HEADS (+ IMPORT-ONLY-HEADS FROM-HEADS))
+
+(def _any []
+  "A positionless load of ANY-ALIAS."
+  (return (ast.Name :id ANY-ALIAS :ctx (ast.Load))))
+
+(def _ellipsis-body []
+  (return [(ast.Expr :value (ast.Constant :value Ellipsis))]))
+
+(def _positionless [tree :keep None]
+  "tree with every node in it but keep at line 0, which the map takes for
+   no position (_lpy-span); the unparser reads a def's lineno, so it is
+   never left unset."
+  (for node in (ast.walk tree)
+    (if (is-not node keep)
+        (for attribute in node._attributes
+          (setattr node attribute 0))))
+  (return tree))
+
+(def _any-declaration [name symbol spelled]
+  "name: Any = ..., its target at the start of symbol (a parsed node) as
+   long as spelled, the text of it that names name."
+  (= target (ast.Name :id name :ctx (ast.Store) :lineno symbol.lineno
+                      :col-offset symbol.col-offset :end-lineno symbol.lineno
+                      :end-col-offset (+ symbol.col-offset (len spelled))))
+  (return (_positionless (ast.AnnAssign :target target :annotation (_any)
+                                        :value (ast.Constant :value Ellipsis) :simple 1)
+                         :keep target)))
+
+(def _bound-name [symbol table :spelled None]
+  "The Python name symbol binds, or None where the compiler refuses that
+   binding: symbol-name's refusals (no Symbol, dotted, no Python name), or
+   a spelling that is a macro of table (check-binding's clash).  spelled is
+   the part of symbol naming it (an import's first dotted part), default
+   its whole text."
+  (= spelling (ife (is spelled None) (atom-text symbol) spelled))
+  (if (and (isinstance spelling str) (is-not (find-macro table spelling) None))
+      (return None))
+  (try
+    (return (ife (is spelled None) (symbol-name symbol) (python-name spelled symbol)))
+    (except [LispyCompileError]
+      (return None))))
+
+(def _def-stub [form name]
+  "def name(<params>) -> Any: ..., positionless, for form, a failed def or
+   async-def whose [params] bracket def-args-walk accepts: every parameter,
+   annotation and default kept in its slot as Any; else None."
+  (if (or (< (len form) 3) (not (isinstance (sub form 2) Bracket)))
+      (return None))
+  (try
+    (= arguments (trampoline (def-args-walk (sub form 2) True (fn [_] (_any)))))
+    (except [LispyCompileError]
+      (return None)))
+  (for arg in (+ arguments.posonlyargs arguments.args arguments.kwonlyargs
+                 [arguments.vararg arguments.kwarg])
+    (if (is-not arg None)
+        (= arg.annotation (_any))))
+  (= make (ife (== (atom-text (sub form 0)) "async-def") ast.AsyncFunctionDef
+               ast.FunctionDef))
+  (return (_positionless
+            (make :name name :args arguments :body (_ellipsis-body)
+                  :decorator-list [] :returns (_any)))))
+
+(def _macro-head-p [form table]
+  "Whether form's head is a macro of table (find-macro): a call of it is no
+   form whose bindings its syntax shows."
+  (= head (atom-text (sub form 0)))
+  (return (and (isinstance head str) (is-not (find-macro table head) None))))
+
+(def form-placeholders [form table]
+  "The statements standing in a view for form, a top-level form that
+   failed, given table, the macro table it compiled under: a declaration of
+   each name it plainly binds (see above), or [] when it binds none
+   knowable."
+  (= decorated False)
+  (while True
+    (if (or (not (isinstance form Paren)) (== (len form) 0) (_macro-head-p form table))
+        (return []))
+    (if (or (!= (atom-text (sub form 0)) "deco") (< (len form) 3))
+        (break))
+    (= decorated True)
+    (= form (sub form 2)))
+  (= head (atom-text (sub form 0)))
+  (cond
+    (and (in head _DEFINITION-HEADS) (>= (len form) 2))
+    (do (= symbol (sub form 1))
+        (if (isinstance symbol GluedHead)
+            (= symbol symbol.head))
+        (= name (_bound-name symbol table))
+        (cond (is name None)
+              (return [])
+              (== head "class")
+              (return [(_positionless
+                         (ast.ClassDef :name name :bases [(_any)] :keywords []
+                                       :body (_ellipsis-body) :decorator-list []))]))
+        (= stub (ife decorated None (_def-stub form name)))
+        (if (is-not stub None)
+            (return [stub]))
+        (return [(_any-declaration name symbol (atom-text symbol))]))
+    (and (== head "=") (>= (len form) 2))
+    ;; (= a b v) binds a and b (a = b = v); (= a ^T v) and (= a) only a.
+    (do (= targets (ife (or (< (len form) 3) (isinstance (sub form 2) Annotation))
+                        [(sub form 1)]
+                        (sub (list form.list) [: 1 -1])))
+        (= found [])
+        (for target in targets
+          (= name (_bound-name target table))
+          (if (is-not name None)
+              (.append found (_any-declaration name target (atom-text target)))))
+        (return found))
+    (and (in head IMPORT-HEADS) (not decorated))
+    (do (try
+          (= bindings (import-bindings form))
+          (except [LispyCompileError]
+            (return [])))
+        (= found [])
+        (for [spelled symbol] in bindings
+          (= name (_bound-name symbol table :spelled spelled))
+          ;; (import a.b) binds a: its target spans only the first part.
+          (if (is-not name None)
+              (.append found (_any-declaration name symbol spelled))))
+        (return found)))
+  (return []))
+
+(def _with-any-import [body]
+  "body with `from typing import Any as ANY-ALIAS`, positionless, after its
+   docstring and __future__ imports (a future import must come first)."
+  (= index 0)
+  (if (and body (isinstance (sub body 0) ast.Expr)
+           (isinstance (. (sub body 0) value) ast.Constant)
+           (isinstance (. (sub body 0) value value) str))
+      (= index 1))
+  (while (and (< index (len body)) (isinstance (sub body index) ast.ImportFrom)
+              (== (. (sub body index) module) "__future__"))
+    (+= index 1))
+  (= imported (_positionless
+                 (ast.ImportFrom :module "typing"
+                                 :names [(ast.alias :name "Any" :asname ANY-ALIAS)]
+                                 :level 0)))
+  (return (+ (sub body [: None index]) [imported] (sub body [: index None]))))
 
 (def compile-buffer [source :package "" :name "__main__" :search-dirs (,)
                      :filename None]
   "The CompiledBuffer of source: the one compile of a buffer, whose view
-   the backend gets and whose failure diagnostics report.  The parse is
+   the backend gets and whose failures diagnostics report.  The parse is
    strict and runs in compile-errors for filename (the document's path), so
-   a parse warning names that file.  Macros run with search-dirs
+   a parse warning names that file; a parse error gives no view.  The forms
+   compile one at a time (compile-unit-forms): a form that fails is a
+   failure, and its placeholders (form-placeholders) stand in the view
+   where it would be, so one form being typed costs the rest of the buffer
+   neither its view nor its backend diagnostics.  Macros run with search-dirs
    (module-names' fourth item) on sys.path (_on-sys-paths), so a relative
    require imports its package and a script's sibling module imports, and
    under fresh-modules, so a module a require imported is
@@ -683,12 +876,27 @@
       ;; No macro ran, so any epoch holds it.
       (return (CompiledBuffer None :stage PARSE-STAGE :error e :epoch (current-epoch)))))
   (= macro-epoch None)
+  (= body [])
+  (= failures [])
+  (= placeheld False)
   (try
     (with [(fresh-modules) as entered (_on-sys-paths search-dirs)]
       (= macro-epoch entered)
-      (= body (list (compile-unit forms scope))))
+      (for [form statements error] in (compile-unit-forms forms scope)
+        (if (is error None)
+            (.extend body statements)
+            (do (.append failures (, form error))
+                ;; The table as it stands after the form, before the next.
+                (= placeholders (form-placeholders
+                                  form (.get scope "__macro_namespace")))
+                (if placeholders
+                    (= placeheld True))
+                (.extend body placeholders)))))
     (except [Exception as e]
-      (return (CompiledBuffer None :stage COMPILE-STAGE :error e :epoch macro-epoch))))
+      (return (CompiledBuffer None :stage COMPILE-STAGE :error e :epoch macro-epoch
+                              :failures failures))))
+  (if placeheld
+      (= body (_with-any-import body)))
   (try
     (= module (ast.Module :body body :type-ignores (list)))
     (= text (unparse module))
@@ -702,21 +910,22 @@
                        for [key macro] in table
                        if (in (id macro) _BUILTIN-MACRO-NAMES)})
     (except [Exception as e]
-      (return (CompiledBuffer None :stage VIEW-STAGE :error e :epoch macro-epoch))))
+      (return (CompiledBuffer None :stage VIEW-STAGE :error e :epoch macro-epoch
+                              :failures failures))))
   (return (CompiledBuffer (PythonView text position-map tree :macros macros
                                       :builtin-macros builtin-macros)
-                          :epoch macro-epoch)))
+                          :epoch macro-epoch :failures failures)))
 
 (def compile-view [source :package "" :name "__main__" :search-dirs (,)]
   "The PythonView of source (compile-buffer), or None when it does not
-   become Python: a parse or compile error, a failing macro, a nesting too
-   deep to unparse."
+   become Python: a parse error, a failing unit start, a nesting too deep to
+   unparse.  A form that fails is left out of it (compile-buffer)."
   (return (. (compile-buffer source :package package :name name :search-dirs search-dirs)
              view)))
 
 ;; Stands in for the word at the cursor: a plain name, unchanged by mangling,
 ;; that compiles wherever a symbol does.
-(= CURSOR-SENTINEL "___lpy_cursor___")
+(= CURSOR-SENTINEL (+ GENERATED-PREFIX "cursor___"))
 
 (= _IDENTIFIER-FIELDS (frozenset ["id" "attr" "arg" "name" "asname" "module"
                                   "names" "rest" "kwd_attrs"]))
@@ -834,16 +1043,28 @@
                 (return False)))))
   (return pure-seen))
 
-(def _refused-open-form [compiled stack]
-  "The entry of stack (open-forms) that compiled's compile error is placed
-   at, at its bracket or its head, or None: no such error, or an error at
-   any other form, which unwrapping the forms around the cursor never
-   mends.  The innermost match wins: an inner form's bracket is the head
-   of the one around it, and unwrapping the outer one first would drop it
-   in the next round too ([(when x| is [x], never x)."
-  (= error compiled.error)
-  (if (or (!= compiled.stage COMPILE-STAGE)
-          (not (isinstance error LispyCompileError))
+(def _cursor-failure [compiled line col]
+  "The exception of compiled's failed top-level form (CompiledBuffer
+   failures) holding the 1-based line, code-point col, or None when that
+   form compiled: a failure elsewhere costs the cursor nothing, its form
+   being left out of the view."
+  (= position (, line col))
+  (for [form error] in compiled.failures
+    (if (and form.lineno
+             (<= (, form.lineno form.col-offset) position)
+             (< position (, form.end-lineno form.end-col-offset)))
+        (return error)))
+  (return None))
+
+(def _refused-open-form [error stack]
+  "The entry of stack (open-forms) that error, the compile error of the
+   form holding the cursor (_cursor-failure), is placed at, at its bracket
+   or its head, or None: no such error, or an error at any other form,
+   which unwrapping the forms around the cursor never mends.  The innermost
+   match wins: an inner form's bracket is the head of the one around it,
+   and unwrapping the outer one first would drop it in the next round too
+   ([(when x| is [x], never x)."
+  (if (or (not (isinstance error LispyCompileError))
           (is error.lineno None) (is error.offset None))
       (return None))
   (= position (, error.lineno (- error.offset 1)))
@@ -1053,9 +1274,11 @@
    or the token's end, so my-|x and -|-x leave nothing of the token to glue
    onto it) is replaced by CURSOR-SENTINEL (marked-source) so a buffer mid-edit (my-x.  or
    (. obj ) ) still compiles, the rest of the word being what a completion
-   there replaces; when the whole buffer does not, the text
+   there replaces; when the buffer gives no view or the top-level form
+   holding the cursor fails (_cursor-failure; a failure elsewhere only
+   leaves its form out), the text
    before the cursor with its open forms closed is compiled instead, and
-   while that is refused at an open form around the cursor ((== (sub gr|
+   while the cursor's form is refused at an open form around it ((== (sub gr|
    with one operand, (when x| with no body), that one form is unwrapped:
    its text up to its child holding the cursor is blanked (_unwrap), so
    that child, and every form inside it, stands in the form's place (under
@@ -1079,6 +1302,10 @@
   (= compiled (compile-buffer marked :package package :name name :search-dirs search-dirs))
   (= view compiled.view)
   (= macro-epoch compiled.epoch)
+  ;; The form holding the cursor failing fails the cursor compile as a
+  ;; whole buffer's failure would: the view lacks the sentinel.
+  (if (is-not (_cursor-failure compiled line start) None)
+      (= view None))
   (if (is view None)
       (do (= prefix (source-prefix marked line sentinel-end))
           (= sentinel-start (- (len prefix) (len CURSOR-SENTINEL)))
@@ -1100,9 +1327,11 @@
                     (and (is-not compiled.epoch None) (< compiled.epoch macro-epoch)))
                 (= macro-epoch compiled.epoch))
             (= view compiled.view)
-            (if (is-not view None)
+            (= failure (_cursor-failure compiled line start))
+            (if (and (is-not view None) (is failure None))
                 (break))
-            (= refused (_refused-open-form compiled stack))
+            (= view None)
+            (= refused (_refused-open-form failure stack))
             (if (or (is refused None)
                     (not (<= 0 (sub refused 4) (- sentinel-start 1))))
                 (return (, None macro-epoch)))

@@ -525,16 +525,18 @@ def test_backend_off_gives_the_fallback_list(complete, off_backends, monkeypatch
 def test_a_buffer_that_does_not_compile_gives_the_fallback_list(
     complete, backend_requests
 ):
-    # An earlier refused form: neither the buffer nor its prefix compiles,
-    # so there is no view to ask the backend about.
-    labels = set(by_label(complete("(def)\n" + CLASS.format("(|)"))[2]))
+    # A refused form before the cursor in the form holding it: neither the
+    # buffer nor its prefix compiles there, so there is no view to ask the
+    # backend about.
+    labels = set(by_label(complete(CLASS.format("(def)\n    (|)"))[2]))
     assert backend_requests.sent == []
     assert_fallback_list(labels)
     # An attribute gets nothing: only the backend knows self's members.
-    assert complete("(def)\n" + CLASS.format("self.|"))[2] == []
+    assert complete(CLASS.format("(def)\n    self.|"))[2] == []
     assert backend_requests.sent == []
-    # The backend does answer the same buffer once it compiles.
-    labels = set(by_label(complete(CLASS.format("self.|"))[2]))
+    # A refused form elsewhere is only left out of the view, so the backend
+    # answers there as it does once the buffer compiles.
+    labels = set(by_label(complete("(def)\n" + CLASS.format("self.|"))[2]))
     assert "__class__" in labels and backend_requests.sent
 
 

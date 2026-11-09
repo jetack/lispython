@@ -401,6 +401,15 @@ def _start_unit(scope, forms, start):
                 seeded.add(key)
 
 
+def _begin_unit(scope, forms, start):
+    """Prepare scope's macro table for the unit forms (the whole list, which
+    the opt-out rule reads): the prelude seeded (seed_prelude), then
+    reshaped as start says (UnitStart). The one home of a unit's start,
+    shared by compile_unit and compile_unit_forms."""
+    seed_prelude(scope)
+    _start_unit(scope, forms, start)
+
+
 def compile_unit(forms, scope, *, start=UnitStart.MODULE, include_meta=True):
     """Compile one unit of source (a module, a REPL input, an editor view or
     region) to a list of Python statements, expanding macros in scope.
@@ -409,9 +418,38 @@ def compile_unit(forms, scope, *, start=UnitStart.MODULE, include_meta=True):
     (seed_prelude), then start (UnitStart) says how the unit's start
     reshapes its macro table. Only the macro table restarts: a reload keeps
     the Python names an earlier load of the scope defined, stale ones
-    included, as a Clojure namespace keeps its vars.
+    included, as a Clojure namespace keeps its vars. The first error ends
+    the compile (compile_unit_forms is the LSP's form-by-form variant).
     """
     forms = list(forms)
-    seed_prelude(scope)
-    _start_unit(scope, forms, start)
+    _begin_unit(scope, forms, start)
     return macroexpand_then_compile(forms, scope, include_meta=include_meta)
+
+
+def compile_unit_forms(forms, scope, *, start=UnitStart.MODULE, include_meta=True):
+    """compile_unit, one top-level form at a time, going on past a form that
+    fails: yields ``(form, statements, None)`` or ``(form, None, error)``
+    for each of forms in order, error the exception its expansion or
+    compile raised. For the LSP alone, which keeps a view of the rest of a
+    buffer while one form is being typed; every other entry point stops at
+    the first error (compile_unit).
+
+    The unit starts exactly as compile_unit's does (_begin_unit, over the
+    whole list), and each form compiles in scope as it would in the whole
+    list, since a list compiles form by form with no state carried between
+    top-level forms (stmt_list_steps); a failed form leaves whatever its
+    expansion had done to scope by then (a defmacro or require run before
+    the error). A generator, so between two forms the caller reads scope
+    (its macro table) as it stands when the next form compiles.
+    """
+    forms = list(forms)
+    _begin_unit(scope, forms, start)
+    for form in forms:
+        try:
+            statements = macroexpand_then_compile(
+                [form], scope, include_meta=include_meta
+            )
+        except Exception as error:
+            yield form, None, error
+        else:
+            yield form, statements, None

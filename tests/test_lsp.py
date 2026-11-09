@@ -126,6 +126,20 @@ def test_a_parameter_is_no_definition_of_a_module_name():
     assert [loc.range.start.line for loc in locations] == [0]
 
 
+@pytest.mark.parametrize("typed", ["", "_", "___lpy"])
+def test_a_name_the_view_generated_is_never_offered(typed):
+    # Defect: the failed forms' Any import (___lpy_any, labelled in hyphen
+    # spelling as every backend name is) and the cursor sentinel are module
+    # names of the view, so the backend offers them at a typed _.
+    items = [
+        lsp.CompletionItem(label=label)
+        for label in ["___lpy-any", "___lpy_cursor___", "_private"]
+    ]
+    kept = server.filtered_answer(typed, items).items
+    expected = {"": ["_private"], "_": ["_private"], "___lpy": []}[typed]
+    assert [item.label for item in kept] == expected
+
+
 def test_completion(buffer):
     # Right after the last line's (, so no typed word filters the list.
     items = run_completion(ls_with(buffer), position(2, 1))
@@ -160,11 +174,29 @@ def test_lispython_diagnostics_underline_the_form_head(source, line, underlined)
     assert not re.search(r"(\(|, )line \d+\)$", diagnostic.message)
 
 
+def test_each_failed_form_has_its_own_diagnostic():
+    # Defect: the compile stops at the first failed form, so a later one
+    # is reported only once the first is fixed, or a later form's failure
+    # replaces the first's.
+    source = "(while)\n(= y 1)\n(for i in (range 3)\n  (def f [x]))"
+    lines = source.split("\n")
+    found = [
+        (
+            d.range.start.line,
+            lines[d.range.start.line][d.range.start.character : d.range.end.character],
+            d.severity,
+        )
+        for d in server.compute_diagnostics(source, URI)
+    ]
+    warning = server.lsp.DiagnosticSeverity.Warning
+    assert found == [(0, "(while", warning), (3, "(def", warning)]
+
+
 def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
     # Defect: a required module's compile error carries that module's line
     # (3, its (while)), which the buffer's diagnostic took as its own: it
     # underlined the buffer's third form, (=, with a bare message naming no
-    # file.
+    # file. It is placed at the require that raised it.
     (tmp_path / "lspbrokenreq.lpy").write_text("(= a 1)\n(= b 2)\n(while)\n")
     source = "(require lspbrokenreq)\n(= a 1)\n(= b 2)"
     try:
@@ -175,17 +207,26 @@ def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
         sys.modules.pop("lspbrokenreq", None)
     rng = diagnostic.range
     assert (rng.start.line, rng.start.character) == (0, 0)
-    assert (rng.end.line, rng.end.character) == (0, 1)
+    assert (rng.end.line, rng.end.character) == (0, len("(require"))
     assert "lspbrokenreq.lpy" in diagnostic.message
 
 
-def test_an_error_with_no_position_marks_one_character():
-    # Defect: an error naming no position took the head of the first form,
-    # (defmacro, as if that form were at fault.
-    source = '(defmacro boom [] (raise (ValueError "boom")))\n(boom)'
-    [diagnostic] = server.compute_diagnostics(source, URI)
-    rng = diagnostic.range
-    assert (rng.start.line, rng.start.character, rng.end.character) == (0, 0, 1)
+def test_an_error_with_no_position_marks_the_form_that_raised_it():
+    # Defects: an error naming no position took the head of the first form,
+    # (defmacro, as if that form were at fault; or every such error stacked
+    # on the buffer's first character, one per failed form.
+    source = '(defmacro boom [] (raise (ValueError "boom")))\n(= a 1)\n(boom)\n  (boom)'
+    lines = source.split("\n")
+    found = [
+        (
+            d.range.start.line,
+            lines[d.range.start.line][d.range.start.character : d.range.end.character],
+            d.message,
+        )
+        for d in server.compute_diagnostics(source, URI)
+    ]
+    message = "Compile warning: boom"
+    assert found == [(2, "(boom", message), (3, "(boom", message)]
 
 
 def test_another_exceptions_line_is_not_a_buffer_position():
@@ -201,7 +242,8 @@ def test_another_exceptions_line_is_not_a_buffer_position():
     )
     [diagnostic] = server.compute_diagnostics(source, URI)
     rng = diagnostic.range
-    assert (rng.start.line, rng.start.character, rng.end.character) == (0, 0, 1)
+    # The (bad) call raised it, on the buffer's fifth line (index 4).
+    assert (rng.start.line, rng.start.character, rng.end.character) == (4, 0, 4)
     assert "line 4" in diagnostic.message
 
 
@@ -732,10 +774,10 @@ class TestRequireSelection:
         source = "(require .mac *)\n(= y (twice 1))"
         doc = SimpleNamespace(uri=(pkg / "x.lpy").as_uri(), version=1, source=source)
         try:
-            assert server.compile_document(doc.uri, 1, source).error is not None
+            assert server.compile_document(doc.uri, 1, source).failures
             (pkg / "__init__.py").write_text("")
             compiled = server.compile_document(doc.uri, 1, source)
-            assert compiled.error is None
+            assert compiled.failures == []
             assert compiled.view.text.endswith("y = 1 + 1")
             assert server.compiled_view(doc) is compiled.view
             (pkg / "__init__.py").unlink()

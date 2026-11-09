@@ -219,16 +219,135 @@ class TestLpyRange:
 
 
 class TestFailures:
+    def test_a_parse_error_is_no_view(self):
+        assert pv.compile_view("(print 1") is None
+
     @pytest.mark.parametrize(
         "src",
         [
-            "(print 1",  # parse error
-            "(= 1 2)",  # compile error
-            "(defmacro boom [] (raise (ValueError)))\n(boom)",  # macro fails
+            "(= 1 2)\n(= y 3)",  # compile error
+            "(defmacro boom [] (raise (ValueError)))\n(boom)\n(= y 3)",  # macro fails
         ],
     )
-    def test_compile_failure_is_none(self, src):
-        assert pv.compile_view(src) is None
+    def test_a_failed_form_is_left_out_of_the_view(self, src):
+        # Defect: one form that fails to compile costs the whole buffer its
+        # view (so the backend publishes nothing for it), or is not reported.
+        compiled = pv.compile_buffer(src)
+        assert compiled.view.text.endswith("\ny = 3") or compiled.view.text == "y = 3"
+        [(form, error)] = compiled.failures
+        assert form.lineno == src.count("\n")
+        assert isinstance(error, Exception)
+
+
+FAILED_FORMS = """"Doc."
+(from __future__ [annotations])
+(def f [x ^int y :z 1 *a :k 2 **kw])
+(async-def af [p])
+(class C []
+  (def m [self]))
+(deco d (def h [a]))
+(def g[T] [])
+(def bad-params [:x 1 y])
+(= v (while))
+(= a.b (while))
+(defmacro mac [x] (return `(def ~x [] (while))))
+(mac q)
+(def when [] 1)
+(= ok 1)
+"""
+
+
+def module_bindings(view):
+    """(kind, name) of each module-level statement of view's tree that binds
+    a name, the defmacro's generated scaffolding aside."""
+    found = []
+    for stmt in view.tree.body:
+        if isinstance(stmt, (pv.ast.FunctionDef, pv.ast.AsyncFunctionDef)):
+            if not stmt.name.startswith("___defmacro"):
+                found.append((type(stmt).__name__, stmt.name))
+        elif isinstance(stmt, pv.ast.ClassDef):
+            found.append(("ClassDef", stmt.name))
+        elif isinstance(stmt, pv.ast.AnnAssign):
+            found.append(("AnnAssign", stmt.target.id))
+        elif isinstance(stmt, pv.ast.Assign):
+            found += [("Assign", t.id) for t in stmt.targets if hasattr(t, "id")]
+    return found
+
+
+class TestFailedForms:
+    def test_a_failed_form_declares_the_names_its_syntax_binds(self):
+        # Defects: a failed def/class/= leaves its name undefined for the
+        # backend at every use (a false "is not defined", in this file and
+        # through the shadow in its importers); a failed user-macro call, a
+        # dotted target or a name the compiler refuses (a macro's) is
+        # declared anyway.
+        view = view_of(FAILED_FORMS)
+        assert module_bindings(view) == [
+            ("FunctionDef", "f"),
+            ("AsyncFunctionDef", "af"),
+            ("ClassDef", "C"),
+            ("AnnAssign", "h"),
+            ("FunctionDef", "g"),
+            ("AnnAssign", "bad_params"),
+            ("AnnAssign", "v"),
+            ("Assign", "ok"),
+        ]
+        [f] = [s for s in view.tree.body if getattr(s, "name", None) == "f"]
+        # The signature stub keeps the arity: x, y and z positional (z with
+        # a default), *a, keyword-only k, **kw.
+        assert [a.arg for a in f.args.args] == ["x", "y", "z"]
+        assert len(f.args.defaults) == 1
+        assert (f.args.vararg.arg, f.args.kwarg.arg) == ("a", "kw")
+        assert [a.arg for a in f.args.kwonlyargs] == ["k"]
+
+    def test_a_failed_chained_assignment_declares_every_target(self):
+        # Defect: only the first target of (= a b v) (a = b = v) is
+        # declared, so b is a false "is not defined" at its uses; an
+        # annotation is no target.
+        view = view_of("(= a b (while))\n(= t ^int (while))\n(print a b t)")
+        assert module_bindings(view) == [
+            ("AnnAssign", "a"),
+            ("AnnAssign", "b"),
+            ("AnnAssign", "t"),
+        ]
+
+    def test_the_any_import_follows_the_docstring_and_future_imports(self):
+        # Defect: the import goes first, before a from __future__ import,
+        # which Python and the backends refuse anywhere but at the top.
+        lines = view_of(FAILED_FORMS).text.split("\n")
+        assert lines[:3] == [
+            '"""Doc."""',
+            "from __future__ import annotations",
+            "from typing import Any as ___lpy_any",
+        ]
+
+    def test_only_a_declared_name_maps_to_the_buffer(self):
+        # Defects: the declared name has no entry (definition and
+        # diagnostics at it are lost), or a diagnostic on the placeholder
+        # plumbing (basedpyright's reportExplicitAny on the annotation or the
+        # class base, reportAny or an unused-parameter hint on a stub's
+        # parameter, anything on the import) lands on the user's code.
+        src = FAILED_FORMS
+        view = view_of(src)
+        start = locate(view.text, "v: ___lpy_any")
+        assert pv.lpy_range(view, src, start, plus(start, 1)) == (
+            locate(src, "v (while)"),
+            plus(locate(src, "v (while)"), 1),
+        )
+        plumbing = [
+            gen_range(view.text, "___lpy_any", nth)
+            for nth in range(view.text.count("___lpy_any"))
+        ] + [
+            gen_range(view.text, "from typing import Any as ___lpy_any"),
+            gen_range(view.text, "class C(___lpy_any):"),
+            gen_range(view.text, "x: ___lpy_any"),
+            gen_range(view.text, "kw: ___lpy_any"),
+            gen_range(view.text, "async def af"),
+            gen_range(view.text, "h: ___lpy_any = ..."),
+        ]
+        for start, end in plumbing:
+            for tagged in (False, True):
+                assert pv.lpy_diagnostic_range(view, src, start, end, tagged) is None
 
 
 class TestCursor:
@@ -274,6 +393,29 @@ class TestCursor:
         assert view.text.split("\n")[1] == line
         assert view.cursor == (2, line.index(".") + 1)
         assert view.partial == ""
+
+    @pytest.mark.parametrize(
+        ["src", "fallback"],
+        [
+            ("(while)\n(= my-x 1)\n(print my-x.fo|)\n(def g)", False),
+            # Unbalanced, so the prefix compiles, (while) in it.
+            ("(while)\n(def f [grid]\n  (when (== (sub gr|\n", True),
+        ],
+    )
+    def test_a_failed_form_elsewhere_keeps_the_cursor_view(self, src, fallback):
+        # Defect: a form failing anywhere in the buffer (or in its prefix)
+        # costs the cursor its view, so the backend is never asked there.
+        view = pv.view_at_cursor(*at_bar(src))
+        assert view is not None and view.fallback is fallback
+
+    def test_the_cursors_own_failed_form_falls_back_to_the_prefix(self):
+        # Defect: the form holding the cursor is left out of the view as a
+        # failure elsewhere is, so the view lacks the sentinel and there is
+        # none; its failure must send the cursor to the prefix and its unwrap.
+        src = "(= my-x 1)\n(def f [] (when (== my-x.fo| 1)))\n(= z 2)"
+        view = pv.view_at_cursor(*at_bar(src))
+        assert view.fallback is True
+        assert (view.partial, view.text) == ("fo", "my_x = 1\n\ndef f():\n    my_x.fo")
 
     def test_unbalanced_buffer_falls_back_to_the_prefix(self):
         src = "(= my-x 1)\n(print my-x.fo\n(def g [] 1)"
@@ -1394,9 +1536,12 @@ class TestShadows:
         self.write(root / "pyrightconfig.json", "{}")
         manifest = pv.ShadowManifest()
         shadows = pv.write_shadows(str(project), str(root), manifest=manifest).shadows
-        mod, top = root / "pkg" / "mod.py", root / "top.py"
-        assert shadows == sorted([str(mod), str(top)])
+        mod, top, bad = root / "pkg" / "mod.py", root / "top.py", root / "bad.py"
+        # A module whose only form fails still has its (empty) shadow, so
+        # an import of it resolves.
+        assert shadows == sorted([str(mod), str(top), str(bad)])
         assert mod.read_text() == "my_x = 1"
+        assert bad.read_text() == ""
 
         calls = []
         real = pv.compile_buffer
@@ -1413,12 +1558,13 @@ class TestShadows:
         assert mod.stat().st_mtime_ns == stamp
 
         (project / "top.lpy").unlink()
-        self.write(project / "pkg" / "mod.lpy", "(= 1 1)")  # stops compiling
+        (project / "bad.lpy").unlink()
+        self.write(project / "pkg" / "mod.lpy", "(= 1 1")  # stops parsing
         os.utime(project / "pkg" / "mod.lpy", ns=(stamp + 2 * 10**9,) * 2)
         assert (
             pv.write_shadows(str(project), str(root), manifest=manifest).shadows == []
         )
-        assert not mod.exists() and not top.exists()
+        assert not mod.exists() and not top.exists() and not bad.exists()
         assert (root / "pyrightconfig.json").read_text() == "{}"
 
     def test_view_path(self, tmp_path):
@@ -2039,7 +2185,8 @@ class TestMacroModules:
             )
 
         try:
-            assert view(first) is None
+            # The require failed and was left out: twice stays a call.
+            assert view(first).text.endswith("yy = twice(2)")
             assert view(second).text.endswith("yy = 2 * 2 * 2")
             (first / (name + ".lpy")).write_text(
                 "(defmacro twice [x] (return `(- ~x ~x)))"
@@ -2084,7 +2231,8 @@ class TestMacroModules:
         # by the file it was read from, so fixing that file is seen.
         text = self.consumer(kind, package, tmp_path)
         (package.pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x))")
-        assert text() is None
+        # The require failed and was left out: twice stays a call.
+        assert text().endswith("yy = twice(2)")
         (package.pkg / "mac.lpy").write_text(THRICE)
         assert "yy = 2 * 2 * 2" in text()
 
@@ -2538,10 +2686,15 @@ def fresh_with_p(node):
     )
 
 
+# core/macro.py's compile entry points: compile-unit and its form-by-form
+# variant, which the LSP's compile uses.
+COMPILE_UNIT_HEADS = ("compile-unit", "compile-unit-forms")
+
+
 def compile_unit_calls(path):
     """(nearest enclosing def's name or None, whether inside the body of a
-    (with [(fresh-modules ...)] ...) form) of every (compile-unit ...) call
-    in the lispython source at path."""
+    (with [(fresh-modules ...)] ...) form) of every call of a compile entry
+    point (COMPILE_UNIT_HEADS) in the lispython source at path."""
     stack = [(form, None, False) for form in parser.parse(path.read_text())]
     found = []
     while stack:
@@ -2550,7 +2703,7 @@ def compile_unit_calls(path):
             head = nodes.atom_text(node[0])
             if head == "def" and len(node) > 1:
                 def_name = nodes.atom_text(node[1])
-            elif head == "compile-unit":
+            elif head in COMPILE_UNIT_HEADS:
                 found.append((def_name, fresh))
             if fresh_with_p(node):
                 stack.extend((child, def_name, True) for child in node[2:])
