@@ -267,11 +267,15 @@ follows [Semantic Versioning](https://semver.org/).
   A document path with a space or a non-ASCII character is read decoded.
   It finds a module by the name its import takes, so `(from ok? [x])` and
   `(import ->foo)` reach `ok_p.lpy` and `_to_foo.lpy`, and it picks the
-  file Python imports: a package's `__init__` (of any suffix) before a
-  module file of the same name, and nothing when that file is no `.lpy`.
-  Every dotted part is looked up as Python's FileFinder looks it up, so a
-  module Python imports from the workspace that is no `.lpy` is never
-  replaced by an installed one, and the lookup imports nothing.
+  file Python imports: a built-in module, then a package's `__init__` (of
+  any suffix) before a module file of the same name, and nothing when that
+  file is no `.lpy`, except a regular package that holds an `init.lpy`
+  (the layout of `lispy.macros`), which answers with that file. Every
+  dotted part is looked up as Python's import looks it up (its FileFinder,
+  and the `sys.meta_path` finders an editable install adds), so a module
+  Python imports from the workspace that is no `.lpy` is never replaced by
+  an installed one, and neither go-to-definition nor the index of a
+  file's requires imports a package to find it.
 - The LSP and the nREPL resolve a relative `require` or `from` in a
   namespace package (a directory with no `__init__`) as the importer does:
   `ns/a.lpy` is `ns.a`, so `(require .mac)` compiles and go-to-definition

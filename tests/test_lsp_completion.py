@@ -1404,6 +1404,31 @@ def test_a_moved_macro_epoch_drops_the_kept_answer(
     assert len(backend_requests.sent) == 2
 
 
+@once
+def test_a_changed_module_naming_drops_the_kept_answer(
+    merged, backend_requests, answer_at, monkeypatch
+):
+    # Defect: an answer kept for a word is reused after the document's
+    # module naming changed (an __init__.py made its directory a package),
+    # though its cursor view compiled under the old name.
+    original = server.document_module_names
+    renamed = {}
+
+    def module_names(path, **kwargs):
+        name, package, import_root, search_dirs = original(path, **kwargs)
+        return renamed.get("name", name), package, import_root, search_dirs
+
+    monkeypatch.setattr(server, "document_module_names", module_names)
+    backend_requests.answer["value"] = [item("my_var")]
+    backend_requests.sent.clear()
+    answer_at("(= my-var 1)\n(print my|)")
+    answer_at("(= my-var 1)\n(print my-|)")
+    assert len(backend_requests.sent) == 1
+    renamed["name"] = "lspnaming.main"
+    answer_at("(= my-var 1)\n(print my-v|)")
+    assert len(backend_requests.sent) == 2
+
+
 # Many names under one prefix, so a backend that caps its list (and marks
 # it incomplete) gives a shorter word fewer of them than a longer one.
 MANY_NAMES = "".join(f"(= item-{i:04} {i})\n" for i in range(1500)) + (

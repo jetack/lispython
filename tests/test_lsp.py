@@ -8,6 +8,7 @@ parse, so the error itself is reported.
 import asyncio
 import importlib
 import importlib.machinery
+import importlib.util
 import pathlib
 import re
 import sys
@@ -719,6 +720,86 @@ class TestRequireSelection:
         finally:
             sys.modules.pop("lspsideeffect", None)
         assert got == str(site / "lspsideeffect" / "mod.lpy")
+
+    def test_indexing_a_require_imports_no_parent_package(self, tmp_path, monkeypatch):
+        # Defect: indexing a file finds each required package through
+        # importlib.util.find_spec, which imports (runs) its parent package
+        # in the server's process.
+        monkeypatch.setattr(server, "WORKSPACE_INDEX", {})
+        monkeypatch.setattr(server, "FILE_TREES", {})
+        monkeypatch.setattr(server, "WORKSPACE_SYMBOLS", {})
+        monkeypatch.setattr(server, "workspace_folders", lambda: [])
+        site = tmp_path / "site"
+        macs = site / "lspindexside" / "macs"
+        macs.mkdir(parents=True)
+        (site / "lspindexside" / "__init__.py").write_text("")
+        (macs / "__init__.lpy").write_text(self.MACROS)
+        monkeypatch.setattr(sys, "path", [*sys.path, str(site)])
+        target = tmp_path / "target.lpy"
+        target.write_text("(require lspindexside.macs)\n")
+        try:
+            server.index_file(target.as_uri())
+            assert "lspindexside" not in sys.modules
+        finally:
+            sys.modules.pop("lspindexside", None)
+        assert "thrice" in server.WORKSPACE_INDEX
+
+    def test_a_meta_path_finder_finds_a_module(self, tmp_path, monkeypatch):
+        # Defect: only the path-based lookup is modelled, so a module an
+        # editable install maps through its sys.meta_path finder, which
+        # Python imports, resolves to nothing; or the finder's package is
+        # not walked into for a dotted name.
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / "lspedpkg").mkdir(parents=True)
+        (elsewhere / "lspedmod.lpy").write_text("")
+        (elsewhere / "lspedpkg" / "__init__.py").write_text("")
+        (elsewhere / "lspedpkg" / "mac.lpy").write_text("")
+
+        class EditableFinder:
+            @staticmethod
+            def find_spec(name, path=None, target=None):
+                if name == "lspedmod":
+                    origin = elsewhere / "lspedmod.lpy"
+                    return importlib.util.spec_from_file_location(name, origin)
+                if name == "lspedpkg":
+                    package = elsewhere / "lspedpkg"
+                    return importlib.util.spec_from_file_location(
+                        name,
+                        package / "__init__.py",
+                        submodule_search_locations=[str(package)],
+                    )
+                return None
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, EditableFinder])
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        got = self._target_in(workspace, "(require lspedmod)")
+        assert got == str(elsewhere / "lspedmod.lpy")
+        got = self._target_in(workspace, "(require lspedpkg.mac)")
+        assert got == str(elsewhere / "lspedpkg" / "mac.lpy")
+
+    def test_a_built_in_module_hides_a_file_of_its_name(self, tmp_path):
+        # Defect: a workspace sys.lpy is taken where Python imports the
+        # built-in module sys, which no file holds.
+        (tmp_path / "sys.lpy").write_text("")
+        assert self._target_in(tmp_path, "(require sys)") is None
+
+    def test_a_working_directory_that_is_gone_is_skipped(self, tmp_path, monkeypatch):
+        # Defect: the '' entry of sys.path is read through os.getcwd, which
+        # raises once the directory is gone, out of the definition handler.
+        # The module lies on sys.path past '', so the lookup reaches it.
+        gone = tmp_path / "gone"
+        gone.mkdir()
+        site = tmp_path / "site"
+        site.mkdir()
+        (site / "lspgonemod.lpy").write_text("")
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        monkeypatch.chdir(gone)
+        gone.rmdir()
+        monkeypatch.setattr(sys, "path", ["", *sys.path, str(site)])
+        got = self._target_in(workspace, "(require lspgonemod)")
+        assert got == str(site / "lspgonemod.lpy")
 
 
 def test_local_completion_tags_special_forms_in_label_details_not_detail():
