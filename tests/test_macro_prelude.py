@@ -163,6 +163,36 @@ def test_runtime_namespace_holds_only_the_modules_own_macros(import_dir):
     assert (everything.v, runtime_macros(everything)) == (2, expected)
 
 
+@pytest.fixture
+def forget_new_modules():
+    before = set(sys.modules)
+    yield
+    for name in set(sys.modules) - before:
+        del sys.modules[name]
+
+
+def test_l2py_f_leaves_modules_and_sys_path_as_it_found_them(
+    tmp_path, forget_new_modules
+):
+    # Defect: l2py_f dropped every .lpy module from sys.modules (lispython's own
+    # included, splitting the process into two copies of them) and left the
+    # script directory on sys.path.
+    (tmp_path / "l2_mac.lpy").write_text("(defmacro twice [x] (return `(* 2 ~x)))\n")
+    script = tmp_path / "l2_main.lpy"
+    script.write_text("(require l2-mac *)\n(twice 3)\n")
+    tools.l2py_s("(inc 1)")
+    before = dict(sys.modules)
+    path_before = list(sys.path)
+    assert str(tmp_path) not in sys.path  # the call itself must find l2_mac
+
+    out = tools.l2py_f(str(script), no_lispy=True, format=False)
+
+    assert out == "2 * 3\n"
+    changed = sorted(k for k, v in before.items() if sys.modules.get(k) is not v)
+    assert changed == []
+    assert sys.path == path_before
+
+
 def test_the_prelude_emits_no_code():
     meta = tools.src_to_python_org("(inc 1)", include_meta=True, scope={})
     assert meta == "1 + 1"

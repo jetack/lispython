@@ -145,35 +145,30 @@
 
 (def l2py-f [file-path :include-meta False :no-lispy False :format True]
   "Translate lispy file to Python source string (standalone with sys.path setup)"
-  ;; Detect package first so we add the right directory to sys.path
+  ;; A translation leaves the process's modules and sys.path as it found them:
+  ;; dropping lispython's own .lpy modules splits the process into two copies
+  ;; of them (macro_modules is the one home of dropping modules).
   (= pkg (detect-package-name :path file-path))
+  (= added-dir None)
   (if (not pkg)
       (do (= script-dir (osp.dirname (osp.abspath file-path)))
           (if (not (in script-dir sys.path))
-              (sys.path.insert 0 script-dir))))
-
-  ;; Clear cached macro modules to ensure fresh reload
-  (= modules-to-remove [])
-  (for [mod-name mod] in (sys.modules.items)
-    (if (or (mod-name.startswith "lispy.macros")
-            (and mod
-                 (hasattr mod "__file__")
-                 mod.__file__
-                 (mod.__file__.endswith ".lpy")))
-        (modules-to-remove.append mod-name)))
-  (for mod-name in modules-to-remove
-    (sys.modules.pop mod-name))
-
-  (with [(open file-path "rb") as f]
-    (= src (.decode (f.read) "utf-8")))
-  ;; The module's dotted name, as the importer names it: a module of
-  ;; lispy.macros compiles without the prelude it is the source of.
-  (= stem (sub (osp.splitext (osp.basename file-path)) 0))
-  (= module-name (conde (== stem "__init__") pkg
-                        pkg (+ pkg "." stem)
-                        stem))
-  (with [(compile-errors file-path src)]
-    (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :name module-name :no-lispy no_lispy :format format) "\n"))))
+              (do (sys.path.insert 0 script-dir)
+                  (= added-dir script-dir)))))
+  (try
+    (with [(open file-path "rb") as f]
+      (= src (.decode (f.read) "utf-8")))
+    ;; The module's dotted name, as the importer names it: a module of
+    ;; lispy.macros compiles without the prelude it is the source of.
+    (= stem (sub (osp.splitext (osp.basename file-path)) 0))
+    (= module-name (conde (== stem "__init__") pkg
+                          pkg (+ pkg "." stem)
+                          stem))
+    (with [(compile-errors file-path src)]
+      (return (+ (l2py-s src :include-meta include_meta :fresh-scope True :package pkg :name module-name :no-lispy no_lispy :format format) "\n")))
+    (finally
+      (if (and (is-not added-dir None) (in added-dir sys.path))
+          (sys.path.remove added-dir)))))
 
 (def l2py []
   "CLI entry point: parse args and translate file"
