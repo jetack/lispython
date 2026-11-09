@@ -13,7 +13,7 @@ from lispy.core.errors import LispyCompileError
 from lispy.core.macro_table import MacroTable, find_entry, find_macro
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
-from lispy.core.nodes import atom_text, macro_expansion_nodes
+from lispy.core.nodes import atom_text, macro_expansion_nodes, wrapper_form_keys
 from lispy.core.utils import trampoline
 
 __macro_namespace: dict[str, Callable[[Node], ast.AST]] = {}
@@ -164,7 +164,8 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
     elif isinstance(sexp, Unquote):
         sexp.value = yield expand(sexp.value, False)
     elif isinstance(sexp, Wrapper):
-        sexp.value = yield expand(sexp.value, in_quasi)
+        for key in wrapper_form_keys(sexp):
+            setattr(sexp, key, (yield expand(getattr(sexp, key), in_quasi)))
     elif isinstance(sexp, GluedHead):
         sexp.params = yield expand(sexp.params, in_quasi)
     elif isinstance(sexp, Expression) and len(sexp) > 0:

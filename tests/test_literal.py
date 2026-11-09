@@ -11,6 +11,7 @@ from lispy.core.compiler.literal import (
     hyphenated_name_p,
     identifier_p,
     name_key,
+    name_spellings,
 )
 from lispy.core.errors import LispyCompileError, compile_errors
 from lispy.core.macro import macroexpand_then_compile
@@ -283,6 +284,38 @@ class TestInterpolatedQuasiquote:
         module = ast.Module(compile_lpy(src, scope), [])
         exec(compile(module, "<lpy>", "exec"), scope)
         assert scope["s"] == f"[{42!r:>6}] x=42 {43:42}"
+
+
+class TestFormatSpecMacros:
+    """A macro call inside a replacement field's format spec expands like one
+    in the field's value."""
+
+    def test_spec_field_expands(self):
+        src = '(defmacro m [] (return 5))\n(print f"{1:{(m)}}")'
+        assert src_to_python_org(src) == "print(f'{1:{5}}')"
+
+    def test_spec_field_runs(self):
+        src = '(defmacro w [] (return 4))\n(= r f"{1:>{(w)}}|{2:{(w)}d}")'
+        assert run_lpy(src) == f"{1:>4}|{2:4d}"
+
+    def test_quasiquote_built_spec_expands(self):
+        src = (
+            "(defmacro w [] (return 3))\n"
+            '(defmacro show [x] (return `f"{~x:>{(w)}}"))\n'
+            "(= r (show 7))"
+        )
+        assert run_lpy(src) == f"{7:>3}"
+
+    @pytest.mark.skipif(sys.version_info < (3, 14), reason="t-strings need 3.14")
+    def test_t_string_spec_field_expands(self):
+        template = run_lpy('(defmacro w [] (return 4))\n(= r t"{1:>{(w)}}")')
+        assert template.interpolations[0].format_spec == ">4"
+
+
+class TestNameSpellings:
+    def test_spelling_in_a_format_spec_field(self):
+        spellings = name_spellings(parse('(print f"{1:{ok?}}")'))
+        assert spellings["ok_p"] == "ok?"
 
 
 class TestMalformedLiterals:

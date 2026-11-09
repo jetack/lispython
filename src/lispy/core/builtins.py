@@ -22,6 +22,7 @@ from lispy.core.nodes import (
     UnquoteSplice,
     Wrapper,
 )
+from lispy.core.nodes import wrapper_form_keys as _wrapper_form_keys
 
 # The one home of the names a defmacro body sees: defmacro-transform
 # (core_meta_functions.lpy) imports exactly these in a function around the
@@ -145,10 +146,8 @@ def _replace_symbol(node, name, new, in_quasi):
         else:
             node.list = [_replace_symbol(child, name, new, in_quasi) for child in lst]
     elif isinstance(node, Wrapper):
-        node.value = _replace_symbol(node.value, name, new, in_quasi)
-        spec = getattr(node, "format_spec", None)
-        if isinstance(node, FStrExpr) and spec is not None:
-            node.format_spec = _replace_symbol(spec, name, new, in_quasi)
+        for key in _wrapper_form_keys(node):
+            setattr(node, key, _replace_symbol(getattr(node, key), name, new, in_quasi))
     return node
 
 

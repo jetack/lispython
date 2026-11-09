@@ -15,6 +15,7 @@ from lispy.core.nodes import (
     Symbol,
     Wrapper,
     atom_text,
+    wrapper_form_keys,
 )
 from lispy.core.utils import binop_dict, boolop_dict, compare_dict, unaryop_dict
 
@@ -513,7 +514,13 @@ def name_spellings(nodes):
                     spellings.setdefault(Symbol(part).name, part)
         elif isinstance(node, Expression):
             stack.extend(reversed(node.list))
-        elif isinstance(node, (Wrapper, MetaIndicator)):
+        elif isinstance(node, Wrapper):
+            stack.extend(
+                child
+                for key in reversed(wrapper_form_keys(node))
+                if (child := getattr(node, key)) is not None
+            )
+        elif isinstance(node, MetaIndicator):
             if node.value is not None:
                 stack.append(node.value)
         elif isinstance(node, GluedHead):

@@ -939,6 +939,17 @@ class FStrExpr(Wrapper):
             **position_info,
         )
 
+
+def wrapper_form_keys(node):
+    """Attributes of the Wrapper ``node`` holding its child forms, in source
+    order: ``value``, then an f/t-string field's format spec when it has one.
+    The one home of a wrapper's children for every walk over code (macro
+    expansion, name spellings, compiler-form marking, replace_symbol), so a
+    walk never misses the spec's own fields."""
+    if isinstance(node, FStrExpr) and node.format_spec is not None:
+        return ("value", "format_spec")
+    return ("value",)
+
     @property
     def name(self):
         return self.value.name
@@ -1193,6 +1204,8 @@ def mark_compiler_forms(root, user_forms=()):
         if isinstance(node, Expression):
             node.compiler_form = True
             stack.extend(node.list)
-        elif isinstance(node, (Wrapper, MetaIndicator)):
+        elif isinstance(node, Wrapper):
+            stack.extend(getattr(node, key) for key in wrapper_form_keys(node))
+        elif isinstance(node, MetaIndicator):
             stack.append(node.value)
     return root
