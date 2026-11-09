@@ -300,6 +300,17 @@ class TestFailedForms:
         assert (f.args.vararg.arg, f.args.kwarg.arg) == ("a", "kw")
         assert [a.arg for a in f.args.kwonlyargs] == ["k"]
 
+    def test_a_failed_chained_assignment_declares_every_target(self):
+        # Defect: only the first target of (= a b v) (a = b = v) is
+        # declared, so b is a false "is not defined" at its uses; an
+        # annotation is no target.
+        view = view_of("(= a b (while))\n(= t ^int (while))\n(print a b t)")
+        assert module_bindings(view) == [
+            ("AnnAssign", "a"),
+            ("AnnAssign", "b"),
+            ("AnnAssign", "t"),
+        ]
+
     def test_the_any_import_follows_the_docstring_and_future_imports(self):
         # Defect: the import goes first, before a from __future__ import,
         # which Python and the backends refuse anywhere but at the top.

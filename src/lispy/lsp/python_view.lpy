@@ -805,9 +805,16 @@
             (return [stub]))
         (return [(_any-declaration name symbol (atom-text symbol))]))
     (and (== head "=") (>= (len form) 2))
-    (do (= name (_bound-name (sub form 1) table))
-        (return (ife (is name None) []
-                     [(_any-declaration name (sub form 1) (atom-text (sub form 1)))])))
+    ;; (= a b v) binds a and b (a = b = v); (= a ^T v) and (= a) only a.
+    (do (= targets (ife (or (< (len form) 3) (isinstance (sub form 2) Annotation))
+                        [(sub form 1)]
+                        (sub (list form.list) [: 1 -1])))
+        (= found [])
+        (for target in targets
+          (= name (_bound-name target table))
+          (if (is-not name None)
+              (.append found (_any-declaration name target (atom-text target)))))
+        (return found))
     (and (in head IMPORT-HEADS) (not decorated))
     (do (try
           (= bindings (import-bindings form))
