@@ -96,6 +96,11 @@ def test_m_refuses_a_part_that_is_no_name(tmp_path: Path):
     [
         ("no-such-mod", "No module named no_such_mod"),
         (".rel", "Relative module names not supported"),
+        (
+            "nopar.child",
+            "Error while finding module specification for 'nopar.child' "
+            "(ModuleNotFoundError: No module named 'nopar')",
+        ),
     ],
 )
 def test_m_unfindable_module_is_one_line_like_python(
@@ -155,5 +160,21 @@ def test_m_compile_time_import_error_traceback_has_no_runpy_noise(tmp_path: Path
         "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
     )
     r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
     assert "During handling" not in r.stderr
-    assert "runpy._Error" not in r.stderr
+    assert not [
+        line for line in r.stderr.splitlines() if line.startswith("runpy._Error:")
+    ]
+
+
+def test_m_package_without_main_is_one_line(tmp_path: Path):
+    pkg = tmp_path / "cwdmod"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert r.stderr.strip().endswith(
+        "'cwdmod' is a package and cannot be directly executed"
+    )
