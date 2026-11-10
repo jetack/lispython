@@ -857,6 +857,26 @@ def test_interrupt_stops_a_running_stream_eval(connect):
     }
 
 
+def test_every_interrupt_ends_in_a_result_and_the_worker_survives(connect):
+    # The interrupt lands wherever the eval happens to be: in the user's
+    # loop, in print's path through the output router and stream, or in
+    # the worker's bookkeeping.  None of it may lose the final result or
+    # kill the connection's worker.
+    client = connect()
+    busy = '(while True (print "t"))'
+    for round_id in range(2, 62, 2):
+        client.send(op="eval", id=round_id, stream=True, code=busy)
+        assert is_out(client.recv(), round_id)
+        client.send(op="interrupt", id=round_id + 1, **{"interrupt-id": round_id})
+        messages = without_out(
+            client.until(lambda m: m.get("op") == "eval-result"), round_id
+        )
+        assert [m["op"] for m in messages] == ["interrupt-result", "eval-result"]
+        assert messages[1]["error"].endswith("KeyboardInterrupt")
+    client.send(op="eval", id=1, code="(+ 1 2)")
+    assert client.recv()["value"] == "3"
+
+
 def test_interrupt_of_an_unknown_id_is_an_error_reply(connect):
     client = connect()
     client.send(op="interrupt", id=5, **{"interrupt-id": 99})
@@ -913,3 +933,62 @@ def test_concurrent_stream_evals_keep_their_own_output(connect, isolated):
         messages = client.until(lambda m: m.get("op") == "eval-result")
         assert messages[-1]["error"] is None
         assert "".join(m["stdout"] for m in messages[:-1]) == f"{marker}\n" * 40
+
+
+def test_a_writer_over_the_cap_waits_for_the_flusher(monkeypatch):
+    # Bounded memory: an eval printing faster than the client reads blocks
+    # once NREPL_OUT_CAP characters are buffered or being sent.
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_OUT_CAP", 10)
+    release = threading.Event()
+    sent = []
+
+    def send(data):
+        release.wait(WAIT)  # the client is not reading
+        sent.append(json.loads(data))
+
+    stream = tools._NreplStream(send, {"id": 1})
+    stream.start()
+    writer = threading.Thread(
+        target=lambda: [stream.write("stdout", "x" * 6 + "\n") for _ in range(3)]
+    )
+    writer.start()
+    writer.join(0.5)
+    assert writer.is_alive()  # blocked behind the unsent output
+    release.set()
+    writer.join(WAIT)
+    stream.stop()
+    assert not writer.is_alive()
+    assert "".join(m["stdout"] for m in sent) == ("x" * 6 + "\n") * 3
+
+
+def test_a_dead_stream_drops_output_and_never_blocks(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_OUT_CAP", 10)
+
+    def send(data):
+        raise BrokenPipeError
+
+    stream = tools._NreplStream(send, {"id": 1})
+    stream.start()
+    writer = threading.Thread(
+        target=lambda: [stream.write("stdout", "line\n") for _ in range(100)]
+    )
+    writer.start()
+    writer.join(WAIT)
+    stream.stop()
+    assert not writer.is_alive()
+    assert stream.dead
+
+
+def test_long_output_is_split_into_capped_out_messages(monkeypatch):
+    monkeypatch.setattr(tools, "NREPL_OUT_MAX_MESSAGE", 64)
+    sent = []
+    stream = tools._NreplStream(lambda data: sent.append(json.loads(data)), {"id": 1})
+    stream.start()
+    stream.write("stdout", "y" * 150)
+    stream.stop()
+    assert [len(m["stdout"]) for m in sent] == [64, 64, 22]
+    assert all(m == {"op": "out", "stdout": m["stdout"], "id": 1} for m in sent)

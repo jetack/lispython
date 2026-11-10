@@ -685,10 +685,21 @@
   raises OSError).  A send failure marks the stream dead: later output is
   dropped and writers never block.  stop() sends what is left and joins the
   flusher, so every out message precedes the final result."
+  ;; ⚠️ The writer is the eval's thread, where an interrupt raises
+  ;; KeyboardInterrupt at any bytecode boundary, so its path uses only
+  ;; primitives whose every step is one C call: a Lock held through `with`
+  ;; and SimpleQueue tokens.  Never a threading.Condition or Event there:
+  ;; their wait and notify are Python code, and an exception landing inside
+  ;; one leaves the lock or the waiter list inconsistent.
   (def __init__ [self send msg]
     (= self._send send)
     (= self._msg msg)  ; the request, for its id
-    (= self._cond (threading.Condition))
+    (= self._lock (threading.Lock))
+    ;; At most one pending token each: _wake tells the flusher the state
+    ;; changed, _drained tells a writer blocked at NREPL-OUT-CAP that a batch
+    ;; went out (or the stream died).
+    (= self._wake (queue.SimpleQueue))
+    (= self._drained (queue.SimpleQueue))
     (= self._chunks [])  ; [key, [text ...]] in write order
     (= self._buffered 0)  ; characters in _chunks
     (= self._in-flight 0)  ; characters taken by the flusher and not yet sent
@@ -704,66 +715,73 @@
 
   (def stop [self]
     "Send what is buffered, then end and join the flusher."
-    (with [self._cond]
-      (= self._stopping True)
-      (self._cond.notify-all))
+    (with [self._lock]
+      (= self._stopping True))
+    (_nrepl-signal self._wake)
     (self._thread.join))
 
   (def write [self key text]
     (if (not text)
         (return))
-    (with [self._cond]
-      (while (and (not self.dead)
-                  (>= (+ self._buffered self._in-flight) NREPL-OUT-CAP))
-        (self._cond.wait NREPL-OUT-WAIT-SLICE))
-      (if self.dead
-          (return))
-      (if (and self._chunks (== (sub (sub self._chunks -1) 0) key))
-          (.append (sub (sub self._chunks -1) 1) text)
-          (.append self._chunks [key [text]]))
-      (+= self._buffered (len text))
-      (cond (or (in "\n" text) (>= self._buffered NREPL-OUT-FLUSH-SIZE))
-            (do (= self._urgent True)
-                (self._cond.notify-all))
-            (is self._due None)
-            (do (= self._due (+ (time.monotonic) NREPL-OUT-FLUSH-DELAY))
-                (self._cond.notify-all)))))
+    (while True
+      (with [self._lock]
+        (if self.dead
+            (return))
+        (if (< (+ self._buffered self._in-flight) NREPL-OUT-CAP)
+            (do (if (and self._chunks (== (sub (sub self._chunks -1) 0) key))
+                    (.append (sub (sub self._chunks -1) 1) text)
+                    (.append self._chunks [key [text]]))
+                (+= self._buffered (len text))
+                (cond (or (in "\n" text) (>= self._buffered NREPL-OUT-FLUSH-SIZE))
+                      (do (= self._urgent True)
+                          (_nrepl-signal self._wake))
+                      (is self._due None)
+                      (do (= self._due (+ (time.monotonic) NREPL-OUT-FLUSH-DELAY))
+                          (_nrepl-signal self._wake)))
+                (return))))
+      ;; Over the cap: wait for the flusher in short slices, so an interrupt
+      ;; is delivered between them.
+      (try
+        (self._drained.get :timeout NREPL-OUT-WAIT-SLICE)
+        (except [queue.Empty]
+          (pass)))))
 
   (def flush [self]
-    (with [self._cond]
+    (with [self._lock]
       (if self._chunks
           (do (= self._urgent True)
-              (self._cond.notify-all)))))
+              (_nrepl-signal self._wake)))))
 
   (def _take [self]
     "Wait for the next batch of chunks and take it; None once stopping with
-    nothing left, or dead.  Called with the condition held.  With nothing
-    buffered it waits with no timeout: an idle stream never polls."
+    nothing left, or dead.  With nothing buffered it waits with no timeout:
+    an idle stream never polls."
     (while True
-      (if self.dead
-          (return None))
-      (if (not self._chunks)
-          (do (if self._stopping
-                  (return None))
-              (self._cond.wait)
-              (continue)))
-      (if (not (or self._urgent self._stopping (is self._due None)))
-          (do (= remaining (- self._due (time.monotonic)))
-              (if (> remaining 0)
-                  (do (self._cond.wait remaining)
-                      (continue)))))
-      (= batch self._chunks)
-      (= self._chunks [])
-      (= self._in-flight self._buffered)
-      (= self._buffered 0)
-      (= self._urgent False)
-      (= self._due None)
-      (return batch)))
+      (with [self._lock]
+        (if self.dead
+            (return None))
+        (= timeout None)
+        (if self._chunks
+            (do (if (not (or self._urgent self._stopping (is self._due None)))
+                    (= timeout (max 0 (- self._due (time.monotonic)))))
+                (if (not timeout)
+                    (do (= batch self._chunks)
+                        (= self._chunks [])
+                        (= self._in-flight self._buffered)
+                        (= self._buffered 0)
+                        (= self._urgent False)
+                        (= self._due None)
+                        (return batch))))
+            (if self._stopping
+                (return None))))
+      (try
+        (self._wake.get :timeout timeout)
+        (except [queue.Empty]
+          (pass)))))
 
   (def _run [self]
     (while True
-      (with [self._cond]
-        (= batch (self._take)))
+      (= batch (self._take))
       (if (is batch None)
           (return))
       (try
@@ -775,13 +793,19 @@
                              {"op" NREPL-OUT-OP
                               key (sub text (slice start (+ start NREPL-OUT-MAX-MESSAGE)))}))))
         (except [OSError]
-          (with [self._cond]
+          (with [self._lock]
             (= self.dead True)
             (= self._chunks [])
             (= self._buffered 0))))
-      (with [self._cond]
-        (= self._in-flight 0)
-        (self._cond.notify-all)))))
+      (with [self._lock]
+        (= self._in-flight 0))
+      (_nrepl-signal self._drained))))
+
+(def _nrepl-signal [tokens]
+  "Leave one token in the SimpleQueue tokens unless one is pending already,
+  so a wake-up never piles up."
+  (if (tokens.empty)
+      (tokens.put None)))
 
 (def nrepl-eval [src scope :filename None :line None :column None :whole-file False
                  :output None]
@@ -1544,7 +1568,7 @@
     ;; The window is open: from here an interrupt may raise KeyboardInterrupt
     ;; at any bytecode boundary, inside nrepl-eval's own bookkeeping too.
     ;; Every lock taken in it (scope lock, linecache lock, output routing,
-    ;; a stream's condition) is held through `with`, so it is released on
+    ;; a stream's lock) is held through `with`, so it is released on
     ;; the way out; a sink left pushed is dropped by release-thread.
     ;; nrepl-eval reports an interrupt of the user's code as its error; one
     ;; that escapes it (raised before or after its try) leaves the outcome
