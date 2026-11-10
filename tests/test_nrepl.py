@@ -1160,7 +1160,10 @@ def test_a_pending_side_request_keeps_later_requests_off_the_reader(connect, iso
 
     isolated["gate"] = gate = threading.Event()
     isolated["go"] = go = threading.Event()
-    tools.nrepl_eval("(defmacro wait-gate [] (gate.wait 10) (return 1))", isolated)
+    isolated["entered"] = entered = threading.Event()
+    tools.nrepl_eval(
+        "(defmacro wait-gate [] (entered.set) (gate.wait 10) (return 1))", isolated
+    )
     client = connect()
     client.sock.settimeout(3)
     try:
@@ -1171,10 +1174,16 @@ def test_a_pending_side_request_keeps_later_requests_off_the_reader(connect, iso
         # The reader handles requests in order: this pong proves the
         # macroexpand went aside while the eval was still running.
         client.send(op="ping", id=6)
-        assert client.recv() == {"op": "pong", "id": 6}
+        # An out message of id 1 may still arrive first ("up" and its newline
+        # are written separately).
+        pong = without_out(client.until(lambda m: m.get("id") == 6), 1)[-1]
+        assert pong == {"op": "pong", "id": 6}
         go.set()
         # The eval ended; the macroexpand still waits.
         assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["id"] == 1
+        # The reader's pong does not say the side worker already runs the
+        # macro; without the scope lock held, eval 4 would finish before pong 5.
+        assert entered.wait(WAIT)
         client.send(op="macroexpand", id=3, code="(inc 1)")
         client.send(op="eval", id=4, code="(+ 1 2)")
         client.send(op="ping", id=5)
