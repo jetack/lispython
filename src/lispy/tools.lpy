@@ -2034,6 +2034,22 @@
       (report-compile-error e)
       (sys.exit 1))))
 
+(def _compile-cause [err]
+  "The ImportError that compiling a module raised, inside runpy's lookup.
+
+  runpy's lookup compiles the module (get_code) and wraps that ImportError, and
+  the error it raises for a package's __main__, in its own error; the wrapped
+  one is returned so it keeps its traceback. None for runpy's own failures (no
+  such module, relative name, spec lookup, namespace package), which python -m
+  prints as one line."
+  (= cur err)
+  (while (isinstance cur runpy._Error)
+    (if (and (is-not cur.__cause__ None)
+             (not (.startswith (str cur) "Error while finding module specification")))
+        (return cur.__cause__))
+    (= cur cur.__context__))
+  None)
+
 (def _run []
   (cond (< (len sys.argv) 2)
         (repl)
@@ -2049,7 +2065,26 @@
               (= modname (module-import-name
                           (Symbol mname :lineno 1 :end-lineno 1 :col-offset 0
                                   :end-col-offset (len mname)))))
-            (runpy.run-module modname :run-name "__main__" :alter-sys True))
+            ;; python -m reports a module it cannot find as one line, before running
+            ;; anything; runpy keeps that lookup (and its error type) private. The
+            ;; lookup also compiles an .lpy (get_code), so it runs once and its
+            ;; code is what runs, as run_module does. Only runpy's own failures
+            ;; (no such module, relative name, spec lookup) are one line; an
+            ;; ImportError the compile raised (a macro's import) keeps its
+            ;; traceback, as does one the module raises while it runs.
+            (= failure None)
+            (try
+              (= details (runpy._get-module-details modname runpy._Error))
+              (except [runpy._Error as e]
+                (= failure e)))
+            (if (is-not failure None)
+                ;; raised here, outside the handler, so runpy's error is not
+                ;; attached as the traceback's context
+                (do (= cause (_compile-cause failure))
+                    (if (is cause None)
+                        (sys.exit f"{sys.executable}: {failure}")
+                        (raise cause))))
+            (runpy._run-module-code (sub details 2) None "__main__" (sub details 1)))
 
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)

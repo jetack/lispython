@@ -89,3 +89,92 @@ def test_m_refuses_a_part_that_is_no_name(tmp_path: Path):
     assert r.stderr.startswith("<command line>:1:1: error:")
     assert r.stderr.splitlines()[1:] == ["class", "^"]
     assert "Traceback" not in r.stderr
+
+
+@pytest.mark.parametrize(
+    ("module", "message"),
+    [
+        ("no-such-mod", "No module named no_such_mod"),
+        (".rel", "Relative module names not supported"),
+        (
+            "nopar.child",
+            "Error while finding module specification for 'nopar.child' "
+            "(ModuleNotFoundError: No module named 'nopar')",
+        ),
+    ],
+)
+def test_m_unfindable_module_is_one_line_like_python(
+    tmp_path: Path, module: str, message: str
+):
+    r = run_m(tmp_path, module)
+    assert r.returncode == 1
+    assert r.stderr.strip().endswith(message)
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert "Traceback" not in r.stderr
+
+
+def test_m_import_error_inside_the_module_keeps_its_traceback(tmp_path: Path):
+    (tmp_path / "cwdmod.py").write_text("import no_such_dependency\n")
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "No module named 'no_such_dependency'" in r.stderr
+
+
+def test_m_import_error_from_a_macro_keeps_its_traceback(tmp_path: Path):
+    (tmp_path / "cwdmod.lpy").write_text(
+        "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
+    )
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "No module named 'no_such_dep_q'" in r.stderr
+
+
+def test_m_compiles_an_lpy_module_once(tmp_path: Path):
+    # With no bytecode cache written, a second compile would run the macro twice.
+    (tmp_path / "cwdmod.lpy").write_text(
+        '(defmacro m [] (print "MACRO-RAN") 1)\n(print (m))\n'
+    )
+    r = run_m(tmp_path, PYTHONDONTWRITEBYTECODE="1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count("MACRO-RAN") == 1
+
+
+def test_m_macro_import_error_in_a_package_main_names_the_real_cause(tmp_path: Path):
+    pkg = tmp_path / "cwdmod"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "__main__.lpy").write_text(
+        "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
+    )
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "No module named 'no_such_dep_q'" in r.stderr
+    assert "cannot be directly executed" not in r.stderr
+
+
+def test_m_compile_time_import_error_traceback_has_no_runpy_noise(tmp_path: Path):
+    (tmp_path / "cwdmod.lpy").write_text(
+        "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
+    )
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "During handling" not in r.stderr
+    assert not [
+        line for line in r.stderr.splitlines() if line.startswith("runpy._Error:")
+    ]
+
+
+def test_m_package_without_main_is_one_line(tmp_path: Path):
+    pkg = tmp_path / "cwdmod"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert r.stderr.strip().endswith(
+        "'cwdmod' is a package and cannot be directly executed"
+    )
