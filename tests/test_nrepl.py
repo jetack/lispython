@@ -935,6 +935,115 @@ def test_concurrent_stream_evals_keep_their_own_output(connect, isolated):
         assert "".join(m["stdout"] for m in messages[:-1]) == f"{marker}\n" * 40
 
 
+def test_a_plain_eval_behind_a_stream_eval_keeps_the_reader_reading(connect):
+    # Waiting for the plain eval would wait for the endless one ahead of
+    # it: no interrupt would ever be read.
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=2, code='(print "two") 2')
+    client.send(op="interrupt", id=3, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("id") == 2), 1)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (3, "interrupt-result"),
+        (1, "eval-result"),
+        (2, "eval-result"),
+    ]
+    assert messages[1]["error"].endswith("KeyboardInterrupt")
+    assert messages[2]["value"] == "2"
+    assert messages[2]["stdout"] == "two\n"
+
+
+BASE_EXCEPTION = "(class Stop [BaseException] (pass))\n(raise (Stop))"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_base_exception_is_the_evals_error(connect, stream):
+    client = connect()
+    client.send(op="eval", id=1, stream=stream, code=BASE_EXCEPTION)
+    result = without_out(
+        client.until(lambda m: m.get("id") == 1 and not is_out(m, 1)), 1
+    )
+    assert result[-1]["op"] == "eval-result"
+    assert result[-1]["error"].startswith("Traceback (most recent call last):")
+    assert result[-1]["error"].endswith("Stop")
+    client.send(op="eval", id=2, stream=stream, code="(+ 1 2)")
+    after = without_out(client.until(lambda m: m.get("op") == "eval-result"), 2)
+    assert after[-1]["value"] == "3"
+    assert not isinstance(sys.stdout, tools._NreplRouter)
+
+
+@pytest.mark.parametrize("req_id", [None, 0, ""])
+def test_a_stream_eval_without_an_id_is_refused(connect, req_id):
+    client = connect()
+    msg = {"op": "eval", "stream": True, "code": '(print "never")'}
+    if req_id is not None:
+        msg["id"] = req_id
+    client.sock.sendall(json.dumps(msg).encode() + b"\n")
+    reply = client.recv()
+    assert reply["op"] == "error"
+    assert "needs an id" in reply["error"]
+    client.send(op="ping", id=9)
+    assert client.recv() == {"op": "pong", "id": 9}
+
+
+def test_a_lock_an_interrupt_left_held_is_released(connect, isolated):
+    # An interrupt can land right after a `with` acquired a lock, before the
+    # block that releases it.  The eval here holds the scope lock on purpose,
+    # as such a leak would; once interrupted, another connection's complete,
+    # which takes that lock, must be answered.
+    isolated["held"] = tools.nrepl_scope_lock(isolated)
+    first, second = connect(), connect()
+    code = '(import time)\n(.acquire held)\n(while True (print "t") (time.sleep 0.005))'
+    first.send(op="eval", id=1, stream=True, code=code)
+    assert is_out(first.recv(), 1)
+    first.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    first.until(lambda m: m.get("op") == "eval-result")
+    second.sock.settimeout(3)
+    second.send(op="complete", id=3, prefix="pri")
+    assert second.recv()["op"] == "complete-result"
+
+
+def test_closing_gives_up_on_an_eval_that_never_stops(isolated, monkeypatch):
+    # An eval that swallows the interrupt keeps its worker: the connection
+    # still ends after NREPL_CLOSE_TIMEOUT, leaving only that daemon thread.
+    import socket
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_CLOSE_TIMEOUT", 0.5)
+    isolated["gate"] = gate = threading.Event()
+    client_sock, server_sock = socket.socketpair()
+    client_sock.settimeout(WAIT)
+    handler = threading.Thread(
+        target=tools._nrepl_handle_client,
+        args=(server_sock, ("test", 0), isolated),
+        daemon=True,
+    )
+    handler.start()
+    client = Client(client_sock)
+    code = (
+        '(print "in")\n'
+        "(while (not (gate.is-set))\n"
+        "  (try (gate.wait 0.01) (except [KeyboardInterrupt] (pass))))"
+    )
+    try:
+        client.send(op="eval", id=1, stream=True, code=code)
+        assert is_out(client.recv(), 1)
+        client_sock.close()  # EOF: the server interrupts, the eval ignores it
+        handler.join(WAIT)
+        assert not handler.is_alive()
+        assert server_sock.fileno() == -1  # closed
+    finally:
+        gate.set()  # lets the eval, and its worker, end
+
+
+def test_an_eval_replacing_stdout_gets_the_original_back(isolated):
+    before = (sys.stdout, sys.stderr)
+    code = "(import io)\n(= sys.stdout (io.StringIO))\n(= sys.stderr (io.StringIO))"
+    assert tools.nrepl_eval("(import sys)\n" + code, isolated)["error"] is None
+    assert (sys.stdout, sys.stderr) == before
+
+
 def test_a_writer_over_the_cap_waits_for_the_flusher(monkeypatch):
     # Bounded memory: an eval printing faster than the client reads blocks
     # once NREPL_OUT_CAP characters are buffered or being sent.
@@ -964,6 +1073,8 @@ def test_a_writer_over_the_cap_waits_for_the_flusher(monkeypatch):
 
 
 def test_a_dead_stream_drops_output_and_never_blocks(monkeypatch):
+    # The flusher stops draining once a send failed, so a writer that kept
+    # counting toward the cap would wait for it forever.
     import threading
 
     monkeypatch.setattr(tools, "NREPL_OUT_CAP", 10)
@@ -974,13 +1085,68 @@ def test_a_dead_stream_drops_output_and_never_blocks(monkeypatch):
     stream = tools._NreplStream(send, {"id": 1})
     stream.start()
     writer = threading.Thread(
-        target=lambda: [stream.write("stdout", "line\n") for _ in range(100)]
+        target=lambda: [stream.write("stdout", "line\n") for _ in range(100)],
+        daemon=True,
     )
     writer.start()
-    writer.join(WAIT)
+    writer.join(2)
     stream.stop()
     assert not writer.is_alive()
     assert stream.dead
+
+
+def test_single_character_writes_count_toward_the_cap_as_memory(monkeypatch):
+    # 1 MiB of one-character writes would hold ~75 MB of queued objects if
+    # the cap counted characters only.
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_OUT_CAP", 1000)
+    release = threading.Event()
+    stream = tools._NreplStream(lambda data: release.wait(WAIT), {"id": 1})
+    stream.start()
+    writer = threading.Thread(
+        target=lambda: [stream.write("stdout", "x") for _ in range(100)], daemon=True
+    )
+    writer.start()
+    writer.join(0.5)
+    blocked = writer.is_alive()  # 100 characters: under the cap by count
+    release.set()
+    writer.join(WAIT)
+    stream.stop()
+    assert blocked
+    assert not writer.is_alive()
+
+
+def test_flush_with_nothing_written_queues_nothing():
+    stream = tools._NreplStream(lambda data: None, {"id": 1})
+    for _ in range(1000):
+        stream.flush()
+    stream.write("stdout", "x")
+    stream.flush()
+    stream.flush()
+    # one write and one flush marker, never a marker per call
+    assert stream._items.qsize() == 2
+
+
+def test_an_interrupt_traceback_ends_at_the_users_code():
+    # An interrupt usually lands inside print's path through the server's
+    # output router and stream; those frames say nothing to the user.
+    own = {}
+    exec(
+        compile(
+            "def own_frame():\n    raise KeyboardInterrupt\n",
+            tools._NREPL_OWN_FILE,
+            "exec",
+        ),
+        own,
+    )
+    try:
+        own["own_frame"]()  # the user's line
+    except KeyboardInterrupt as e:
+        error = tools._nrepl_format_exception(e)
+    assert error.endswith("KeyboardInterrupt")
+    assert "test_nrepl.py" in error
+    assert tools._NREPL_OWN_FILE not in error
 
 
 def test_long_output_is_split_into_capped_out_messages(monkeypatch):

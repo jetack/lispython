@@ -505,11 +505,21 @@
 
 (def _nrepl-format-exception [e]
   "The traceback of e without nrepl-eval's own frame: it starts at the
-  user's code (or at the compiler, for a crash while compiling)."
+  user's code (or at the compiler, for a crash while compiling).  An
+  interrupt (KeyboardInterrupt) also loses the trailing frames of this
+  file, where it lands when the code was printing (the output router and
+  stream), so it ends at the user's line."
   (= tb e.__traceback__)
   (while (and (is-not tb None) (is tb.tb_frame.f_code nrepl-eval.__code__))
     (= tb tb.tb_next))
-  (return (.rstrip (.join "" (traceback.format-exception (type e) e tb)))))
+  (= report (traceback.TracebackException (type e) e tb))
+  (if (isinstance e KeyboardInterrupt)
+      (while (and (> (len report.stack) 1)
+                  (== (. (sub report.stack -1) filename) _NREPL-OWN-FILE))
+        (.pop report.stack)))
+  (return (.rstrip (.join "" (report.format)))))
+
+(= _NREPL-OWN-FILE _nrepl-format-exception.__code__.co_filename)
 
 ;; --- eval output ------------------------------------------------------------
 ;;
@@ -588,8 +598,8 @@
 (class _NreplOutputRouting []
   "Which sink each thread's output goes to, and the routers that read it.
   The routers are installed when the first thread pushes a sink and removed
-  (sys.stdout/stderr back to the wrapped streams, when they are still the
-  routers) when the last sink is gone.  Sinks are per thread ident, a stack
+  (sys.stdout/stderr back to the wrapped streams) when the last sink is
+  gone.  Sinks are per thread ident, a stack
   for nested evals; only the thread itself pushes and pops its stack, so a
   write reads it without the lock.  ⚠️ The eval worker pushes and pops
   outside its interruptible window (_NreplConnection._serve), because an
@@ -634,11 +644,10 @@
         (return))
     (= [out err] self._routers)
     (= self._routers None)
-    ;; Code that replaced sys.stdout while it ran keeps its replacement.
-    (if (is sys.stdout out)
-        (= sys.stdout out.wrapped))
-    (if (is sys.stderr err)
-        (= sys.stderr err.wrapped))))
+    ;; As before routing existed: the streams found when the first eval
+    ;; started come back, even over a replacement the evaluated code made.
+    (= sys.stdout out.wrapped)
+    (= sys.stderr err.wrapped)))
 
 (= _NREPL-OUTPUT (_NreplOutputRouting))
 
@@ -672,6 +681,11 @@
 ;; an async KeyboardInterrupt (an interrupt) is delivered only between
 ;; bytecodes, never inside one untimed wait.
 (= NREPL-OUT-CAP (* 1024 1024))
+;; What one queued write or flush counts toward NREPL-OUT-CAP beyond its
+;; characters: roughly the memory of its str, tuple and queue slot, so an
+;; eval writing one character at a time is bounded by memory, not by
+;; characters (1 MiB of single characters would hold about 75 MB).
+(= NREPL-OUT-ITEM-COST 128)
 (= NREPL-OUT-WAIT-SLICE 0.1)
 (= NREPL-OUT-MAX-MESSAGE (* 64 1024))  ; most characters of text in one out message
 
@@ -698,8 +712,10 @@
     (= self._msg msg)  ; the request, for its id
     (= self._items (queue.SimpleQueue))  ; (key, text), _NREPL-OUT-FLUSH, _NREPL-OUT-STOP
     (= self._drained (queue.SimpleQueue))  ; a token after each batch went out
-    (= self._written 0)  ; characters queued, counted by the writer
-    (= self._sent 0)  ; characters sent or dropped, counted by the flusher
+    ;; Backlog in characters plus NREPL-OUT-ITEM-COST per queued item.
+    (= self._written 0)  ; queued, counted by the writer
+    (= self._sent 0)  ; sent or dropped, counted by the flusher
+    (= self._flushed 0)  ; _written at the last flush marker
     (= self.dead False)
     (= self._thread (threading.Thread :target self._run :daemon True
                                       :name "nrepl-out")))
@@ -725,19 +741,27 @@
     (if self.dead
         (return))
     (self._items.put (, key text))
-    (+= self._written (len text)))
+    (+= self._written (+ (len text) NREPL-OUT-ITEM-COST)))
 
   (def flush [self]
-    (self._items.put _NREPL-OUT-FLUSH))
+    ;; Only after a write since the last flush: an eval flushing in a loop
+    ;; would otherwise queue markers past the cap.
+    (if (or self.dead (== self._written self._flushed))
+        (return))
+    (self._items.put _NREPL-OUT-FLUSH)
+    (+= self._written NREPL-OUT-ITEM-COST)
+    (= self._flushed self._written))
 
   (def _next-batch [self]
-    "The next batch to send: ([key, [text ...]] chunks, their size, stop?).
+    "The next batch to send: ([key, [text ...]] chunks, the backlog its items
+    counted (see _written), stop?).
     With nothing queued it waits with no timeout (an idle stream never
     polls); then it collects until a newline, a flush or
     NREPL-OUT-FLUSH-SIZE characters make it urgent (taking what is already
     queued), or NREPL-OUT-FLUSH-DELAY after its first text."
     (= chunks [])
-    (= size 0)
+    (= size 0)  ; characters
+    (= cost 0)  ; backlog of the items taken
     (= urgent False)
     (= due None)
     (while (< size NREPL-OUT-FLUSH-SIZE)
@@ -750,9 +774,10 @@
               (= item (self._items.get :timeout (max 0 (- due (time.monotonic))))))
         (except [queue.Empty]
           (break)))
-      (cond (is item _NREPL-OUT-STOP)
-            (return (, chunks size True))
-            (is item _NREPL-OUT-FLUSH)
+      (if (is item _NREPL-OUT-STOP)
+          (return (, chunks cost True)))
+      (+= cost NREPL-OUT-ITEM-COST)
+      (cond (is item _NREPL-OUT-FLUSH)
             (= urgent (bool chunks))
             True
             (do (= [key text] item)
@@ -760,16 +785,17 @@
                     (.append (sub (sub chunks -1) 1) text)
                     (.append chunks [key [text]]))
                 (+= size (len text))
+                (+= cost (len text))
                 (if (in "\n" text)
                     (= urgent True))
                 (if (is due None)
                     (= due (+ (time.monotonic) NREPL-OUT-FLUSH-DELAY))))))
-    (return (, chunks size False)))
+    (return (, chunks cost False)))
 
   (def _run [self]
     (= stopping False)
     (while (not stopping)
-      (= [chunks size stopping] (self._next-batch))
+      (= [chunks cost stopping] (self._next-batch))
       (if (not self.dead)
           (try
             (for [key texts] chunks
@@ -781,10 +807,14 @@
                                   key (sub text (slice start (+ start NREPL-OUT-MAX-MESSAGE)))}))))
             (except [OSError]
               (= self.dead True))))
-      (+= self._sent size)
+      (+= self._sent cost)
       ;; At most one pending token, so tokens never pile up.
       (if (self._drained.empty)
-          (self._drained.put None)))))
+          (self._drained.put None))
+      ;; A dead stream stops draining: a writer drops its output once it
+      ;; sees dead, so it never waits on the flusher again.
+      (if self.dead
+          (return)))))
 
 (def nrepl-eval [src scope :filename None :line None :column None :whole-file False
                  :output None]
@@ -884,10 +914,11 @@
     ;; escape and kill the connection; report it like any other eval error.
     (except [SystemExit as e]
       (= (sub result "error") (+ "SystemExit: " (str e.code))))
-    ;; An interrupt (nREPL interrupt op) is a KeyboardInterrupt raised in
-    ;; this thread: report it as the eval's error, with the traceback of
-    ;; where the code stopped.
-    (except [(, KeyboardInterrupt Exception) as e]
+    ;; Any other exception, a BaseException subclass of the user's or an
+    ;; interrupt (nREPL interrupt op: a KeyboardInterrupt raised in this
+    ;; thread) included, is the eval's error, with the traceback of where
+    ;; the code stopped; one escaping would take the connection's worker.
+    (except [BaseException as e]
       (= (sub result "error") (_nrepl-format-exception e)))
     (finally
       (if (not routed)
@@ -1418,7 +1449,8 @@
 
 (class _NreplJob []
   "One eval or load-file request waiting for or running on a connection's
-  eval worker."
+  eval worker.  Its fields carry the worker's progress, so _serve can be
+  re-entered after an interrupt escaped it (_NreplConnection._work)."
   (def __init__ [self msg stream send]
     (= self.msg msg)
     (= self.stream stream)
@@ -1426,8 +1458,24 @@
     (= self.state _NREPL-QUEUED)
     (= self.cancelled False)  ; interrupted while queued: never run
     (= self.ident None)  ; the worker thread, once RUNNING
+    (= self.raised-at None)  ; monotonic time of the last interrupt raised in it
+    (= self.prepared False)  ; sink started and routed
+    (= self.ran False)  ; _execute was entered
+    (= self.outcome (, _NREPL-INTERRUPTED None))
     (= self.done (threading.Event))  ; its final reply was sent (or failed)
     (= self.send-error None)))  ; the OSError sending that reply raised
+
+;; An interrupt of an eval already interrupted this recently raises nothing
+;; more (its reply still says interrupt-result): each raise must land in the
+;; eval, and one landing while the worker closes the window after the first
+;; would have to be caught by bookkeeping again.  Long enough to absorb a
+;; doubled key press, far below a second deliberate interrupt.
+(= NREPL-INTERRUPT-REPEAT 0.25)  ; seconds
+;; How long a closing connection waits for its worker: an eval blocked in
+;; one C call, or one that swallows KeyboardInterrupt, never stops, and then
+;; only its daemon thread is left behind.
+(= NREPL-CLOSE-TIMEOUT 5)  ; seconds
+(= _NREPL-WORKER-STOP (object))  ; queued by close(): the worker returns
 
 (class _NreplConnection []
   "One client connection: its send lock and its eval worker.
@@ -1442,7 +1490,9 @@
   stream eval (NREPL-STREAM-FIELD true, opt-in for that reason) does not
   hold the reader: complete, docs, interrupt and the rest are answered while
   it runs, and its output arrives as out messages (_NreplStream) before its
-  final result.
+  final result.  ⚠️ A plain eval queued behind a stream eval is not waited
+  for either, because the reader would then stop reading (no interrupt, no
+  EOF) for as long as the stream eval runs; its reply comes when it ran.
 
   Every send on the connection is one whole line under one lock (sendall),
   so the reader, the worker and a stream's flusher never interleave bytes."
@@ -1465,28 +1515,42 @@
       (self.conn.sendall data)))
 
   (def evaluate [self msg]
-    "Queue an eval or load-file request.  A plain one is waited for (and its
-    reply's send failure raised here, which ends the connection); a stream
-    one returns at once.  A stream eval reusing the id of a queued or
-    running one gets an error reply and is not run."
+    "Queue an eval or load-file request.  A plain one with no stream eval
+    ahead of it is waited for (and its reply's send failure raised here,
+    which ends the connection); any other returns at once.  A stream eval
+    needs an id it can be interrupted by (a truthy string or number), unique
+    among the connection's queued and running ones; without one it gets an
+    error reply and is not run."
     (= stream (is (.get msg NREPL-STREAM-FIELD) True))
     (= key (_nrepl-interrupt-key (.get msg "id")))
     (= job (_NreplJob msg stream self.sendall))
+    (= refusal None)
     (with [self._lock]
-      (= duplicate (and stream (is-not key None) (in key self._by-id)))
-      (if (not duplicate)
-          (do (if (and stream (is-not key None))
-                  (= (sub self._by-id key) job))
-              (.append self._jobs job))))
-    (if duplicate
-        (do (_nrepl-error-reply self msg (+ "an eval with id " (json.dumps key)
-                                            " is already queued or running"))
+      (cond (and stream (is key None))
+            (= refusal "a stream eval needs an id: a non-empty string or a non-zero number")
+            (and stream (in key self._by-id))
+            (= refusal (+ "an eval with id " (json.dumps key) " is already queued or running"))
+            True
+            (do (= wait (and (not stream) (not (any (j.stream for j in self._jobs)))))
+                (if stream
+                    (= (sub self._by-id key) job))
+                (.append self._jobs job))))
+    (if (is-not refusal None)
+        (do (_nrepl-error-reply self msg refusal)
             (return)))
     (self._queue.put job)
-    (if (not stream)
+    (if wait
         (do (job.done.wait)
             (if (is-not job.send-error None)
                 (raise job.send-error)))))
+
+  (def _raise-in [self job]
+    "Raise KeyboardInterrupt in RUNNING job, unless it was raised there
+    within NREPL-INTERRUPT-REPEAT.  Called under the lock."
+    (= now (time.monotonic))
+    (if (or (is job.raised-at None) (>= (- now job.raised-at) NREPL-INTERRUPT-REPEAT))
+        (do (= job.raised-at now)
+            (_nrepl-raise-in job.ident KeyboardInterrupt))))
 
   (def interrupt [self msg]
     "Answer an interrupt request: raise KeyboardInterrupt in the stream eval
@@ -1502,7 +1566,7 @@
             (== job.state _NREPL-QUEUED)
             (= job.cancelled True)
             (== job.state _NREPL-RUNNING)
-            (_nrepl-raise-in job.ident KeyboardInterrupt)
+            (self._raise-in job)
             True
             (= job None))
       (if (is job None)
@@ -1513,57 +1577,98 @@
 
   (def close [self]
     "End the connection's evals: cancel the queued ones, interrupt the
-    running one, then stop and join the worker (each still sends its final
-    reply, which a closed peer may refuse)."
+    running one, shut the socket down (so their final replies fail at once
+    instead of waiting on a peer that is gone), and join the worker for at
+    most NREPL-CLOSE-TIMEOUT.  The caller closes the socket."
     (with [self._lock]
       (for job self._jobs
         (cond (== job.state _NREPL-QUEUED)
               (= job.cancelled True)
               (== job.state _NREPL-RUNNING)
-              (_nrepl-raise-in job.ident KeyboardInterrupt))))
-    (self._queue.put None)
-    (self._worker.join))
+              (self._raise-in job))))
+    (= shutdown (getattr self.conn "shutdown" None))
+    (if (is-not shutdown None)
+        (try
+          (shutdown socket.SHUT-RDWR)
+          (except [OSError]
+            (pass))))
+    (self._queue.put _NREPL-WORKER-STOP)
+    (self._worker.join NREPL-CLOSE-TIMEOUT))
 
   (def _work [self]
+    ;; ⚠️ Every escape from _serve is caught and _serve re-entered on the
+    ;; same job (its fields hold how far it got), so no exception, an
+    ;; interrupt landing in the worker's bookkeeping included, ends the
+    ;; worker or loses a job's reply.  Interrupts land only until _serve has
+    ;; closed the job's window, and NREPL-INTERRUPT-REPEAT spaces them out.
+    (= job None)
     (while True
-      (= job (self._queue.get))
-      (if (is job None)
-          (return))
-      (self._serve job)))
+      (try
+        (if (is job None)
+            (= job (self._queue.get)))
+        (if (is job _NREPL-WORKER-STOP)
+            (return))
+        (self._serve job)
+        (= job None)
+        (except [BaseException as e]
+          ;; Past the window no interrupt can land, so an exception there
+          ;; is the worker's own fault: re-entering would repeat it, so the
+          ;; job ends with an error reply instead.
+          (if (and (is-not job None) (is-not job _NREPL-WORKER-STOP)
+                   (== job.state _NREPL-FINISHING))
+              (do (try
+                    (_nrepl-error-reply self job.msg
+                                        (+ "internal error: " (_nrepl-failure-text e)))
+                    (except [OSError]
+                      (pass)))
+                  (= job.state _NREPL-DONE)
+                  (job.done.set)
+                  (= job None)))))))
 
   (def _serve [self job]
-    (if job.stream
-        (job.sink.start))
-    (_NREPL-OUTPUT.push job.sink)
-    (= outcome (, _NREPL-INTERRUPTED None))
-    (try
-      (= outcome (self._execute job))
-      ;; Raised past _execute's own close of the window (a second interrupt
-      ;; landing in its bookkeeping): close it again.
-      (except [KeyboardInterrupt]
-        (self._close-window job)))
+    "Run job and deliver its final reply.  Re-entrant: each step before the
+    window is closed runs once, and the close is retried until it holds."
+    (if (== job.state _NREPL-DONE)
+        (return))
+    (if (not job.prepared)
+        (do (= job.prepared True)
+            (if job.stream
+                (job.sink.start))
+            (_NREPL-OUTPUT.push job.sink)))
+    ;; Retried until the window is closed: an interrupt raised while it was
+    ;; open may fire anywhere up to the close, and no handler body may run
+    ;; after the window opened without this loop around it.
+    (while (!= job.state _NREPL-FINISHING)
+      (try
+        (if (not job.ran)
+            (do (= job.ran True)
+                (= job.outcome (self._execute job))))
+        (self._close-window job)
+        (except [BaseException]
+          (pass))))
     ;; From here on no interrupt can be raised in this thread.
     (_nrepl-release-window-locks)
     (_NREPL-OUTPUT.pop job.sink)
     (if job.stream
         (job.sink.stop))
     (with [self._lock]
-      (= job.state _NREPL-DONE)
-      (.remove self._jobs job)
+      (if (in job self._jobs)
+          (.remove self._jobs job))
       ;; Before the final reply: a client may reuse the id once it has it.
       (= key (_nrepl-interrupt-key (.get job.msg "id")))
       (if (and (is-not key None) (is (.get self._by-id key) job))
           (del (sub self._by-id key))))
     (try
-      (self._deliver job outcome)
+      (self._deliver job job.outcome)
       (except [OSError as e]
         (= job.send-error e))
       (finally
+        (= job.state _NREPL-DONE)
         (job.done.set))))
 
   (def _execute [self job]
     "Run job inside its user-code window and return its outcome, a (kind,
-    value) pair."
+    value) pair; the caller closes the window."
     (with [self._lock]
       (if job.cancelled
           (return (, _NREPL-INTERRUPTED None)))
@@ -1576,37 +1681,31 @@
     ;; and before the block (CPython 3.14 delivers it there): each such lock
     ;; is an RLock that _serve releases after the window
     ;; (_nrepl-release-window-locks).  The output routing is set up outside
-    ;; the window and the stream sink takes no lock.  nrepl-eval reports an interrupt of the user's code as its error; one
+    ;; the window and the stream sink takes no lock.  nrepl-eval reports
+    ;; any exception of the user's code as its error; a KeyboardInterrupt
     ;; that escapes it (raised before or after its try) leaves the outcome
-    ;; INTERRUPTED.
+    ;; INTERRUPTED, and any other escaping exception is a failure reply.
     (= outcome (, _NREPL-INTERRUPTED None))
     (try
-      (try
-        (= outcome (, _NREPL-RESULT (_nrepl-dispatch job.msg self.scope
-                                                     :output job.sink)))
-        (except [Exception as e]
-          (= outcome (, _NREPL-FAILURE e))))
+      (= outcome (, _NREPL-RESULT (_nrepl-dispatch job.msg self.scope
+                                                   :output job.sink)))
       (except [KeyboardInterrupt]
         (pass))
-      (finally
-        (self._close-window job)))
+      (except [BaseException as e]
+        (= outcome (, _NREPL-FAILURE e))))
     (return outcome))
 
   (def _close-window [self job]
-    "Leave job's user-code window: no interrupt raises in this thread after
-    the lock is released, and one already pending is cleared.  A pending one
-    may still fire anywhere before that, in this bookkeeping too, so it is
-    retried until it completes, releasing the lock if the exception left it
-    held (an RLock for that reason)."
-    (while True
-      (try
-        (with [self._lock]
-          (if (== job.state _NREPL-RUNNING)
-              (do (= job.state _NREPL-FINISHING)
-                  (_nrepl-raise-in job.ident None))))
-        (return)
-        (except [KeyboardInterrupt]
-          (_nrepl-release-owned self._lock)))))
+    "Leave job's user-code window (or mark a job that never opened one): no
+    interrupt raises in this thread after the lock is released, and one
+    already pending is cleared.  An exception landing right after the
+    acquire leaves the lock held, so it is released first (an RLock for
+    that reason); the caller retries."
+    (_nrepl-release-owned self._lock)
+    (with [self._lock]
+      (if (== job.state _NREPL-RUNNING)
+          (_nrepl-raise-in job.ident None))
+      (= job.state _NREPL-FINISHING)))
 
   (def _deliver [self job outcome]
     (= [kind value] outcome)

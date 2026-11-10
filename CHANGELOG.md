@@ -88,6 +88,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- nREPL: an eval's output is captured per thread, no longer by swapping
+  `sys.stdout` for the whole process. Output of a thread the evaluated code
+  starts now goes to the server's own stdout/stderr, plain evals included,
+  instead of into the eval's result.
 - `lpy -m` names its module the way `import` does, so `ok?` and `->foo`
   run `ok_p.lpy` and `_to_foo.lpy` rather than a plain `-` to `_` swap's
   `ok?` and `_>foo`, and a part that is no name (a keyword such as `class`)
