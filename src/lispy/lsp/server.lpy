@@ -23,7 +23,7 @@
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
-(from lispy.core.importer [finder-loader-details])
+(from lispy.core.importer [finder-loader-details finder-suffixes renames-modules-p])
 (from lispy.core.macro [prelude-opted-out])
 (from lispy.core.parser [_WORD_TOKENS parse run-tokens source-offset tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
@@ -1648,12 +1648,13 @@
       (index-workspace folders))
   (watch-module-files ls)))
 
-;; The module files whose creation or deletion renames the modules around
-;; them (package_root): an __init__ makes its directory a regular package,
-;; and a module file beside a namespace directory of its name ends that
-;; package.  Their content never does, so only Create and Delete are
-;; watched.
-(= MODULE-FILE-GLOBS ["**/*.py" "**/*.lpy"])
+(def module-file-globs []
+  "The client watch patterns of every module file: one per suffix the
+   importer's FileFinder takes (finder-suffixes, .lpy included), since
+   creating or deleting such a file may rename the modules around it
+   (renames-modules-p).  Their content never does, so only Create and
+   Delete are watched."
+  (return (list (.fromkeys dict [f"**/*{suffix}" for suffix in (finder-suffixes)]))))
 
 (def _registration-done [future]
   (if (and (not (.cancelled future)) (is-not (.exception future) None))
@@ -1669,7 +1670,7 @@
       (return))
   (= kind (| lsp.WatchKind.Create lsp.WatchKind.Delete))
   (= watchers [(lsp.FileSystemWatcher :glob-pattern glob :kind kind)
-               for glob in MODULE-FILE-GLOBS])
+               for glob in (module-file-globs)])
   (= options (lsp.DidChangeWatchedFilesRegistrationOptions :watchers watchers))
   (= registration (lsp.Registration :id "lispython-module-files"
                                     :method lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES
@@ -1682,12 +1683,44 @@
     (except [Exception]
       (.exception logger "lispython LSP: cannot register the module file watch"))))
 
+(def renaming-file-p [path]
+  "Whether a file created or deleted at path can rename a module of the
+   user's: it renames modules (renames-modules-p) and lies outside
+   site-packages, the stdlib and lispython (the tracked paths of
+   macro_modules), so an install or a checkout of a dependency, one event
+   per file, republishes nothing."
+  (return (and (macro-modules._trackable-path-p (osp.realpath path))
+               (renames-modules-p path))))
+
+(def reindex-watched-file [uri path]
+  "Keep the workspace index to an .lpy file created or deleted on disk:
+   index it while it exists, inside a workspace folder or already indexed
+   (index-file decides its membership), else drop it with its parsed tree."
+  (if (osp.isfile path)
+      (if (or (in uri FILE-TREES) (under-workspace path (workspace-folders)))
+          (index-file uri))
+      (do (unindex-file uri)
+          (.pop FILE-TREES uri None))))
+
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
 (def did-change-watched-files [ls params]
-  "A file created or deleted may rename open documents' modules
-   (watch-module-files); a change of content never does."
-  (if (any ((in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
-            for change in params.changes))
+  "Module files created or deleted (watch-module-files): an .lpy one is
+   indexed again (reindex-watched-file), and when one may rename a module
+   (renaming-file-p) every open document is published again.  A change of
+   content never matters."
+  (= renamed False)
+  (for change in params.changes
+    (if (not-in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
+        (continue))
+    (= path (uri-to-path change.uri))
+    (try
+      (if (.endswith path ".lpy")
+          (reindex-watched-file (path-to-uri path) path))
+      (if (and (not renamed) (renaming-file-p path))
+          (= renamed True))
+      (except [Exception]
+        (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
+  (if renamed
       (republish-open-documents ls))))
 
 (def reindex-folders [added removed]
@@ -1708,17 +1741,21 @@
                 (.pop FILE-TREES uri None))))))
 
 ;; pygls updates workspace.folders before it calls this, so workspace-folders
-;; already gives the new ones.  An open document now in a project with no
-;; backend yet starts one, as an open does.
+;; already gives the new ones.  Each open document moves to its project's
+;; backend now (Backends.folders-changed, then document-opened, which starts
+;; one as an open does) before it is published again, so the run's push
+;; finds that backend.
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WORKSPACE_FOLDERS)
 (def did-change-workspace-folders [ls params]
   (try
     (reindex-folders (or params.event.added []) (or params.event.removed []))
     (except [Exception]
       (.exception logger "lispython LSP: cannot reindex the workspace folders")))
-  (republish-open-documents ls)
-  (for uri in (list DIAGNOSTIC-RUNS)
-    (.document-opened backends uri))))
+  (= uris (list DIAGNOSTIC-RUNS))
+  (.folders-changed backends uris)
+  (for uri in uris
+    (.document-opened backends uri))
+  (republish-open-documents ls)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
