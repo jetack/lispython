@@ -453,6 +453,74 @@ def test_a_save_tells_the_backend_of_every_shadow_it_rewrote(
                 del sys.modules[key]
 
 
+def test_a_save_while_the_backend_starts_reaches_it(
+    project, tmp_path, fake_default, monkeypatch
+):
+    # Defect: a save landing while the backend starts, after the start's
+    # sweep read the disk, is dropped: a macro module's dependent shadow
+    # stays stale and the backend never hears of it until the next save.
+    name = "bkmmstart"
+    pkg = project / name
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))")
+    (pkg / "mod.lpy").write_text("(require .mac *)\n(= yy (twice 2))")
+    for key in [name, name + ".mac"]:
+        monkeypatch.delitem(sys.modules, key, raising=False)
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    main = (project / "main.lpy").as_uri()
+    mac = (pkg / "mac.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    shadow = pathlib.Path(client.view_root.path) / name / "mod.py"
+    mod_uri = client.backend_uri((pkg / "mod.lpy").as_uri())
+    sweep = client._prepare_view_root
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        swept = asyncio.Event()
+
+        def signalling_sweep():
+            result = sweep()
+            loop.call_soon_threadsafe(swept.set)
+            return result
+
+        client._prepare_view_root = signalling_sweep
+        try:
+            backends.document_opened(main)
+            await swept.wait()
+            assert "yy = 2 + 2" in shadow.read_text()
+            # The window: the start's sweep is done, the process not running.
+            assert client._starting is not None and not client._starting.done()
+            assert not client.running
+            (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(* ~x ~x ~x)))")
+            backends.document_saved(mac)
+            assert await client._starting
+            await asyncio.gather(*backends._tasks)
+            # The replay runs after the start, as a task of its own.
+            deadline = loop.time() + 10
+            while True:
+                answer = await backends.request(
+                    main, lsp.TEXT_DOCUMENT_HOVER, params, text="t"
+                )
+                watched = fake_hover(answer)["watched"]
+                if mod_uri in watched or loop.time() > deadline:
+                    return watched
+                await asyncio.sleep(0.05)
+        finally:
+            await backends.shutdown_all()
+
+    try:
+        watched = run_bounded(scenario())
+        assert "yy = 2 * 2 * 2" in shadow.read_text()
+        assert mod_uri in watched
+    finally:
+        for key in list(sys.modules):
+            if key == name or key.startswith(name + "."):
+                del sys.modules[key]
+
+
 def test_crashed_backend_restarts_once(project, tmp_path, fake_argv, spawned):
     # Defect: a backend that crashed stays dead for the session, or one that
     # keeps crashing is respawned on every request.
