@@ -1515,24 +1515,28 @@
       (self.conn.sendall data)))
 
   (def evaluate [self msg]
-    "Queue an eval or load-file request.  A plain one with no stream eval
-    ahead of it is waited for (and its reply's send failure raised here,
-    which ends the connection); any other returns at once.  A stream eval
-    needs an id it can be interrupted by (a truthy string or number), unique
-    among the connection's queued and running ones; without one it gets an
-    error reply and is not run."
+    "Queue an eval or load-file request.  A plain one with nothing queued or
+    running ahead of it is waited for (and its reply's send failure raised
+    here, which ends the connection); any other returns at once and can be
+    interrupted by its id while queued or running.  A stream eval needs such
+    an id (a truthy string or number); an id already queued or running on
+    the connection is refused for any eval that is not waited for.  A
+    refused eval gets an error reply and is not run."
     (= stream (is (.get msg NREPL-STREAM-FIELD) True))
     (= key (_nrepl-interrupt-key (.get msg "id")))
     (= job (_NreplJob msg stream self.sendall))
     (= refusal None)
     (with [self._lock]
+      ;; Waited for only behind nothing: a plain eval behind any unwaited one
+      ;; (stream or plain) may wait for an endless eval, and the reader would
+      ;; then read no interrupt and no EOF.
+      (= wait (and (not stream) (not self._jobs)))
       (cond (and stream (is key None))
             (= refusal "a stream eval needs an id: a non-empty string or a non-zero number")
-            (and stream (in key self._by-id))
+            (and (not wait) (is-not key None) (in key self._by-id))
             (= refusal (+ "an eval with id " (json.dumps key) " is already queued or running"))
             True
-            (do (= wait (and (not stream) (not (any (j.stream for j in self._jobs)))))
-                (if stream
+            (do (if (and (not wait) (is-not key None))
                     (= (sub self._by-id key) job))
                 (.append self._jobs job))))
     (if (is-not refusal None)
@@ -1544,36 +1548,44 @@
             (if (is-not job.send-error None)
                 (raise job.send-error)))))
 
-  (def _raise-in [self job]
+  (def _raise-in [self job :force False]
     "Raise KeyboardInterrupt in RUNNING job, unless it was raised there
-    within NREPL-INTERRUPT-REPEAT.  Called under the lock."
+    within NREPL-INTERRUPT-REPEAT (force: regardless).  True when it raised.
+    Called under the lock."
     (= now (time.monotonic))
-    (if (or (is job.raised-at None) (>= (- now job.raised-at) NREPL-INTERRUPT-REPEAT))
-        (do (= job.raised-at now)
-            (_nrepl-raise-in job.ident KeyboardInterrupt))))
+    (if (not (or force (is job.raised-at None)
+                 (>= (- now job.raised-at) NREPL-INTERRUPT-REPEAT)))
+        (return False))
+    (= job.raised-at now)
+    (_nrepl-raise-in job.ident KeyboardInterrupt)
+    (return True))
 
   (def interrupt [self msg]
-    "Answer an interrupt request: raise KeyboardInterrupt in the stream eval
-    whose id is its NREPL-INTERRUPT-ID-FIELD when that eval runs, or cancel
-    it when it is queued; an error reply when there is no such eval.  The
-    reply goes out under the lock, so it precedes the eval's final result."
+    "Answer an interrupt request: raise KeyboardInterrupt in the eval whose
+    id is its NREPL-INTERRUPT-ID-FIELD when that eval runs, or cancel it
+    when it is queued, and reply interrupt-result; an error reply when there
+    is no such eval, or when it was interrupted less than
+    NREPL-INTERRUPT-REPEAT ago and this one raised nothing (the client may
+    send it again).  Only a stream eval, or a plain one queued behind one,
+    can be interrupted.  The reply goes out under the lock, so it precedes
+    the eval's final result."
     (= target (.get msg NREPL-INTERRUPT-ID-FIELD))
     (= key (_nrepl-interrupt-key target))
     (with [self._lock]
       (= job (ife (is key None) None (.get self._by-id key)))
-      (cond (is job None)
-            (pass)
+      (= error None)
+      (cond (or (is job None) (not-in job.state (, _NREPL-QUEUED _NREPL-RUNNING)))
+            (= error (+ "no queued or running eval with id " (json.dumps target)))
             (== job.state _NREPL-QUEUED)
             (= job.cancelled True)
-            (== job.state _NREPL-RUNNING)
-            (self._raise-in job)
-            True
-            (= job None))
-      (if (is job None)
-          (_nrepl-error-reply self msg (+ "no queued or running stream eval with id "
-                                          (json.dumps target)))
+            (not (self._raise-in job))
+            (= error (+ "eval " (json.dumps target) " was interrupted less than "
+                        (str NREPL-INTERRUPT-REPEAT) " s ago; send the interrupt again"
+                        " to interrupt it again")))
+      (if (is error None)
           (_nrepl-reply self msg {"op" NREPL-INTERRUPT-RESULT-OP
-                                  NREPL-INTERRUPT-ID-FIELD target}))))
+                                  NREPL-INTERRUPT-ID-FIELD target})
+          (_nrepl-error-reply self msg error))))
 
   (def close [self]
     "End the connection's evals: cancel the queued ones, interrupt the
@@ -1585,7 +1597,7 @@
         (cond (== job.state _NREPL-QUEUED)
               (= job.cancelled True)
               (== job.state _NREPL-RUNNING)
-              (self._raise-in job))))
+              (self._raise-in job :force True))))
     (= shutdown (getattr self.conn "shutdown" None))
     (if (is-not shutdown None)
         (try
@@ -1596,75 +1608,87 @@
     (self._worker.join NREPL-CLOSE-TIMEOUT))
 
   (def _work [self]
-    ;; ⚠️ Every escape from _serve is caught and _serve re-entered on the
-    ;; same job (its fields hold how far it got), so no exception, an
-    ;; interrupt landing in the worker's bookkeeping included, ends the
-    ;; worker or loses a job's reply.  Interrupts land only until _serve has
-    ;; closed the job's window, and NREPL-INTERRUPT-REPEAT spaces them out.
-    (= job None)
+    ;; An exception escaping _serve is the worker's own fault (_serve absorbs
+    ;; every interrupt), so the job ends through the same cleanup with an
+    ;; internal-error reply, and the worker goes on with the next job.
+    ;; A KeyboardInterrupt escaping _serve (a second interrupt landing in
+    ;; the handler of its retry loop) re-enters it: its steps run once.
     (while True
-      (try
-        (if (is job None)
-            (= job (self._queue.get)))
-        (if (is job _NREPL-WORKER-STOP)
-            (return))
-        (self._serve job)
-        (= job None)
-        (except [BaseException as e]
-          ;; Past the window no interrupt can land, so an exception there
-          ;; is the worker's own fault: re-entering would repeat it, so the
-          ;; job ends with an error reply instead.
-          (if (and (is-not job None) (is-not job _NREPL-WORKER-STOP)
-                   (== job.state _NREPL-FINISHING))
-              (do (try
-                    (_nrepl-error-reply self job.msg
-                                        (+ "internal error: " (_nrepl-failure-text e)))
-                    (except [OSError]
-                      (pass)))
-                  (= job.state _NREPL-DONE)
-                  (job.done.set)
-                  (= job None)))))))
+      (= job (self._queue.get))
+      (if (is job _NREPL-WORKER-STOP)
+          (return))
+      (while (!= job.state _NREPL-DONE)
+        (try
+          (self._serve job)
+          (except [KeyboardInterrupt]
+            (pass))
+          (except [Exception as e]
+            (self._end job :internal e))))))
 
   (def _serve [self job]
-    "Run job and deliver its final reply.  Re-entrant: each step before the
-    window is closed runs once, and the close is retried until it holds."
-    (if (== job.state _NREPL-DONE)
-        (return))
+    "Run job and deliver its final reply.  Re-entrant: the steps before the
+    window closed run once, the close until it holds."
     (if (not job.prepared)
         (do (= job.prepared True)
             (if job.stream
                 (job.sink.start))
             (_NREPL-OUTPUT.push job.sink)))
     ;; Retried until the window is closed: an interrupt raised while it was
-    ;; open may fire anywhere up to the close, and no handler body may run
-    ;; after the window opened without this loop around it.
+    ;; open may fire anywhere up to the close.  Only KeyboardInterrupt is
+    ;; retried; anything else is a bug that would repeat (_work ends the job).
     (while (!= job.state _NREPL-FINISHING)
       (try
         (if (not job.ran)
             (do (= job.ran True)
                 (= job.outcome (self._execute job))))
         (self._close-window job)
-        (except [BaseException]
+        (except [KeyboardInterrupt]
           (pass))))
     ;; From here on no interrupt can be raised in this thread.
-    (_nrepl-release-window-locks)
-    (_NREPL-OUTPUT.pop job.sink)
-    (if job.stream
-        (job.sink.stop))
+    (self._end job))
+
+  (def _end [self job :internal None]
+    "Clean job up and send its one final reply: its outcome, or an internal
+    error when internal (an exception of the worker's own) is given or the
+    delivery fails before sending.  Each step runs whatever failed before
+    it, so the id is freed and the reader released in every case."
+    (if (is-not internal None)
+        ;; The window may still be open: close it without the lock's retry.
+        (do (= job.state _NREPL-FINISHING)
+            (if (is-not job.ident None)
+                (_nrepl-raise-in job.ident None))))
+    (for step [_nrepl-release-window-locks
+               (fn [] (_NREPL-OUTPUT.pop job.sink))
+               (fn [] (ife job.stream (job.sink.stop) None))
+               (fn [] (self._unregister job))]
+      (try
+        (step)
+        (except [Exception]
+          (pass))))
+    (try
+      (if (is internal None)
+          (self._deliver job job.outcome)
+          (_nrepl-error-reply self job.msg (+ "internal error: " (_nrepl-failure-text internal))))
+      (except [OSError as e]
+        (= job.send-error e))
+      (except [Exception as e]
+        ;; _deliver raises only before it sends, so this is still the one reply.
+        (try
+          (_nrepl-error-reply self job.msg (+ "internal error: " (_nrepl-failure-text e)))
+          (except [OSError as e2]
+            (= job.send-error e2))))
+      (finally
+        (= job.state _NREPL-DONE)
+        (job.done.set))))
+
+  (def _unregister [self job]
     (with [self._lock]
       (if (in job self._jobs)
           (.remove self._jobs job))
       ;; Before the final reply: a client may reuse the id once it has it.
       (= key (_nrepl-interrupt-key (.get job.msg "id")))
       (if (and (is-not key None) (is (.get self._by-id key) job))
-          (del (sub self._by-id key))))
-    (try
-      (self._deliver job job.outcome)
-      (except [OSError as e]
-        (= job.send-error e))
-      (finally
-        (= job.state _NREPL-DONE)
-        (job.done.set))))
+          (del (sub self._by-id key)))))
 
   (def _execute [self job]
     "Run job inside its user-code window and return its outcome, a (kind,

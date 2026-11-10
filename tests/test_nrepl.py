@@ -1004,6 +1004,116 @@ def test_a_lock_an_interrupt_left_held_is_released(connect, isolated):
     assert second.recv()["op"] == "complete-result"
 
 
+CATCH_ONCE = (
+    "(import time)\n"
+    '(try (while True (print "a") (time.sleep 0.005))\n'
+    '  (except [KeyboardInterrupt] (print "caught")))\n'
+    '(while True (print "b") (time.sleep 0.005))'
+)
+
+
+def test_an_interrupt_that_raised_nothing_is_never_acknowledged(connect):
+    # The eval survives its first interrupt.  A second one inside
+    # NREPL_INTERRUPT_REPEAT raises nothing, so it must not claim success;
+    # one sent after that window stops the eval.
+    import time
+
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=CATCH_ONCE)
+    assert is_out(client.recv(), 1)
+    client.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    assert client.until(lambda m: m.get("id") == 2)[-1] == {
+        "op": "interrupt-result",
+        "interrupt-id": 1,
+        "id": 2,
+    }
+    time.sleep(0.1)
+    client.send(op="interrupt", id=3, **{"interrupt-id": 1})
+    refused = client.until(lambda m: m.get("id") == 3)[-1]
+    assert refused["op"] == "error"
+    assert "was interrupted less than" in refused["error"]
+    time.sleep(tools.NREPL_INTERRUPT_REPEAT)
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    messages = client.until(lambda m: m.get("op") == "eval-result")
+    replies = without_out(messages, 1)
+    assert replies[0] == {"op": "interrupt-result", "interrupt-id": 1, "id": 4}
+    assert replies[1]["error"].endswith("KeyboardInterrupt")
+    # it was the second loop that the last interrupt stopped
+    assert "b" in "".join(m["stdout"] for m in messages if is_out(m, 1))
+
+
+def test_a_plain_eval_queued_behind_a_stream_eval_can_be_cancelled(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=2, code='(print "never")')
+    client.send(op="interrupt", id=3, **{"interrupt-id": 2})
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("id") == 2), 1)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (3, "interrupt-result"),
+        (4, "interrupt-result"),
+        (1, "eval-result"),
+        (2, "eval-result"),
+    ]
+    assert messages[3]["error"] == "KeyboardInterrupt"
+    assert messages[3]["stdout"] == ""
+
+
+def test_a_plain_eval_running_behind_a_stream_eval_can_be_interrupted(
+    connect, isolated
+):
+    import threading
+
+    isolated["gate"] = gate = threading.Event()
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code="(gate.wait 10)")
+    client.send(op="eval", id=2, code=ENDLESS)  # not waited for: 1 is ahead
+    gate.set()
+    assert client.recv()["id"] == 1  # the stream eval's result: 2 now runs
+    client.send(op="interrupt", id=3, **{"interrupt-id": 2})
+    messages = client.until(lambda m: m.get("id") == 2)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (3, "interrupt-result"),
+        (2, "eval-result"),
+    ]
+    assert messages[1]["error"].endswith("KeyboardInterrupt")
+    assert messages[1]["stdout"].startswith("tick\n")
+
+
+@pytest.mark.parametrize("method", ["_deliver", "_close_window"])
+def test_a_worker_fault_still_sends_one_reply_and_frees_the_id(
+    connect, monkeypatch, method
+):
+    # _deliver failing before it sends, and a fault in the window close
+    # (which must not be retried forever), each end the job with one
+    # internal-error reply; the id is free again and plain evals are again
+    # waited for in order.
+    original = getattr(tools._NreplConnection, method)
+    failed = []
+
+    def faulty(self, job, *args):
+        if not failed:
+            failed.append(job)
+            raise RuntimeError("boom")
+        return original(self, job, *args)
+
+    monkeypatch.setattr(tools._NreplConnection, method, faulty)
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code="(+ 1 1)")
+    [reply] = without_out(client.until(lambda m: m.get("id") == 1), 1)
+    assert reply == {
+        "op": "error",
+        "error": "internal error: RuntimeError: boom",
+        "id": 1,
+    }
+    client.send(op="eval", id=1, stream=True, code="(+ 2 2)")
+    assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["value"] == "4"
+    client.send(op="eval", id=5, code="(+ 3 3)")
+    client.send(op="ping", id=6)
+    assert [client.recv()["id"], client.recv()["id"]] == [5, 6]
+
+
 def test_closing_gives_up_on_an_eval_that_never_stops(isolated, monkeypatch):
     # An eval that swallows the interrupt keeps its worker: the connection
     # still ends after NREPL_CLOSE_TIMEOUT, leaving only that daemon thread.
