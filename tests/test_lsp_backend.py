@@ -1407,6 +1407,119 @@ def test_real_backend_follows_a_config_a_save_changed(project, tmp_path, name):
     assert after == [lsp.DiagnosticSeverity.Error]
 
 
+@pytest.mark.parametrize("name", list(REAL_BACKENDS))
+def test_real_backend_searches_a_script_directory_only_for_its_files(
+    project, tmp_path, name
+):
+    # Defects: the backend's search paths are one list for the whole
+    # project, so scripts/ (searched only by `lpy scripts/x.lpy`) answers
+    # a root module's (import helper), which `lpy main.lpy` fails; and the
+    # view root, searched first, answers scripts/x.lpy's (import utils)
+    # with the root utils.py, where `lpy scripts/x.lpy` imports
+    # scripts/utils.py.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    scripts = project / "scripts"
+    scripts.mkdir()
+    (project / "utils.py").write_text("only_in_root = 1\n")
+    (scripts / "utils.py").write_text("only_in_scripts = 1\n")
+    (scripts / "helper.py").write_text("h = 1\n")
+    sources = {
+        project / "main.lpy": "(import helper)\n(print helper.h)\n",
+        scripts / "x.lpy": (
+            "(import utils)\n(print utils.only-in-scripts utils.only-in-root)\n"
+        ),
+    }
+    for path, source in sources.items():
+        path.write_text(source)
+    client = backend.BackendClient(view_root(project, tmp_path), argv, name=name)
+    views = {path.as_uri(): pv.compile_view(text) for path, text in sources.items()}
+    main, script = (path.as_uri() for path in sources)
+
+    def messages(uri):
+        found = client.diagnostics_for(uri, views[uri].text)
+        return None if found is None else [d.message for d, _ in found]
+
+    def settled():
+        # Each buffer's positive control: the error the right resolution
+        # gives (scripts/utils has no only_in_root; no helper beside main).
+        main_found, script_found = messages(main), messages(script)
+        return (
+            main_found is not None
+            and any("helper" in m for m in main_found)
+            and script_found is not None
+            and any("only_in_root" in m for m in script_found)
+        )
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(main))
+            )
+            for path, text in sources.items():
+                client.push_buffer(path.as_uri(), text, views[path.as_uri()])
+            deadline = asyncio.get_running_loop().time() + 30
+            while not settled():
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages(main), messages(script)
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    main_found, script_found = run_bounded(scenario(), timeout=90)
+    assert main_found is not None and any("helper" in m for m in main_found)
+    assert script_found is not None
+    assert any("only_in_root" in m for m in script_found)
+    assert not any("only_in_scripts" in m for m in script_found)
+
+
+def test_a_save_that_adds_or_drops_a_search_environment_tells_the_backend(
+    project, tmp_path
+):
+    # Defect: a save that writes a new nested pyrefly.toml (a script
+    # directory got its first .lpy) or removes one tells the running backend
+    # nothing, since only the root config file's text is compared, so it
+    # keeps the search paths it read at its start for that directory.
+    client = backend.BackendClient(
+        view_root(project, tmp_path), ["unused"], name="pyrefly"
+    )
+    sent = []
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    client._client = SimpleNamespace(workspace_did_change_watched_files=sent.append)
+    nested = pathlib.Path(client.view_root.path) / "scripts" / pv.PYREFLY_CONFIG
+    script = project / "scripts" / "x.lpy"
+
+    def config_events():
+        return {
+            (change.uri, change.type)
+            for params in sent
+            for change in params.changes
+            if change.uri.endswith(pv.PYREFLY_CONFIG)
+        }
+
+    # As a start: the view written and its config files read.
+    run_bounded(client.saved((project / "main.lpy").as_uri()))
+    sent.clear()
+    script.parent.mkdir()
+    script.write_text("(= x 1)\n")
+    run_bounded(client.saved(script.as_uri()))
+    assert nested.is_file()
+    assert config_events() == {(nested.as_uri(), lsp.FileChangeType.Changed)}
+    sent.clear()
+    script.unlink()
+    run_bounded(client.saved((project / "main.lpy").as_uri()))
+    assert not nested.exists()
+    assert config_events() == {(nested.as_uri(), lsp.FileChangeType.Deleted)}
+
+
 # Runs lispython's LSP with its real backends, and one extra request,
 # lispy-test/backendPid, the pid of a document's running backend, or None.
 REAL_LAUNCHER = textwrap.dedent(
