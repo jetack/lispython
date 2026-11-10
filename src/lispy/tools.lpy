@@ -2049,6 +2049,14 @@
               (= modname (module-import-name
                           (Symbol mname :lineno 1 :end-lineno 1 :col-offset 0
                                   :end-col-offset (len mname)))))
+            ;; python -m reports a module it cannot find as one line, before running
+            ;; anything; runpy keeps that lookup (and its error type) private.
+            ;; Only the lookup is guarded: an ImportError the module raises while
+            ;; it runs keeps its traceback, as under python -m.
+            (try
+              (runpy._get-module-details modname runpy._Error)
+              (except [runpy._Error as e]
+                (sys.exit f"{sys.executable}: {e}")))
             (runpy.run-module modname :run-name "__main__" :alter-sys True))
 
         (== (sub sys.argv 1) "-c")
