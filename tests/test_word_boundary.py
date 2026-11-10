@@ -85,6 +85,14 @@ SPANS = [
     # ~ with nothing after it is the invert symbol.
     ("~|", (0, 0, 1)),
     ("{x|", (1, 1, 2)),
+    # A { ends a symbol: in an f-string the word is the field's own name,
+    # never glued to the text or format spec before the field's brace.
+    ("a{b|", (2, 2, 3)),
+    ("a|{b", (0, 0, 1)),
+    ('f"{1:{wi|}}"', (6, 6, 8)),
+    ('f"{x:>{wi|}}"', (7, 7, 9)),
+    ('f"ab{wi|}"', (5, 5, 7)),
+    ('f"{a}b{c|}"', (7, 7, 8)),
     ("[x|", (1, 1, 2)),
     (",x|", (1, 1, 2)),
     ("#x|", (0, 0, 2)),
@@ -200,7 +208,7 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 3 and spec["columns"] == "code points"
+    assert spec["version"] == 4 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"])

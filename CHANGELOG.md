@@ -100,6 +100,11 @@ follows [Semantic Versioning](https://semver.org/).
   sending an eval (`shutdown(SHUT_WR)`, `nc -N`) usually loses the reply:
   EOF cancels or interrupts the connection's unfinished evals and shuts
   the socket down, so only an eval that finished first is sure to reply.
+- `{` now ends a symbol, as `[` does, so a symbol can no longer contain `{`:
+  `a{b}` reads as the symbol `a` and the brace form `{b}` (it was an
+  unmatched `}`), and `x{` is an unclosed `{` (it was the symbol `x{`). A
+  `{` never glues to the name before it. The word boundary spec
+  (`python -m lispy.word_boundary`) is version 4: `{` is in `stopChars`.
 - nREPL: an eval's output is captured per thread, no longer by swapping
   `sys.stdout` for the whole process. Output of a thread the evaluated code
   starts now goes to the server's own stdout/stderr, plain evals included,
@@ -290,6 +295,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Completion in an f-string field after text or in a format spec
+  (`f"ab{wi`, `f"{x:>{wi`, `f"{a}b{c`) completes the field's name: the word
+  no longer runs back through the field's `{` into the text or spec before
+  it, in the LSP and in every editor following the word boundary spec.
 - LSP: go-to-definition without a backend resolves a relative module, of a
   `require` or a `from`, as Python does: in the document's package, never
   beyond its top-level package, and not at all for a buffer with no file.

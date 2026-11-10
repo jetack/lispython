@@ -92,8 +92,13 @@ _FORM_END = "\\s\\)\\}\\],;"
 # The characters CPython ends a line at (LF, CR; CRLF is one break of both).
 # A comment stops at either; a lone CR is skipped between tokens like a tab.
 _LINE_BREAK_CHARS = "\\r\\n"
-# What ends a symbol token.
-_SYMBOL_STOP = _FORM_END + '\\"\\['
+# What ends a symbol token: a form end, a quote, and the brackets that may
+# open right after a form. "[" so that f[T] is a symbol glued to a bracket
+# (the one glued head); "{" so that the word at a caret never runs into a
+# preceding f-string text or format spec through a field's brace
+# (completion_word_span lexes the line as code: f"ab{wi" is the word wi).
+# x{y} is the symbol x then the dict {y}, never a glued head.
+_SYMBOL_STOP = _FORM_END + '\\"\\[\\{'
 # A line continuation in a field: a backslash before a line break or the end
 # of the source (_token_patterns).
 _FIELD_CONTINUATION = "\\\\(?:\\r\\n|\\r|\\n|\\Z)"
@@ -164,9 +169,9 @@ def _token_patterns(in_field, field_level=False):
         [f";(?:{comment_char})*+", "comment"],
         [_NUMBER_TOKEN + f"(?=[{_FORM_END}]|{end})", "number"],
         [",", "comma"],
-        # "[" ends a symbol so that f[T] is a symbol glued to a bracket. At a
-        # field's own level a lone ":" or "!" matches too, so the lexer sees
-        # the delimiter where a token starts.
+        # A symbol stops at _SYMBOL_STOP (f[T] is a symbol glued to a
+        # bracket). At a field's own level a lone ":" or "!" matches too, so
+        # the lexer sees the delimiter where a token starts.
         [
             f'(?:{char}|\\\\(?!["{_LINE_BREAK_CHARS}]|\\Z))++'
             + ("|[:!]" if field_level else "")
