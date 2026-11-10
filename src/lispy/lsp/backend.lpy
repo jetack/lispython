@@ -1110,7 +1110,9 @@
     (= self.on-input-changed None)
     (= self.clients {})
     (= self._tasks (set))
-    (= self._closed False))
+    (= self._closed False)
+    ;; The clients whose files-changed sweep is scheduled and not begun.
+    (= self._sweeps-due (set)))
 
   (def configure [self init-options]
     (try
@@ -1272,6 +1274,60 @@
           (._schedule self (.saved client lpy-uri)))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
+
+  (def files-changed [self lpy-uris]
+    "Files that name the modules of documents lpy-uris changed (a module
+     file created or deleted, the workspace folders changed): every backend
+     of one of them that runs or is starting sweeps its view root once, as
+     a save of its documents among them (BackendClient.saved), so its
+     package overlays and import roots follow the new naming.  A backend
+     whose sweep is due already gets no second one: that sweep reads the
+     disk when it begins.  Call on the loop."
+    (= by-client {})
+    (for lpy-uri in lpy-uris
+      (try
+        (= client (._existing self lpy-uri))
+        (if (and (is-not client None) (or client.running client.starting)
+                 (not-in client self._sweeps-due))
+            (.append (.setdefault by-client client (list)) lpy-uri))
+        (except [Exception]
+          (.exception logger "lispython LSP: no Python backend for %s" lpy-uri))))
+    (for [client uris] in (.items by-client)
+      (try
+        (.add self._sweeps-due client)
+        (._schedule self (._sweep self client uris))
+        (except [Exception]
+          (.discard self._sweeps-due client)
+          (.exception logger "lispython LSP: backend sweep failed for %s"
+                      client.project-root)))))
+
+  (async-def _sweep [self client uris]
+    (.discard self._sweeps-due client)
+    (await (.saved client *uris)))
+
+  (def folders-changed [self lpy-uris]
+    "The workspace folders changed: each open document lpy-uris is closed
+     in every backend but its project's now (close-document, a no-op where
+     it is not open), so no backend keeps its old view over the disk, and
+     every backend whose project is no longer a workspace folder is shut
+     down and dropped, so the folder added again makes a new one.  Call on
+     the loop."
+    (try
+      (= owners {lpy-uri (._existing self lpy-uri) for lpy-uri in lpy-uris})
+      (for client in (list (.values self.clients))
+        (for [lpy-uri owner] in (.items owners)
+          (if (is-not client owner)
+              (.close-document client lpy-uri))))
+      (= roots (set))
+      (for folder in (self.folders)
+        (= path (to-fs-path folder.uri))
+        (if (is-not path None)
+            (.add roots (osp.realpath path))))
+      (for root in (list self.clients)
+        (if (not-in root roots)
+            (._schedule self (.shutdown (.pop self.clients root)))))
+      (except [Exception]
+        (.exception logger "lispython LSP: cannot follow the workspace folders"))))
 
   (async-def shutdown-all [self]
     "Shut every backend down (the LSP's shutdown); none starts afterwards."

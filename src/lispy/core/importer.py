@@ -24,12 +24,13 @@ def _is_lpy_file(filename):
     return osp.isfile(filename) and osp.splitext(filename)[1] == ".lpy"
 
 
+INIT_FILE_NAMES = ("__init__.py", "__init__.lpy")
+
+
 def has_init_file(dir_path):
-    """Whether dir_path is a package directory: it holds __init__.py or
-    __init__.lpy."""
-    return osp.exists(osp.join(dir_path, "__init__.py")) or osp.exists(
-        osp.join(dir_path, "__init__.lpy")
-    )
+    """Whether dir_path is a package directory: it holds one of
+    INIT_FILE_NAMES."""
+    return any(osp.exists(osp.join(dir_path, name)) for name in INIT_FILE_NAMES)
 
 
 def finder_loader_details():
@@ -72,6 +73,23 @@ def _namespace_portion_p(dir_path):
     parent = osp.dirname(dir_path)
     return not any(
         osp.isfile(osp.join(parent, name + suffix)) for suffix in finder_suffixes()
+    )
+
+
+def renames_modules_p(path):
+    """Whether creating or deleting the file at path can change what
+    package_root gives: it is an __init__ file (has_init_file), or a module
+    file (a finder suffix) of a directory's name beside that directory,
+    which it stops or lets be a namespace portion (_namespace_portion_p).
+    The file need not exist (a deletion)."""
+    name = osp.basename(path)
+    if name in INIT_FILE_NAMES:
+        return True
+    parent = osp.dirname(path)
+    return any(
+        osp.isdir(osp.join(parent, name[: -len(suffix)]))
+        for suffix in finder_suffixes()
+        if name.endswith(suffix) and len(name) > len(suffix)
     )
 
 
