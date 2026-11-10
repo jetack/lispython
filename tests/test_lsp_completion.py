@@ -1264,6 +1264,22 @@ def test_an_incomplete_list_is_kept(merged, backend_requests, answer_at):
 
 
 @once
+def test_a_kept_answer_drops_the_word_typed_now_from_the_local_list(
+    merged, backend_requests, answer_at
+):
+    # Defect: where the backend's items leave nothing, the local list that
+    # answers is compared with the kept view's word (l), not the word typed
+    # now (li), so at the binding (def f [li|]) the name li bound elsewhere
+    # is offered back on every later keystroke of a kept answer.
+    backend_requests.answer["value"] = [item("l")]
+    backend_requests.sent.clear()
+    answer_at("(= li 1)\n(def f [l|]\n  1)")
+    answer = answer_at("(= li 1)\n(def f [li|]\n  1)")
+    assert len(backend_requests.sent) == 1  # the kept answer served li
+    assert "li" not in by_label(answer.items)
+
+
+@once
 @pytest.mark.parametrize(
     "first",
     [None, [], lsp.CompletionList(is_incomplete=True, items=[]), "failed"],
