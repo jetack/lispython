@@ -1474,7 +1474,7 @@
 ;; How long a closing connection waits for its worker: an eval blocked in
 ;; one C call, or one that swallows KeyboardInterrupt, never stops, and then
 ;; only its daemon thread is left behind.
-(= NREPL-CLOSE-TIMEOUT 5)  ; seconds
+(= NREPL-CLOSE-TIMEOUT 2)  ; seconds
 (= _NREPL-WORKER-STOP (object))  ; queued by close(): the worker returns
 
 (class _NreplConnection []
