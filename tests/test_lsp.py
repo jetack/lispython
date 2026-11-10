@@ -192,12 +192,28 @@ def test_each_failed_form_has_its_own_diagnostic():
     assert found == [(0, "(while", warning), (3, "(def", warning)]
 
 
+def assert_placed_in_required_module(diagnostic, module, line, start, end):
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character) == (0, 0)
+    assert (rng.end.line, rng.end.character) == (0, len("(require"))
+    # The full path, never the basename alone, which two packages may share.
+    assert f"({module}:{line + 1})" in diagnostic.message
+    [related] = diagnostic.related_information
+    assert related.location.uri == module.as_uri()
+    there = related.location.range
+    assert (there.start.line, there.start.character) == (line, start)
+    assert (there.end.line, there.end.character) == (line, end)
+
+
 def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
-    # Defect: a required module's compile error carries that module's line
+    # Defects: a required module's compile error carries that module's line
     # (3, its (while)), which the buffer's diagnostic took as its own: it
     # underlined the buffer's third form, (=, with a bare message naming no
-    # file. It is placed at the require that raised it.
-    (tmp_path / "lspbrokenreq.lpy").write_text("(= a 1)\n(= b 2)\n(while)\n")
+    # file. It is placed at the require that raised it. Its message then
+    # named the module by basename alone ("lspbrokenreq.lpy, line 3"), and
+    # no related location led to the line there.
+    module = tmp_path / "lspbrokenreq.lpy"
+    module.write_text("(= a 1)\n(= b 2)\n  (while)\n")
     source = "(require lspbrokenreq)\n(= a 1)\n(= b 2)"
     try:
         [diagnostic] = server.compute_diagnostics(
@@ -205,10 +221,50 @@ def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
         )
     finally:
         sys.modules.pop("lspbrokenreq", None)
+    # Its (while head on line 3, after two spaces.
+    assert_placed_in_required_module(diagnostic, module, 2, 2, 8)
+
+
+def test_a_required_python_modules_syntax_error_names_its_file(tmp_path):
+    # Defect: CPython's SyntaxError of a required .py reached the message as
+    # its str, "invalid syntax (lspbrokenpy.py, line 2)", by basename alone.
+    module = tmp_path / "lspbrokenpy.py"
+    module.write_text("x = 1\nx = = 2\n")
+    try:
+        [diagnostic] = server.compute_diagnostics(
+            "(require lspbrokenpy)", (tmp_path / "main.lpy").as_uri()
+        )
+    finally:
+        sys.modules.pop("lspbrokenpy", None)
+    assert diagnostic.message.startswith("Compile warning: invalid syntax (")
+    # The second = of "x = = 2", where CPython places it.
+    assert_placed_in_required_module(diagnostic, module, 1, 4, 5)
+
+
+def test_a_position_in_text_a_macro_parsed_is_not_the_buffers():
+    # Defect: an include-like macro parses other text, whose (while) error
+    # carries filename None and that text's line 3, which the diagnostic took
+    # as the buffer's third line and underlined its unrelated (= b 2).
+    source = (
+        "(defmacro inc [] (import lispy.core.parser)"
+        ' (return (sub (lispy.core.parser.parse "\\n\\n(while)") 0)))\n'
+        "(= a 1)\n"
+        "(= b 2)\n"
+        "(inc)"
+    )
+    [diagnostic] = server.compute_diagnostics(source, URI)
+    rng = diagnostic.range
+    # The (inc) call raised it, on the buffer's fourth line (index 3).
+    assert (rng.start.line, rng.start.character, rng.end.character) == (3, 0, 4)
+
+
+def test_an_internal_error_range_is_not_zero_width():
+    # Defect: (0,0)-(0,0), which eglot places a character early and VS Code
+    # widens to a word of its choosing.
+    [diagnostic] = server.internal_error_diagnostics(RuntimeError("boom"))
     rng = diagnostic.range
     assert (rng.start.line, rng.start.character) == (0, 0)
-    assert (rng.end.line, rng.end.character) == (0, len("(require"))
-    assert "lspbrokenreq.lpy" in diagnostic.message
+    assert (rng.end.line, rng.end.character) == (0, 1)
 
 
 def test_an_error_with_no_position_marks_the_form_that_raised_it():
