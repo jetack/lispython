@@ -388,6 +388,20 @@ def test_a_diagnostic_range_counts_in_the_editors_units():
     )
 
 
+def test_a_diagnostic_range_ignores_line_breaks_the_reader_does_not_count():
+    # Defect: columns were converted over pygls' doc.lines, which splits on
+    # \x0c, \x1c-\x1e, \x85 and U+2028 too, so every range after one of them
+    # on its line was converted over the wrong line.
+    from pygls.workspace import PositionCodec, TextDocument
+
+    for char in "\x0c\x1c\x85 ":
+        source = f'(= s "a{char}b")\n  (while)'
+        doc = TextDocument(URI, source, position_codec=PositionCodec(encoding="utf-16"))
+        [diagnostic] = server.compute_diagnostics(source, URI, doc=doc)
+        rng = diagnostic.range
+        assert (rng.start.line, rng.start.character, rng.end.character) == (1, 2, 8)
+
+
 def test_a_diagnostic_never_underlines_a_crlf_lines_carriage_return():
     # Defect: the line's text kept CRLF's \r, so an error at the end of the
     # line underlined the invisible \r instead of the line's last character.

@@ -2026,7 +2026,7 @@
   (if (is codec None)
       (return (, (+ pos.line 1) pos.character)))
   (= server-pos (.position-from-client-units
-                  codec doc.lines
+                  codec (document-lines doc)
                   (lsp.Position :line pos.line :character pos.character)))
   (return (, (+ server-pos.line 1) server-pos.character)))
 
@@ -2167,6 +2167,13 @@
   (= lines (.split source "\n"))
   (return (ife (<= 1 line (len lines)) (sub lines (- line 1)) "")))
 
+(def document-lines [doc]
+  "doc's lines as the reader and the LSP count them (\\r\\n, a lone \\r, \\n),
+   each with its line break kept as pygls' do; never doc.lines, which splits
+   on str.splitlines()'s extra breaks (\\x0c, \\x1c-\\x1e, \\x85, U+2028) and
+   so moves every column after one on its line."
+  (return (re.findall r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+" doc.source)))
+
 (def client-position [doc line character :lines None]
   "The 1-based line and code-point character as an LSP Position in client
    units, through the document's position codec (a test double without one
@@ -2176,7 +2183,7 @@
   (= codec (getattr doc "position_codec" None))
   (if (is codec None)
       (return pos))
-  (return (.position-to-client-units codec (ife (is lines None) doc.lines lines) pos)))
+  (return (.position-to-client-units codec (ife (is lines None) (document-lines doc) lines) pos)))
 
 (def completion-ranges [doc line col]
   "The ranges a completion item edits at the 1-based line and code-point
