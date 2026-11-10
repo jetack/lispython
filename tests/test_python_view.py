@@ -544,6 +544,12 @@ class TestCursor:
         # at module scope and x resolved outside the lambda's parameters.
         assert pv.view_at_cursor(*at_bar("(fn[T] [x] ^x|")) is None
 
+    @pytest.mark.skipif(sys.version_info >= (3, 12), reason="type needs 3.12")
+    def test_a_type_alias_value_gives_no_view_where_type_is_refused(self):
+        # Defect: on 3.11 the refused type form was unwrapped to the bare
+        # value +U, which resolves U outside the alias's type parameters.
+        assert pv.view_at_cursor(*at_bar("(type A[U] (+ U|")) is None
+
     def test_a_type_head_with_glued_params_gives_no_view_in_its_value(self):
         # Defect: type[T] (not legal) was unwrapped to the bare value +U, which
         # resolves U outside the alias's type parameters.
