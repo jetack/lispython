@@ -1086,16 +1086,19 @@
 (= _DEF-HEADS (, "def" "async-def" "defmacro"))
 (= _TYPE-PARAMETER-HEADS (, "def" "async-def" "class" "type"))
 
+(def _head-name [form]
+  "The text of form's head, a glued head (fn[T], def[T] f) read by its name,
+   or None when the head is no atom."
+  (= head (sub form 0))
+  (return (atom-text (ife (isinstance head GluedHead) head.head head))))
+
 (def _param-slot [form]
   "The slot of form, a parsed Paren, that holds the [params] bracket its
    head binds (_DEF-HEADS, LAMBDA-HEADS), or None when its head binds
    none."
   (if (== (len form) 0)
       (return None))
-  ;; A glued head (fn[T], not legal) is read by its name, so its form is
-  ;; refused at its params as lambda is.
-  (= head (sub form 0))
-  (= head (atom-text (ife (isinstance head GluedHead) head.head head)))
+  (= head (_head-name form))
   (return (ife (in head _DEF-HEADS) 2 (ife (in head LAMBDA-HEADS) 1 None))))
 
 (def _header-slot [form]
@@ -1103,7 +1106,7 @@
    never an expression: a def's or lambda's params (_param-slot) or a
    class's bases; or None."
   (= slot (_param-slot form))
-  (if (and (is slot None) (== (atom-text (sub form 0)) "class"))
+  (if (and (is slot None) (== (_head-name form) "class"))
       (return 2))
   (return slot))
 
@@ -1234,7 +1237,7 @@
   ;; the scope around the def, as a default is; after a lambda head
   ;; (LAMBDA-HEADS) the ^ form is the body.
   (= body (sub form.list [: (+ slot 1) None]))
-  (if (and body (in (atom-text (sub form 0)) _DEF-HEADS)
+  (if (and body (in (_head-name form) _DEF-HEADS)
            (isinstance (sub body 0) Annotation))
       (= body (sub body [: 1 None])))
   (if (any ((_holds-sentinel part) for part in body))

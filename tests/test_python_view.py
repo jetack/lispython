@@ -545,6 +545,15 @@ class TestCursor:
         assert pv.view_at_cursor(*at_bar("(fn[T] [x] ^x|")) is None
 
     @pytest.mark.parametrize(
+        ["src", "text"], [("(def[T] f [x] ^x|", "x"), ("(class[T] A [B|", "B")]
+    )
+    def test_a_glued_def_or_class_head_unwraps_as_the_plain_head_does(self, src, text):
+        # Defect: the head of def[T]/class[T] was read raw (None), so a return
+        # annotation counted as body (no view) and a class's bases bracket was
+        # never entered ('[B]').
+        assert pv.view_at_cursor(*at_bar(src)).text == text
+
+    @pytest.mark.parametrize(
         ["src", "text"], [("[(when x|", "[x]"), ("((when x|", "x()")]
     )
     def test_the_innermost_refused_form_is_unwrapped(self, src, text):
