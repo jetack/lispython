@@ -1168,6 +1168,10 @@ def test_a_pending_side_request_keeps_later_requests_off_the_reader(connect, iso
         client.send(op="eval", id=1, stream=True, code='(print "up")\n(go.wait 10)')
         assert is_out(client.recv(), 1)
         client.send(op="macroexpand", id=2, code="(wait-gate)")
+        # The reader handles requests in order: this pong proves the
+        # macroexpand went aside while the eval was still running.
+        client.send(op="ping", id=6)
+        assert client.recv() == {"op": "pong", "id": 6}
         go.set()
         # The eval ended; the macroexpand still waits.
         assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["id"] == 1
@@ -1486,16 +1490,15 @@ def test_closing_waits_for_the_warnings_lock_before_interrupting(
     from lispy.core import errors
 
     monkeypatch.setattr(tools, "NREPL_WARNINGS_WAIT", 0.05)
-    isolated["wlock"] = errors._WARNINGS_LOCK
-    isolated["seen"] = seen = []
+    isolated["landed_at"] = landed_at = []
     isolated["started"] = started = threading.Event()
+    isolated["landed"] = landed = threading.Event()
     code = (
         "(import time)\n(.set started)\n"
         "(try (while True (time.sleep 0.005))\n"
         "  (except [KeyboardInterrupt]\n"
-        "    (= free (.acquire wlock :blocking False))\n"
-        "    (.append seen free)\n"
-        "    (if free (.release wlock))\n"
+        "    (.append landed-at (time.monotonic))\n"
+        "    (.set landed)\n"
         "    (raise)))"
     )
     client = connect()
@@ -1504,7 +1507,20 @@ def test_closing_waits_for_the_warnings_lock_before_interrupting(
     with errors._WARNINGS_LOCK:
         client.sock.close()  # EOF: the reader closes the connection
         time.sleep(0.3)
-    deadline = time.monotonic() + WAIT
-    while not seen and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert seen == [True]
+        released_at = time.monotonic()  # just before the release
+    assert landed.wait(WAIT)
+    assert landed_at[0] >= released_at
+
+
+def test_a_plain_complete_never_reads_a_values_class_attribute(isolated):
+    # A plain-prefix complete runs on the reader: classifying a value must
+    # not run user code such as a __class__ property (lazy proxies).
+    class Proxy:
+        @property
+        def __class__(self):
+            raise RuntimeError("user code ran")
+
+    isolated["oddval"] = Proxy()
+    [item] = tools.nrepl_complete("oddv", isolated)["items"]
+    assert item["label"] == "oddval"
+    assert item["kind"] == tools.VARIABLE_KIND

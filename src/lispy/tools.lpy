@@ -1138,8 +1138,12 @@
            "items" items}))
 
 (def _completion-kind [obj]
-  "The nREPL completion kind of a value: class, function or variable."
-  (cond (isinstance obj type) (return "class")
+  "The nREPL completion kind of a value: class, function or variable.
+   Read off (type obj) only, never isinstance, which falls back to
+   obj.__class__ (a property, a lazy proxy's __getattribute__): a
+   plain-prefix complete runs on the reader and must run no user code.
+   callable reads the type's call slot."
+  (cond (issubclass (type obj) type) (return "class")
         (callable obj) (return "function")
         True (return "variable")))
 
@@ -1166,7 +1170,7 @@
     (= raw (inspect.getattr-static obj attr))
     (except [Exception]
       (return "variable")))
-  (cond (isinstance raw _FUNCTION-DESCRIPTORS) (return "function")
+  (cond (issubclass (type raw) _FUNCTION-DESCRIPTORS) (return "function")
         True (return (_completion-kind raw))))
 
 (def _scope-macro-names [scope]
@@ -1547,8 +1551,13 @@
   they run on the reader as before.  Their replies have the reader's
   shapes.  A plain eval is waited for only with no job and no side request
   pending, since a side request may hold the scope lock its compile needs.
-  A side request that never returns leaves only its daemon thread behind,
-  and the side requests after it on that connection wait for it.
+  A side request cannot be interrupted: one that never returns leaves only
+  its daemon thread behind, the side requests after it on that connection
+  wait for it, and an unwaited plain eval behind it waits on the scope lock
+  until it returns.  While an eval is not waited for, replies can leave in
+  another order than their requests came (a side reply after a later
+  inline one), so a client matches them by id; an id-less request has
+  nothing to match by.
 
   Every send on the connection is one whole line under one lock (sendall),
   so the reader, the workers and a stream's flusher never interleave bytes."
