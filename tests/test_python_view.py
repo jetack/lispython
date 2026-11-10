@@ -544,6 +544,11 @@ class TestCursor:
         # at module scope and x resolved outside the lambda's parameters.
         assert pv.view_at_cursor(*at_bar("(fn[T] [x] ^x|")) is None
 
+    def test_a_def_head_with_glued_params_gives_no_view_in_its_body(self):
+        # Defect: def[T] (not legal) read as no slot, so the body unwrapped
+        # to a bare +x outside the def's parameters.
+        assert pv.view_at_cursor(*at_bar("(def[T] f [x] (+ x|")) is None
+
     @pytest.mark.parametrize(
         ["src", "text"], [("(def[T] f [x] ^x|", "x"), ("(class[T] A [B|", "B")]
     )

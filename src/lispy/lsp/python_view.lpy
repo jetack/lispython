@@ -1224,7 +1224,7 @@
    never counts; nor do class bases."
   (if (== (len form) 0)
       (return False))
-  (if (and (in (atom-text (sub form 0)) _TYPE-PARAMETER-HEADS) (>= (len form) 2)
+  (if (and (in (_head-name form) _TYPE-PARAMETER-HEADS) (>= (len form) 2)
            (isinstance (sub form 1) GluedHead)
            (_holds-sentinel (. (sub form 1) params)))
       (return True))
