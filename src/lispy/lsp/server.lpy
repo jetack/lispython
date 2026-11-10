@@ -2908,7 +2908,8 @@
 
 (def backend-input-changed [uri]
   "Backends' on-input-changed: a text of buffer uri was sent to the
-   backend, which uri's own entry's key already tells, or (None) a backend
+   backend, which uri's own entry's key already tells, or uri was closed in
+   it, whose own answers a request's resent text keeps, or (None) a backend
    started or was told files on disk changed."
   (.invalidate completion-cache :keep uri))
 

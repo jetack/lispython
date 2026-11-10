@@ -883,9 +883,13 @@ def test_a_request_never_reopens_a_closed_buffer_for_good(
     # Defect: a request waiting for the start when its buffer closes (or
     # moves to another project's backend) syncs its text afterwards,
     # reopening the document, and nothing closes it again: the backend
-    # answers for that cursor view forever instead of the file on disk.
+    # answers for that cursor view forever instead of the file on disk;
+    # once closed there, a completion kept over that text must not serve on
+    # (on-input-changed hears it).
     folder = SimpleNamespace(uri=project.as_uri())
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    heard = []
+    backends.on_input_changed = heard.append
     uri = (project / "main.lpy").as_uri()
     params = hover_params(backends.client_for(uri).backend_uri(uri))
 
@@ -899,6 +903,7 @@ def test_a_request_never_reopens_a_closed_buffer_for_good(
             await asyncio.sleep(0)  # the request awaits the start
             backends.document_closed(uri)
             assert await pending == "cursor"
+            assert heard[-2:] == [uri, uri]  # opened, then closed
             assert await backend_text() == "y = 1"
         finally:
             await backends.shutdown_all()

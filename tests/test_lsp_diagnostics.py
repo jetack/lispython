@@ -847,7 +847,10 @@ def test_an_init_file_in_lispythons_own_package_renames_modules():
     # Defect: naming borrowed the tracking exclusions, which leave out
     # lispython's own package, so an __init__ created in an editable
     # lispython checkout that is the workspace republishes nothing.
-    created = pathlib.Path(lispy.__file__).parent / "newpkg" / "__init__.py"
+    # The checkout's package, never lispy.__file__, which an installed
+    # wheel (nox tests_latest) puts in site-packages, a library path.
+    checkout = pathlib.Path(__file__).resolve().parents[1]
+    created = checkout / "src" / "lispy" / "newpkg" / "__init__.py"
     assert server.renaming_file_p(str(created))
 
 

@@ -458,10 +458,11 @@
     (= self.on-view-prepared None)
     ;; Called on the loop once the backend's input changed: with an lpy uri
     ;; once a text of that buffer was sent to it (_sync: a full view's or a
-    ;; cursor view's), with None once a start succeeded (_start: the new
-    ;; process reads the disk anew) or it was told files on disk changed
-    ;; (file-saved, saved); set by Backends.  Never raises
-    ;; (_tell-input-changed catches).
+    ;; cursor view's) or it was closed in it (_close-backend-copy: the
+    ;; backend reads that file from disk again), with None once a start
+    ;; succeeded (_start: the new process reads the disk anew) or it was
+    ;; told files on disk changed (file-saved, saved); set by Backends.
+    ;; Never raises (_tell-input-changed catches).
     (= self.on-input-changed None)
     ;; Path -> text of each of the view root's config files the running
     ;; process last read (_read-configs): at its start (_spawn) or when told
@@ -929,14 +930,19 @@
     (._close-backend-copy self lpy-uri))
 
   (def _close-backend-copy [self lpy-uri]
-    "didClose for document lpy-uri if this backend process has it open."
+    "didClose for document lpy-uri if this backend process has it open;
+     on-input-changed then hears lpy-uri, since the backend reads that file
+     from disk again, which another buffer's answer may depend on; the
+     document's own answers were computed over a text a request sends
+     again, so they stand."
     (= doc (.pop self._docs lpy-uri None))
     (if (is-not doc None)
         (._next-version self))
     (if (and (is-not doc None) self.running)
-        (.text-document-did-close self._client
-          (lsp.DidCloseTextDocumentParams
-            :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))))
+        (do (.text-document-did-close self._client
+              (lsp.DidCloseTextDocumentParams
+                :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))
+            (._tell-input-changed self lpy-uri))))
 
   (async-def file-saved [self *lpy-uris]
     "Rewrite a running backend's shadows and config, then tell it every file
@@ -1130,8 +1136,9 @@
    buffer's diagnostics; on-view-prepared with a BackendClient once its
    start succeeded, over the view root's shadows and config file it wrote,
    or a save changed its config file; on-input-changed with an lpy uri once
-   a text of that buffer (a full or cursor view's) was sent to a backend,
-   or None once a backend started or was told files on disk changed."
+   a text of that buffer (a full or cursor view's) was sent to a backend
+   or it was closed in one, or None once a backend started or was told
+   files on disk changed."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
