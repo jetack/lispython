@@ -667,13 +667,14 @@
   "The lsp.Location of exc, a SyntaxError raised in a file other than the
    buffer at path (a required module's parse or compile error), over the
    head of the error on its line there (error-head-span over exc.text, in
-   doc's client units, code points without doc); None for any other
-   exception, a filename None, the buffer's own or a pseudo-name such as
-   <string>, which no file holds."
+   doc's client units, code points without doc, line 0 with no lineno);
+   None for any other exception, the buffer's own file, or a filename that
+   names no existing file (None, a pseudo-name such as <string>, a relative
+   name abspath would resolve against the server's working directory)."
   (if (not (isinstance exc SyntaxError))
       (return None))
   (= filename exc.filename)
-  (if (or (is filename None) (.startswith filename "<") (same-file-p filename path))
+  (if (or (is filename None) (not (osp.isfile filename)) (same-file-p filename path))
       (return None))
   (= line (max 0 (- (or exc.lineno 1) 1)))
   (= text (.rstrip (or exc.text "") "\r\n"))
@@ -875,11 +876,15 @@
       (do (= [line col] pos)
           (= [start end] (error-head-span (reader-line source line) col))))
   (= related None)
-  (cond own (= message (or exc.msg (str exc)))
+  ;; A SyntaxError's msg, its type's name when it has none (its str would
+  ;; read "None (...)").
+  (= msg (or (getattr exc "msg" None) (. (type exc) __name__)))
+  (cond own (= message msg)
         (is-not other None)
-        (do (= message f"{exc.msg} ({(osp.abspath exc.filename)}:{(+ other.range.start.line 1)})")
+        (do (= at (ife (is exc.lineno None) "" f":{exc.lineno}"))
+            (= message f"{msg} ({(osp.abspath exc.filename)}{at})")
             (= related [(lsp.DiagnosticRelatedInformation :location other
-                                                          :message exc.msg)]))
+                                                          :message msg)]))
         True (= message (str exc)))
   (= rng (ife (is doc None)
               (make-range line start line end)
@@ -1062,8 +1067,8 @@
 
 (def internal-error-diagnostics [exc]
   "lispython's diagnostics of a document whose compile-document raised exc:
-   one Error over its first character (never zero-width, error-head-span),
-   so the editor drops the set of an older text."
+   one Error over its first character (never zero-width, which a client
+   misplaces), so the editor drops the set of an older text."
   (return [(lsp.Diagnostic :range (make-range 0 0 0 1)
                            :severity lsp.DiagnosticSeverity.Error :source "lpy-lsp"
                            :message (+ f"Internal error: cannot compile this document: {exc}"

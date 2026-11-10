@@ -263,8 +263,61 @@ def test_an_internal_error_range_is_not_zero_width():
     # widens to a word of its choosing.
     [diagnostic] = server.internal_error_diagnostics(RuntimeError("boom"))
     rng = diagnostic.range
-    assert (rng.start.line, rng.start.character) == (0, 0)
-    assert (rng.end.line, rng.end.character) == (0, 1)
+    assert (rng.start.line, rng.start.character) != (rng.end.line, rng.end.character)
+
+
+def test_a_required_modules_related_range_counts_in_the_editors_units(tmp_path):
+    # Defect: the related range's columns measured over the buffer's lines,
+    # not the module's line, so the astral character before the module's
+    # (while (code point 10, UTF-16 unit 11) went uncounted.
+    from pygls.workspace import PositionCodec, TextDocument
+
+    (tmp_path / "lspastralreq.lpy").write_text('(= s "😀") (while)\n')
+    source = "(require lspastralreq)"
+    uri = (tmp_path / "main.lpy").as_uri()
+    doc = TextDocument(uri, source, position_codec=PositionCodec(encoding="utf-16"))
+    try:
+        [diagnostic] = server.compute_diagnostics(source, uri, doc=doc)
+    finally:
+        sys.modules.pop("lspastralreq", None)
+    there = diagnostic.related_information[0].location.range
+    assert (there.start.character, there.end.character) == (11, 17)
+
+
+def other_file_error(tmp_path, kind):
+    module = tmp_path / "other.lpy"
+    module.write_text("(= a 1)\n")
+    return {
+        # A name no file holds, relative to the server's working directory.
+        "relative name": SyntaxError("boom", ("rel/other.lpy", 1, 1, "(= a 1)")),
+        "no lineno": SyntaxError("boom", (str(module), None, None, None)),
+        "no msg": SyntaxError(None, (str(module), 1, 1, "(= a 1)")),
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", ["relative name", "no lineno", "no msg"])
+def test_another_files_error_names_only_what_it_carries(tmp_path, kind):
+    # Defects: a relative fake filename was resolved against the working
+    # directory into a file that does not exist; an error with no lineno
+    # named line 1; a None msg read "None (...)" and its related information
+    # raised TypeError.
+    exc = other_file_error(tmp_path, kind)
+    diagnostic = server.error_diagnostic(
+        exc,
+        "(require other)",
+        (tmp_path / "main.lpy").as_uri(),
+        lsp.DiagnosticSeverity.Warning,
+        "Compile warning: ",
+    )
+    if kind == "relative name":
+        assert diagnostic.related_information is None
+        assert diagnostic.message == f"Compile warning: {exc}"
+    elif kind == "no lineno":
+        assert diagnostic.message.endswith(f"({tmp_path / 'other.lpy'})")
+    else:
+        assert "None" not in diagnostic.message
+        [related] = diagnostic.related_information
+        assert related.message == "SyntaxError"
 
 
 def test_an_error_with_no_position_marks_the_form_that_raised_it():
