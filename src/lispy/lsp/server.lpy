@@ -2814,13 +2814,10 @@
   (= text (line-text source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
-  ;; Sliced by offset, so before and after are the buffer's own text, its
-  ;; line breaks as written.
-  (= line-start (ife (<= 1 line (len (split-lines source)))
-                     ((source-offset source) line 0)
-                     (len source)))
-  (= before (sub source [: None (+ line-start start)]))
-  (= after (sub source [: (+ line-start col) None]))
+  ;; source-prefix slices the buffer, so before and after keep its own
+  ;; line breaks.
+  (= before (source-prefix source line start))
+  (= after (sub source [: (len (source-prefix source line col)) None]))
   (return (, (, line start before after attribute (uri-module-names doc.uri))
              (sub text [: start col]))))
 

@@ -84,8 +84,13 @@
 ;; move-to-end), the nREPL's as well.
 
 (def source-prefix [source line col]
-  "The text of source before the 1-based line and code-point column."
-  (= text (sub (split-lines source) (- line 1)))
+  "The text of source before the 1-based line and code-point column (the
+   column clamped to the line), sliced from source so its line breaks stay
+   as written; all of source for a line past its end."
+  (= lines (split-lines source))
+  (if (> line (len lines))
+      (return source))
+  (= text (sub lines (- line 1)))
   (return (sub source [: None (+ ((source-offset source) line 0) (min col (len text)))])))
 
 ;; Every LSP walk of a parsed tree reads a wrapper's children through it, so
@@ -971,9 +976,8 @@
   (if (not (<= 0 col (len text)))
       (return None))
   (= [word-start start end] (completion-word-span text col))
-  (= line-start ((source-offset source) line 0))
-  (= marked (+ (sub source [: None (+ line-start start)]) CURSOR-SENTINEL
-               (sub source [: (+ line-start end) None])))
+  (= marked (+ (source-prefix source line start) CURSOR-SENTINEL
+               (sub source [: (len (source-prefix source line end)) None])))
   (return (, marked word-start start end (sub text [: start col]))))
 
 ;; The node types whose name field, a str, is a name the node binds; the

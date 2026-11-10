@@ -491,15 +491,16 @@ def test_a_snapshot_keeps_the_readers_lines(served):
 
 
 def test_completion_context_keeps_the_buffers_own_text():
-    # Defect: the text around the word was rejoined with \n, so a CRLF
-    # buffer's key was not its own text.
+    # Pins the cache key's text around the word as the buffer's own slices,
+    # line breaks as written (a CRLF buffer's \r kept), never rejoined.
     doc = server.LpyDocument(URI, "(a)\r\n(fo x)\r\n")
     [_, _, before, after, *_], typed = server.completion_context(doc, 2, 3, False)
     assert (before, after, typed) == ("(a)\r\n(", " x)\r\n", "fo")
 
 
 def test_buffer_texts_reads_the_rest_of_the_buffer_as_written():
-    # Defect: the text from the next top-level form was rejoined with \n.
+    # Pins the text from the next top-level form as the buffer's own slice,
+    # line breaks as written, never rejoined.
     assert server.buffer_texts("(f\r\n(g)\r\n", 1) == ["(f\r\n(g)\r\n", "(g)\r\n"]
 
 
