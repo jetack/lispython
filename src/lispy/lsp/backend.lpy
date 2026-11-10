@@ -275,10 +275,13 @@
 ;; their edits land on generated lines, and a symbol the buffer never
 ;; imports would give a buffer name its kind.  pyright's settings default
 ;; wins over pyrightconfig.json there, so the config file cannot turn them
-;; off.  basedpyright reads its whole analysis object from here once one
-;; is given, so autoSearchPaths keeps its default (true) explicitly.
+;; off.  pyrefly reads python.analysis for that; basedpyright reads it
+;; only when basedpyright.analysis is absent, and takes the whole analysis
+;; object from the one it picks, so its own section stays, with
+;; autoSearchPaths kept at its default (true) explicitly.
 (def backend-settings [view-root]
-  (return {"python" {"pythonPath" view-root.python}
+  (return {"python" {"pythonPath" view-root.python
+                     "analysis" {"autoImportCompletions" False}}
            "basedpyright" {"analysis" {"autoImportCompletions" False
                                        "autoSearchPaths" True
                                        ;; The view root holds a shadow of every

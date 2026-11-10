@@ -240,18 +240,21 @@ def test_an_imported_class_is_one_class_item(complete, idle, monkeypatch):
 def test_auto_import_completions_are_off(
     complete, run_on_loop, backend_project, real_backends
 ):
-    # Defect: the backend offers symbols the buffer never imports, with an
-    # import edit on a generated line (and their kinds).
+    # Defect: the backend computes auto-import items on every keystroke,
+    # symbols the buffer never imports with an import edit on a generated
+    # line (and their kinds).
     complete("(import os)\nos.pa|")
     client = real_backends.available_client((backend_project / "main.lpy").as_uri())
     document = server.TextDocument(
         (backend_project / "main.lpy").as_uri(),
-        "(= default-x 1)\n(defau)",
+        "(= x 1)\n(Pat)",
         version=None,
     )
-    _, items, _ = run_on_loop(server.backend_answer(client, document, 2, 6, None))
-    assert "default_x" in {item.label for item in items}  # it did answer
-    assert "defaultdict" not in {item.label for item in items}
+    _, items, _ = run_on_loop(server.backend_answer(client, document, 2, 4, None))
+    labels = {item.label for item in items}
+    assert any(label.startswith("P") for label in labels)  # it did answer
+    assert "Path" not in labels
+    assert not [i.label for i in items if i.additional_text_edits]
 
 
 def assert_fallback_list(labels):
