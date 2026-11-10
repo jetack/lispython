@@ -41,7 +41,8 @@
 (from lispy.core.compiler.stmt [import-bindings])
 (from lispy.core.errors [LispyCompileError compile-errors])
 (from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
-                         MetaIndicator Paren Starred Symbol Wrapper atom-text])
+                         MetaIndicator Paren Starred Symbol Wrapper atom-text
+                         wrapper-form-keys])
 (from lispy.core.parser [completion-word-span parse source-offset tokenize word-parts])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
@@ -87,6 +88,15 @@
   (= before (sub lines [: None (- line 1)]))
   (.append before (sub (sub lines (- line 1)) [: None col]))
   (return (.join "\n" before)))
+
+;; Every LSP walk of a parsed tree reads a wrapper's children through it, so
+;; a name in an f/t-string field's format spec (f"{w:{w}}") is never missed.
+(def wrapper-forms [node]
+  "The child forms of node, a Wrapper or MetaIndicator, in source order
+   (wrapper-form-keys: an f/t-string field's format spec after its value),
+   a missing child left out."
+  (= children ((getattr node key) for key in (wrapper-form-keys node)))
+  (return [child for child in children if (is-not child None)]))
 
 (def _pop-through [stack kind]
   "Pop stack down to and including its last entry of kind, if it has one."
@@ -1177,7 +1187,7 @@
           (isinstance node MetaIndicator)
           (.append pending (, node.value (ife (is marks None) (_position node) marks)))
           (isinstance node Wrapper)
-          (.append pending (, node.value None))))
+          (.extend pending ((, child None) for child in (wrapper-forms node)))))
   (if (is form None)
       (return None))
   (= child (_sentinel-child form))
@@ -1269,7 +1279,7 @@
           (isinstance node GluedHead)
           (.extend pending [node.head node.params])
           (isinstance node (, Wrapper MetaIndicator))
-          (.append pending node.value)
+          (.extend pending (wrapper-forms node))
           ;; The sentinel's own token may glue it to a base (grid.___).
           (and (isinstance node Symbol) (in CURSOR-SENTINEL (atom-text node)))
           (return True)))

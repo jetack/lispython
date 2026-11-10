@@ -46,7 +46,8 @@
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
                              pyrefly-fallback source-lines source-prefix
-                             spelled-in suppression-comments view-at-cursor])
+                             spelled-in suppression-comments view-at-cursor
+                             wrapper-forms])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT project-root-of suppression-tool])
 ;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
 (import lispy.lsp.macro-modules as macro-modules)
@@ -1344,33 +1345,37 @@
 ;; Hover
 ;; ---------------------------------------------------------------------------
 
+(def _node-span [node]
+  "node's 0-based (start, end) as (line, col) pairs."
+  (return (, (, (- node.lineno 1) node.col_offset)
+             (, (- node.end_lineno 1) node.end_col_offset))))
+
 (def node-at-position [nodes line-0 col]
   "Find the most specific node at the given 0-based position."
-  (for node in nodes
-    (= n-start-line (- node.lineno 1))
-    (= n-start-col node.col_offset)
-    (= n-end-line (- node.end_lineno 1))
-    (= n-end-col node.end_col_offset)
-    ;; Check if position is inside this node's range
-    (if (< (, line-0 col) (, n-start-line n-start-col))
+  ;; Of the nodes holding the position, the first one, unless a later one
+  ;; lies inside it: an f/t-string's head Symbol spans the whole literal, so
+  ;; first-match alone never reached a name in one of its fields.
+  (= cursor (, line-0 col))
+  (= node None)
+  (for candidate in nodes
+    (= [start end] (_node-span candidate))
+    (if (not (<= start cursor end))
         (continue))
-    (if (> (, line-0 col) (, n-end-line n-end-col))
-        (continue))
-    ;; Position is within this node — try to go deeper
-    (if (isinstance node Expression)
-        (do (= deeper (node-at-position node.list line-0 col))
-            (if (is-not deeper None)
-                (return deeper))))
-    (if (isinstance node (, Wrapper MetaIndicator))
-        (do (= deeper (node-at-position [node.value] line-0 col))
-            (if (is-not deeper None)
-                (return deeper))))
-    (if (isinstance node GluedHead)
-        (do (= deeper (node-at-position [node.head node.params] line-0 col))
-            (if (is-not deeper None)
-                (return deeper))))
-    (return node))
-  (return None))
+    (if (is-not node None)
+        (do (= [best-start best-end] (_node-span node))
+            (if (not (and (<= best-start start) (<= end best-end)
+                          (!= (, start end) (, best-start best-end))))
+                (continue))))
+    (= node candidate))
+  (if (is node None)
+      (return None))
+  ;; Position is within this node — try to go deeper
+  (cond (isinstance node Expression) (= children node.list)
+        (isinstance node (, Wrapper MetaIndicator)) (= children (wrapper-forms node))
+        (isinstance node GluedHead) (= children [node.head node.params])
+        True (= children []))
+  (= deeper (node-at-position children line-0 col))
+  (return (ife (is deeper None) node deeper)))
 
 (def form-heads [nodes]
   "The ids of every form head in nodes, a parsed tree: the first element of
@@ -1384,8 +1389,8 @@
             (do (if (and (isinstance node Paren) (> (len node.list) 0))
                     (.add heads (id (sub node.list 0))))
                 (.append pending node.list))
-            (and (isinstance node (, Wrapper MetaIndicator)) (is-not node.value None))
-            (.append pending [node.value])
+            (isinstance node (, Wrapper MetaIndicator))
+            (.append pending (wrapper-forms node))
             (isinstance node GluedHead)
             (.append pending [node.head node.params]))))
   (return heads))
@@ -1527,8 +1532,7 @@
           (isinstance node Expression)
           (.extend stack (reversed node.list))
           (isinstance node (, Wrapper MetaIndicator))
-          (if (is-not node.value None)
-              (.append stack node.value))
+          (.extend stack (reversed (wrapper-forms node)))
           (isinstance node GluedHead)
           (.extend stack [node.params node.head])))
   (return refs))
