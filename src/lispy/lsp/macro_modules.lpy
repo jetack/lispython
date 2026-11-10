@@ -7,6 +7,7 @@
 (require lispy.macros *)
 
 (import contextlib)
+(import contextvars)
 (import importlib)
 (import importlib.machinery)
 (import importlib.util)
@@ -38,10 +39,14 @@
 ;; cache reads none of the files its compile read (a module a macro imported
 ;; as it expanded), so no window sees them.  dirs maps a directory searched
 ;; for a module no finder found, or holding a namespace package, to its
-;; st_mtime_ns then.  running holds a token per compile in progress (one
-;; object per fresh-modules entry), hung the running ones a drop's wait timed
-;; out on: a token leaves both when its compile ends.  epoch is the macro
-;; environment's version.
+;; st_mtime_ns then.  running maps a token per compile in progress (one
+;; object per fresh-modules entry) to its search dirs, hung holds the running
+;; ones a wait timed out on: a token leaves both when its compile ends.
+;; loaded-dirs are the search dirs the modules in names were imported under
+;; (None: mixed); every running compile that is not hung has those dirs.
+;; switching counts the compiles waiting to change them.  search-dirs is the
+;; running compile's search dirs, per thread (_SearchDirsFinder).  epoch is
+;; the macro environment's version.
 (class _Shared []
   (def __init__ [self original-path-stats original-namespace-exec]
     (= self.local (threading.local))
@@ -52,8 +57,11 @@
     (= self.names (set))
     (= self.dep-files {})
     (= self.dirs {})
-    (= self.running (set))
+    (= self.running {})
     (= self.hung (set))
+    (= self.loaded-dirs None)
+    (= self.switching 0)
+    (= self.search-dirs (contextvars.ContextVar "lispy_search_dirs" :default (,)))
     (= self.epoch 0)))
 
 ;; How long, in seconds, a compile waits for the running ones to end before
@@ -136,15 +144,16 @@
 ;; swallows the ModuleNotFoundError (core/macro.py require_macro), so no
 ;; exception says so either.  The import system asks this finder, last on
 ;; sys.meta_path, only once every other finder found nothing; it records the
-;; directories that were searched (the parent package's __path__, or
-;; sys.path for a top-level name a require asked for) with their mtime.
+;; directories that were searched (the parent package's __path__, or the
+;; compile's search dirs and sys.path for a top-level name a require asked
+;; for, _top-level-path) with their mtime.
 ;; Creating a file there, or saving one by an atomic rename, changes that
 ;; mtime: the signal FileFinder itself uses.  A top-level miss of any other
 ;; import (a module's try: import optional) is not recorded, because sys.path
 ;; holds the import root: in a flat layout every file written there (a lock,
 ;; a backup) would drop every module.  The module is never probed again with
 ;; find_spec instead: that imports its parents outside any window, and the
-;; import root is on sys.path only while a compile runs.
+;; search dirs are searched only while a compile runs.
 (= _IMPORTLIB-FILE importlib.__file__)
 
 (def _asked-by-require-p [frame]
@@ -164,7 +173,7 @@
       (if (or (not windows)
               (and (is path None) (not (_asked-by-require-p (sys._getframe 1)))))
           (return None))
-      (for directory in (list (ife (is path None) sys.path path))
+      (for directory in (ife (is path None) (_top-level-path) (list path))
         (if (isinstance directory str)
             (try
               (.append (sub windows -1)
@@ -174,11 +183,36 @@
                 (pass)))))
       (return None))))
 
+;; A compile's search dirs come before sys.path for a top-level name, as
+;; `lpy` puts a script's directory first, but only for the thread compiling:
+;; sys.path is shared by every thread, so a dir inserted there would serve
+;; another compile, or land behind one already present.  Sits right before
+;; PathFinder, so the built-in and frozen importers still come first.
+(def _top-level-path []
+  "The search path of a top-level import on this thread: the running
+   compile's search dirs, then sys.path."
+  (return (+ (list (.get _SHARED.search-dirs)) sys.path)))
+
+(class _SearchDirsFinder []
+  (deco staticmethod
+    (def find-spec [name path :target None]
+      (if (or (is-not path None) (not (.get _SHARED.search-dirs)))
+          (return None))
+      (= spec (importlib.machinery.PathFinder.find-spec name (_top-level-path) target))
+      ;; A namespace package's NamespacePath recomputes its portions from
+      ;; sys.path alone (on invalidate_caches or a sys.path change), which
+      ;; would lose those under the search dirs.
+      (if (and (is-not spec None)
+               (is-not spec.submodule-search-locations None)
+               (not (isinstance spec.submodule-search-locations list)))
+          (= spec.submodule-search-locations (list spec.submodule-search-locations)))
+      (return spec))))
+
 ;; The fresh-modules windows open on each thread, innermost last: each a list
 ;; of the (name, path, stamp) reads made in it, (None, directory,
 ;; st_mtime_ns) for each directory searched for a module no finder found or
 ;; holding a namespace package, and (name, None, None) for a namespace
-;; package.  The wrappers and the observer are installed once per process,
+;; package.  The wrappers and the finders are installed once per process,
 ;; with the _Shared they write to, by the first import of this module; a
 ;; later instance installs nothing, so nothing is wrapped twice.
 (= _SOURCE-LOADER importlib.machinery.SourceFileLoader)
@@ -189,6 +223,11 @@
         (setattr _SOURCE-LOADER "_lispy_fresh_modules" _SHARED)
         (= _SOURCE-LOADER.path-stats _recording-path-stats)
         (= _NAMESPACE-LOADER.exec-module _recording-namespace-exec)
+        (.insert sys.meta-path
+                 (ife (in importlib.machinery.PathFinder sys.meta-path)
+                      (.index sys.meta-path importlib.machinery.PathFinder)
+                      (len sys.meta-path))
+                 _SearchDirsFinder)
         (.append sys.meta-path _MissingModuleObserver)))
 
 (def _stale-state []
@@ -247,7 +286,7 @@
     (= [changed stale] (_stale-state))
     (if (not stale)
         (return True))
-    (= blockers (- _SHARED.running _SHARED.hung))
+    (= blockers (- (.keys _SHARED.running) _SHARED.hung))
     (if blockers
         (do (if (not wait)
                 (return False))
@@ -340,30 +379,85 @@
     (if (_trackable-path-p real)
         (.setdefault _SHARED.dep-files real (, mtime size)))))
 
+(def _enter [token search-dirs]
+  "Admit the compile token with search-dirs: once nothing tracked is stale
+   (_drop-stale), and once the modules in names were imported under the
+   same search dirs.  Else it switches them: it waits until no compile
+   (less the hung ones) runs, up to WAIT-LIMIT, then drops the modules in
+   names.  Under _SHARED.condition."
+  ;; A module two search dirs both hold (a script's sibling helper) is one
+  ;; sys.modules entry, so it may serve only compiles of the dirs it was
+  ;; imported under.  A switch keeps files, dep-files and dirs: no file
+  ;; changed, so they still say when the epoch's modules are stale, and the
+  ;; epoch stays, or every other open document would recompile and switch
+  ;; back.  Compiles arriving with the loaded dirs wait behind a switch, so
+  ;; a stream of them cannot starve it.
+  (= switching False)
+  (= target None)
+  (try
+    (while True
+      (_drop-stale True)
+      (if (== _SHARED.loaded-dirs search-dirs)
+          (do (if (or switching (not _SHARED.switching))
+                  (break))
+              (.wait _SHARED.condition)
+              (continue)))
+      (if (not switching)
+          (do (= switching True)
+              (+= _SHARED.switching 1)))
+      ;; The wait is bounded from when these dirs were loaded, once.
+      (if (or (is target None) (!= (sub target 0) _SHARED.loaded-dirs))
+          (= target (, _SHARED.loaded-dirs (+ (time.monotonic) WAIT-LIMIT))))
+      (= blockers (- (.keys _SHARED.running) _SHARED.hung))
+      (if blockers
+          (do (= remaining (- (sub target 1) (time.monotonic)))
+              (if (> remaining 0)
+                  (do (.wait _SHARED.condition remaining)
+                      (continue)))
+              ;; As in _drop-stale: the drop may fail an import a slow compile
+              ;; has in progress, so its result must be compiled again.
+              (.update _SHARED.hung blockers)
+              (+= _SHARED.epoch 1)))
+      (for name in (list _SHARED.names)
+        (.pop sys.modules name None))
+      (.clear _SHARED.names)
+      (= _SHARED.loaded-dirs search-dirs)
+      (break))
+    (finally
+      (if switching
+          (do (-= _SHARED.switching 1)
+              (.notify-all _SHARED.condition)))))
+  (= (sub _SHARED.running token) search-dirs))
+
 (deco contextlib.contextmanager
-  (def fresh-modules []
-    "Wrap one compile: first drop every tracked module once one is stale
-     (_drop-stale, waiting), then track every .py or .lpy source the
+  (def fresh-modules [:search-dirs (,)]
+    "Wrap one compile whose top-level imports search search-dirs (a tuple)
+     before sys.path (_SearchDirsFinder), on this thread only: first drop
+     every tracked module once one is stale or was imported under other
+     search dirs (_enter, waiting), then track every .py or .lpy source the
      compile reads (_trackable-p) by the stamp its file had when read, the
      trackable files in each such .lpy's cache record (_track-record),
      every trackable directory searched for a module no finder found by its
      mtime, and every namespace package it imports by its directories
      (_recording-namespace-exec).  Yields the epoch the compile runs under."
+    (= search-dirs (tuple search-dirs))
     (= reads [])
     (= token (object))
     (with [_SHARED.condition]
-      (_drop-stale True)
-      (= current _SHARED.epoch)
-      (.add _SHARED.running token))
+      (_enter token search-dirs)
+      (= current _SHARED.epoch))
+    (= reset (.set _SHARED.search-dirs search-dirs))
     (try
       (.append (_windows) reads)
       (yield current)
       (finally
+        (.reset _SHARED.search-dirs reset)
         (= windows (_windows))
         (if (and windows (is (sub windows -1) reads))
             (.pop windows))
         (with [_SHARED.condition]
           (try
+            (= added False)
             (for [name path stamp] in reads
               (cond
                 (is name None)
@@ -373,22 +467,29 @@
 
                 (is path None)
                 (if (not (_lispy-module-p name))
-                    (.add _SHARED.names name))
+                    (do (.add _SHARED.names name)
+                        (= added True)))
 
                 (_trackable-p name path)
                 (do (.setdefault _SHARED.files path stamp)
                     (.add _SHARED.names name)
+                    (= added True)
                     (if (and (is-not stamp None) (.endswith path ".lpy"))
                         (_track-record path)))))
+            ;; Only a hung compile can end under other dirs than the loaded
+            ;; ones: its modules are mixed in, so the next compile drops them.
+            (if (and added (!= search-dirs _SHARED.loaded-dirs))
+                (= _SHARED.loaded-dirs None))
             (finally
-              (.discard _SHARED.running token)
+              (.pop _SHARED.running token None)
               (.discard _SHARED.hung token)
               (.notify-all _SHARED.condition))))))))
 
 (def epoch []
   "The macro environment's version, never waiting: it moves whenever the
-   tracked modules are dropped, which this does first when one is stale
-   and no compile (less the hung ones) runs.  None while such a drop is
+   tracked modules are dropped as stale (which this does first when one is
+   and no compile, less the hung ones, runs) and whenever a search-dirs
+   switch dropped them under a hung compile (_enter).  None while such a drop is
    due but compiles run: every view or shadow made before is stale then.  A
    view or shadow made under one epoch is stale under another."
   (with [_SHARED.condition]

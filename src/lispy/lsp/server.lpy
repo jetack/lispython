@@ -427,7 +427,7 @@
    import root alone.  With no origin, or no package, or beyond the
    top-level package, it resolves to nothing.  An absolute name is looked
    up on a search path of origin's search dirs (module-names), in the
-   order its compile puts them on sys.path, so scripts/x.lpy finds its
+   order its compile searches them, so scripts/x.lpy finds its
    sibling helper.lpy, then every workspace folder's project-import-roots,
    then sys.path (installed packages, lispython itself).  Either lookup is
    module-file-on, which imports nothing."
@@ -873,7 +873,7 @@
   "The CompiledBuffer of document uri's source (python_view.compile-buffer),
    named as Python imports its file (module-names) so the prelude, its
    opt-out and the macros it defines apply as when the module compiles,
-   with its search dirs on sys.path, and its parse warnings naming the
+   with its search dirs searched first, and its parse warnings naming the
    file.  One compile per version (view-cache): a change's diagnostics,
    its backend push and every request on that version share it; fresh
    compiles again all the same and caches the result.  It runs

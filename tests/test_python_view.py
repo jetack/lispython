@@ -1002,21 +1002,6 @@ class TestShadows:
         assert view is not None and view.text.endswith("\nyy = 2 + 2")
         assert sys.path == path
 
-    def test_import_root_stays_on_sys_path_while_any_user_holds_it(self):
-        # Two compiles overlapping on one import root, the first ending first:
-        # the root stays for the second and goes with it.
-        root = "/nonexistent/pv-overlap-root"
-        path = list(sys.path)
-        first, second = pv._on_sys_path(root), pv._on_sys_path(root)
-        first.__enter__()
-        second.__enter__()
-        try:
-            first.__exit__(None, None, None)
-            assert sys.path[0] == root
-        finally:
-            second.__exit__(None, None, None)
-        assert sys.path == path
-
     def test_relative_require_in_a_src_layout(self, tmp_path, monkeypatch):
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pvsrcpkg"
@@ -2636,6 +2621,111 @@ class TestMacroModules:
             assert len(waits) == 1
         assert view.fallback and "yy = 2 * 2 * 2 + zz" in view.text
 
+    @pytest.fixture
+    def helper(self, tmp_path, request):
+        """A top-level macro module of one name in two directories, a/ and
+        b/, whose pick expands to 1 and 2."""
+        name = "pvsd" + re.sub(r"\W", "", request.node.name).lower()
+        dirs = []
+        for number, sub in enumerate(["a", "b"], 1):
+            directory = tmp_path / sub
+            directory.mkdir()
+            (directory / f"{name}.lpy").write_text(
+                f"(defmacro pick [] (return {number}))"
+            )
+            dirs.append(str(directory))
+        sys.modules.pop(name, None)
+        yield SimpleNamespace(name=name, a=dirs[0], b=dirs[1])
+        sys.modules.pop(name, None)
+
+    def picked(self, helper, *dirs):
+        """What pick expands to in a compile searching dirs."""
+        view = pv.compile_view(
+            f"(require {helper.name} *)\n(= yy (pick))", search_dirs=dirs
+        )
+        return view.text.rpartition("yy = ")[2]
+
+    @contextlib.contextmanager
+    def held_with(self, dirs, imported, limit, monkeypatch):
+        """A compile searching dirs hung in its macros for the whole block,
+        after importing the module imported; WAIT_LIMIT set to limit."""
+        monkeypatch.setattr(mm, "WAIT_LIMIT", limit)
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules(dirs):
+                importlib.import_module(imported)
+                entered.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(10)
+            yield
+        finally:
+            release.set()
+            holder.join(10)
+            assert not holder.is_alive()
+
+    def test_search_dirs_come_first_in_their_order(self, helper, monkeypatch):
+        # Defect: a search dir already on sys.path is left where it is while
+        # an absent one goes in front, so a module both hold comes from the
+        # second dir.
+        monkeypatch.setattr(sys, "path", [helper.a, *sys.path])
+        assert self.picked(helper, helper.a, helper.b) == "1"
+
+    def test_a_module_of_other_search_dirs_is_imported_anew(self, helper):
+        # Defect: a script's sibling module stays in sys.modules, so a script
+        # in another directory requiring the same name gets the first one's.
+        assert self.picked(helper, helper.a) == "1"
+        assert self.picked(helper, helper.b) == "2"
+
+    def test_a_switch_of_search_dirs_waits_for_running_compiles(
+        self, helper, monkeypatch
+    ):
+        # Defect: a compile under other search dirs drops (or reuses) the
+        # modules a running compile is using.
+        result = []
+        with self.held_with((helper.a,), helper.name, 30, monkeypatch):
+            other = threading.Thread(
+                target=lambda: result.append(self.picked(helper, helper.b)),
+                daemon=True,
+            )
+            other.start()
+            other.join(0.5)
+            assert other.is_alive()
+        other.join(10)
+        assert result == ["2"]
+
+    def test_a_switch_past_a_hung_compile_moves_the_epoch(self, helper, monkeypatch):
+        # Defect: a switch drops the modules under a hung compile but leaves
+        # its result, which the drop may have broken, current.
+        with self.held_with((helper.a,), helper.name, 0.2, monkeypatch):
+            before = mm.current_epoch()
+            compiled = pv.compile_buffer("(= yy 1)", search_dirs=(helper.b,))
+        assert compiled.epoch == before + 1
+
+    def test_a_namespace_package_keeps_its_search_dir_portion(self, tmp_path):
+        # Defect: a namespace package with portions under a search dir and on
+        # sys.path recomputes them from sys.path alone on invalidate_caches,
+        # so its submodule under the search dir stops importing.
+        name = "pvsdns"
+        (tmp_path / "d" / name).mkdir(parents=True)
+        (tmp_path / "d" / name / "sub.py").write_text("X = 1\n")
+        (tmp_path / "s" / name).mkdir(parents=True)
+        path = sys.path[:]
+        sys.path.append(str(tmp_path / "s"))
+        try:
+            with mm.fresh_modules((str(tmp_path / "d"),)):
+                importlib.import_module(name)
+                importlib.invalidate_caches()
+                assert importlib.import_module(name + ".sub").X == 1
+        finally:
+            sys.path[:] = path
+            for key in [name, name + ".sub"]:
+                sys.modules.pop(key, None)
+
     def test_a_missing_module_keeps_the_environment_settled(
         self, package, tmp_path, monkeypatch
     ):
@@ -2951,7 +3041,12 @@ def test_a_slow_macro_in_a_view_never_holds_up_another_compile(monkeypatch):
     # as long as a worker's macro runs, and a hanging macro freezes the LSP.
     gate = SimpleNamespace(entered=threading.Event(), release=threading.Event())
     monkeypatch.setitem(sys.modules, "lpy_test_gate", gate)
-    worker = threading.Thread(target=pv.compile_view, args=(SLOW_MACRO,))
+    # The other file's search dirs: compiles under other dirs wait for each
+    # other by design (macro_modules._enter).
+    dirs = pv.module_names("/other.lpy")[3]
+    worker = threading.Thread(
+        target=pv.compile_view, args=(SLOW_MACRO,), kwargs={"search_dirs": dirs}
+    )
     worker.start()
     try:
         assert gate.entered.wait(10)
