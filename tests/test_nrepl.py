@@ -16,13 +16,18 @@ from lispy import tools
 
 
 class FakeConn:
-    def __init__(self, chunks):
+    def __init__(self, chunks, before_eof=None):
         self.chunks = list(chunks)
         self.sent = []
         self.closed = False
+        self.before_eof = before_eof
 
     def recv(self, n):
-        return self.chunks.pop(0) if self.chunks else b""
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.before_eof is not None:
+            self.before_eof()
+        return b""
 
     def sendall(self, data):
         self.sent.append(data)
@@ -36,10 +41,32 @@ def line(**msg):
 
 
 def serve(chunks):
-    conn = FakeConn(chunks)
+    # EOF ends a connection's unfinished evals, so the fake client sends it
+    # only once every request it sent has been answered.
+    import time
+
+    connections = []
+    original = tools._NreplConnection
+
+    class RecordedConnection(original):
+        def __init__(self, *args):
+            super().__init__(*args)
+            connections.append(self)
+
+    def answered():
+        deadline = time.monotonic() + 10
+        while any(c._jobs or c._side_pending for c in connections):
+            assert time.monotonic() < deadline, "an eval was never answered"
+            time.sleep(0.001)
+
+    conn = FakeConn(chunks, before_eof=answered)
     scope = {"__name__": "__nrepl_test__", "__macro_namespace": {}}
     tools.nrepl_eval("(require lispy.macros *)", scope)
-    tools._nrepl_handle_client(conn, ("127.0.0.1", 0), scope)
+    tools._NreplConnection = RecordedConnection
+    try:
+        tools._nrepl_handle_client(conn, ("127.0.0.1", 0), scope)
+    finally:
+        tools._NreplConnection = original
     assert conn.closed
     replies = []
     for data in conn.sent:
@@ -48,11 +75,16 @@ def serve(chunks):
     return replies
 
 
+def by_id(replies):
+    # An eval's reply may follow a later request's: match replies by id.
+    return sorted(replies, key=lambda reply: reply["id"])
+
+
 def test_character_split_across_reads_is_decoded_whole():
     first = line(op="eval", id=1, code='(print "한국어")')
     second = line(op="ping", id=2)
     cut = first.index("국".encode()) + 1  # inside the 3-byte character
-    replies = serve([first[:cut], first[cut:] + second])
+    replies = by_id(serve([first[:cut], first[cut:] + second]))
     assert [r["id"] for r in replies] == [1, 2]
     assert replies[0]["op"] == "eval-result"
     assert replies[0]["error"] is None
@@ -69,7 +101,7 @@ def test_unknown_op_replies_with_error_and_keeps_serving():
 
 
 def test_handler_exception_replies_with_error_and_keeps_serving():
-    replies = serve([line(op="eval", id=3) + line(op="ping", id=4)])
+    replies = by_id(serve([line(op="eval", id=3) + line(op="ping", id=4)]))
     assert replies == [
         {"op": "error", "error": "KeyError: 'code'", "id": 3},
         {"op": "pong", "id": 4},
@@ -99,7 +131,9 @@ def test_connection_closes_when_recv_returns_empty():
 
 
 def test_exit_in_eval_is_an_eval_error_and_keeps_serving():
-    replies = serve([line(op="eval", id=1, code="(exit)") + line(op="ping", id=2)])
+    replies = by_id(
+        serve([line(op="eval", id=1, code="(exit)") + line(op="ping", id=2)])
+    )
     assert replies[0]["op"] == "eval-result"
     assert replies[0]["id"] == 1
     assert "SystemExit" in replies[0]["error"]
@@ -383,7 +417,7 @@ LIMITS = {
 )
 def test_invalid_position_replies_with_error_and_keeps_serving(field, value):
     request = line(op="eval", id=9, code="1", **{field: value})
-    replies = serve([request + line(op="ping", id=10)])
+    replies = by_id(serve([request + line(op="ping", id=10)]))
     limit = LIMITS[field]
     assert replies == [
         {
@@ -471,7 +505,7 @@ def test_invalid_ns_replies_with_error_and_keeps_serving(name, ns, file):
     msg = {"code": "1", "prefix": "a", "ns": ns}
     if file:
         msg["file"] = file  # file wins the scope, but a bad ns is still refused
-    replies = serve([line(op=name, id=7, **msg) + line(op="ping", id=8)])
+    replies = by_id(serve([line(op=name, id=7, **msg) + line(op="ping", id=8)]))
     assert replies == [
         {
             "op": "error",
@@ -1122,7 +1156,7 @@ def test_an_unhashable_op_is_an_unknown_op(connect, bad_op):
 
 def test_a_dotted_complete_runs_off_the_reader_while_an_eval_runs(connect, isolated):
     # Resolving the head of a dotted prefix runs user code (here __dir__),
-    # which must not hold up the reader while an eval is not waited for.
+    # which must not hold up the reader while an eval runs.
     import threading
 
     gate = threading.Event()
@@ -1154,8 +1188,8 @@ def test_a_dotted_complete_runs_off_the_reader_while_an_eval_runs(connect, isola
 def test_a_pending_side_request_keeps_later_requests_off_the_reader(connect, isolated):
     # A side request stuck in a macro holds the scope lock.  After the eval
     # that sent it aside has ended, a later macroexpand must still queue
-    # behind it, and a plain eval (whose compile needs the lock) must not be
-    # waited for, or the reader would read nothing more.
+    # behind it, and a plain eval (whose compile needs the lock) must not
+    # hold the reader, or it would read nothing more.
     import threading
 
     isolated["gate"] = gate = threading.Event()
@@ -1286,7 +1320,7 @@ def test_a_plain_eval_running_behind_a_stream_eval_can_be_interrupted(
     isolated["gate"] = gate = threading.Event()
     client = connect()
     client.send(op="eval", id=1, stream=True, code="(gate.wait 10)")
-    client.send(op="eval", id=2, code=ENDLESS)  # not waited for: 1 is ahead
+    client.send(op="eval", id=2, code=ENDLESS)  # queued: 1 is ahead
     gate.set()
     assert client.recv()["id"] == 1  # the stream eval's result: 2 now runs
     client.send(op="interrupt", id=3, **{"interrupt-id": 2})
@@ -1299,14 +1333,56 @@ def test_a_plain_eval_running_behind_a_stream_eval_can_be_interrupted(
     assert messages[1]["stdout"].startswith("tick\n")
 
 
+# A plain eval alone on its connection (vsc-lispy sends only plain evals):
+# the reader must still read the interrupt or the EOF while it runs.
+STARTED_ENDLESS = (
+    "(import time)\n(started.set)\n"
+    '(try (while True (print "tick") (time.sleep 0.005)) (finally (stopped.set)))'
+)
+
+
+@pytest.fixture
+def endless(isolated):
+    import threading
+
+    isolated["started"] = threading.Event()
+    isolated["stopped"] = threading.Event()
+    return isolated["started"], isolated["stopped"]
+
+
+def test_a_plain_eval_alone_can_be_interrupted(connect, endless):
+    started, stopped = endless
+    client = connect()
+    client.send(op="eval", id=1, code=STARTED_ENDLESS)
+    assert started.wait(WAIT)
+    client.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    messages = client.until(lambda m: m.get("id") == 1)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (2, "interrupt-result"),
+        (1, "eval-result"),
+    ]
+    assert messages[1]["error"].endswith("KeyboardInterrupt")
+    assert messages[1]["stdout"].startswith("tick\n")
+    assert stopped.is_set()
+
+
+def test_closing_the_client_stops_a_plain_eval(connect, endless):
+    started, stopped = endless
+    client = connect()
+    client.send(op="eval", id=1, code=STARTED_ENDLESS)
+    assert started.wait(WAIT)
+    client.sock.close()
+    assert stopped.wait(WAIT)
+
+
 @pytest.mark.parametrize("method", ["_deliver", "_close_window"])
 def test_a_worker_fault_still_sends_one_reply_and_frees_the_id(
     connect, monkeypatch, method
 ):
     # _deliver failing before it sends, and a fault in the window close
     # (which must not be retried forever), each end the job with one
-    # internal-error reply; the id is free again and plain evals are again
-    # waited for in order.
+    # internal-error reply; the id is free again and the worker still runs
+    # the evals after it.
     original = getattr(tools._NreplConnection, method)
     failed = []
 
@@ -1328,8 +1404,13 @@ def test_a_worker_fault_still_sends_one_reply_and_frees_the_id(
     client.send(op="eval", id=1, stream=True, code="(+ 2 2)")
     assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["value"] == "4"
     client.send(op="eval", id=5, code="(+ 3 3)")
-    client.send(op="ping", id=6)
-    assert [client.recv()["id"], client.recv()["id"]] == [5, 6]
+    assert client.recv() == {
+        "op": "eval-result",
+        "value": "6",
+        "stdout": "",
+        "error": None,
+        "id": 5,
+    }
 
 
 def test_closing_gives_up_on_an_eval_that_never_stops(isolated, monkeypatch):

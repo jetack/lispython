@@ -15,11 +15,11 @@ follows [Semantic Versioning](https://semver.org/).
   The connection keeps answering `complete`, `docs`, `macroexpand`,
   `annotate`, `ping` and `interrupt` while a stream eval runs.
   `{"op": "interrupt", "interrupt-id": X}` raises `KeyboardInterrupt` in the
-  running stream eval `X` (its result's error is the traceback), or cancels
-  it while it is queued (error `KeyboardInterrupt`), and replies
+  running eval `X`, stream or plain (its result's error is the traceback),
+  or cancels it while it is queued (error `KeyboardInterrupt`), and replies
   `interrupt-result`. Evals of one connection run one at a time in request
   order; different connections run at once, each eval's output kept to its
-  own connection. Without `stream`, an eval behaves as before.
+  own connection. Without `stream`, an eval's output stays in its result.
 
 - `(require mod as m)` registers every macro of `mod` as `m.name`, with a
   bare `as` as `import` takes. The LSP's completion after `m.`, hover and
@@ -88,6 +88,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- nREPL: the server no longer waits for a plain eval before reading the next
+  request, so an endless eval can be interrupted, and closing the client
+  stops it, where before only killing the server did. Replies to later
+  non-eval requests can now arrive before the eval's result (match them by
+  `id`), a plain eval reusing the `id` of one still queued or running is
+  refused, and an EOF (a half-closed socket included) cancels or interrupts
+  the connection's unfinished evals.
 - nREPL: an eval's output is captured per thread, no longer by swapping
   `sys.stdout` for the whole process. Output of a thread the evaluated code
   starts now goes to the server's own stdout/stderr, plain evals included,
