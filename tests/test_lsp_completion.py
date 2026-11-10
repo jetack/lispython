@@ -723,7 +723,9 @@ SCREENSHOT = (
         "referenced later",
     ],
 )
-def test_the_word_being_typed_is_never_offered_as_its_own_name(merged, source, word):
+def test_the_word_being_typed_is_never_offered_as_its_own_name(
+    merged, source, word, monkeypatch
+):
     # Defect: a name read off text in which the word at the cursor binds
     # itself is offered: over a fallback view the buffer's definitions are
     # collected with the partial word in place ((from heapq [heappush heap|])
@@ -734,6 +736,19 @@ def test_the_word_being_typed_is_never_offered_as_its_own_name(merged, source, w
     assert word not in items
     if source is SCREENSHOT:
         assert "heappop" in items  # the backend did answer
+    # Positive control, per case: the drop was armed (a backend offers the
+    # word only at some positions, none at a parameter or alias on some, so
+    # its absence alone proves nothing).
+    armed = []
+    drop = server.without_self_binding
+    monkeypatch.setattr(
+        server,
+        "without_self_binding",
+        lambda view, items: armed.append(view.self_bound) or drop(view, items),
+    )
+    if source is not SCREENSHOT:  # a fallback view has its own control above
+        merged(source)
+        assert armed and all(armed)
 
 
 def test_the_general_list_never_offers_the_word_being_typed(off_complete):
