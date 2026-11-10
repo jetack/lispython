@@ -134,3 +134,26 @@ def test_m_compiles_an_lpy_module_once(tmp_path: Path):
     r = run_m(tmp_path, PYTHONDONTWRITEBYTECODE="1")
     assert r.returncode == 0, r.stderr
     assert r.stdout.count("MACRO-RAN") == 1
+
+
+def test_m_macro_import_error_in_a_package_main_names_the_real_cause(tmp_path: Path):
+    pkg = tmp_path / "cwdmod"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "__main__.lpy").write_text(
+        "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
+    )
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "No module named 'no_such_dep_q'" in r.stderr
+    assert "cannot be directly executed" not in r.stderr
+
+
+def test_m_compile_time_import_error_traceback_has_no_runpy_noise(tmp_path: Path):
+    (tmp_path / "cwdmod.lpy").write_text(
+        "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
+    )
+    r = run_m(tmp_path)
+    assert "During handling" not in r.stderr
+    assert "runpy._Error" not in r.stderr
