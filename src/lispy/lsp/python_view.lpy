@@ -1023,22 +1023,18 @@
   "True when the word at the cursor, restored (its Python name) standing
    for the sentinel in tree, sits where it only binds: the sentinel's
    occurrence is a pure binding (_bindings) and no impure one, and restored
-   is neither a builtin nor a dunder.  There the backend's item equal to
-   the word inserts nothing the word does not already hold, so dropping it
-   loses nothing, whether or not the name is bound elsewhere in the tree
-   ((def m [self] 1) beside (def n [self|] 1), a loop or parameter name
-   reused): which scope binds what is never read, because that is Python
-   scope analysis, which the backend owns.  A builtin stays, because it
-   exists without the word; a dunder never counts, because every backend
-   adds its own implicit ones per scope (__path__, __qualname__,
-   __class__), so no list of them stays right.  A stored attribute is never
-   self-bound (_bindings), so the backend's own self.x item at
-   (= self.x| ...) stays offered, because a real member must never be
-   dropped.  Over a fallback view a later binding of a kind
-   collect-definitions does not collect (with-as, except-as, walrus, match
-   capture, comprehension target) is not offered back either
-   (buffer-definition-names in server.lpy)."
-  (if (or (not restored) (in restored (vars builtins)) (_dunder-p restored))
+   is not a dunder.  There an item equal to the word inserts nothing the
+   word does not already hold, so dropping it loses nothing, whether the
+   name is bound elsewhere in the tree ((def m [self] 1) beside
+   (def n [self|] 1), a loop or parameter name reused) or is a builtin
+   ((def f [list|])): which scope binds what is never read, because that
+   is Python scope analysis, which the backend owns.  A dunder never
+   counts, because every backend adds its own implicit ones per scope
+   (__path__, __qualname__, __class__), so no list of them stays right.  A
+   stored attribute is never self-bound (_bindings), so the backend's own
+   self.x item at (= self.x| ...) stays offered, because a real member must
+   never be dropped."
+  (if (or (not restored) (_dunder-p restored))
       (return False))
   (= pure-seen False)
   (for node in (ast.walk tree)

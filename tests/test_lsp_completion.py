@@ -712,6 +712,7 @@ SCREENSHOT = (
         ("(= heap 1)\n(for heap| in [1] 1)\n", "heap"),
         ("(class A []\n  (def m [self] 1)\n  (def n [self|] 1))\n", "self"),
         ("(for heap| in [1] 1)\n(= heap 2)\n", "heap"),
+        ("(def f [list|]\n  1)\n", "list"),
     ],
     ids=[
         "fallback view",
@@ -727,6 +728,7 @@ SCREENSHOT = (
         "bound elsewhere",
         "bound in another scope",
         "bound later",
+        "builtin",
     ],
 )
 def test_the_word_being_typed_is_never_offered_as_its_own_name(
@@ -738,20 +740,23 @@ def test_the_word_being_typed_is_never_offered_as_its_own_name(
     # defines heap), and over a cursor view the backend offers the binding
     # the restored word makes (def f [ab|] offers ab); neither a reference
     # ((print ab)) nor another binding of the name (before, after, or in
-    # another method: (def m [self] 1)) may turn the drop off at a position
-    # that only binds, since the item there inserts nothing new, and where
-    # the backend gives no items the local list that answers (the buffer's
-    # definitions, holding the other binding) drops it too.
+    # another method: (def m [self] 1)) nor a builtin of that name may turn
+    # the drop off at a position that only binds, since the item there
+    # inserts nothing new, and where the backend gives no items the local
+    # list that answers (the buffer's definitions and the builtins) drops it
+    # too.
     # Control: pyrefly offers the word except at the aliases, and with
-    # basedpyright, which offers it nowhere, the local list offers the name
-    # bound elsewhere; at the rest absence alone proves nothing, so the
-    # per-case control is that the drop was armed.
+    # basedpyright, which offers it nowhere, the local list offers a name
+    # bound elsewhere or a builtin; at the rest absence alone proves nothing,
+    # so the per-case control is that the drop was armed.
     armed = []
     drop = server.without_self_binding
     monkeypatch.setattr(
         server,
         "without_self_binding",
-        lambda view, items: armed.append(view.self_bound) or drop(view, items),
+        lambda view, items, **kw: (
+            armed.append(view.self_bound) or drop(view, items, **kw)
+        ),
     )
     items = by_label(merged(source)[2])
     assert word not in items
@@ -774,7 +779,6 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
 @pytest.mark.parametrize(
     "source, word",
     [
-        ("(= abs| 1)\n", "abs"),
         ("(from heapq [heappush|])\n", "heappush"),
         ("(def f [abc]\n  abc|)\n", "abc"),
         ("(import os)\n(= os.environ| 1)\n", "environ"),
@@ -782,7 +786,6 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
         ('(from os.path *)\n(+= sep| "x")\n', "sep"),
     ],
     ids=[
-        "builtin",
         "imported name",
         "reference",
         "existing member stored",
@@ -792,10 +795,10 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
 )
 def test_a_real_name_equal_to_the_word_being_typed_stays(merged, source, word):
     # Defect: the self-binding filter drops every item named as the typed
-    # word, so a name that exists without it (a builtin, the module member
-    # an import names, a parameter read, a module's real member being stored
-    # to, an implicit dunder a backend adds, a star-imported name an
-    # augmented assignment reads) is lost.
+    # word, so a name that exists without it (the module member an import
+    # names, a parameter read, a module's real member being stored to, an
+    # implicit dunder a backend adds, a star-imported name an augmented
+    # assignment reads) is lost.
     assert word in by_label(merged(source)[2])
 
 

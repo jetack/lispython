@@ -2393,7 +2393,10 @@
    cursor replaced by the sentinel (marked-source, as the cursor view
    compiles it), because that word binds a name only because it is being
    typed ((from heapq [heappush heap|]) binds heap): a name offered there
-   must exist without it."
+   must exist without it.  Limit: a binding collect-definitions does not
+   collect (with-as, except-as, walrus, match capture, comprehension
+   target) is never listed, so over a fallback view one after the cursor
+   is not offered."
   (= source doc.source)
   (if (and (is-not line None) (is-not col None))
       (do (= cursor (marked-source source line col))
@@ -2754,18 +2757,20 @@
             generation))
   (return answer))
 
-(def without-self-binding [view items]
+(def without-self-binding [view items :word None]
   "items, the backend's (backend-items) over view or the local answer that
    replaces them, less the word at the cursor itself when view.self-bound,
    the one home of that drop: at a position that only binds
    ((def f [ab|]), (import heapq as he|)) the backend offers the name the
-   typed word binds, and accepting it inserts nothing new.  Compared with view.partial, the word
-   the backend saw, never the word typed now, because a kept answer
-   (completion-cache) serves the later keystrokes of that word; by
-   name-key, so the hyphen label of the item is the same name."
+   typed word binds, and accepting it inserts nothing new.  The backend's
+   items are compared with view.partial (word None), the word the backend
+   saw, never the word typed now, because a kept answer (completion-cache)
+   serves the later keystrokes of that word; a local answer, built for the
+   word typed now, is compared with that word.  By name-key, so the hyphen
+   label of the item is the same name."
   (if (not view.self-bound)
       (return items))
-  (= word (name-key view.partial))
+  (= word (name-key (ife (is word None) view.partial word)))
   (return [item for item in items if (!= (name-key item.label) word)]))
 
 (async-def backend-completion [doc line col base insert-replace]
@@ -2819,8 +2824,10 @@
         ;; The local answer is the word's own name too where the word only
         ;; binds ((def n [self|]) beside (def m [self])).
         (not found)
-        (return (without-self-binding view (local-completion doc :line line :col col
-                                                             :base base)))
+        (return (without-self-binding view
+                                      (local-completion doc :line line :col col
+                                                        :base base)
+                                      :word (sub (completion-ranges doc line col) 2)))
         (not view.attribute)
         (= found (merged-items doc line col view found)))
   (return found))
