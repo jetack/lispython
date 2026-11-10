@@ -864,7 +864,7 @@ def test_every_interrupt_ends_in_a_result_and_the_worker_survives(connect):
     # kill the connection's worker.
     client = connect()
     busy = '(while True (print "t"))'
-    for round_id in range(2, 62, 2):
+    for round_id in range(2, 202, 2):
         client.send(op="eval", id=round_id, stream=True, code=busy)
         assert is_out(client.recv(), round_id)
         client.send(op="interrupt", id=round_id + 1, **{"interrupt-id": round_id})

@@ -25,8 +25,11 @@ _COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default
 # diagnostics) restore out of order and can leave one's filter in force for
 # good.  Never hold it across user code (a macro, a require): every
 # compile on any thread would wait for that code, however long it runs.  The
-# one site, literal.py's literal_eval, holds it for microseconds.
-_WARNINGS_LOCK = threading.Lock()
+# one site, literal.py's literal_eval, holds it for microseconds.  An RLock:
+# an nREPL interrupt (an async KeyboardInterrupt) can land right after the
+# acquire and leave it held, and only an RLock's owner can then release it
+# (tools.lpy, _nrepl-release-window-locks).
+_WARNINGS_LOCK = threading.RLock()
 
 
 @contextlib.contextmanager
