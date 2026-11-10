@@ -2050,14 +2050,20 @@
                           (Symbol mname :lineno 1 :end-lineno 1 :col-offset 0
                                   :end-col-offset (len mname)))))
             ;; python -m reports a module it cannot find as one line, before running
-            ;; anything; runpy keeps that lookup (and its error type) private.
-            ;; Only the lookup is guarded: an ImportError the module raises while
-            ;; it runs keeps its traceback, as under python -m.
+            ;; anything; runpy keeps that lookup (and its error type) private. The
+            ;; lookup also compiles an .lpy (get_code), so it runs once and its
+            ;; code is what runs, as run_module does. Only runpy's own failures
+            ;; (no such module, relative name, spec lookup) are one line; an
+            ;; ImportError the compile raised (a macro's import) keeps its
+            ;; traceback, as does one the module raises while it runs.
             (try
-              (runpy._get-module-details modname runpy._Error)
+              (= details (runpy._get-module-details modname runpy._Error))
               (except [runpy._Error as e]
-                (sys.exit f"{sys.executable}: {e}")))
-            (runpy.run-module modname :run-name "__main__" :alter-sys True))
+                (if (or (is e.__cause__ None)
+                        (.startswith (str e) "Error while finding module specification"))
+                    (sys.exit f"{sys.executable}: {e}")
+                    (raise e.__cause__))))
+            (runpy._run-module-code (sub details 2) None "__main__" (sub details 1)))
 
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)

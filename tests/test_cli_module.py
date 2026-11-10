@@ -114,3 +114,23 @@ def test_m_import_error_inside_the_module_keeps_its_traceback(tmp_path: Path):
     assert r.returncode == 1
     assert "Traceback" in r.stderr
     assert "No module named 'no_such_dependency'" in r.stderr
+
+
+def test_m_import_error_from_a_macro_keeps_its_traceback(tmp_path: Path):
+    (tmp_path / "cwdmod.lpy").write_text(
+        "(defmacro m [] (import no_such_dep_q) 1)\n(print (m))\n"
+    )
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "No module named 'no_such_dep_q'" in r.stderr
+
+
+def test_m_compiles_an_lpy_module_once(tmp_path: Path):
+    # With no bytecode cache written, a second compile would run the macro twice.
+    (tmp_path / "cwdmod.lpy").write_text(
+        '(defmacro m [] (print "MACRO-RAN") 1)\n(print (m))\n'
+    )
+    r = run_m(tmp_path, PYTHONDONTWRITEBYTECODE="1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count("MACRO-RAN") == 1
