@@ -2755,10 +2755,11 @@
   (return answer))
 
 (def without-self-binding [view items]
-  "items, the backend's (backend-items) over view, less the word at the
-   cursor itself when view.self-bound: the backend offers a name the word
-   binds only because it is being typed ((def f [ab|]), (import heapq as
-   he|)), never one the buffer has.  Compared with view.partial, the word
+  "items, the backend's (backend-items) over view or the local answer that
+   replaces them, less the word at the cursor itself when view.self-bound,
+   the one home of that drop: at a position that only binds
+   ((def f [ab|]), (import heapq as he|)) the backend offers the name the
+   typed word binds, and accepting it inserts nothing new.  Compared with view.partial, the word
    the backend saw, never the word typed now, because a kept answer
    (completion-cache) serves the later keystrokes of that word; by
    name-key, so the hyphen label of the item is the same name."
@@ -2769,8 +2770,10 @@
 
 (async-def backend-completion [doc line col base insert-replace]
   "The completion items over a Python view of doc, with the backend's help
-   when there is one, or None when there is none (no view, no items), and
-   local-completion is the answer (filtered-answer filters either).  doc
+   when there is one, or None when there is no view, and local-completion
+   is the answer (filtered-answer filters either); with a view but no
+   items it is local-completion's answer less the word where it only binds
+   (without-self-binding).  doc
    is a snapshot (document-snapshot); base is the qualified-base at the
    cursor.  base is read off the text before the word, which the
    completion-cache key holds, so a kept backend answer never outlives its
@@ -2813,8 +2816,11 @@
         (do (= taken (set [(name-key item.label) for item in macros]))
             (= found (+ macros [item for item in found
                                 if (not-in (name-key item.label) taken)])))
+        ;; The local answer is the word's own name too where the word only
+        ;; binds ((def n [self|]) beside (def m [self])).
         (not found)
-        (return None)
+        (return (without-self-binding view (local-completion doc :line line :col col
+                                                             :base base)))
         (not view.attribute)
         (= found (merged-items doc line col view found)))
   (return found))
