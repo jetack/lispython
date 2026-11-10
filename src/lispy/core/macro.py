@@ -120,6 +120,16 @@ def macroexpand(sexp, scope, include_meta=True):
     return sexp
 
 
+def _within_call(error, call):
+    """Whether error's start position lies inside call's span (a call with
+    no position gives no span to refuse by)."""
+    if not call.lineno:
+        return True
+    start = (call.lineno, call.col_offset + 1)
+    end = (call.end_lineno, call.end_col_offset + 1)
+    return start <= (error.lineno, error.offset or 0) <= end
+
+
 def macroexpand_1(sexp, scope):
     return macroexpand_1_and_check(sexp, scope)[0]
 
@@ -170,8 +180,13 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
             except LispyCompileError as error:
                 # A macro cannot see its own call form (literal operands
                 # arrive unwrapped), so an error it raises with no position
-                # is placed at the call.
-                if error.lineno is not None:
+                # is placed at the call. One positioned outside the call is
+                # of other text (a macro parsing a string): nodes carry no
+                # file identity, so its position would name an unrelated
+                # line of this file; it is placed at the call too.
+                if error.lineno is not None and (
+                    error.filename is not None or _within_call(error, sexp)
+                ):
                     raise
                 raise LispyCompileError(error.msg, sexp) from None
             # Python data anywhere in the expansion becomes nodes, and

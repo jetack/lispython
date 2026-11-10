@@ -615,3 +615,27 @@ def test_a_template_name_spans_the_whole_macro_call(macros, src, generated, scop
     for part in parts:
         assert (part.lineno, part.col_offset) == (2, 0)
         assert (part.end_lineno, part.end_col_offset) == (2, len(src))
+
+
+def _bad_include():
+    parse("(a")
+
+
+def _bad_operand(x):
+    raise LispyCompileError("no", x)
+
+
+def test_error_from_parsing_other_text_is_placed_at_the_call():
+    # The macro parses a string, so the error position (line 1) is of that
+    # text, not of this file; it is reported at the call form.
+    scope = {"__macro_namespace": {"bad_include": _bad_include}}
+    with pytest.raises(LispyCompileError) as info:
+        macroexpand_then_compile(parse("\n\n\n\n(bad-include)"), scope)
+    assert info.value.lineno == 5
+
+
+def test_error_on_an_operand_keeps_the_operand_position():
+    scope = {"__macro_namespace": {"bad_operand": _bad_operand}}
+    with pytest.raises(LispyCompileError) as info:
+        macroexpand_then_compile(parse("\n\n(bad-operand\n    foo)"), scope)
+    assert (info.value.lineno, info.value.offset) == (4, 5)
