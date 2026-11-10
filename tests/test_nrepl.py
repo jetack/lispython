@@ -733,9 +733,14 @@ class Client:
         return json.loads(raw)
 
     def until(self, done):
-        """Every message up to and including the first that done accepts."""
+        """Every message up to and including the first that done accepts,
+        within WAIT seconds even while out messages keep arriving."""
+        import time
+
+        deadline = time.monotonic() + WAIT
         messages = []
         while True:
+            assert time.monotonic() < deadline, f"no such reply in {messages[-3:]}"
             messages.append(self.recv())
             if done(messages[-1]):
                 return messages
