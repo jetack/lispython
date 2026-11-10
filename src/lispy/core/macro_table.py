@@ -61,9 +61,18 @@ class MacroTable(MutableMapping):
     unit start copies from and what tells a built-in from a user macro; None
     until seed_prelude (core/macro.py) seeds the table, which it does once.
     seeded: the keys a unit start (seed_prelude, MODULE, TOP) put there from
-    the prelude and nothing has registered since: the entries a TOP start
-    may take back. A require never adds to it. Its keys are spellings; look
-    them up in the table, which compares them by name."""
+    the prelude and nothing has registered or removed since: the entries a
+    TOP start may take back. Registering or removing a name drops the entry
+    it replaces from it (``__setitem__``/``__delitem__``), so a key a
+    require or defmacro registers is theirs from then on, even when it is
+    the very macro the start seeded; only a unit start adds to it, after
+    setting the entry. Its keys are spellings (an entry's stored one); look
+    them up in the table, which compares them by name.
+
+    A unit start never reshapes the table in place: it builds the new state
+    off to the side and swaps it in (``reset``), so a reader holding no lock
+    (nREPL completion) iterates a whole old or a whole new table, never one
+    half cleared."""
 
     __slots__ = ("_entries", "prelude", "seeded")
 
@@ -86,12 +95,18 @@ class MacroTable(MutableMapping):
         return found[1]
 
     def __setitem__(self, name, macro):
-        self._entries[_key(name)] = (name, macro)
+        entries = self._entries
+        key = _key(name)
+        old = entries.get(key)
+        entries[key] = (name, macro)
+        if old is not None:
+            self.seeded.discard(old[0])
 
     def __delitem__(self, name):
         if not isinstance(name, str):
             raise KeyError(name)
-        del self._entries[_key(name)]
+        old = self._entries.pop(_key(name))
+        self.seeded.discard(old[0])
 
     def __contains__(self, name):
         return self.entry(name) is not None
@@ -109,7 +124,20 @@ class MacroTable(MutableMapping):
         return _Values(self)
 
     def clear(self):
-        self._entries.clear()
+        self.reset(MacroTable(prelude=self.prelude))
+
+    def reset(self, table):
+        """Take table's state (entries, seeded, prelude) as this table's own,
+        by attribute stores only, so an unlocked reader sees the old whole
+        table or the new one. table is built off to the side and not used
+        after. A macro other running code registers into the old entries
+        while the new state is being built is lost, as it would be by a
+        clear() in place, and one racing the swap may discard its replaced
+        spelling from the new seeded set, un-seeding a built-in it never
+        replaced there (a later TOP start then keeps that built-in)."""
+        self.seeded = table.seeded
+        self._entries = table._entries
+        self.prelude = table.prelude
 
     def copy(self):
         table = MacroTable(prelude=self.prelude)

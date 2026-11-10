@@ -98,7 +98,9 @@ def require_macro(sexp, scope, include_meta=True):
         )
         with compile_nesting_errors(body):
             code = compile(ast.Interactive(body=body), REQUIRE_FILENAME, "single")
-        _eval_require(code, scope)
+        # A key it registers is the require's from then on, even over a
+        # seeded built-in (MacroTable.seeded), so a later TOP start keeps it.
+        eval(code, scope)
     except (ModuleNotFoundError, ImportError):
         import sys
 
@@ -109,28 +111,6 @@ def require_macro(sexp, scope, include_meta=True):
             file=sys.stderr,
         )
     return transformed if include_meta else None
-
-
-def _eval_require(code, scope):
-    """Run a require's code in scope. A key the require registers is the
-    require's from then on, even when it registers the very macro a unit
-    start seeded there (MacroTable.seeded), so a later TOP start keeps it: the
-    seeded keys are set aside while it runs, and each it did not register
-    again is put back, still seeded."""
-    namespace = scope.get("__macro_namespace")
-    seeded = namespace.seeded if isinstance(namespace, MacroTable) else None
-    if not seeded:
-        eval(code, scope)
-        return
-    aside = {key: namespace.pop(key) for key in list(seeded) if key in namespace}
-    try:
-        eval(code, scope)
-    finally:
-        for key, macro in aside.items():
-            if key in namespace:
-                seeded.discard(key)
-            else:
-                namespace[key] = macro
 
 
 def macroexpand(sexp, scope, include_meta=True):
@@ -303,17 +283,30 @@ def seed_prelude(scope):
         import lispy.macros
 
         prelude = MacroTable(getattr(lispy.macros, "__macro_namespace"))
-    if not isinstance(namespace, MacroTable):
+    # Built off to the side and swapped in whole (MacroTable.reset): a reader
+    # holding no lock (nREPL completion) never sees the table half seeded.
+    if isinstance(namespace, MacroTable):
+        new = namespace.copy()
+    else:
         # A plain dict cannot carry the record, so it is copied: a macro that
         # running code registers in the old dict during this swap is lost,
         # which only a user rebinding the table of a live scope can reach.
-        namespace = MacroTable(namespace or ())
-        scope["__macro_namespace"] = namespace
-    namespace.prelude = prelude
+        new = MacroTable(namespace or ())
+    _seed(new, prelude)
+    new.prelude = prelude
+    if isinstance(namespace, MacroTable):
+        namespace.reset(new)
+    else:
+        scope["__macro_namespace"] = new
+
+
+def _seed(table, prelude):
+    """Add every prelude macro whose name table lacks, marking it seeded
+    (after setting it, since a registration un-seeds the entry it replaces)."""
     for name, macro in prelude.items():
-        if name not in namespace:
-            namespace[name] = macro
-            namespace.seeded.add(name)
+        if name not in table:
+            table[name] = macro
+            table.seeded.add(name)
 
 
 class UnitStart(enum.Enum):
@@ -378,27 +371,28 @@ def prelude_opted_out(forms):
 
 
 def _start_unit(scope, forms, start):
-    """Reshape scope's macro table, in place, for a unit starting as start
-    says (UnitStart)."""
+    """Reshape scope's macro table for a unit starting as start says
+    (UnitStart). The new table is built off to the side and swapped in whole
+    (MacroTable.reset), so a reader holding no lock (nREPL completion) sees
+    the old table or the new one, never one half reset."""
     if start is UnitStart.CONTINUE:
         return
     namespace = scope["__macro_namespace"]
     prelude = namespace.prelude
     first = _first_form(forms)
     if start is UnitStart.MODULE:
-        namespace.clear()
+        new = MacroTable(prelude=prelude)
     elif first is None:
         return
     else:
-        for key in namespace.seeded:
-            if key in namespace and namespace[key] is prelude.get(key):
-                del namespace[key]
-    seeded = namespace.seeded = set()
+        new = namespace.copy()
+        for key in list(new.seeded):
+            if key in new and new[key] is prelude.get(key):
+                del new[key]
+        new.seeded = set()
     if not prelude_opted_out(forms):
-        for key, macro in prelude.items():
-            if key not in namespace:
-                namespace[key] = macro
-                seeded.add(key)
+        _seed(new, prelude)
+    namespace.reset(new)
 
 
 def _begin_unit(scope, forms, start):
