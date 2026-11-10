@@ -292,15 +292,18 @@ def other_file_error(tmp_path, kind):
         "relative name": SyntaxError("boom", ("rel/other.lpy", 1, 1, "(= a 1)")),
         "no lineno": SyntaxError("boom", (str(module), None, None, None)),
         "no msg": SyntaxError(None, (str(module), 1, 1, "(= a 1)")),
+        "non-str msg": SyntaxError(42, (str(module), 1, 1, "(= a 1)")),
     }[kind]
 
 
-@pytest.mark.parametrize("kind", ["relative name", "no lineno", "no msg"])
+@pytest.mark.parametrize(
+    "kind", ["relative name", "no lineno", "no msg", "non-str msg"]
+)
 def test_another_files_error_names_only_what_it_carries(tmp_path, kind):
     # Defects: a relative fake filename was resolved against the working
     # directory into a file that does not exist; an error with no lineno
-    # named line 1; a None msg read "None (...)" and its related information
-    # raised TypeError.
+    # named line 1; a None msg read "None (...)", and a None or non-str msg
+    # made its related information raise TypeError.
     exc = other_file_error(tmp_path, kind)
     diagnostic = server.error_diagnostic(
         exc,
@@ -314,10 +317,13 @@ def test_another_files_error_names_only_what_it_carries(tmp_path, kind):
         assert diagnostic.message == f"Compile warning: {exc}"
     elif kind == "no lineno":
         assert diagnostic.message.endswith(f"({tmp_path / 'other.lpy'})")
-    else:
+    elif kind == "no msg":
         assert "None" not in diagnostic.message
         [related] = diagnostic.related_information
         assert related.message == "SyntaxError"
+    else:
+        [related] = diagnostic.related_information
+        assert related.message == "42"
 
 
 def test_an_error_with_no_position_marks_the_form_that_raised_it():

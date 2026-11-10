@@ -850,6 +850,12 @@
                      :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
+(def syntax-error-msg [exc]
+  "The msg of exc, a SyntaxError, as a str; its type's name when it has
+   none, since its str would then read None (...)."
+  (= msg exc.msg)
+  (return (ife (in msg [None ""]) (. (type exc) __name__) (str msg))))
+
 (def error-diagnostic [exc source uri severity prefix :doc None :form None]
   "The diagnostic of exc, the parse or compile error of source, document
    uri's text, its message prefix + the error's.  A SyntaxError of the
@@ -860,9 +866,11 @@
    top-level form that raised it, when given (a macro's ValueError, a
    required module's error at its require), else the first character of
    source.  A SyntaxError of another file (other-file-location) says its msg
-   with that file's absolute path and line, since a client may ignore
-   relatedInformation (eglot does), and carries the location there as its
-   relatedInformation; any other error keeps its str.  The range is in
+   with that file's absolute path, and its line when it has a lineno, since
+   a client may ignore relatedInformation (eglot does), and carries the
+   location there as its relatedInformation; any other error keeps its str.
+   A SyntaxError's msg is worded by syntax-error-msg (its type's name when
+   it has none).  The range is in
    doc's client units (client-position), in code points when there is no
    doc."
   (= path (uri-to-path uri))
@@ -876,12 +884,10 @@
       (do (= [line col] pos)
           (= [start end] (error-head-span (reader-line source line) col))))
   (= related None)
-  ;; A SyntaxError's msg, its type's name when it has none (its str would
-  ;; read "None (...)").
-  (= msg (or (getattr exc "msg" None) (. (type exc) __name__)))
-  (cond own (= message msg)
+  (cond own (= message (syntax-error-msg exc))
         (is-not other None)
-        (do (= at (ife (is exc.lineno None) "" f":{exc.lineno}"))
+        (do (= msg (syntax-error-msg exc))
+            (= at (ife (is exc.lineno None) "" f":{exc.lineno}"))
             (= message f"{msg} ({(osp.abspath exc.filename)}{at})")
             (= related [(lsp.DiagnosticRelatedInformation :location other
                                                           :message msg)]))
