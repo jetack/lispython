@@ -233,8 +233,16 @@ def test_a_reopened_document_never_reuses_a_version(tmp_path):
         def text_document_did_change(self, params):
             self.sent.append(params.text_document.version)
 
+        def text_document_did_close(self, params):
+            self.closed.append(params.text_document.uri)
+
+        returncode = None
+
     process = Process()
+    process.closed = []
     client._client = process
+    client.process = process
+    client.state = "running"
     uri = (project / "main.lpy").as_uri()
     shadow = client.backend_uri(uri)
     diagnostic = lsp.Diagnostic(
@@ -249,6 +257,7 @@ def test_a_reopened_document_never_reuses_a_version(tmp_path):
     client._full[uri] = (text_a, ("src", None))
     version_a = process.sent[-1]
     client.close_document(uri)
+    assert process.closed == [shadow]
     client._sync(uri, text_b, origin=("src", None))
     client._full[uri] = (text_b, ("src", None))
     version_b = process.sent[-1]

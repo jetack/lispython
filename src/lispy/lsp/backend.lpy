@@ -433,8 +433,8 @@
     ;; PythonView whose text was sent, or None when the sender did not say
     ;; (locate).
     (= self._docs {})
-    ;; The last version sent to the backend, for any document, never reset:
-    ;; a reopened document continues past every version it had.  A reopen at
+    ;; The last version used for any document (sent, or taken by a close),
+    ;; never reset: a reopened document continues past every version it had.  A reopen at
     ;; a version already used would let a late publish for the old open's
     ;; text pass (_diagnostics-published) as the new text's.  pyrefly also
     ;; publishes an empty set at a closed document's last version + 1, so
