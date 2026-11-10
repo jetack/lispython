@@ -1092,7 +1092,10 @@
    none."
   (if (== (len form) 0)
       (return None))
-  (= head (atom-text (sub form 0)))
+  ;; A glued head (fn[T], not legal) is read by its name, so its form is
+  ;; refused at its params as lambda is.
+  (= head (sub form 0))
+  (= head (atom-text (ife (isinstance head GluedHead) head.head head)))
   (return (ife (in head _DEF-HEADS) 2 (ife (in head LAMBDA-HEADS) 1 None))))
 
 (def _header-slot [form]

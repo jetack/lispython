@@ -538,6 +538,12 @@ class TestCursor:
         )
         assert pv.view_at_cursor(*at_bar(src)) is None
 
+    def test_a_lambda_head_with_glued_params_gives_no_view(self):
+        # Defect: fn[T] (not legal lispython) has a GluedHead head, which
+        # _param-slot read as no slot, so the form was unwrapped to a bare x
+        # at module scope and x resolved outside the lambda's parameters.
+        assert pv.view_at_cursor(*at_bar("(fn[T] [x] ^x|")) is None
+
     @pytest.mark.parametrize(
         ["src", "text"], [("[(when x|", "[x]"), ("((when x|", "x()")]
     )
