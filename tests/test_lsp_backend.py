@@ -673,8 +673,9 @@ def test_backend_is_told_the_interpreter(project, tmp_path, fake_argv):
         finally:
             await client.shutdown()
 
-    python, _ = run_bounded(scenario())
+    python, other = run_bounded(scenario())
     assert python["pythonPath"] == client.view_root.python
+    assert other == {}
 
 
 def test_a_save_that_changes_the_config_tells_the_backend(
