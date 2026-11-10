@@ -9,6 +9,7 @@ last test runs the session's real basedpyright.
 """
 
 import asyncio
+import concurrent.futures
 import importlib
 import itertools
 import pathlib
@@ -630,6 +631,125 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
         run_bounded(scenario())
     finally:
         go.set()
+
+
+# ---------------------------------------------------------------------------
+# A change of module naming publishes the open documents again
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def outside_documents(fake_served, monkeypatch):
+    """(editor, outside, mod, folders): a document outside/<pkg>/mod.lpy,
+    in no workspace folder (folders, the server's, which a test may grow)
+    and with no __init__, requiring the sibling macro module relatively,
+    the backend off."""
+    _, backends = fake_served
+    backends.configure({"backend": "off"})
+    project = pathlib.Path(backends.folders()[0].uri[len("file://") :])
+    outside = project.parent / "outside"
+    name = "diagrepub"
+    pkg = outside / name
+    pkg.mkdir(parents=True)
+    (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+    mod = pkg / "mod.lpy"
+    mod.write_text("(require .mac *)\n(= yy (twice 2))\n")
+    folders = [SimpleNamespace(uri=project.as_uri())]
+    monkeypatch.setattr(server, "workspace_folders", lambda: list(folders))
+    for key in [name, name + ".mac"]:
+        monkeypatch.delitem(sys.modules, key, raising=False)
+    yield Documents(), outside, mod, folders
+    for key in list(sys.modules):
+        if key == name or key.startswith(name + "."):
+            del sys.modules[key]
+
+
+async def published_as_script(editor, mod):
+    """Open mod; as a script its relative require fails."""
+    uri = editor.open(mod)
+    await until(lambda: uri in editor.published)
+    [warning] = editor.published[uri][-1]
+    assert "relative" in warning.message
+    return uri
+
+
+def test_a_created_init_file_republishes_the_open_documents(outside_documents):
+    # Defect: an __init__ created beside an open document makes its folder
+    # a package, so its relative require now resolves, but the warning
+    # published under the old naming stays until the document's next edit.
+    editor, _, mod, _ = outside_documents
+
+    async def scenario():
+        uri = await published_as_script(editor, mod)
+        count = len(editor.published[uri])
+        init = mod.parent / "__init__.py"
+        init.write_text("")
+        change = lsp.FileEvent(uri=init.as_uri(), type=lsp.FileChangeType.Created)
+        server.did_change_watched_files(
+            editor, lsp.DidChangeWatchedFilesParams(changes=[change])
+        )
+        await until(lambda: len(editor.published[uri]) > count, timeout=5)
+        assert editor.published[uri][-1] == []
+
+    run_bounded(scenario())
+
+
+def test_an_added_workspace_folder_republishes_the_open_documents(
+    outside_documents,
+):
+    # Defect: a workspace folder added around an open document makes its
+    # directory a namespace package of that project, so its relative
+    # require now resolves, but the warning published before stays.
+    editor, outside, mod, folders = outside_documents
+
+    async def scenario():
+        uri = await published_as_script(editor, mod)
+        count = len(editor.published[uri])
+        folder = lsp.WorkspaceFolder(uri=outside.as_uri(), name="outside")
+        folders.append(folder)
+        event = lsp.WorkspaceFoldersChangeEvent(added=[folder], removed=[])
+        server.did_change_workspace_folders(
+            editor, lsp.DidChangeWorkspaceFoldersParams(event=event)
+        )
+        await until(lambda: len(editor.published[uri]) > count, timeout=5)
+        assert editor.published[uri][-1] == []
+
+    run_bounded(scenario())
+
+
+class Registering:
+    """A client double for initialized: dynamic registration of file
+    watches advertised or not; every registration request is recorded and
+    refused."""
+
+    def __init__(self, dynamic):
+        watched = SimpleNamespace(dynamic_registration=dynamic)
+        self.client_capabilities = SimpleNamespace(
+            workspace=SimpleNamespace(did_change_watched_files=watched)
+        )
+        self.workspace = SimpleNamespace(folders=None)
+        self.requests = []
+
+    def client_register_capability(self, params):
+        self.requests.append(params)
+        refused = concurrent.futures.Future()
+        refused.set_exception(RuntimeError("refused"))
+        return refused
+
+
+def test_init_files_are_watched_only_where_the_client_can_register(caplog):
+    # Defects: the watch is registered with a client that cannot take a
+    # dynamic registration, or never asked for at all, so no __init__
+    # change is ever heard; a refused registration raises out of
+    # initialized.
+    unable, able = Registering(None), Registering(True)
+    server.on_initialized(unable, None)
+    server.on_initialized(able, None)
+    assert unable.requests == []
+    [params] = able.requests
+    [registration] = params.registrations
+    assert registration.method == lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES
+    assert "refused" in caplog.text
 
 
 class ScriptedBackends:

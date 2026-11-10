@@ -1215,6 +1215,22 @@
           (except [Exception]
             (.exception logger "lispython LSP: cannot refresh %s" other))))))
 
+(def republish-open-documents [ls]
+  "Publish every open document again, after a change that can rename its
+   module (an __init__ created or deleted, the workspace folders changed:
+   uri-module-names), since its published diagnostics came from a compile
+   under the old naming.  Every document is published, as a refresh run:
+   one whose naming did not change finds its view cached (the ViewCache
+   key holds version, epoch and naming), so nothing compiles; one
+   compiling now gets a run queued behind that compile (compile-latest),
+   compiled under the new naming.  A refresh run starts no refresh-outdated,
+   which is not needed here since every open document is published anyway."
+  (for uri in (list DIAGNOSTIC-RUNS)
+    (try
+      (publish-diagnostics ls uri :refresh True)
+      (except [Exception]
+        (.exception logger "lispython LSP: cannot republish %s" uri)))))
+
 (async-def wait-backend-diagnostics [run]
   "Wait until the backend's diagnostics for run's view are known, at most
    DIAGNOSTICS-TIMEOUT, and no longer once a newer change superseded run."
@@ -1614,7 +1630,54 @@
                   (list (.values ls.workspace.folders))
                   []))
   (if folders
-      (index-workspace folders))))
+      (index-workspace folders))
+  (watch-init-files ls)))
+
+;; The files whose creation or deletion renames the modules around them
+;; (package_root's regular packages); their content never does, so only
+;; Create and Delete are watched.
+(= INIT-FILE-NAMES ["__init__.py" "__init__.lpy"])
+
+(def _registration-done [future]
+  (if (and (not (.cancelled future)) (is-not (.exception future) None))
+      (.error logger "lispython LSP: the client refused the __init__ file watch: %s"
+              (.exception future))))
+
+(def watch-init-files [ls]
+  "Ask the client to tell us (didChangeWatchedFiles) when an __init__ file
+   is created or deleted anywhere, when it can register a file watch
+   dynamically; a failure is logged, never raised."
+  (if (not (client-capability-p
+             ls ["workspace" "did_change_watched_files" "dynamic_registration"]))
+      (return))
+  (= kind (| lsp.WatchKind.Create lsp.WatchKind.Delete))
+  (= watchers [(lsp.FileSystemWatcher :glob-pattern f"**/{name}" :kind kind)
+               for name in INIT-FILE-NAMES])
+  (= options (lsp.DidChangeWatchedFilesRegistrationOptions :watchers watchers))
+  (= registration (lsp.Registration :id "lispython-init-files"
+                                    :method lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES
+                                    :register-options options))
+  (try
+    (.add-done-callback
+      (.client-register-capability
+        ls (lsp.RegistrationParams :registrations [registration]))
+      _registration-done)
+    (except [Exception]
+      (.exception logger "lispython LSP: cannot register the __init__ file watch"))))
+
+(deco (server.feature lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
+(def did-change-watched-files [ls params]
+  "An __init__ file created or deleted may rename open documents' modules;
+   any other file event is not ours (watch-init-files)."
+  (if (any ((in (osp.basename (uri-to-path change.uri)) INIT-FILE-NAMES)
+            for change in params.changes))
+      (republish-open-documents ls))))
+
+;; pygls updates workspace.folders before it calls this, so workspace-folders
+;; already gives the new ones.
+(deco (server.feature lsp.WORKSPACE_DID_CHANGE_WORKSPACE_FOLDERS)
+(def did-change-workspace-folders [ls params]
+  (republish-open-documents ls)))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
