@@ -267,10 +267,20 @@
   "Spans between the generated Python and the .lpy source.  Each entry is
    (gen-start gen-end lpy-start lpy-end name-p): a whole node, or with name-p
    just its identifier (Name, arg, keyword, alias, the attribute of an
-   Attribute), whose columns correspond character for character."
+   Attribute), whose columns correspond character for character.
+   placeholders are the generated (start, end) of each placeholder target
+   (form-placeholders): a name the user's code never binds there, mapped
+   only so navigation reaches the user's symbol (placeholder-p)."
 
-  (def __init__ [self entries]
-    (= self.entries entries))
+  (def __init__ [self entries :placeholders (,)]
+    (= self.entries entries)
+    (= self.placeholders (list placeholders)))
+
+  (def placeholder-p [self start end]
+    "Whether the generated range start..end lies within a placeholder
+     target's span."
+    (return (any ((and (_contains gen-start gen-end start) (_contains gen-start gen-end end))
+                  for [gen-start gen-end] in self.placeholders))))
 
   (def _innermost [self pos from-index]
     "The innermost entry whose span on side from-index (0 generated, 2
@@ -346,7 +356,11 @@
            (_shift-pos ls lpy-line lpy-start lpy-end lpy-delta)
            (_shift-pos le lpy-line lpy-start lpy-end lpy-delta)
            name-p)
-        for [gs ge ls le name-p] in self.entries])))
+        for [gs ge ls le name-p] in self.entries])
+    (= self.placeholders
+       [(, (_shift-pos gs gen-line gen-start gen-end gen-delta)
+           (_shift-pos ge gen-line gen-start gen-end gen-delta))
+        for [gs ge] in self.placeholders])))
 
 (def _lpy-span [node]
   "node's .lpy (start, end), or None for a node the compiler left
@@ -434,6 +448,7 @@
   (= lines (split-lines source))
   (= columns (_GeneratedColumns text))
   (= entries [])
+  (= placeholders [])
   (= stack [(, compiled generated)])
   (while stack
     (= [a b] (.pop stack))
@@ -444,6 +459,8 @@
     (if (and (is-not lpy None) (not (_in-buffer-p lines lpy)))
         (= lpy None))
     (= gen (ife (is lpy None) None (_gen-span b columns)))
+    (if (and (is-not gen None) (getattr a PLACEHOLDER-TARGET False))
+        (.append placeholders gen))
     (if (is-not gen None)
         (do (.append entries (, (sub gen 0) (sub gen 1) (sub lpy 0) (sub lpy 1) False))
             (= named (_gen-name-span b gen))
@@ -467,7 +484,7 @@
     (.extend stack (reversed children)))
   ;; Generated order, which breaks ties between equal .lpy spans.
   (.sort entries :key (fn [e] (sub e 0)))
-  (return (PositionMap entries)))
+  (return (PositionMap entries :placeholders placeholders)))
 
 ;; ---------------------------------------------------------------------------
 ;; Views
@@ -588,12 +605,16 @@
       inside a macro's output lands on the macro call, whose position its
       positionless nodes took;
    d. None, as Volar and Svelte drop what does not map.
+   A range within a placeholder target (PositionMap.placeholder-p) is
+   dropped first, since that binding is lispython's (form-placeholders).
    A hint needs a or b, since greying the whole enclosing form would mark
    code that is used; and an identifier that a misses (a gensym, a
    defmacro's temporary def) is never b's, since its node took the macro
    call's span.  lpy-range's module rule (an empty range at (1, 0)) does
    not apply: a dropped diagnostic never moves to the module's start."
   (if (and (== start (, 1 0)) (== end (, 1 0)))
+      (return None))
+  (if (.placeholder-p view.map start end)
       (return None))
   (= found (lpy-range view source start end))
   (if (is-not found None)
@@ -680,13 +701,19 @@
     (= self.failures (list failures))))
 
 ;; Every name the LSP writes into a view starts with GENERATED-PREFIX
-;; (CURSOR-SENTINEL, ANY-ALIAS), so none is a name the user wrote, and a
-;; backend completion item naming one is dropped (filtered-answer in
-;; server.lpy).
+;; (CURSOR-SENTINEL, ANY-ALIAS, ANY-VALUE), so none is a name the user
+;; wrote, and a backend completion item naming one is dropped
+;; (filtered-answer in server.lpy).
 (= GENERATED-PREFIX "___lpy_")
 ;; The name a failed form's placeholders annotate with: typing.Any, imported
 ;; under it once per view that has a placeholder (_with-any-import).
 (= ANY-ALIAS (+ GENERATED-PREFIX "any"))
+;; The value a variable placeholder is assigned: declared ANY-VALUE: Any
+;; once, right after the Any import.
+(= ANY-VALUE (+ GENERATED-PREFIX "any_value"))
+;; The AST attribute marking a placeholder's positioned target, which
+;; build-position-map records in PositionMap.placeholders.
+(= PLACEHOLDER-TARGET "lpy_placeholder_target")
 
 ;; Placeholders stand in for a top-level form that failed (compile-buffer),
 ;; so the names it plainly binds stay defined for the backend, in this
@@ -696,13 +723,28 @@
 ;; (symbol-name, python-name, import-bindings, def-args-walk); a failed call
 ;; of a user macro binds nothing knowable, so it is left out.  Only a
 ;; declared name carries a position, its symbol's .lpy span, so the map has
-;; a name entry there; the rest (the AnnAssign, its annotation, the Any
-;; import, every def and class placeholder) carry none, so a backend
-;; diagnostic on them (basedpyright's reportExplicitAny, reportAny on a
-;; parameter) maps nowhere and is dropped (lpy-diagnostic-range).  The
-;; shapes, checked on basedpyright and pyrefly:
-;; - name: Any = ...  A bare `name: Any` leaves a module-level name unbound
-;;   (basedpyright reports "is unbound" at a later use), so it has a value.
+;; a name entry there for navigation; the rest (the assignment, its value,
+;; the Any import and ANY-VALUE's declaration, every def and class
+;; placeholder) carry none, so a backend diagnostic on them (basedpyright's
+;; reportExplicitAny, reportAny on a parameter) maps nowhere and is dropped
+;; (lpy-diagnostic-range).  A diagnostic on the declared name itself is
+;; dropped too (PLACEHOLDER-TARGET, PositionMap.placeholder-p): the entry
+;; cannot tell lispython's binding from the user's, and what a backend says
+;; of the placeholder (reportAny "Type of x is Any" under basedpyright's
+;; recommended and all) is about no code the user wrote.  A use of a
+;; placeholder's name is the user's code, so what a strict mode reports
+;; there stays (basedpyright's reportAny/reportUnknown*, pyrefly's
+;; unknown-attribute-access on a class placeholder under preset all): any
+;; permissive stand-in is Any or Unknown to a checker, and a concrete one
+;; gives false errors.  The shapes, checked on basedpyright and pyrefly:
+;; - name = ANY-VALUE, unannotated.  A declared `name: Any = ...` is a
+;;   second declaration of a name the user's own def or class also
+;;   declares (the failed form retyped below it, or the def it shadows):
+;;   basedpyright reports reportRedeclaration and reportAssignmentType at
+;;   either, even in standard mode; an unannotated assignment declares no
+;;   type, and neither backend reports it in either order.  A bare
+;;   `name: Any` leaves a module-level name unbound (basedpyright reports
+;;   "is unbound" at a later use), so it has a value.
 ;; - a class is `class C(Any): ...`, positionless: a declared `C: Any` is a
 ;;   variable, which basedpyright refuses in an annotation (^C: "Variable
 ;;   not allowed in type expression"); with the Any base, (C 1), (. (C) a)
@@ -714,7 +756,7 @@
 ;;   signature, every parameter and the return Any, positionless for the
 ;;   same reason as a class: a call with a wrong arity is still reported
 ;;   (as Python's checkers report one to a def with no body), a right one is
-;;   not.  A decorated def is `name: Any = ...`, since its decorators may
+;;   not.  A decorated def is `name = ANY-VALUE`, since its decorators may
 ;;   change the signature.
 (= _DEFINITION-HEADS (, "def" "async-def" "class"))
 (= FROM-HEADS (, "from" "lazy-from"))
@@ -739,13 +781,15 @@
   (return tree))
 
 (def _any-declaration [name symbol spelled]
-  "name: Any = ..., its target at the start of symbol (a parsed node) as
-   long as spelled, the text of it that names name."
+  "name = ANY-VALUE, its target at the start of symbol (a parsed node) as
+   long as spelled, the text of it that names name, and marked
+   PLACEHOLDER-TARGET."
   (= target (ast.Name :id name :ctx (ast.Store) :lineno symbol.lineno
                       :col-offset symbol.col-offset :end-lineno symbol.lineno
                       :end-col-offset (+ symbol.col-offset (len spelled))))
-  (return (_positionless (ast.AnnAssign :target target :annotation (_any)
-                                        :value (ast.Constant :value Ellipsis) :simple 1)
+  (setattr target PLACEHOLDER-TARGET True)
+  (return (_positionless (ast.Assign :targets [target]
+                                     :value (ast.Name :id ANY-VALUE :ctx (ast.Load)))
                          :keep target)))
 
 (def _bound-name [symbol table :spelled None]
@@ -844,8 +888,9 @@
   (return []))
 
 (def _with-any-import [body]
-  "body with `from typing import Any as ANY-ALIAS`, positionless, after its
-   docstring and __future__ imports (a future import must come first)."
+  "body with `from typing import Any as ANY-ALIAS` and `ANY-VALUE:
+   ANY-ALIAS = ...`, positionless, after its docstring and __future__
+   imports (a future import must come first)."
   (= index 0)
   (if (and body (isinstance (sub body 0) ast.Expr)
            (isinstance (. (sub body 0) value) ast.Constant)
@@ -858,7 +903,11 @@
                  (ast.ImportFrom :module "typing"
                                  :names [(ast.alias :name "Any" :asname ANY-ALIAS)]
                                  :level 0)))
-  (return (+ (sub body [: None index]) [imported] (sub body [: index None]))))
+  (= declared (_positionless
+                 (ast.AnnAssign :target (ast.Name :id ANY-VALUE :ctx (ast.Store))
+                                :annotation (_any) :value (ast.Constant :value Ellipsis)
+                                :simple 1)))
+  (return (+ (sub body [: None index]) [imported declared] (sub body [: index None]))))
 
 (def compile-buffer [source :package "" :name "__main__" :search-dirs (,)
                      :filename None]

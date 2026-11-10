@@ -28,6 +28,7 @@ from pygls.workspace import TextDocument
 import lispy  # noqa: F401  (registers the .lpy importer)
 import lispy.core.macro
 from lispy.core.importer import finder_suffixes
+from tests.lsp_backends import basedpyright_only
 from tests.test_lsp_backend import FAKE_SERVER, fake_hover, hover_params, run_bounded
 
 backend = importlib.import_module("lispy.lsp.backend")
@@ -1901,6 +1902,58 @@ def test_a_failed_form_keeps_the_rest_of_the_buffers_backend_diagnostics(
     )
     assert own == [(0, "(def"), (2, "(def"), (4, "(mk")]
     assert found == [(6, "q"), (6, "undefined-name"), (7, "2")]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "(= x (while))\n(def x [a]\n  (return a))\n(print undefined-name)\n",
+        "(def x [a]\n  (return a))\n(= x (while))\n(print undefined-name)\n",
+    ],
+    ids=["placeholder-first", "def-first"],
+)
+def test_a_failed_assignment_beside_a_def_of_its_name_reports_neither(
+    run_on_loop, real_backends, backend_project, monkeypatch, source
+):
+    # Defect: the failed (= x ...)'s placeholder is a second declaration of
+    # the user's def x, so basedpyright reports a redeclaration (and an
+    # assignment type error) on one x or the other, though neither is wrong.
+    _, found = published_marks(
+        run_on_loop, real_backends, backend_project, monkeypatch, source, 1
+    )
+    assert found == [(3, "undefined-name")]
+
+
+@basedpyright_only
+def test_a_placeholder_is_unreported_in_a_strict_mode(
+    run_on_loop, real_backends, monkeypatch, tmp_path
+):
+    # Defect: what basedpyright's recommended mode reports on a failed
+    # form's placeholder (reportAny "Type of x is Any") lands on the user's
+    # x, which the placeholder's target maps onto for navigation. A project
+    # of its own, so its config reaches no other test; real_backends only
+    # puts the test on basedpyright, whose process this test's own
+    # Backends stops before it ends.
+    project = tmp_path / "strict-project"
+    project.mkdir()
+    (project / "main.lpy").write_text("(= y 1)\n")
+    (project / "pyrightconfig.json").write_text('{"typeCheckingMode": "recommended"}')
+    folder = SimpleNamespace(uri=project.as_uri())
+    strict = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    strict.configure({"backend": real_backends.name})
+    try:
+        _, found = published_marks(
+            run_on_loop,
+            strict,
+            project,
+            monkeypatch,
+            "(= x (while))\n(print undefined-name)\n",
+            1,
+        )
+    finally:
+        run_on_loop(strict.shutdown_all())
+    # recommended may report undefined-name more than once.
+    assert set(found) == {(1, "undefined-name")}
 
 
 def test_an_importer_of_a_failed_module_sees_its_names(
