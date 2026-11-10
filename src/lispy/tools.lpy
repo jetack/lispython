@@ -534,6 +534,11 @@
 ;; ⚠️ Output of a thread the user's code starts goes to the server's own
 ;; stream, never to the eval: that thread has no sink, and a sink found by
 ;; anything but the writing thread would cross between connections.
+;; Inheriting the starter's sink was rejected: a thread outlives its eval (a plain
+;; eval's capture is already returned, a stream sink is stopped) and a pool worker
+;; would keep its first submitter's sink (ipykernel shipped that inheritance in
+;; 6.29-7.0 and reverted it in 7.1). An interrupt likewise reaches only the eval's
+;; own thread (job.ident), as SIGINT reaches only the main thread in a plain REPL.
 
 (= NREPL-STDOUT-FIELD "stdout")  ; result and out-message field of stdout text
 (= NREPL-STDERR-FIELD "stderr")  ; result and out-message field of stderr text
