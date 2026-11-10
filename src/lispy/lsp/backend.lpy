@@ -434,11 +434,11 @@
     ;; (locate).
     (= self._docs {})
     ;; The last version used for any document (sent, or taken by a close),
-    ;; never reset: a reopened document continues past every version it had.  A reopen at
-    ;; a version already used would let a late publish for the old open's
-    ;; text pass (_diagnostics-published) as the new text's.  pyrefly also
-    ;; publishes an empty set at a closed document's last version + 1, so
-    ;; close-document takes that version too.
+    ;; never reset: a reopened document continues past every version it
+    ;; had.  A reopen at a version already used would let a late publish
+    ;; for the old open's text pass (_diagnostics-published) as the new
+    ;; text's.  pyrefly also publishes an empty set at a closed document's
+    ;; last version + 1, so close-document takes that version too.
     (= self._sent-version 0)
     ;; lpy uri -> (text, origin) of the buffer's latest full view
     ;; (push-buffer), kept across spawns: a start opens each in the new
