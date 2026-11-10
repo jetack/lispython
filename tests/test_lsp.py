@@ -388,18 +388,113 @@ def test_a_diagnostic_range_counts_in_the_editors_units():
     )
 
 
-def test_a_diagnostic_range_ignores_line_breaks_the_reader_does_not_count():
-    # Defect: columns were converted over pygls' doc.lines, which splits on
-    # \x0c, \x1c-\x1e, \x85 and U+2028 too, so every range after one of them
-    # on its line was converted over the wrong line.
-    from pygls.workspace import PositionCodec, TextDocument
+def drive(handler, *args):
+    """Run a pygls builtin handler (a generator) and the user handler it
+    yields, as pygls' protocol does; its return value."""
+    steps = handler(*args)
+    try:
+        user_handler, user_args, _ = next(steps)
+        user_handler(*user_args)
+        steps.send(None)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError("handler yielded twice")
 
+
+@pytest.fixture
+def served(monkeypatch):
+    """The real server's protocol after initialize: open(source) -> the
+    document its workspace holds after didOpen; change(range, text) -> that
+    document after an incremental didChange.  pygls' builtins run, the user
+    didOpen/didChange handlers do not (they compile); the protocol is
+    restored after."""
+    protocol = server.server.protocol
+    saved = dict(vars(protocol))
+    monkeypatch.setattr(server.backends, "name", server.backends.name)
+    monkeypatch.setattr(
+        server.backends, "python_diagnostics", server.backends.python_diagnostics
+    )
+    drive(
+        protocol.lsp_initialize,
+        lsp.InitializeParams(capabilities=lsp.ClientCapabilities()),
+    )
+
+    def builtin(handler, params):
+        # Only the builtin's own workspace update, before the user handler.
+        steps = handler(params)
+        next(steps, None)
+        steps.close()
+
+    def open_(source):
+        item = lsp.TextDocumentItem(uri=URI, language_id="lpy", version=1, text=source)
+        builtin(
+            protocol.lsp_text_document__did_open,
+            lsp.DidOpenTextDocumentParams(text_document=item),
+        )
+        return protocol.workspace.get_text_document(URI)
+
+    def change(rng, text):
+        partial = lsp.TextDocumentContentChangePartial(range=rng, text=text)
+        builtin(
+            protocol.lsp_text_document__did_change,
+            lsp.DidChangeTextDocumentParams(
+                text_document=lsp.VersionedTextDocumentIdentifier(uri=URI, version=2),
+                content_changes=[partial],
+            ),
+        )
+        return protocol.workspace.get_text_document(URI)
+
+    yield SimpleNamespace(open=open_, change=change)
+    vars(protocol).clear()
+    vars(protocol).update(saved)
+
+
+def test_an_incremental_edit_lands_on_the_readers_line(served):
+    # Defect: the workspace kept pygls' TextDocument, whose lines split on
+    # str.splitlines() (\x0c, \x1c-\x1e, \x85, U+2028 too): an incremental
+    # edit after one of them was applied to the wrong line, corrupting the
+    # buffer the server compiles.
+    edit = lsp.Range(
+        start=lsp.Position(line=1, character=1), end=lsp.Position(line=1, character=6)
+    )
+    for char in "\x0c\x1c\x85 ":
+        served.open(f'(= s "a{char}b")\n(print 1)\n')
+        assert served.change(edit, "len").source == f'(= s "a{char}b")\n(len 1)\n'
+
+
+def test_a_position_after_a_final_line_break_is_on_the_empty_last_line(served):
+    # Defect: pygls' lines have no empty line after a final break, so the
+    # codec clamped a position there to the end of the line before it.
+    doc = served.open("(print 1)\n")
+    assert server.cursor_of(doc, lsp.Position(line=1, character=0)) == (2, 0)
+
+
+def test_a_diagnostic_range_ignores_line_breaks_the_reader_does_not_count(served):
+    # Defect: columns were converted over str.splitlines()' lines, which
+    # break at \x0c, \x1c-\x1e, \x85 and U+2028 too, so every range after
+    # one of them on its line was converted over the wrong line.
     for char in "\x0c\x1c\x85 ":
         source = f'(= s "a{char}b")\n  (while)'
-        doc = TextDocument(URI, source, position_codec=PositionCodec(encoding="utf-16"))
+        doc = served.open(source)
         [diagnostic] = server.compute_diagnostics(source, URI, doc=doc)
         rng = diagnostic.range
         assert (rng.start.line, rng.start.character, rng.end.character) == (1, 2, 8)
+
+
+def test_the_cursor_word_is_found_on_the_readers_line_after_a_lone_cr():
+    # Defect: the buffer was split on "\n" only, so after a lone \r (a line
+    # break to the reader) the cursor's line was missing or another one:
+    # no cursor view, no completion context.
+    source = "(x)\r(fo)\r\n(y)"
+    marked, _, start, end, partial = pv.marked_source(source, 2, 3)
+    assert (marked, start, end, partial) == (
+        f"(x)\r({pv.CURSOR_SENTINEL})\r\n(y)",
+        1,
+        3,
+        "fo",
+    )
+    assert server.line_text(source, 2) == "(fo)"
+    assert pv.source_prefix(source, 2, 3) == "(x)\r(fo"
 
 
 def test_a_diagnostic_never_underlines_a_crlf_lines_carriage_return():

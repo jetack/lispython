@@ -19,13 +19,14 @@
 (from lsprotocol [types as lsp])
 (from pygls.lsp.server [LanguageServer])
 (from pygls.uris [to-fs-path])
-(from pygls.workspace [PositionCodec TextDocument])
+(from pygls.workspace [PositionCodec TextDocument Workspace])
 
 (from lispy.core.nodes *)
 (from lispy.core.errors [compile-errors LispyCompileError])
 (from lispy.core.importer [finder-loader-details finder-suffixes renames-modules-p])
 (from lispy.core.macro [prelude-opted-out])
-(from lispy.core.parser [_WORD_TOKENS parse run-tokens source-offset tokenize])
+(from lispy.core.parser [_WORD_TOKENS parse run-tokens source-offset split-lines
+                          tokenize])
 (from lispy.core.builtins [LAMBDA-HEADS])
 (from lispy.core.compiler.expr [param-bindings])
 (from lispy.core.compiler.stmt [import-bindings type-alias-p])
@@ -59,6 +60,25 @@
 ;; ---------------------------------------------------------------------------
 
 (= server (LanguageServer "lpy-lsp" "v0.1.0"))
+
+(class LpyDocument [TextDocument]
+  "A pygls document whose lines are the reader's (split-lines), each with
+   its line break as pygls expects, the empty line after a final break
+   included.  pygls' own split on str.splitlines(), which also breaks at
+   \\x0c, \\x1c-\\x1e, \\x85 and U+2028, so incremental edits, position
+   conversion and every column after such a character landed on the wrong
+   line; and with no empty last line, a position after a final break was
+   clamped to the end of the line before it."
+  (deco property
+    (def lines [self]
+      (return (tuple (split-lines self.source :keepends True))))))
+
+(class LpyWorkspace [Workspace]
+  "pygls' workspace building LpyDocuments (on-initialize installs it)."
+  (def _create_text_document [self doc-uri :source None :version None :language-id None]
+    (return (LpyDocument doc-uri :source source :version version :language-id language-id
+                         :sync-kind self._sync_kind
+                         :position-codec self._position_codec))))
 
 ;; ---------------------------------------------------------------------------
 ;; Python builtins introspection
@@ -1637,6 +1657,10 @@
 
 (deco (server.feature lsp.INITIALIZE)
 (def on-initialize [ls params]
+  ;; pygls builds its Workspace just before this handler and offers no
+  ;; document class hook, so the workspace is made an LpyWorkspace here,
+  ;; before any document opens.
+  (= ls.workspace.__class__ LpyWorkspace)
   (.configure backends params.initialization_options)))
 
 (deco (server.feature lsp.INITIALIZED)
@@ -2026,7 +2050,7 @@
   (if (is codec None)
       (return (, (+ pos.line 1) pos.character)))
   (= server-pos (.position-from-client-units
-                  codec (document-lines doc)
+                  codec doc.lines
                   (lsp.Position :line pos.line :character pos.character)))
   (return (, (+ server-pos.line 1) server-pos.character)))
 
@@ -2164,15 +2188,8 @@
 
 (def line-text [source line]
   "The text of source's 1-based line, the empty string past its end."
-  (= lines (.split source "\n"))
+  (= lines (split-lines source))
   (return (ife (<= 1 line (len lines)) (sub lines (- line 1)) "")))
-
-(def document-lines [doc]
-  "doc's lines as the reader and the LSP count them (\\r\\n, a lone \\r, \\n),
-   each with its line break kept as pygls' do; never doc.lines, which splits
-   on str.splitlines()'s extra breaks (\\x0c, \\x1c-\\x1e, \\x85, U+2028) and
-   so moves every column after one on its line."
-  (return (re.findall r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+" doc.source)))
 
 (def client-position [doc line character :lines None]
   "The 1-based line and code-point character as an LSP Position in client
@@ -2183,7 +2200,7 @@
   (= codec (getattr doc "position_codec" None))
   (if (is codec None)
       (return pos))
-  (return (.position-to-client-units codec (ife (is lines None) (document-lines doc) lines) pos)))
+  (return (.position-to-client-units codec (ife (is lines None) doc.lines lines) pos)))
 
 (def completion-ranges [doc line col]
   "The ranges a completion item edits at the 1-based line and code-point
@@ -2472,7 +2489,7 @@
    reads one).  Limits: only the form open at the cursor is skipped, so a
    second form left open after it loses what follows it; and a ( in column
    0 inside a multi-line string is taken for a form's start."
-  (= lines (.split source "\n"))
+  (= lines (split-lines source))
   (= texts [source])
   (for i in (range (ife (is line None) (len lines) line) (len lines))
     (if (.startswith (sub lines i) "(")
@@ -2793,7 +2810,7 @@
    and after the cursor, whether it is an attribute, and the naming its
    cursor view compiles under (uri-module-names, which follows the files
    and workspace folders around the document)."
-  (= lines (.split doc.source "\n"))
+  (= lines (split-lines doc.source))
   (= text (line-text doc.source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
@@ -2992,7 +3009,7 @@
     ;; UnicodeDecodeError is a ValueError.
     (except [(, OSError ValueError)]
       (= source "")))
-  (return (TextDocument doc.uri source
+  (return (LpyDocument doc.uri source
                         :version (getattr doc "version" None)
                         :position-codec (getattr doc "position_codec" None))))
 
@@ -3344,7 +3361,7 @@
   (= span (origin-span origin rng))
   (if (is span None)
       (return None))
-  (return (span-range doc span (.split (sub origin 0) "\n"))))
+  (return (span-range doc span (split-lines (sub origin 0)))))
 
 (def utf16-client-p [doc]
   "Whether doc's editor counts positions in UTF-16 units, as the backend
