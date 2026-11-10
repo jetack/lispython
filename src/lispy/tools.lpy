@@ -1507,9 +1507,7 @@
     (= self.raised-at None)  ; monotonic time of the last interrupt raised in it
     (= self.prepared False)  ; sink started and routed
     (= self.ran False)  ; _execute was entered
-    (= self.outcome (, _NREPL-INTERRUPTED None))
-    (= self.done (threading.Event))  ; its final reply was sent (or failed)
-    (= self.send-error None)))  ; the OSError sending that reply raised
+    (= self.outcome (, _NREPL-INTERRUPTED None))))
 
 ;; An interrupt of an eval already interrupted this recently raises nothing
 ;; more (its reply still says interrupt-result): each raise must land in the
@@ -1532,7 +1530,7 @@
 (= _NREPL-BUSY "busy")  ; the warnings lock stayed held for NREPL-WARNINGS-WAIT
 ;; Requests that can run user code (macros; _resolve-obj evaluates a dotted
 ;; name, so a property, a __getattr__ or a lazy import runs) and so leave the
-;; reader while an eval is not waited for (_NreplConnection.aside).  A
+;; reader while an eval is queued or running (_NreplConnection.aside).  A
 ;; complete does too when its prefix has a dot (_resolve-obj on its head,
 ;; dir running __dir__); a plain-prefix complete runs no user code and
 ;; stays on the reader (_nrepl-runs-user-code-p).
@@ -1556,34 +1554,30 @@
   Every eval and load-file runs on the connection's worker thread, from a
   FIFO queue: one connection's evals run one at a time in request order
   (Clojure nREPL's session rule, so an eval sees what the one before it
-  defined), and different connections run at the same time.  A plain eval
-  keeps the old contract: the reader waits for it before reading the next
-  request, and its output comes back in its result, which vsc-lispy relies
-  on (it settles a request on the first message carrying its id).  A
-  stream eval (NREPL-STREAM-FIELD true, opt-in for that reason) does not
-  hold the reader: complete, docs, interrupt and the rest are answered while
-  it runs, and its output arrives as out messages (_NreplStream) before its
-  final result.  ⚠️ A plain eval queued behind a stream eval is not waited
-  for either, because the reader would then stop reading (no interrupt, no
-  EOF) for as long as the stream eval runs; its reply comes when it ran.
+  defined), and different connections run at the same time.  ⚠️ The reader
+  never waits for an eval: it queues it and reads on, because while it
+  waited it would read no interrupt and notice no EOF, so an endless eval
+  could be stopped only by killing the server.  A plain eval's output comes
+  back in its final result (_NreplCapture), which vsc-lispy relies on (it
+  settles a request on the first message carrying its id); a stream eval
+  (NREPL-STREAM-FIELD true, opt-in) sends its output as out messages
+  (_NreplStream) before its final result.  Either can be interrupted by its
+  id while queued or running.
 
-  The reader never waits on user code while an eval is not waited for, or
-  an interrupt sent then would never be read: complete takes no lock
+  The reader never waits on user code while an eval is queued or running,
+  or an interrupt sent then would never be read: complete takes no lock
   (nrepl-scope-lock), and the requests that may run user code (macroexpand,
   docs, annotate, a dotted complete: _nrepl-runs-user-code-p) go to the
   connection's side worker, one lazily started thread with its own FIFO
   queue, whenever a job is queued or running or an earlier side request is
   still pending (so a later inline request never overtakes one); otherwise
-  they run on the reader as before.  Their replies have the reader's
-  shapes.  A plain eval is waited for only with no job and no side request
-  pending, since a side request may hold the scope lock its compile needs.
-  A side request cannot be interrupted: one that never returns leaves only
-  its daemon thread behind, the side requests after it on that connection
-  wait for it, and an unwaited plain eval behind it waits on the scope lock
-  until it returns.  While an eval is not waited for, replies can leave in
-  another order than their requests came (a side reply after a later
-  inline one), so a client matches them by id; an id-less request has
-  nothing to match by.
+  they run on the reader.  Their replies have the reader's shapes.  A side
+  request cannot be interrupted: one that never returns leaves only its
+  daemon thread behind, the side requests after it on that connection wait
+  for it, and an eval behind it waits on the scope lock until it returns.
+  Replies can leave in another order than their requests came (an eval's
+  after a later inline request's), so a client matches them by id; an
+  id-less request has nothing to match by.
 
   Every send on the connection is one whole line under one lock (sendall),
   so the reader, the workers and a stream's flusher never interleave bytes."
@@ -1595,7 +1589,7 @@
     ;; under it, while the job is RUNNING.  An RLock: _close-window.
     (= self._lock (threading.RLock))
     (= self._jobs [])  ; queued and running jobs, in request order
-    (= self._by-id {})  ; _nrepl-interrupt-key -> stream job, queued or running
+    (= self._by-id {})  ; _nrepl-interrupt-key -> job, queued or running
     (= self._queue (queue.SimpleQueue))
     (= self._worker (threading.Thread :target self._work :daemon True
                                       :name "nrepl-eval"))
@@ -1609,40 +1603,28 @@
       (self.conn.sendall data)))
 
   (def evaluate [self msg]
-    "Queue an eval or load-file request.  A plain one with nothing queued or
-    running ahead of it is waited for (and its reply's send failure raised
-    here, which ends the connection); any other returns at once and can be
-    interrupted by its id while queued or running.  A stream eval needs such
-    an id (a truthy string or number); an id already queued or running on
-    the connection is refused for any eval that is not waited for.  A
-    refused eval gets an error reply and is not run."
+    "Queue an eval or load-file request and return at once; its final reply
+    goes out when it ran.  An eval with an id (a truthy string or number)
+    can be interrupted by it while queued or running; a stream eval needs
+    one, and an id already queued or running on the connection is refused.
+    A refused eval gets an error reply and is not run."
     (= stream (is (.get msg NREPL-STREAM-FIELD) True))
     (= key (_nrepl-interrupt-key (.get msg "id")))
     (= job (_NreplJob msg stream self.sendall))
     (= refusal None)
     (with [self._lock]
-      ;; Waited for only behind nothing: a plain eval behind any unwaited one
-      ;; (stream or plain) may wait for an endless eval, and one behind a
-      ;; pending side request may wait for its scope lock forever (a macro
-      ;; that never returns), and the reader would then read no interrupt
-      ;; and no EOF.  _side-pending changes only under this lock.
-      (= wait (and (not stream) (not self._jobs) (== self._side-pending 0)))
       (cond (and stream (is key None))
             (= refusal "a stream eval needs an id: a non-empty string or a non-zero number")
-            (and (not wait) (is-not key None) (in key self._by-id))
+            (and (is-not key None) (in key self._by-id))
             (= refusal (+ "an eval with id " (json.dumps key) " is already queued or running"))
             True
-            (do (if (and (not wait) (is-not key None))
+            (do (if (is-not key None)
                     (= (sub self._by-id key) job))
                 (.append self._jobs job))))
     (if (is-not refusal None)
         (do (_nrepl-error-reply self msg refusal)
             (return)))
-    (self._queue.put job)
-    (if wait
-        (do (job.done.wait)
-            (if (is-not job.send-error None)
-                (raise job.send-error)))))
+    (self._queue.put job))
 
   (def _raise-in [self job :force False :wait None]
     "Raise KeyboardInterrupt in RUNNING job and return _NREPL-RAISED, unless
@@ -1686,9 +1668,8 @@
     is no such eval, or when it was interrupted less than
     NREPL-INTERRUPT-REPEAT ago or busy in the compiler's warnings lock
     (_raise-in) and this one raised nothing (the client may send it again).
-    Only a stream eval, or a plain one queued behind one, can be
-    interrupted.  The reply goes out under the lock, so it precedes
-    the eval's final result."
+    The reply goes out under the lock, so it precedes the eval's final
+    result."
     (= target (.get msg NREPL-INTERRUPT-ID-FIELD))
     (= key (_nrepl-interrupt-key target))
     (with [self._lock]
@@ -1824,7 +1805,8 @@
     "Clean job up and send its one final reply: its outcome, or an internal
     error when internal (an exception of the worker's own) is given or the
     delivery fails before sending.  Each step runs whatever failed before
-    it, so the id is freed and the reader released in every case."
+    it, so the id is freed and the job ends in every case.  A failed send
+    is dropped: the reader ends the connection on its own recv."
     (if (is-not internal None)
         ;; The window may still be open: close it without the lock's retry.
         (do (= job.state _NREPL-FINISHING)
@@ -1842,17 +1824,16 @@
       (if (is internal None)
           (self._deliver job job.outcome)
           (_nrepl-error-reply self job.msg (+ "internal error: " (_nrepl-failure-text internal))))
-      (except [OSError as e]
-        (= job.send-error e))
+      (except [OSError]
+        (pass))
       (except [Exception as e]
         ;; _deliver raises only before it sends, so this is still the one reply.
         (try
           (_nrepl-error-reply self job.msg (+ "internal error: " (_nrepl-failure-text e)))
-          (except [OSError as e2]
-            (= job.send-error e2))))
+          (except [OSError]
+            (pass))))
       (finally
-        (= job.state _NREPL-DONE)
-        (job.done.set))))
+        (= job.state _NREPL-DONE))))
 
   (def _unregister [self job]
     (with [self._lock]
@@ -1929,7 +1910,8 @@
   "Serve one connection until EOF or a socket error, then end its evals
   (_NreplConnection.close) and close conn.  Every non-blank request line
   gets exactly one final reply; only a stream eval's out messages come
-  besides."
+  besides.  An eval never holds the reader (_NreplConnection.evaluate), so
+  an interrupt or EOF is read while one runs."
   ;; Buffer bytes and decode only whole lines: a multi-byte UTF-8 character can
   ;; straddle two recv reads, and decoding each read on its own would raise.
   ;; A line over NREPL-MAX-LINE gets one error reply and is dropped up to its
