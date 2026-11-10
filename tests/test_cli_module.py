@@ -89,3 +89,28 @@ def test_m_refuses_a_part_that_is_no_name(tmp_path: Path):
     assert r.stderr.startswith("<command line>:1:1: error:")
     assert r.stderr.splitlines()[1:] == ["class", "^"]
     assert "Traceback" not in r.stderr
+
+
+@pytest.mark.parametrize(
+    ("module", "message"),
+    [
+        ("no-such-mod", "No module named no_such_mod"),
+        (".rel", "Relative module names not supported"),
+    ],
+)
+def test_m_unfindable_module_is_one_line_like_python(
+    tmp_path: Path, module: str, message: str
+):
+    r = run_m(tmp_path, module)
+    assert r.returncode == 1
+    assert r.stderr.strip().endswith(message)
+    assert len(r.stderr.strip().splitlines()) == 1
+    assert "Traceback" not in r.stderr
+
+
+def test_m_import_error_inside_the_module_keeps_its_traceback(tmp_path: Path):
+    (tmp_path / "cwdmod.py").write_text("import no_such_dependency\n")
+    r = run_m(tmp_path)
+    assert r.returncode == 1
+    assert "Traceback" in r.stderr
+    assert "No module named 'no_such_dependency'" in r.stderr
