@@ -393,8 +393,10 @@
    .lpy uri, as the view-path shadow's uri: a buffer's full view
    (push-buffer), or a request's cursor view, after whose answer the full
    view is synced back.  Its diagnostics are kept only for a full view's
-   text (_diagnostics-published, diagnostics-for).  definition-walks-up is
-   True for a backend in DEFINITION-WALKS-UP."
+   text (_diagnostics-published, diagnostics-for).  A save while a start
+   is in progress is recorded and replayed once it runs (_replay-saves),
+   since the start's sweep may have read the disk before the save.
+   definition-walks-up is True for a backend in DEFINITION-WALKS-UP."
   (def __init__ [self view-root argv :name None :manifest None
                  :check-types True :definition-walks-up False]
     (= self.view-root view-root)
@@ -415,6 +417,12 @@
     (= self._starting None)
     ;; _discard's cleanups still running (_reap).
     (= self._cleanups (set))
+    ;; lpy uris saved while a start was in progress (file-saved), which its
+    ;; sweep may have missed: replayed once it runs, dropped when it fails.
+    (= self._saved-while-starting (set))
+    ;; The replays of those saves still running (_replay-saves); kept here
+    ;; because the loop holds tasks only weakly.
+    (= self._replays (set))
     ;; lpy uri -> [backend uri, version, text last sent, origin], for this
     ;; spawn: origin is (source, view), the .lpy source and the PythonView
     ;; whose text was sent, or None when the sender did not say (locate).
@@ -454,6 +462,11 @@
                    (is self.process.returncode None)))))
 
   (deco property
+    (def starting [self]
+      "True while a start is in progress (_start-task's task)."
+      (return (and (is-not self._starting None) (not (.done self._starting))))))
+
+  (deco property
     (def available [self]
       "False when the backend is off or shut down: a request answers None
        without trying, so a caller need not prepare one."
@@ -486,7 +499,7 @@
     "The task starting the backend: the one in progress, else a new one when
      none runs and a start is left (MAX-SPAWNS), else None.  Synchronous, so
      two requests on the loop never start two processes."
-    (if (and (is-not self._starting None) (not (.done self._starting)))
+    (if self.starting
         (return self._starting))
     (if (and (== self.state "running") (not self.running))
         ;; exited, and server_exit has not reported it yet
@@ -535,16 +548,20 @@
       (except [Exception as e]
         (.warning logger "lispython LSP: Python backend for %s failed to start: %s"
                   self.project-root e)
+        ;; the next start's own sweep reads the disk anew
+        (.clear self._saved-while-starting)
         (await (._discard self))
         (if (!= self.state "closed")
             (= self.state (ife (>= self.spawns MAX-SPAWNS) OFF "dead")))
         (return False))
       (except [asyncio.CancelledError]
+        (.clear self._saved-while-starting)
         (await (._discard self))
         (raise)))
     (if (== self.state "closed")
         ;; shutdown came during the spawn
-        (do (await (._discard self))
+        (do (.clear self._saved-while-starting)
+            (await (._discard self))
             (return False)))
     (= self.state "running")
     ;; The buffers pushed while it started: their diagnostics need their
@@ -557,7 +574,21 @@
     ;; Only now: a start that failed or was shut down tells nobody of the
     ;; view it wrote, since no backend ever used it.
     (._tell-view-prepared self)
+    (._replay-saves self)
     (return True))
+
+  (def _replay-saves [self]
+    "Replay the saves recorded while the start that just succeeded was in
+     progress, all at once (saved: one sweep), as a task of its own: a
+     request awaits the start, and the sweep compiles the project."
+    (if (not self._saved-while-starting)
+        (return))
+    (= lpy-uris (sorted self._saved-while-starting))
+    (.clear self._saved-while-starting)
+    (= replay (asyncio.create-task (.saved self *lpy-uris)))
+    (.add self._replays replay)
+    (.add-done-callback replay _task-done)
+    (.add-done-callback replay self._replays.discard))
 
   (def _tell-view-prepared [self]
     "Call on-view-prepared with this client, if set.  Never raises."
@@ -867,18 +898,24 @@
           (lsp.DidCloseTextDocumentParams
             :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))))
 
-  (async-def file-saved [self lpy-uri]
+  (async-def file-saved [self *lpy-uris]
     "Rewrite a running backend's shadows and config, then tell it every file
-     the sweep changed: the saved file's shadow and each shadow the sweep
+     the sweep changed: each saved file's shadow and each shadow the sweep
      wrote (a macro module's dependents recompile with it) as Changed, each
-     file it removed as Deleted."
+     file it removed as Deleted.  While a start is in progress the saves
+     are recorded instead and replayed once it runs (_replay-saves),
+     because its sweep may have read the disk before them; with neither, a
+     no-op, since the next start sweeps."
     (if (not self.running)
-        (return))
+        (do (if self.starting
+                (.update self._saved-while-starting lpy-uris))
+            (return)))
     (= sweep (await (asyncio.to-thread self._prepare-view-root)))
     (= changed [(.as-uri (pathlib.Path path)) for path in sweep.written])
-    (= uri (.backend-uri self lpy-uri))
-    (if (and (is-not uri None) (not-in uri changed))
-        (.append changed uri))
+    (for lpy-uri in lpy-uris
+      (= uri (.backend-uri self lpy-uri))
+      (if (and (is-not uri None) (not-in uri changed))
+          (.append changed uri)))
     (= changes (+ [(lsp.FileEvent :uri uri :type lsp.FileChangeType.Changed)
                    for uri in changed]
                   [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
@@ -890,13 +927,14 @@
             ;; On the loop: the thread's work ended at the await above.
             (._tell-input-changed self None))))
 
-  (async-def saved [self lpy-uri]
-    "Document lpy-uri was saved: file-saved, then, when that changed the
+  (async-def saved [self *lpy-uris]
+    "Documents lpy-uris were saved: file-saved, then, when that changed the
      view root's config file, tell the running backend the file changed and
      call on-view-prepared.  A running backend reads its config at start
      and when told the file changed, then republishes its open documents;
-     it never re-reads it on its own."
-    (await (.file-saved self lpy-uri))
+     it never re-reads it on its own.  A save during a start is replayed
+     through here once it runs (_replay-saves)."
+    (await (.file-saved self *lpy-uris))
     (if (not self.running)
         (return))
     (= path (._config-path self))
@@ -912,11 +950,11 @@
     (._tell-view-prepared self))
 
   (async-def shutdown [self]
-    "Stop the backend for good: cancel a start in progress, send shutdown
-     and exit and wait for the process to end, all within SHUTDOWN-TIMEOUT,
-     then kill and reap it (_reap: up to three KILL-TIMEOUT waits), about
-     3.5 s at worst; a start it cancels reaps its own client instead.
-     No request spawns one afterwards."
+    "Stop the backend for good: cancel a start or save replay in progress,
+     send shutdown and exit and wait for the process to end, all within
+     SHUTDOWN-TIMEOUT, then kill and reap it (_reap: up to three
+     KILL-TIMEOUT waits), about 3.5 s at worst; a start it cancels reaps
+     its own client instead.  No request spawns one afterwards."
     (= self.state "closed")
     (= deadline (+ (.time (asyncio.get-running-loop)) SHUTDOWN-TIMEOUT))
     (= starting self._starting)
@@ -926,6 +964,10 @@
         ;; lock) after shutdown, which only touches the cache directory.
         (do (.cancel starting)
             (await (asyncio.gather starting :return-exceptions True))))
+    (= replays (list self._replays))
+    (for replay in replays
+      (.cancel replay))
+    (await (asyncio.gather *replays :return-exceptions True))
     (= client self._client)
     (= process self.process)
     (if (and (is-not client None) (is-not process None) (is process.returncode None))
@@ -958,6 +1000,8 @@
     (= self.state "closed")
     (if (is-not self._starting None)
         (.cancel self._starting))
+    (for replay in (list self._replays)
+      (.cancel replay))
     (_kill self.process)))
 
 (async-def _reap [client process drain]
@@ -1203,9 +1247,12 @@
         (.exception logger "lispython LSP: backend close failed for %s" lpy-uri))))
 
   (def document-saved [self lpy-uri]
+    "A buffer was saved: BackendClient.saved for a running backend or one
+     starting, which replays it once it runs (its sweep may predate the
+     save).  Call on the loop."
     (try
       (= client (._existing self lpy-uri))
-      (if (and (is-not client None) client.running)
+      (if (and (is-not client None) (or client.running client.starting))
           (._schedule self (.saved client lpy-uri)))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
