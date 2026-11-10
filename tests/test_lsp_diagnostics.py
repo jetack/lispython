@@ -213,9 +213,10 @@ def test_only_the_full_views_current_version_is_kept(tmp_path):
 
 
 def test_a_reopened_document_never_reuses_a_version(tmp_path):
-    # Defect: a reopen sends didOpen at version 1 again, so a late publish
-    # the backend computed for the previous open's version 1 (old text) is
-    # kept as the diagnostics of the new text and mapped onto it.
+    # Defect: a reopen sends didOpen at a version already used, so a late
+    # publish for the previous open (its version, or pyrefly's empty publish
+    # at a closed document's last version + 1) is kept as the diagnostics of
+    # the new text and mapped onto it.
     project = tmp_path / "project"
     project.mkdir()
     client = backend.BackendClient(
@@ -251,8 +252,9 @@ def test_a_reopened_document_never_reuses_a_version(tmp_path):
     client._sync(uri, text_b, origin=("src", None))
     client._full[uri] = (text_b, ("src", None))
     version_b = process.sent[-1]
-    assert version_a != version_b
     client._diagnostics_published(process, published(shadow, version_a, [diagnostic]))
+    assert client.diagnostics_for(uri, text_b) is None
+    client._diagnostics_published(process, published(shadow, version_a + 1, []))
     assert client.diagnostics_for(uri, text_b) is None
     client._diagnostics_published(process, published(shadow, version_b, [diagnostic]))
     assert client.diagnostics_for(uri, text_b) == [(diagnostic, [])]

@@ -436,7 +436,9 @@
     ;; The last version sent to the backend, for any document, never reset:
     ;; a reopened document continues past every version it had.  A reopen at
     ;; a version already used would let a late publish for the old open's
-    ;; text pass (_diagnostics-published) as the new text's.
+    ;; text pass (_diagnostics-published) as the new text's.  pyrefly also
+    ;; publishes an empty set at a closed document's last version + 1, so
+    ;; close-document takes that version too.
     (= self._sent-version 0)
     ;; lpy uri -> (text, origin) of the buffer's latest full view
     ;; (push-buffer), kept across spawns: a start opens each in the new
@@ -913,6 +915,8 @@
     (.pop self._full lpy-uri None)
     (.pop self._diagnostics lpy-uri None)
     (= doc (.pop self._docs lpy-uri None))
+    (if (is-not doc None)
+        (._next-version self))
     (if (and (is-not doc None) self.running)
         (.text-document-did-close self._client
           (lsp.DidCloseTextDocumentParams
