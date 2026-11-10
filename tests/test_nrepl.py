@@ -42,7 +42,9 @@ def line(**msg):
 
 def serve(chunks):
     # EOF ends a connection's unfinished evals, so the fake client sends it
-    # only once every request it sent has been answered.
+    # only once no job is queued or running and no side request is pending.
+    # A reply still being sent then lands: close() joins the worker, and
+    # FakeConn has no shutdown for close() to cut the send short with.
     import time
 
     connections = []
