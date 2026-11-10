@@ -1305,6 +1305,66 @@ def test_an_operator_never_spells_a_name():
     assert (spellings.get("_", "_"), spellings["_p"]) == ("_", "?")
 
 
+# w at line 1 columns 10 (the field's value) and 13 (its format spec's field).
+FIELD_SPEC = '(= w 4)\n(print f"{w:{w}}")'
+
+
+@pytest.mark.parametrize("character", [3, 10, 13], ids=["def", "field", "spec"])
+def test_references_include_a_format_specs_fields(character):
+    # Defect: the walk reads a field's value only, never its format spec,
+    # and the f-string's head spans the whole literal, so a name in a field
+    # was that head: the spec's w was missed, or the references were the
+    # f-string form's.
+    assert local_references(FIELD_SPEC, 0 if character == 3 else 1, character) == [
+        (0, 3),
+        (1, 10),
+        (1, 13),
+    ]
+
+
+@pytest.mark.parametrize("character", [10, 13], ids=["field", "spec"])
+def test_definition_of_a_name_in_an_f_string_field(character):
+    # Defect: the cursor's node was the f-string's head, whose span is the
+    # whole literal, so a name in a field had no definition.
+    [location] = run_definition(ls_with(FIELD_SPEC), position(1, character))
+    assert (location.range.start.line, location.range.start.character) == (0, 3)
+
+
+def test_hover_inside_a_format_spec_reads_the_spec():
+    # Defect: a name or form head in a format spec answered as the f-string
+    # form, or a head there was no form head (form-heads skipped the spec).
+    source = '(print f"{1:{len}}" f"{1:{(ife a b c)}}")'
+    hover = run_hover(ls_with(source), position(0, 14))
+    assert "Python builtin" in hover.contents.value
+    hover = run_hover(ls_with(source), position(0, source.index("ife") + 1))
+    assert hover.contents.value == server.SPECIAL_FORM_DOCS["ife"]
+
+
+@pytest.mark.parametrize("character", [8, 9, 11, 14, 15, 18, 20, 22])
+def test_hover_on_an_f_strings_own_text_is_the_form(character):
+    # Defect: a cursor on the literal's text, braces or delimiters left the
+    # head for a string part or the field, so there was no hover.
+    # Columns: the quote, a, the field's {, the spec's > and {, the
+    # field's closing }, c, the closing quote.
+    source = '(print f"ab{x:>{w}} cd")'
+    hover = run_hover(ls_with(source), position(0, character))
+    assert hover.contents.value == server.SPECIAL_FORM_DOCS["f-string"]
+
+
+def test_node_at_position_walks_any_depth():
+    # Defect: one call per nesting level, so a deep buffer raised
+    # RecursionError out of hover.
+    # The RecursionError is caught here: pytest formatting its frames, each
+    # holding a node whose repr walks the tree, would never finish.
+    depth = 5000
+    tree = parse("(" * depth + "x" + ")" * depth, partial=True)
+    try:
+        name = server.node_at_position(tree, 0, depth).value
+    except RecursionError:
+        name = "RecursionError"
+    assert name == "x"
+
+
 def test_completion_reads_the_view_generation_before_the_hand_off(
     monkeypatch, tmp_path
 ):
