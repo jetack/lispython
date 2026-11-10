@@ -2493,7 +2493,7 @@
   (= texts [source])
   (for i in (range (ife (is line None) (len lines) line) (len lines))
     (if (.startswith (sub lines i) "(")
-        (do (.append texts (.join "\n" (sub lines [: i None])))
+        (do (.append texts (sub source [: ((source-offset source) (+ i 1) 0) None]))
             (break))))
   (return texts))
 
@@ -2810,12 +2810,17 @@
    and after the cursor, whether it is an attribute, and the naming its
    cursor view compiles under (uri-module-names, which follows the files
    and workspace folders around the document)."
-  (= lines (split-lines doc.source))
-  (= text (line-text doc.source line))
+  (= source doc.source)
+  (= text (line-text source line))
   (= col (min col (len text)))
   (= start (sub (partial-span text col) 0))
-  (= before (.join "\n" [*(sub lines [: None (max 0 (- line 1))]) (sub text [: None start])]))
-  (= after (.join "\n" [(sub text [: col None]) *(sub lines [: line None])]))
+  ;; Sliced by offset, so before and after are the buffer's own text, its
+  ;; line breaks as written.
+  (= line-start (ife (<= 1 line (len (split-lines source)))
+                     ((source-offset source) line 0)
+                     (len source)))
+  (= before (sub source [: None (+ line-start start)]))
+  (= after (sub source [: (+ line-start col) None]))
   (return (, (, line start before after attribute (uri-module-names doc.uri))
              (sub text [: start col]))))
 

@@ -481,6 +481,47 @@ def test_a_diagnostic_range_ignores_line_breaks_the_reader_does_not_count(served
         assert (rng.start.line, rng.start.character, rng.end.character) == (1, 2, 8)
 
 
+def test_a_snapshot_keeps_the_readers_lines(served):
+    # Defect: document-snapshot copied into pygls' TextDocument, whose
+    # lines break at \x0c too, so a position after it was converted over
+    # the line before (here the line holding the astral characters).
+    doc = server.document_snapshot(served.open('(= s "a\x0cb")\n(= x "😀😀😀")\n'))
+    assert server.cursor_of(doc, lsp.Position(line=1, character=12)) == (2, 9)
+    assert server.client_position(doc, 2, 9).character == 12
+
+
+def test_completion_context_keeps_the_buffers_own_text():
+    # Defect: the text around the word was rejoined with \n, so a CRLF
+    # buffer's key was not its own text.
+    doc = server.LpyDocument(URI, "(a)\r\n(fo x)\r\n")
+    [_, _, before, after, *_], typed = server.completion_context(doc, 2, 3, False)
+    assert (before, after, typed) == ("(a)\r\n(", " x)\r\n", "fo")
+
+
+def test_buffer_texts_reads_the_rest_of_the_buffer_as_written():
+    # Defect: the text from the next top-level form was rejoined with \n.
+    assert server.buffer_texts("(f\r\n(g)\r\n", 1) == ["(f\r\n(g)\r\n", "(g)\r\n"]
+
+
+def test_an_origin_range_counts_over_the_readers_lines():
+    # Defect: origin-range split the origin's source on \n only, so after a
+    # lone CR the line was missing and the range fell to the end of the
+    # buffer instead of counting the astral character before bb.
+    from pygls.workspace import PositionCodec
+
+    src = '(= a 1)\r(= bb 2)\r(print "😀" bb)'
+    view = pv.compile_view(src)
+    gen_line = view.text.split("\n").index("print('😀', bb)")
+    gen_col = "print('😀', bb)".index("bb") + 1  # UTF-16: the astral is two
+    rng = lsp.Range(
+        start=lsp.Position(line=gen_line, character=gen_col),
+        end=lsp.Position(line=gen_line, character=gen_col + 2),
+    )
+    doc = server.LpyDocument(URI, src, position_codec=PositionCodec(encoding="utf-16"))
+    got = server.origin_range(doc, (src, view), rng)
+    assert (got.start.line, got.start.character, got.end.character) == (2, 12, 14)
+
+
 def test_the_cursor_word_is_found_on_the_readers_line_after_a_lone_cr():
     # Defect: the buffer was split on "\n" only, so after a lone \r (a line
     # break to the reader) the cursor's line was missing or another one:

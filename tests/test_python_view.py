@@ -212,6 +212,14 @@ class TestLpyRange:
             is None
         )
 
+    @pytest.mark.parametrize("sep", ["\n", "\r\n", "\r"])
+    def test_a_name_maps_on_the_readers_lines(self, sep):
+        # Defect: the position map read the source's lines split on \n only,
+        # so after a lone CR no node was in the buffer and nothing mapped.
+        src = f"(= a 1){sep}(= bb 2){sep}(print bb)"
+        view = view_of(src)
+        assert pv.lpy_range(view, src, *gen_range(view.text, "bb")) == ((2, 3), (2, 5))
+
     def test_the_module_location_stays_at_its_start(self):
         # A module's own location (the definition of an imported module) is
         # the empty range at its first character, whatever entry is there.

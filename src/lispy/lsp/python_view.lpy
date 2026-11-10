@@ -426,7 +426,7 @@
    shape) and a list field whose lengths differ are skipped with everything
    under them, never the whole map; except a Constant the unparse spells as an
    operation (-1, 1+2j, a nan), which still maps as one node."
-  (= lines (.split source "\n"))
+  (= lines (split-lines source))
   (= columns (_GeneratedColumns text))
   (= entries [])
   (= stack [(, compiled generated)])
