@@ -1086,13 +1086,19 @@
 (= _DEF-HEADS (, "def" "async-def" "defmacro"))
 (= _TYPE-PARAMETER-HEADS (, "def" "async-def" "class" "type"))
 
+(def _head-name [form]
+  "The text of form's head, a glued head (fn[T], def[T] f) read by its name,
+   or None when the head is no atom."
+  (= head (sub form 0))
+  (return (atom-text (ife (isinstance head GluedHead) head.head head))))
+
 (def _param-slot [form]
   "The slot of form, a parsed Paren, that holds the [params] bracket its
    head binds (_DEF-HEADS, LAMBDA-HEADS), or None when its head binds
    none."
   (if (== (len form) 0)
       (return None))
-  (= head (atom-text (sub form 0)))
+  (= head (_head-name form))
   (return (ife (in head _DEF-HEADS) 2 (ife (in head LAMBDA-HEADS) 1 None))))
 
 (def _header-slot [form]
@@ -1100,7 +1106,7 @@
    never an expression: a def's or lambda's params (_param-slot) or a
    class's bases; or None."
   (= slot (_param-slot form))
-  (if (and (is slot None) (== (atom-text (sub form 0)) "class"))
+  (if (and (is slot None) (== (_head-name form) "class"))
       (return 2))
   (return slot))
 
@@ -1218,9 +1224,18 @@
    never counts; nor do class bases."
   (if (== (len form) 0)
       (return False))
-  (if (and (in (atom-text (sub form 0)) _TYPE-PARAMETER-HEADS) (>= (len form) 2)
+  (if (and (in (_head-name form) _TYPE-PARAMETER-HEADS) (>= (len form) 2)
            (isinstance (sub form 1) GluedHead)
            (_holds-sentinel (. (sub form 1) params)))
+      (return True))
+  ;; A type alias's value is read with its type parameters bound.  Reached
+  ;; only when the compiler refuses the type form or its type-parameter
+  ;; bracket: the glued head (type[T]), or any type statement on 3.11.  An
+  ;; alias with no type parameters binds nothing, so it unwraps freely.
+  (if (and (== (_head-name form) "type") (> (len form) 2)
+           (or (isinstance (sub form 0) GluedHead)
+               (isinstance (sub form 1) GluedHead))
+           (any ((_holds-sentinel part) for part in (sub form.list [: 2 None]))))
       (return True))
   (= slot (_param-slot form))
   (if (or (is slot None) (<= (len form) slot)
@@ -1231,7 +1246,7 @@
   ;; the scope around the def, as a default is; after a lambda head
   ;; (LAMBDA-HEADS) the ^ form is the body.
   (= body (sub form.list [: (+ slot 1) None]))
-  (if (and body (in (atom-text (sub form 0)) _DEF-HEADS)
+  (if (and body (in (_head-name form) _DEF-HEADS)
            (isinstance (sub body 0) Annotation))
       (= body (sub body [: 1 None])))
   (if (any ((_holds-sentinel part) for part in body))

@@ -538,6 +538,43 @@ class TestCursor:
         )
         assert pv.view_at_cursor(*at_bar(src)) is None
 
+    def test_a_lambda_head_with_glued_params_gives_no_view(self):
+        # Defect: fn[T] (not legal lispython) has a GluedHead head, which
+        # _param-slot read as no slot, so the form was unwrapped to a bare x
+        # at module scope and x resolved outside the lambda's parameters.
+        assert pv.view_at_cursor(*at_bar("(fn[T] [x] ^x|")) is None
+
+    @pytest.mark.skipif(sys.version_info >= (3, 12), reason="type needs 3.12")
+    def test_a_type_alias_value_gives_no_view_where_type_is_refused(self):
+        # Defect: on 3.11 the refused type form was unwrapped to the bare
+        # value +U, which resolves U outside the alias's type parameters.
+        assert pv.view_at_cursor(*at_bar("(type A[U] (+ U|")) is None
+
+    @pytest.mark.skipif(sys.version_info >= (3, 12), reason="type needs 3.12")
+    def test_a_type_alias_without_type_parameters_keeps_its_unwrapped_view(self):
+        # Defect guarded: refusing every type value on 3.11 also lost the
+        # view of an alias that binds no name.
+        assert pv.view_at_cursor(*at_bar("(type A x.|)")).text == "x."
+
+    def test_a_type_head_with_glued_params_gives_no_view_in_its_value(self):
+        # Defect: type[T] (not legal) was unwrapped to the bare value +U, which
+        # resolves U outside the alias's type parameters.
+        assert pv.view_at_cursor(*at_bar("(type[T] A[U] (+ U|")) is None
+
+    def test_a_def_head_with_glued_params_gives_no_view_in_its_body(self):
+        # Defect: def[T] (not legal) read as no slot, so the body unwrapped
+        # to a bare +x outside the def's parameters.
+        assert pv.view_at_cursor(*at_bar("(def[T] f [x] (+ x|")) is None
+
+    @pytest.mark.parametrize(
+        ["src", "text"], [("(def[T] f [x] ^x|", "x"), ("(class[T] A [B|", "B")]
+    )
+    def test_a_glued_def_or_class_head_unwraps_as_the_plain_head_does(self, src, text):
+        # Defect: the head of def[T]/class[T] was read raw (None), so a return
+        # annotation counted as body (no view) and a class's bases bracket was
+        # never entered ('[B]').
+        assert pv.view_at_cursor(*at_bar(src)).text == text
+
     @pytest.mark.parametrize(
         ["src", "text"], [("[(when x|", "[x]"), ("((when x|", "x()")]
     )
