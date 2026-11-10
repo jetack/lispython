@@ -681,3 +681,230 @@ def test_a_file_eval_requires_relatively_in_a_namespace_package(isolated, namesp
     reply = dispatch(isolated, code=code, file=str(namespace / "a.lpy"), line=1)
     assert reply["error"] is None
     assert reply["stdout"] == "4\n"
+
+
+# --- stream evals, concurrent requests and interrupt -------------------------
+#
+# Driven over real sockets: the behaviour is the reader, the eval worker and a
+# stream's flusher running at once.  Every wait is bounded (socket timeout,
+# join timeout), and the endless loop a test starts is stopped by closing its
+# connection in the fixture's teardown, which interrupts a running eval.
+
+WAIT = 10  # seconds any one reply may take
+
+ENDLESS = '(import time)\n(while True (print "tick") (time.sleep 0.005))'
+
+WIRE_NAMES = {
+    "NREPL_EVAL_OP": "eval",
+    "NREPL_EVAL_RESULT_OP": "eval-result",
+    "NREPL_LOAD_FILE_OP": "load-file",
+    "NREPL_LOAD_FILE_RESULT_OP": "load-file-result",
+    "NREPL_STREAM_FIELD": "stream",
+    "NREPL_OUT_OP": "out",
+    "NREPL_STDOUT_FIELD": "stdout",
+    "NREPL_STDERR_FIELD": "stderr",
+    "NREPL_INTERRUPT_OP": "interrupt",
+    "NREPL_INTERRUPT_RESULT_OP": "interrupt-result",
+    "NREPL_INTERRUPT_ID_FIELD": "interrupt-id",
+    "NREPL_INTERRUPTED_ERROR": "KeyboardInterrupt",
+}
+
+
+def test_nrepl_wire_names():
+    # The names lpy-mode and vsc-lispy send and read: a rename on one side
+    # silently stops the feature on the other.
+    assert {name: getattr(tools, name) for name in WIRE_NAMES} == WIRE_NAMES
+
+
+class Client:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+
+    def send(self, **msg):
+        self.sock.sendall(line(**msg))
+
+    def recv(self):
+        while b"\n" not in self.buf:
+            data = self.sock.recv(65536)  # bounded by the socket timeout
+            assert data, "server closed the connection"
+            self.buf += data
+        raw, self.buf = self.buf.split(b"\n", 1)
+        return json.loads(raw)
+
+    def until(self, done):
+        """Every message up to and including the first that done accepts."""
+        messages = []
+        while True:
+            messages.append(self.recv())
+            if done(messages[-1]):
+                return messages
+
+
+def is_out(msg, req_id):
+    return msg.get("op") == "out" and msg.get("id") == req_id
+
+
+def without_out(messages, req_id):
+    return [m for m in messages if not is_out(m, req_id)]
+
+
+@pytest.fixture
+def connect(isolated):
+    import socket
+    import threading
+
+    served = []
+
+    def connect():
+        client_sock, server_sock = socket.socketpair()
+        client_sock.settimeout(WAIT)
+        thread = threading.Thread(
+            target=tools._nrepl_handle_client,
+            args=(server_sock, ("test", 0), isolated),
+            daemon=True,
+        )
+        thread.start()
+        served.append((client_sock, thread))
+        return Client(client_sock)
+
+    yield connect
+    # EOF on each connection interrupts its running eval and ends its worker.
+    for client_sock, _ in served:
+        client_sock.close()
+    for _, thread in served:
+        thread.join(WAIT)
+    assert not any(thread.is_alive() for _, thread in served)
+
+
+def test_stream_eval_streams_output_before_its_result(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    first = client.recv()
+    assert is_out(first, 1)
+    assert "tick" in first["stdout"]
+
+
+def test_partial_line_is_sent_before_the_eval_ends(connect, isolated):
+    import threading
+
+    isolated["gate"] = gate = threading.Event()
+    client = connect()
+    code = '(print "part" :end "")\n(gate.wait 10)'
+    client.send(op="eval", id=1, stream=True, code=code)
+    first = client.recv()  # no newline was written: only the flush delay sends it
+    gate.set()
+    assert first == {"op": "out", "stdout": "part", "id": 1}
+    result = client.recv()
+    assert result["op"] == "eval-result"
+    assert result["error"] is None
+    assert result["stdout"] == ""
+    assert "stderr" not in result
+
+
+def test_stream_output_keeps_write_order_across_stdout_and_stderr(connect):
+    client = connect()
+    code = '(import sys)\n(print "a")\n(print "b" :file sys.stderr)\n(print "c")'
+    client.send(op="eval", id=1, stream=True, code=code)
+    messages = client.until(lambda m: m.get("op") == "eval-result")
+    chunks = []
+    for msg in messages[:-1]:
+        assert is_out(msg, 1)
+        [(key, text)] = [(k, v) for k, v in msg.items() if k in ("stdout", "stderr")]
+        if chunks and chunks[-1][0] == key:
+            chunks[-1] = (key, chunks[-1][1] + text)
+        else:
+            chunks.append((key, text))
+    assert chunks == [("stdout", "a\n"), ("stderr", "b\n"), ("stdout", "c\n")]
+    assert messages[-1]["stdout"] == ""
+
+
+def test_requests_are_answered_while_a_stream_eval_runs(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="complete", id=2, prefix="pri")
+    before = client.until(lambda m: m.get("id") == 2)
+    assert all(is_out(m, 1) for m in before[:-1])
+    assert before[-1]["op"] == "complete-result"
+    assert "print" in before[-1]["completions"]
+    assert is_out(client.recv(), 1)  # the eval is still running
+
+
+def test_interrupt_stops_a_running_stream_eval(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("op") == "eval-result"), 1)
+    assert messages[0] == {"op": "interrupt-result", "interrupt-id": 1, "id": 2}
+    [result] = messages[1:]
+    assert result["id"] == 1
+    assert result["error"].startswith("Traceback (most recent call last):")
+    assert result["error"].endswith("KeyboardInterrupt")
+    client.send(op="eval", id=3, code="(+ 1 2)")
+    assert client.recv() == {
+        "op": "eval-result",
+        "value": "3",
+        "stdout": "",
+        "error": None,
+        "id": 3,
+    }
+
+
+def test_interrupt_of_an_unknown_id_is_an_error_reply(connect):
+    client = connect()
+    client.send(op="interrupt", id=5, **{"interrupt-id": 99})
+    reply = client.recv()
+    assert reply["op"] == "error"
+    assert reply["id"] == 5
+    client.send(op="ping", id=6)
+    assert client.recv() == {"op": "pong", "id": 6}
+
+
+def test_interrupt_cancels_a_queued_stream_eval(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=2, stream=True, code='(print "never")')
+    client.send(op="interrupt", id=3, **{"interrupt-id": 2})
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("id") == 2), 1)
+    assert [m["id"] for m in messages] == [3, 4, 1, 2]
+    assert messages[0]["op"] == messages[1]["op"] == "interrupt-result"
+    assert messages[2]["error"].endswith("KeyboardInterrupt")
+    assert messages[3] == {
+        "op": "eval-result",
+        "value": None,
+        "stdout": "",
+        "error": "KeyboardInterrupt",
+        "id": 2,
+    }
+
+
+def test_a_stream_eval_reusing_a_running_id_is_refused(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=1, stream=True, code='(print "twice")')
+    refusal = without_out(client.until(lambda m: m.get("op") == "error"), 1)
+    error = "an eval with id 1 is already queued or running"
+    assert refusal == [{"op": "error", "error": error, "id": 1}]
+
+
+def test_concurrent_stream_evals_keep_their_own_output(connect, isolated):
+    import threading
+
+    # Each eval waits for the other, so their prints surely overlap in time.
+    isolated["barrier"] = threading.Barrier(2)
+    clients = {"alpha": connect(), "beta": connect()}
+    for marker, client in clients.items():
+        code = (
+            "(import time)\n(barrier.wait 10)\n"
+            f'(for i (range 40) (print "{marker}") (time.sleep 0.002))'
+        )
+        client.send(op="eval", id=1, stream=True, code=code)
+    for marker, client in clients.items():
+        messages = client.until(lambda m: m.get("op") == "eval-result")
+        assert messages[-1]["error"] is None
+        assert "".join(m["stdout"] for m in messages[:-1]) == f"{marker}\n" * 40
