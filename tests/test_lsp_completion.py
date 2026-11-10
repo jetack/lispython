@@ -709,6 +709,10 @@ SCREENSHOT = (
         ("(with [(open 1) as ab|] 1)\n", "ab"),
         ("(try 1 (except [Exception as ab|] 1))\n", "ab"),
         ("(= ab| 1)\n(print ab)\n", "ab"),
+        ("(= heap 1)\n(for heap| in [1] 1)\n", "heap"),
+        ("(class A []\n  (def m [self] 1)\n  (def n [self|] 1))\n", "self"),
+        ("(for heap| in [1] 1)\n(= heap 2)\n", "heap"),
+        ("(def f [list|]\n  1)\n", "list"),
     ],
     ids=[
         "fallback view",
@@ -721,25 +725,52 @@ SCREENSHOT = (
         "with as",
         "except as",
         "referenced later",
+        "bound elsewhere",
+        "bound in another scope",
+        "bound later",
+        "builtin",
     ],
 )
-def test_the_word_being_typed_is_never_offered_as_its_own_name(merged, source, word):
+def test_the_word_being_typed_is_never_offered_as_its_own_name(
+    merged, source, word, monkeypatch
+):
     # Defect: a name read off text in which the word at the cursor binds
     # itself is offered: over a fallback view the buffer's definitions are
     # collected with the partial word in place ((from heapq [heappush heap|])
     # defines heap), and over a cursor view the backend offers the binding
-    # the restored word makes (def f [ab|] offers ab); a later reference
-    # ((print ab)) binds nothing, so it must not count as another binding.
+    # the restored word makes (def f [ab|] offers ab); neither a reference
+    # ((print ab)) nor another binding of the name (before, after, or in
+    # another method: (def m [self] 1)) nor a builtin of that name may turn
+    # the drop off at a position that only binds, since the item there
+    # inserts nothing new, and where the backend gives no items the local
+    # list that answers (the buffer's definitions and the builtins) drops it
+    # too.
+    # Control: pyrefly offers the word except at the aliases, and with
+    # basedpyright, which offers it nowhere, the local list offers a name
+    # bound elsewhere or a builtin; at the rest absence alone proves nothing,
+    # so the per-case control is that the drop was armed.
+    armed = []
+    drop = server.without_self_binding
+    monkeypatch.setattr(
+        server,
+        "without_self_binding",
+        lambda view, items, **kw: (
+            armed.append(view.self_bound) or drop(view, items, **kw)
+        ),
+    )
     items = by_label(merged(source)[2])
     assert word not in items
     if source is SCREENSHOT:
         assert "heappop" in items  # the backend did answer
+    else:  # a fallback view has its own control above
+        assert armed and all(armed)
 
 
 def test_the_general_list_never_offers_the_word_being_typed(off_complete):
     # Defect: with no backend the buffer's definitions are read with the
     # partial word in place, so (from heapq [heappush heap|]) offers heap;
-    # and a real name equal to that word, bound elsewhere, must stay.
+    # and a real name equal to that word, bound elsewhere, must stay: with
+    # no backend there is no cursor view to tell a binding position.
     assert "heap" not in by_label(off_complete("(from heapq [heappush heap|])\n")[2])
     items = by_label(off_complete("(= heap 1)\n(for heap| in [1] 1)\n")[2])
     assert "heap" in items
@@ -748,21 +779,15 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
 @pytest.mark.parametrize(
     "source, word",
     [
-        ("(= heap 1)\n(for heap| in [1] 1)\n", "heap"),
-        ("(= abs| 1)\n", "abs"),
         ("(from heapq [heappush|])\n", "heappush"),
         ("(def f [abc]\n  abc|)\n", "abc"),
-        ("(for heap| in [1] 1)\n(= heap 2)\n(= )\n", "heap"),
         ("(import os)\n(= os.environ| 1)\n", "environ"),
         ("(= __path__| 1)\n", "__path__"),
         ('(from os.path *)\n(+= sep| "x")\n', "sep"),
     ],
     ids=[
-        "bound elsewhere",
-        "builtin",
         "imported name",
         "reference",
-        "defined after, fallback view",
         "existing member stored",
         "implicit dunder",
         "augmented target",
@@ -770,11 +795,10 @@ def test_the_general_list_never_offers_the_word_being_typed(off_complete):
 )
 def test_a_real_name_equal_to_the_word_being_typed_stays(merged, source, word):
     # Defect: the self-binding filter drops every item named as the typed
-    # word, so a name that exists without it (bound elsewhere, a builtin,
-    # the module member an import names, a parameter, a definition after
-    # the cursor that only the buffer's list knows over a fallback view, a
-    # module's real member being stored to, an implicit dunder a backend
-    # adds, a star-imported name an augmented assignment reads) is lost.
+    # word, so a name that exists without it (the module member an import
+    # names, a parameter read, a module's real member being stored to, an
+    # implicit dunder a backend adds, a star-imported name an augmented
+    # assignment reads) is lost.
     assert word in by_label(merged(source)[2])
 
 
@@ -1237,6 +1261,22 @@ def test_an_incomplete_list_is_kept(merged, backend_requests, answer_at):
     answer = answer_at("(= my-var 1)\n(print my-v|)")
     assert len(backend_requests.sent) == 1
     assert "my-var" in by_label(answer.items)
+
+
+@once
+def test_a_kept_answer_drops_the_word_typed_now_from_the_local_list(
+    merged, backend_requests, answer_at
+):
+    # Defect: where the backend's items leave nothing, the local list that
+    # answers is compared with the kept view's word (l), not the word typed
+    # now (li), so at the binding (def f [li|]) the name li bound elsewhere
+    # is offered back on every later keystroke of a kept answer.
+    backend_requests.answer["value"] = [item("l")]
+    backend_requests.sent.clear()
+    answer_at("(= li 1)\n(def f [l|]\n  1)")
+    answer = answer_at("(= li 1)\n(def f [li|]\n  1)")
+    assert len(backend_requests.sent) == 1  # the kept answer served li
+    assert "li" not in by_label(answer.items)
 
 
 @once

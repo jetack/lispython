@@ -477,7 +477,7 @@
    generated Python (a dot right before it: x.a, (. x a), a.b.c),
    in-import, True when the word is a name inside an import statement
    (a module, a dotted part of one, an imported name or its alias),
-   self-bound, True when the word is a name only its own occurrence binds
+   self-bound, True when the word's occurrence only binds it
    (_self-bound-p), so a backend's item of that name is the word itself,
    and fallback, True when only the text before the cursor compiled; its tree
    is None, since its text was edited after the parse (and may not parse:
@@ -1021,36 +1021,28 @@
 
 (def _self-bound-p [tree restored]
   "True when the word at the cursor, restored (its Python name) standing
-   for the sentinel in tree, is a name only its own occurrence binds: the
-   sentinel's occurrence is a pure binding (_bindings) and no impure one,
-   no other occurrence in tree binds restored, in any scope (an augmented
-   assignment elsewhere counts: it needs the name to exist), and it is
-   neither a builtin nor a dunder.  A dunder never counts, because every
-   backend adds its own implicit ones per scope (__path__, __qualname__,
-   __class__), so no list of them stays right.  A backend offers such a
-   name because the generated Python, with the word restored, binds it, so
-   its item is the word being typed, never a name the buffer has; a mere
-   reference elsewhere ((print ab)) names nothing more.  Limits: a
-   star-imported name equal to a word typed where it is bound is not told
-   apart (the tree does not hold it), and is not offered there, the word
-   being typed in full already; over a fallback view a later binding of a
-   kind collect-definitions does not collect (with-as, except-as, walrus,
-   match capture, comprehension target) is not offered back either
-   (buffer-definition-names in server.lpy); a stored attribute is never
-   self-bound (_bindings), so the backend's own self.x item at
-   (= self.x| ...) stays offered, because a real member must never be
-   dropped."
-  (if (or (not restored) (in restored (vars builtins)) (_dunder-p restored))
+   for the sentinel in tree, sits where it only binds: the sentinel's
+   occurrence is a pure binding (_bindings) and no impure one, and restored
+   is not a dunder.  There an item equal to the word inserts nothing the
+   word does not already hold, so dropping it loses nothing, whether the
+   name is bound elsewhere in the tree ((def m [self] 1) beside
+   (def n [self|] 1), a loop or parameter name reused) or is a builtin
+   ((def f [list|])): which scope binds what is never read, because that
+   is Python scope analysis, which the backend owns.  A dunder never
+   counts, because every backend adds its own implicit ones per scope
+   (__path__, __qualname__, __class__), so no list of them stays right.  A
+   stored attribute is never self-bound (_bindings), so the backend's own
+   self.x item at (= self.x| ...) stays offered, because a real member must
+   never be dropped."
+  (if (or (not restored) (_dunder-p restored))
       (return False))
   (= pure-seen False)
   (for node in (ast.walk tree)
     (for [name pure] in (_bindings node)
-      (cond (== name restored)
-            (return False)
-            (== name CURSOR-SENTINEL)
-            (if pure
-                (= pure-seen True)
-                (return False)))))
+      (when (== name CURSOR-SENTINEL)
+        (if pure
+            (= pure-seen True)
+            (return False)))))
   (return pure-seen))
 
 (def _cursor-failure [compiled line col]
