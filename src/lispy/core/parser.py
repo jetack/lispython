@@ -1108,7 +1108,10 @@ def _parse_tokens(src, tokens, stack, rst):
                 raise extra
             if tktype == "deprecated":
                 if not _PARTIAL.get():
-                    compile_warning(t, SyntaxWarning, position_info)
+                    # Text a macro parses has no line in the module (parse).
+                    compile_warning(
+                        t, SyntaxWarning, {} if IN_MACRO_CALL.get() else position_info
+                    )
             elif tktype == "interpolated-start":
                 stack.append(string_parse(t, tktype, position_info, extra))
             else:

@@ -4,6 +4,9 @@ Without one they would carry the Node default (line 0), so a traceback or a
 compile error in macro-generated code would point nowhere."""
 
 import ast
+import importlib
+import sys
+import warnings
 from collections import deque
 
 import pytest
@@ -688,3 +691,53 @@ def test_error_on_a_node_kept_from_an_earlier_form_keeps_its_line():
     error = info.value
     assert (error.filename, error.lineno, error.offset) == ("m.lpy", 1, 7)
     assert error.text == "(keep foo)"
+
+
+def _include_deprecated_field():
+    [form] = parse('\n\n\n(f"{(.get d \\"k\\")}")')
+    return form
+
+
+def test_warning_from_parsing_other_text_names_no_line_of_the_module():
+    # Defect: the deprecated-field warning took the line of the string the
+    # macro parses (4) and named it in m.lpy.
+    scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
+    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert (warning.filename, warning.lineno) == ("m.lpy", 0)
+
+
+def test_warning_as_error_from_parsing_other_text_is_placed_at_the_call():
+    scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SyntaxWarning)
+        with pytest.raises(LispyCompileError) as info:
+            _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
+    error = info.value
+    assert (error.filename, error.lineno) == ("m.lpy", 2)
+    assert error.text == "(inc)"
+
+
+def test_module_a_macro_imports_keeps_its_own_positions(tmp_path, monkeypatch):
+    # Defect: the importer's compile of badmod ran with the macro call's
+    # IN_MACRO_CALL still set, so badmod's own nodes lost their positions and
+    # its error was placed at the macro call in m.lpy.
+    (tmp_path / "badmod.lpy").write_text("(x)\n(x)\n(print (return 2))\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    before = set(sys.modules)
+
+    def import_bad():
+        importlib.import_module("badmod")
+
+    scope = {"__macro_namespace": {"import_bad": import_bad}}
+    try:
+        with pytest.raises(LispyCompileError) as info:
+            _compile_m("(x)\n(import-bad)", scope)
+    finally:
+        for name in set(sys.modules) - before:
+            del sys.modules[name]
+    error = info.value
+    assert (error.filename, error.lineno) == (str(tmp_path / "badmod.lpy"), 3)
+    assert error.text == "(print (return 2))"

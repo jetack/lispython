@@ -152,7 +152,8 @@ def compile_warning(msg, category, position_info):
 
     The warning goes through warnings.warn_explicit at ``position_info``'s
     line, naming the file compile_errors is compiling (``<unknown>`` outside
-    one), so filters select it as any other warning. Where a filter turns it
+    one), or line 0 for a ``position_info`` with no line (text a macro
+    parses), so filters select it as any other warning. Where a filter turns it
     into an exception of ``category``, that exception becomes a
     LispyCompileError with the same message at the whole position, as CPython
     replaces it with a SyntaxError, so every entry point reports it as a
@@ -160,7 +161,9 @@ def compile_warning(msg, category, position_info):
     """
     filename = _COMPILING_FILENAME.get() or "<unknown>"
     try:
-        warnings.warn_explicit(msg, category, filename, position_info["lineno"])
+        warnings.warn_explicit(
+            msg, category, filename, position_info.get("lineno") or 0
+        )
     except category:
         # ``from None`` hides the warning from the traceback, as CPython
         # clears it before raising the SyntaxError.
