@@ -152,14 +152,20 @@ def compile_warning(msg, category, position_info):
 
     The warning goes through warnings.warn_explicit at ``position_info``'s
     line, naming the file compile_errors is compiling (``<unknown>`` outside
-    one), or line 0 for a ``position_info`` with no line (text a macro
-    parses), so filters select it as any other warning. Where a filter turns it
-    into an exception of ``category``, that exception becomes a
-    LispyCompileError with the same message at the whole position, as CPython
-    replaces it with a SyntaxError, so every entry point reports it as a
-    compile error; any other exception a filter or hook raises passes through.
+    one), or line 0 while a macro function runs (IN_MACRO_CALL) or for a
+    ``position_info`` with no line, so filters select it as any other
+    warning. Where a filter turns it into an exception of ``category``, that
+    exception becomes a LispyCompileError with the same message at the whole
+    position (none while a macro function runs), as CPython replaces it with
+    a SyntaxError, so every entry point reports it as a compile error; any
+    other exception a filter or hook raises passes through.
     """
     filename = _COMPILING_FILENAME.get() or "<unknown>"
+    if IN_MACRO_CALL.get():
+        # Text a macro parses or compiles is not the module's source, so its
+        # warning names no line of the module, and its error no position,
+        # which the expander then places at the call.
+        position_info = {}
     try:
         warnings.warn_explicit(
             msg, category, filename, position_info.get("lineno") or 0

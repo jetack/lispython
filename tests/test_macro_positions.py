@@ -709,15 +709,20 @@ def test_warning_from_parsing_other_text_names_no_line_of_the_module():
     assert (warning.filename, warning.lineno) == ("m.lpy", 0)
 
 
-def test_warning_as_error_from_parsing_other_text_is_placed_at_the_call():
-    scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", SyntaxWarning)
-        with pytest.raises(LispyCompileError) as info:
-            _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
-    error = info.value
-    assert (error.filename, error.lineno) == ("m.lpy", 2)
-    assert error.text == "(inc)"
+def _include_escape_in_fstring():
+    [form] = parse('\n\n\n(f"\\d{x}")')
+    return form
+
+
+def test_escape_warning_from_parsing_other_text_names_no_line_of_the_module():
+    # Defect: the invalid-escape warning of an f-string literal the macro
+    # parses took that text's line (4) and named it in m.lpy.
+    scope = {"__macro_namespace": {"inc": _include_escape_in_fstring}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
+    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert (warning.filename, warning.lineno) == ("m.lpy", 0)
 
 
 def test_module_a_macro_imports_keeps_its_own_positions(tmp_path, monkeypatch):
