@@ -681,3 +681,590 @@ def test_a_file_eval_requires_relatively_in_a_namespace_package(isolated, namesp
     reply = dispatch(isolated, code=code, file=str(namespace / "a.lpy"), line=1)
     assert reply["error"] is None
     assert reply["stdout"] == "4\n"
+
+
+# --- stream evals, concurrent requests and interrupt -------------------------
+#
+# Driven over real sockets: the behaviour is the reader, the eval worker and a
+# stream's flusher running at once.  Every wait is bounded (socket timeout,
+# join timeout), and the endless loop a test starts is stopped by closing its
+# connection in the fixture's teardown, which interrupts a running eval.
+
+WAIT = 10  # seconds any one reply may take
+
+ENDLESS = '(import time)\n(while True (print "tick") (time.sleep 0.005))'
+
+WIRE_NAMES = {
+    "NREPL_EVAL_OP": "eval",
+    "NREPL_EVAL_RESULT_OP": "eval-result",
+    "NREPL_LOAD_FILE_OP": "load-file",
+    "NREPL_LOAD_FILE_RESULT_OP": "load-file-result",
+    "NREPL_STREAM_FIELD": "stream",
+    "NREPL_OUT_OP": "out",
+    "NREPL_STDOUT_FIELD": "stdout",
+    "NREPL_STDERR_FIELD": "stderr",
+    "NREPL_INTERRUPT_OP": "interrupt",
+    "NREPL_INTERRUPT_RESULT_OP": "interrupt-result",
+    "NREPL_INTERRUPT_ID_FIELD": "interrupt-id",
+    "NREPL_INTERRUPTED_ERROR": "KeyboardInterrupt",
+}
+
+
+def test_nrepl_wire_names():
+    # The names lpy-mode and vsc-lispy send and read: a rename on one side
+    # silently stops the feature on the other.
+    assert {name: getattr(tools, name) for name in WIRE_NAMES} == WIRE_NAMES
+
+
+class Client:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buf = b""
+
+    def send(self, **msg):
+        self.sock.sendall(line(**msg))
+
+    def recv(self):
+        while b"\n" not in self.buf:
+            data = self.sock.recv(65536)  # bounded by the socket timeout
+            assert data, "server closed the connection"
+            self.buf += data
+        raw, self.buf = self.buf.split(b"\n", 1)
+        return json.loads(raw)
+
+    def until(self, done):
+        """Every message up to and including the first that done accepts,
+        within WAIT seconds even while out messages keep arriving."""
+        import time
+
+        deadline = time.monotonic() + WAIT
+        messages = []
+        while True:
+            assert time.monotonic() < deadline, f"no such reply in {messages[-3:]}"
+            messages.append(self.recv())
+            if done(messages[-1]):
+                return messages
+
+
+def is_out(msg, req_id):
+    return msg.get("op") == "out" and msg.get("id") == req_id
+
+
+def without_out(messages, req_id):
+    return [m for m in messages if not is_out(m, req_id)]
+
+
+@pytest.fixture
+def connect(isolated):
+    import socket
+    import threading
+
+    served = []
+
+    def connect():
+        client_sock, server_sock = socket.socketpair()
+        client_sock.settimeout(WAIT)
+        thread = threading.Thread(
+            target=tools._nrepl_handle_client,
+            args=(server_sock, ("test", 0), isolated),
+            daemon=True,
+        )
+        thread.start()
+        served.append((client_sock, thread))
+        return Client(client_sock)
+
+    yield connect
+    # EOF on each connection interrupts its running eval and ends its worker.
+    for client_sock, _ in served:
+        client_sock.close()
+    for _, thread in served:
+        thread.join(WAIT)
+    assert not any(thread.is_alive() for _, thread in served)
+
+
+def test_stream_eval_streams_output_before_its_result(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    first = client.recv()
+    assert is_out(first, 1)
+    assert "tick" in first["stdout"]
+
+
+def test_partial_line_is_sent_before_the_eval_ends(connect, isolated):
+    import threading
+
+    isolated["gate"] = gate = threading.Event()
+    client = connect()
+    code = '(print "part" :end "")\n(gate.wait 10)'
+    client.send(op="eval", id=1, stream=True, code=code)
+    first = client.recv()  # no newline was written: only the flush delay sends it
+    gate.set()
+    assert first == {"op": "out", "stdout": "part", "id": 1}
+    result = client.recv()
+    assert result["op"] == "eval-result"
+    assert result["error"] is None
+    assert result["stdout"] == ""
+    assert "stderr" not in result
+
+
+def test_stream_output_keeps_write_order_across_stdout_and_stderr(connect):
+    client = connect()
+    code = '(import sys)\n(print "a")\n(print "b" :file sys.stderr)\n(print "c")'
+    client.send(op="eval", id=1, stream=True, code=code)
+    messages = client.until(lambda m: m.get("op") == "eval-result")
+    chunks = []
+    for msg in messages[:-1]:
+        assert is_out(msg, 1)
+        [(key, text)] = [(k, v) for k, v in msg.items() if k in ("stdout", "stderr")]
+        if chunks and chunks[-1][0] == key:
+            chunks[-1] = (key, chunks[-1][1] + text)
+        else:
+            chunks.append((key, text))
+    assert chunks == [("stdout", "a\n"), ("stderr", "b\n"), ("stdout", "c\n")]
+    assert messages[-1]["stdout"] == ""
+
+
+def test_requests_are_answered_while_a_stream_eval_runs(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="complete", id=2, prefix="pri")
+    before = client.until(lambda m: m.get("id") == 2)
+    assert all(is_out(m, 1) for m in before[:-1])
+    assert before[-1]["op"] == "complete-result"
+    assert "print" in before[-1]["completions"]
+    assert is_out(client.recv(), 1)  # the eval is still running
+
+
+def test_interrupt_stops_a_running_stream_eval(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("op") == "eval-result"), 1)
+    assert messages[0] == {"op": "interrupt-result", "interrupt-id": 1, "id": 2}
+    [result] = messages[1:]
+    assert result["id"] == 1
+    assert result["error"].startswith("Traceback (most recent call last):")
+    assert result["error"].endswith("KeyboardInterrupt")
+    client.send(op="eval", id=3, code="(+ 1 2)")
+    assert client.recv() == {
+        "op": "eval-result",
+        "value": "3",
+        "stdout": "",
+        "error": None,
+        "id": 3,
+    }
+
+
+def test_every_interrupt_ends_in_a_result_and_the_worker_survives(connect):
+    # The interrupt lands wherever the eval happens to be: in the user's
+    # loop, in print's path through the output router and stream, or in
+    # the worker's bookkeeping.  None of it may lose the final result or
+    # kill the connection's worker.
+    client = connect()
+    busy = '(while True (print "t"))'
+    for round_id in range(2, 202, 2):
+        client.send(op="eval", id=round_id, stream=True, code=busy)
+        assert is_out(client.recv(), round_id)
+        client.send(op="interrupt", id=round_id + 1, **{"interrupt-id": round_id})
+        messages = without_out(
+            client.until(lambda m: m.get("op") == "eval-result"), round_id
+        )
+        assert [m["op"] for m in messages] == ["interrupt-result", "eval-result"]
+        assert messages[1]["error"].endswith("KeyboardInterrupt")
+    client.send(op="eval", id=1, code="(+ 1 2)")
+    assert client.recv()["value"] == "3"
+
+
+def test_interrupt_of_an_unknown_id_is_an_error_reply(connect):
+    client = connect()
+    client.send(op="interrupt", id=5, **{"interrupt-id": 99})
+    reply = client.recv()
+    assert reply["op"] == "error"
+    assert reply["id"] == 5
+    client.send(op="ping", id=6)
+    assert client.recv() == {"op": "pong", "id": 6}
+
+
+def test_interrupt_cancels_a_queued_stream_eval(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=2, stream=True, code='(print "never")')
+    client.send(op="interrupt", id=3, **{"interrupt-id": 2})
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("id") == 2), 1)
+    assert [m["id"] for m in messages] == [3, 4, 1, 2]
+    assert messages[0]["op"] == messages[1]["op"] == "interrupt-result"
+    assert messages[2]["error"].endswith("KeyboardInterrupt")
+    assert messages[3] == {
+        "op": "eval-result",
+        "value": None,
+        "stdout": "",
+        "error": "KeyboardInterrupt",
+        "id": 2,
+    }
+
+
+def test_a_stream_eval_reusing_a_running_id_is_refused(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=1, stream=True, code='(print "twice")')
+    refusal = without_out(client.until(lambda m: m.get("op") == "error"), 1)
+    error = "an eval with id 1 is already queued or running"
+    assert refusal == [{"op": "error", "error": error, "id": 1}]
+
+
+def test_concurrent_stream_evals_keep_their_own_output(connect, isolated):
+    import threading
+
+    # Each eval waits for the other, so their prints surely overlap in time.
+    isolated["barrier"] = threading.Barrier(2)
+    clients = {"alpha": connect(), "beta": connect()}
+    for marker, client in clients.items():
+        code = (
+            "(import time)\n(barrier.wait 10)\n"
+            f'(for i (range 40) (print "{marker}") (time.sleep 0.002))'
+        )
+        client.send(op="eval", id=1, stream=True, code=code)
+    for marker, client in clients.items():
+        messages = client.until(lambda m: m.get("op") == "eval-result")
+        assert messages[-1]["error"] is None
+        assert "".join(m["stdout"] for m in messages[:-1]) == f"{marker}\n" * 40
+
+
+def test_a_plain_eval_behind_a_stream_eval_keeps_the_reader_reading(connect):
+    # Waiting for the plain eval would wait for the endless one ahead of
+    # it: no interrupt would ever be read.
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=2, code='(print "two") 2')
+    client.send(op="interrupt", id=3, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("id") == 2), 1)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (3, "interrupt-result"),
+        (1, "eval-result"),
+        (2, "eval-result"),
+    ]
+    assert messages[1]["error"].endswith("KeyboardInterrupt")
+    assert messages[2]["value"] == "2"
+    assert messages[2]["stdout"] == "two\n"
+
+
+BASE_EXCEPTION = "(class Stop [BaseException] (pass))\n(raise (Stop))"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_base_exception_is_the_evals_error(connect, stream):
+    client = connect()
+    client.send(op="eval", id=1, stream=stream, code=BASE_EXCEPTION)
+    result = without_out(
+        client.until(lambda m: m.get("id") == 1 and not is_out(m, 1)), 1
+    )
+    assert result[-1]["op"] == "eval-result"
+    assert result[-1]["error"].startswith("Traceback (most recent call last):")
+    assert result[-1]["error"].endswith("Stop")
+    client.send(op="eval", id=2, stream=stream, code="(+ 1 2)")
+    after = without_out(client.until(lambda m: m.get("op") == "eval-result"), 2)
+    assert after[-1]["value"] == "3"
+    assert not isinstance(sys.stdout, tools._NreplRouter)
+
+
+@pytest.mark.parametrize("req_id", [None, 0, ""])
+def test_a_stream_eval_without_an_id_is_refused(connect, req_id):
+    client = connect()
+    msg = {"op": "eval", "stream": True, "code": '(print "never")'}
+    if req_id is not None:
+        msg["id"] = req_id
+    client.sock.sendall(json.dumps(msg).encode() + b"\n")
+    reply = client.recv()
+    assert reply["op"] == "error"
+    assert "needs an id" in reply["error"]
+    client.send(op="ping", id=9)
+    assert client.recv() == {"op": "pong", "id": 9}
+
+
+def test_a_lock_an_interrupt_left_held_is_released(connect, isolated):
+    # An interrupt can land right after a `with` acquired a lock, before the
+    # block that releases it.  The eval here holds the scope lock on purpose,
+    # as such a leak would; once interrupted, another connection's complete,
+    # which takes that lock, must be answered.
+    isolated["held"] = tools.nrepl_scope_lock(isolated)
+    first, second = connect(), connect()
+    code = '(import time)\n(.acquire held)\n(while True (print "t") (time.sleep 0.005))'
+    first.send(op="eval", id=1, stream=True, code=code)
+    assert is_out(first.recv(), 1)
+    first.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    first.until(lambda m: m.get("op") == "eval-result")
+    second.sock.settimeout(3)
+    second.send(op="complete", id=3, prefix="pri")
+    assert second.recv()["op"] == "complete-result"
+
+
+CATCH_ONCE = (
+    "(import time)\n"
+    '(try (while True (print "a") (time.sleep 0.005))\n'
+    '  (except [KeyboardInterrupt] (print "caught")))\n'
+    '(while True (print "b") (time.sleep 0.005))'
+)
+
+
+def test_an_interrupt_that_raised_nothing_is_never_acknowledged(connect):
+    # The eval survives its first interrupt.  A second one inside
+    # NREPL_INTERRUPT_REPEAT raises nothing, so it must not claim success;
+    # one sent after that window stops the eval.
+    import time
+
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=CATCH_ONCE)
+    assert is_out(client.recv(), 1)
+    client.send(op="interrupt", id=2, **{"interrupt-id": 1})
+    assert client.until(lambda m: m.get("id") == 2)[-1] == {
+        "op": "interrupt-result",
+        "interrupt-id": 1,
+        "id": 2,
+    }
+    time.sleep(0.1)
+    client.send(op="interrupt", id=3, **{"interrupt-id": 1})
+    refused = client.until(lambda m: m.get("id") == 3)[-1]
+    assert refused["op"] == "error"
+    assert "was interrupted less than" in refused["error"]
+    time.sleep(tools.NREPL_INTERRUPT_REPEAT)
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    messages = client.until(lambda m: m.get("op") == "eval-result")
+    replies = without_out(messages, 1)
+    assert replies[0] == {"op": "interrupt-result", "interrupt-id": 1, "id": 4}
+    assert replies[1]["error"].endswith("KeyboardInterrupt")
+    # it was the second loop that the last interrupt stopped
+    assert "b" in "".join(m["stdout"] for m in messages if is_out(m, 1))
+
+
+def test_a_plain_eval_queued_behind_a_stream_eval_can_be_cancelled(connect):
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    client.send(op="eval", id=2, code='(print "never")')
+    client.send(op="interrupt", id=3, **{"interrupt-id": 2})
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    messages = without_out(client.until(lambda m: m.get("id") == 2), 1)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (3, "interrupt-result"),
+        (4, "interrupt-result"),
+        (1, "eval-result"),
+        (2, "eval-result"),
+    ]
+    assert messages[3]["error"] == "KeyboardInterrupt"
+    assert messages[3]["stdout"] == ""
+
+
+def test_a_plain_eval_running_behind_a_stream_eval_can_be_interrupted(
+    connect, isolated
+):
+    import threading
+
+    isolated["gate"] = gate = threading.Event()
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code="(gate.wait 10)")
+    client.send(op="eval", id=2, code=ENDLESS)  # not waited for: 1 is ahead
+    gate.set()
+    assert client.recv()["id"] == 1  # the stream eval's result: 2 now runs
+    client.send(op="interrupt", id=3, **{"interrupt-id": 2})
+    messages = client.until(lambda m: m.get("id") == 2)
+    assert [(m["id"], m["op"]) for m in messages] == [
+        (3, "interrupt-result"),
+        (2, "eval-result"),
+    ]
+    assert messages[1]["error"].endswith("KeyboardInterrupt")
+    assert messages[1]["stdout"].startswith("tick\n")
+
+
+@pytest.mark.parametrize("method", ["_deliver", "_close_window"])
+def test_a_worker_fault_still_sends_one_reply_and_frees_the_id(
+    connect, monkeypatch, method
+):
+    # _deliver failing before it sends, and a fault in the window close
+    # (which must not be retried forever), each end the job with one
+    # internal-error reply; the id is free again and plain evals are again
+    # waited for in order.
+    original = getattr(tools._NreplConnection, method)
+    failed = []
+
+    def faulty(self, job, *args):
+        if not failed:
+            failed.append(job)
+            raise RuntimeError("boom")
+        return original(self, job, *args)
+
+    monkeypatch.setattr(tools._NreplConnection, method, faulty)
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code="(+ 1 1)")
+    [reply] = without_out(client.until(lambda m: m.get("id") == 1), 1)
+    assert reply == {
+        "op": "error",
+        "error": "internal error: RuntimeError: boom",
+        "id": 1,
+    }
+    client.send(op="eval", id=1, stream=True, code="(+ 2 2)")
+    assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["value"] == "4"
+    client.send(op="eval", id=5, code="(+ 3 3)")
+    client.send(op="ping", id=6)
+    assert [client.recv()["id"], client.recv()["id"]] == [5, 6]
+
+
+def test_closing_gives_up_on_an_eval_that_never_stops(isolated, monkeypatch):
+    # An eval that swallows the interrupt keeps its worker: the connection
+    # still ends after NREPL_CLOSE_TIMEOUT, leaving only that daemon thread.
+    import socket
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_CLOSE_TIMEOUT", 0.5)
+    isolated["gate"] = gate = threading.Event()
+    client_sock, server_sock = socket.socketpair()
+    client_sock.settimeout(WAIT)
+    handler = threading.Thread(
+        target=tools._nrepl_handle_client,
+        args=(server_sock, ("test", 0), isolated),
+        daemon=True,
+    )
+    handler.start()
+    client = Client(client_sock)
+    code = (
+        '(print "in")\n'
+        "(while (not (gate.is-set))\n"
+        "  (try (gate.wait 0.01) (except [KeyboardInterrupt] (pass))))"
+    )
+    try:
+        client.send(op="eval", id=1, stream=True, code=code)
+        assert is_out(client.recv(), 1)
+        client_sock.close()  # EOF: the server interrupts, the eval ignores it
+        handler.join(WAIT)
+        assert not handler.is_alive()
+        assert server_sock.fileno() == -1  # closed
+    finally:
+        gate.set()  # lets the eval, and its worker, end
+
+
+def test_an_eval_replacing_stdout_gets_the_original_back(isolated):
+    before = (sys.stdout, sys.stderr)
+    code = "(import io)\n(= sys.stdout (io.StringIO))\n(= sys.stderr (io.StringIO))"
+    assert tools.nrepl_eval("(import sys)\n" + code, isolated)["error"] is None
+    assert (sys.stdout, sys.stderr) == before
+
+
+def test_a_writer_over_the_cap_waits_for_the_flusher(monkeypatch):
+    # Bounded memory: an eval printing faster than the client reads blocks
+    # once NREPL_OUT_CAP characters are buffered or being sent.
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_OUT_CAP", 10)
+    release = threading.Event()
+    sent = []
+
+    def send(data):
+        release.wait(WAIT)  # the client is not reading
+        sent.append(json.loads(data))
+
+    stream = tools._NreplStream(send, {"id": 1})
+    stream.start()
+    writer = threading.Thread(
+        target=lambda: [stream.write("stdout", "x" * 6 + "\n") for _ in range(3)]
+    )
+    writer.start()
+    writer.join(0.5)
+    assert writer.is_alive()  # blocked behind the unsent output
+    release.set()
+    writer.join(WAIT)
+    stream.stop()
+    assert not writer.is_alive()
+    assert "".join(m["stdout"] for m in sent) == ("x" * 6 + "\n") * 3
+
+
+def test_a_dead_stream_drops_output_and_never_blocks(monkeypatch):
+    # The flusher stops draining once a send failed, so a writer that kept
+    # counting toward the cap would wait for it forever.
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_OUT_CAP", 10)
+
+    def send(data):
+        raise BrokenPipeError
+
+    stream = tools._NreplStream(send, {"id": 1})
+    stream.start()
+    writer = threading.Thread(
+        target=lambda: [stream.write("stdout", "line\n") for _ in range(100)],
+        daemon=True,
+    )
+    writer.start()
+    writer.join(2)
+    stream.stop()
+    assert not writer.is_alive()
+    assert stream.dead
+
+
+def test_single_character_writes_count_toward_the_cap_as_memory(monkeypatch):
+    # 1 MiB of one-character writes would hold ~75 MB of queued objects if
+    # the cap counted characters only.
+    import threading
+
+    monkeypatch.setattr(tools, "NREPL_OUT_CAP", 1000)
+    release = threading.Event()
+    stream = tools._NreplStream(lambda data: release.wait(WAIT), {"id": 1})
+    stream.start()
+    writer = threading.Thread(
+        target=lambda: [stream.write("stdout", "x") for _ in range(100)], daemon=True
+    )
+    writer.start()
+    writer.join(0.5)
+    blocked = writer.is_alive()  # 100 characters: under the cap by count
+    release.set()
+    writer.join(WAIT)
+    stream.stop()
+    assert blocked
+    assert not writer.is_alive()
+
+
+def test_flush_with_nothing_written_queues_nothing():
+    stream = tools._NreplStream(lambda data: None, {"id": 1})
+    for _ in range(1000):
+        stream.flush()
+    stream.write("stdout", "x")
+    stream.flush()
+    stream.flush()
+    # one write and one flush marker, never a marker per call
+    assert stream._items.qsize() == 2
+
+
+def test_an_interrupt_traceback_ends_at_the_users_code():
+    # An interrupt usually lands inside print's path through the server's
+    # output router and stream; those frames say nothing to the user.
+    own = {}
+    exec(
+        compile(
+            "def own_frame():\n    raise KeyboardInterrupt\n",
+            tools._NREPL_OWN_FILE,
+            "exec",
+        ),
+        own,
+    )
+    try:
+        own["own_frame"]()  # the user's line
+    except KeyboardInterrupt as e:
+        error = tools._nrepl_format_exception(e)
+    assert error.endswith("KeyboardInterrupt")
+    assert "test_nrepl.py" in error
+    assert tools._NREPL_OWN_FILE not in error
+
+
+def test_long_output_is_split_into_capped_out_messages(monkeypatch):
+    monkeypatch.setattr(tools, "NREPL_OUT_MAX_MESSAGE", 64)
+    sent = []
+    stream = tools._NreplStream(lambda data: sent.append(json.loads(data)), {"id": 1})
+    stream.start()
+    stream.write("stdout", "y" * 150)
+    stream.stop()
+    assert [len(m["stdout"]) for m in sent] == [64, 64, 22]
+    assert all(m == {"op": "out", "stdout": m["stdout"], "id": 1} for m in sent)

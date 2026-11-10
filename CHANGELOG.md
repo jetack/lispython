@@ -8,6 +8,19 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- nREPL: stream evals and an `interrupt` op. An `eval` or `load-file` sent
+  with `"stream": true` streams its output as `{"op": "out", "stdout": ...}`
+  / `{"op": "out", "stderr": ...}` messages (in write order, promptly, with
+  bounded buffering) before its final result, whose `stdout` is then empty.
+  The connection keeps answering `complete`, `docs`, `macroexpand`,
+  `annotate`, `ping` and `interrupt` while a stream eval runs.
+  `{"op": "interrupt", "interrupt-id": X}` raises `KeyboardInterrupt` in the
+  running stream eval `X` (its result's error is the traceback), or cancels
+  it while it is queued (error `KeyboardInterrupt`), and replies
+  `interrupt-result`. Evals of one connection run one at a time in request
+  order; different connections run at once, each eval's output kept to its
+  own connection. Without `stream`, an eval behaves as before.
+
 - `(require mod as m)` registers every macro of `mod` as `m.name`, with a
   bare `as` as `import` takes. The LSP's completion after `m.`, hover and
   go-to-definition follow the alias, and a relative require's macros.
@@ -75,6 +88,10 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- nREPL: an eval's output is captured per thread, no longer by swapping
+  `sys.stdout` for the whole process. Output of a thread the evaluated code
+  starts now goes to the server's own stdout/stderr, plain evals included,
+  instead of into the eval's result.
 - `lpy -m` names its module the way `import` does, so `ok?` and `->foo`
   run `ok_p.lpy` and `_to_foo.lpy` rather than a plain `-` to `_` swap's
   `ok?` and `_>foo`, and a part that is no name (a keyword such as `class`)
