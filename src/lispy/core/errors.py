@@ -18,6 +18,14 @@ from types import SimpleNamespace
 # issued where they are found, so unlike errors they cannot get it afterwards.
 _COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default=None)
 
+# True while a macro function runs (macro.py _expand_1), False again inside a
+# compile_errors it enters.  Text a macro parses there is not the module's
+# source, and nodes carry no file identity, so parse() names such an error's
+# file "<string>": otherwise its position would name an unrelated line of the
+# module being compiled.  A nested compile (a required .lpy) is its own source
+# and keeps its own filename, hence the reset in compile_errors.
+IN_MACRO_CALL = contextvars.ContextVar("lispy_in_macro_call", default=False)
+
 # Held by every warnings.catch_warnings lispython enters (filtered_warnings).
 # catch_warnings swaps the process-wide filter list and puts back, on exit,
 # the one it found on entry, so two threads inside it at once (the LSP
@@ -124,6 +132,7 @@ def compile_errors(filename, source):
     A compile_warning issued meanwhile names ``filename``.
     """
     token = _COMPILING_FILENAME.set(filename)
+    macro_token = IN_MACRO_CALL.set(False)
     try:
         yield
     except LispyCompileError as err:
@@ -132,6 +141,7 @@ def compile_errors(filename, source):
         converted = LispyCompileError.from_syntax_error(err)
         raise attach_source(converted, filename, source) from err
     finally:
+        IN_MACRO_CALL.reset(macro_token)
         _COMPILING_FILENAME.reset(token)
 
 

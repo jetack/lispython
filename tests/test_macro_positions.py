@@ -8,7 +8,7 @@ from collections import deque
 
 import pytest
 
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, compile_errors
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.nodes import (
     Bracket,
@@ -625,17 +625,44 @@ def _bad_operand(x):
     raise LispyCompileError("no", x)
 
 
-def test_error_from_parsing_other_text_is_placed_at_the_call():
-    # The macro parses a string, so the error position (line 1) is of that
-    # text, not of this file; it is reported at the call form.
+def _compile_m(src, scope):
+    with compile_errors("m.lpy", src):
+        macroexpand_then_compile(parse(src), scope)
+
+
+def test_error_from_parsing_other_text_names_no_line_of_the_module():
+    # The macro parses a string: the error's position (line 1) is of that
+    # text, so it must not be reported as line 1 of m.lpy.
     scope = {"__macro_namespace": {"bad_include": _bad_include}}
     with pytest.raises(LispyCompileError) as info:
-        macroexpand_then_compile(parse("\n\n\n\n(bad-include)"), scope)
-    assert info.value.lineno == 5
+        _compile_m("(bad-include)", scope)
+    assert info.value.filename == "<string>"
+    assert info.value.text is None
 
 
 def test_error_on_an_operand_keeps_the_operand_position():
     scope = {"__macro_namespace": {"bad_operand": _bad_operand}}
     with pytest.raises(LispyCompileError) as info:
-        macroexpand_then_compile(parse("\n\n(bad-operand\n    foo)"), scope)
-    assert (info.value.lineno, info.value.offset) == (4, 5)
+        _compile_m("\n\n(bad-operand\n    foo)", scope)
+    error = info.value
+    assert (error.filename, error.lineno, error.offset) == ("m.lpy", 4, 5)
+
+
+def test_error_on_a_node_kept_from_an_earlier_form_keeps_its_line():
+    # A macro may raise on a node it saved at an earlier call: that node is
+    # of this file, so its line stands, though it lies outside the call.
+    kept = []
+
+    def keep(x):
+        kept.append(x)
+        return None
+
+    def refuse():
+        raise LispyCompileError("refused", kept[0])
+
+    scope = {"__macro_namespace": {"keep": keep, "refuse": refuse}}
+    with pytest.raises(LispyCompileError) as info:
+        _compile_m("(keep foo)\n\n(refuse)", scope)
+    error = info.value
+    assert (error.filename, error.lineno, error.offset) == ("m.lpy", 1, 7)
+    assert error.text == "(keep foo)"

@@ -9,7 +9,7 @@ from lispy.core.compiler.literal import (
     string_node_value,
 )
 from lispy.core.compiler.utils import compile_nesting_errors
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import IN_MACRO_CALL, LispyCompileError
 from lispy.core.macro_table import MacroTable, find_entry, find_macro
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
@@ -120,16 +120,6 @@ def macroexpand(sexp, scope, include_meta=True):
     return sexp
 
 
-def _within_call(error, call):
-    """Whether error's start position lies inside call's span (a call with
-    no position gives no span to refuse by)."""
-    if not call.lineno:
-        return True
-    start = (call.lineno, call.col_offset + 1)
-    end = (call.end_lineno, call.end_col_offset + 1)
-    return start <= (error.lineno, error.offset or 0) <= end
-
-
 def macroexpand_1(sexp, scope):
     return macroexpand_1_and_check(sexp, scope)[0]
 
@@ -175,20 +165,20 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
             is_call
             and (macro := find_macro(scope.get("__macro_namespace"), name)) is not None
         ):
+            # Text the macro parses is not this module's source: parse()
+            # names its errors' file "<string>" (IN_MACRO_CALL).
+            in_macro = IN_MACRO_CALL.set(True)
             try:
                 expansion = macro(*[_unwrap_literal(o) for o in operands])
             except LispyCompileError as error:
                 # A macro cannot see its own call form (literal operands
                 # arrive unwrapped), so an error it raises with no position
-                # is placed at the call. One positioned outside the call is
-                # of other text (a macro parsing a string): nodes carry no
-                # file identity, so its position would name an unrelated
-                # line of this file; it is placed at the call too.
-                if error.lineno is not None and (
-                    error.filename is not None or _within_call(error, sexp)
-                ):
+                # is placed at the call.
+                if error.lineno is not None:
                     raise
                 raise LispyCompileError(error.msg, sexp) from None
+            finally:
+                IN_MACRO_CALL.reset(in_macro)
             # Python data anywhere in the expansion becomes nodes, and
             # template-built nodes take the call's position, so tracebacks and
             # compile errors point at the macro call, not line 0. The

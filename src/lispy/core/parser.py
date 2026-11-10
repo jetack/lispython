@@ -10,7 +10,7 @@ from lispy.core.compiler.literal import (
     check_plain_string_prefix,
     string_literal_value,
 )
-from lispy.core.errors import LispyCompileError, compile_warning
+from lispy.core.errors import IN_MACRO_CALL, LispyCompileError, compile_warning
 from lispy.core.nodes import *
 from lispy.core.nodes import (
     Brace,
@@ -1067,7 +1067,13 @@ def parse(src, partial=False):
     form.  The LSP's diagnostics still use the strict parse to report it.
     """
     if not partial:
-        return _parse_into(src, [])
+        try:
+            return _parse_into(src, [])
+        except LispyCompileError as err:
+            # Text a macro parses is not the module's source (IN_MACRO_CALL).
+            if IN_MACRO_CALL.get() and err.filename is None:
+                err.filename = "<string>"
+            raise
     rst = []
     token = _PARTIAL.set(True)
     try:
