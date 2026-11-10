@@ -990,8 +990,8 @@ def test_a_stream_eval_without_an_id_is_refused(connect, req_id):
 def test_a_lock_an_interrupt_left_held_is_released(connect, isolated):
     # An interrupt can land right after a `with` acquired a lock, before the
     # block that releases it.  The eval here holds the scope lock on purpose,
-    # as such a leak would; once interrupted, another connection's complete,
-    # which takes that lock, must be answered.
+    # as such a leak would; once interrupted, another connection's
+    # macroexpand, which takes that lock, must be answered.
     isolated["held"] = tools.nrepl_scope_lock(isolated)
     first, second = connect(), connect()
     code = '(import time)\n(.acquire held)\n(while True (print "t") (time.sleep 0.005))'
@@ -1000,8 +1000,114 @@ def test_a_lock_an_interrupt_left_held_is_released(connect, isolated):
     first.send(op="interrupt", id=2, **{"interrupt-id": 1})
     first.until(lambda m: m.get("op") == "eval-result")
     second.sock.settimeout(3)
-    second.send(op="complete", id=3, prefix="pri")
-    assert second.recv()["op"] == "complete-result"
+    second.send(op="macroexpand", id=3, code="(inc 1)")
+    assert second.recv() == {
+        "op": "macroexpand-result",
+        "expansion": "(+ 1 1)",
+        "error": None,
+        "id": 3,
+    }
+
+
+# A macro that never returns: the eval holds the scope lock (its compile
+# phase) for as long as it runs.
+SPIN_MACRO = (
+    '(defmacro spin [] (import time) (while True (print "m") (time.sleep 0.01)) None)\n'
+    "(spin)"
+)
+
+
+def test_a_stream_eval_stuck_compiling_keeps_the_reader_reading(connect):
+    # complete must not wait for the compile's scope lock, and macroexpand
+    # (which takes it) must wait off the reader, or the interrupt behind
+    # them would never be read.
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=SPIN_MACRO)
+    assert is_out(client.recv(), 1)
+    client.send(op="complete", id=2, prefix="pri")
+    reply = without_out(client.until(lambda m: m.get("id") == 2), 1)[-1]
+    assert reply["op"] == "complete-result"
+    assert "print" in reply["completions"]
+    client.send(op="macroexpand", id=3, code="(inc 1)")
+    client.send(op="ping", id=4)
+    assert without_out(client.until(lambda m: m.get("id") == 4), 1) == [
+        {"op": "pong", "id": 4}
+    ]
+    client.send(op="interrupt", id=5, **{"interrupt-id": 1})
+    seen = set()
+
+    def eval_and_macroexpand_answered(msg):
+        # The eval's result and the macroexpand reply, in either order.
+        if not is_out(msg, 1):
+            seen.add(msg.get("id"))
+        return {1, 3} <= seen
+
+    messages = without_out(client.until(eval_and_macroexpand_answered), 1)
+    replies = {msg["id"]: msg for msg in messages}
+    assert sorted(replies) == [1, 3, 5]
+    assert replies[5] == {"op": "interrupt-result", "interrupt-id": 1, "id": 5}
+    assert replies[1]["op"] == "eval-result"
+    assert replies[1]["error"].endswith("KeyboardInterrupt")
+    assert replies[3] == {
+        "op": "macroexpand-result",
+        "expansion": "(+ 1 1)",
+        "error": None,
+        "id": 3,
+    }
+    client.send(op="eval", id=6, code="(+ 1 2)")
+    assert client.recv()["value"] == "3"
+
+
+def test_a_slow_require_keeps_the_built_ins_in_the_table(
+    connect, tmp_path, monkeypatch
+):
+    # A require's import runs user code; the built-ins a unit start seeded
+    # stay in the table the whole time it runs.
+    (tmp_path / "lockfreeze_spin.lpy").write_text(
+        '(import time)\n(while True (print "r") (time.sleep 0.01))\n'
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # A file scope: its unit start seeded the built-ins (the session scope
+    # of this fixture required them all, which made them its own).
+    path = str(tmp_path / "f.lpy")
+    client = connect()
+    client.send(
+        op="eval",
+        id=1,
+        stream=True,
+        file=path,
+        line=3,
+        code="(require lockfreeze-spin)",
+    )
+    assert is_out(client.recv(), 1)
+    # docs reads the table with no lock (complete would offer cond anyway,
+    # as one of lispython's own names).
+    client.send(op="docs", id=2, symbol="cond", file=path)
+    reply = without_out(client.until(lambda m: m.get("id") == 2), 1)[-1]
+    assert reply["op"] == "docs-result"
+    assert reply["docs"].startswith("cond")
+
+
+def test_an_interrupt_waits_for_the_warnings_lock(connect, monkeypatch):
+    # An interrupt landing inside filtered_warnings would leave the
+    # process-wide warning filters swapped, so none is raised while that
+    # lock is held; the client is told to send it again.
+    from lispy.core import errors
+
+    monkeypatch.setattr(tools, "NREPL_WARNINGS_WAIT", 0.05)
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=ENDLESS)
+    assert is_out(client.recv(), 1)
+    with errors._WARNINGS_LOCK:
+        client.send(op="interrupt", id=2, **{"interrupt-id": 1})
+        refused = without_out(client.until(lambda m: m.get("id") == 2), 1)[-1]
+    assert refused["op"] == "error"
+    assert "busy" in refused["error"]
+    # The busy interrupt raised nothing, so it does not count as a recent one.
+    client.send(op="interrupt", id=3, **{"interrupt-id": 1})
+    replies = without_out(client.until(lambda m: m.get("op") == "eval-result"), 1)
+    assert replies[0] == {"op": "interrupt-result", "interrupt-id": 1, "id": 3}
+    assert replies[1]["error"].endswith("KeyboardInterrupt")
 
 
 CATCH_ONCE = (

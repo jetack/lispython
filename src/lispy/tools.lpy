@@ -899,10 +899,12 @@
                         (, exec (compile (ast.Module :body [st] :type-ignores [])
                                          filename "exec"))))))
       ;; Only code that compiled binds anything, so only it is recorded.
-      (= spellings (nrepl-scope-spellings scope))
-      (if whole-file
-          (.clear spellings))
-      (.update spellings spelled))
+      ;; A new dict, published by one attribute store: completion reads the
+      ;; record with no lock (nrepl-scope-spellings).
+      (= entry (_nrepl-scope-entry scope))
+      (= spellings (ife whole-file {} (dict entry.spellings)))
+      (.update spellings spelled)
+      (= entry.spellings spellings))
     (= last-val None)
     (for [run code] codes
       (= last-val (run code scope)))
@@ -979,19 +981,27 @@
             (= (sub _NREPL-FILE-SCOPES key) scope))))
   (return scope))
 
-;; id(scope) -> (scope, lock, spellings), under _NREPL-FILE-SCOPES-LOCK.  A
-;; side table, never a key in the scope, which is the user's globals
-;; (completion would offer it, pickling fails, and code that clears its
-;; globals would swap it).  The entry keeps the scope alive, so its id is
-;; never reused.
+;; id(scope) -> _NreplScopeEntry, under _NREPL-FILE-SCOPES-LOCK.  A side
+;; table, never a key in the scope, which is the user's globals (completion
+;; would offer it, pickling fails, and code that clears its globals would
+;; swap it).  The entry keeps the scope alive, so its id is never reused.
 (= _NREPL-SCOPE-LOCKS {})
 
+(class _NreplScopeEntry []
+  "A scope's nREPL state: the scope (kept alive), its lock and its spelling
+  record (nrepl-scope-lock, nrepl-scope-spellings)."
+  (= __slots__ (, "scope" "lock" "spellings"))
+  (def __init__ [self scope]
+    (= self.scope scope)
+    (= self.lock (threading.RLock))
+    (= self.spellings {})))
+
 (def _nrepl-scope-entry [scope]
-  "scope's side-table entry (scope, lock, spellings), created on first use."
+  "scope's side-table entry (_NreplScopeEntry), created on first use."
   (with [_NREPL-FILE-SCOPES-LOCK]
     (= entry (.get _NREPL-SCOPE-LOCKS (id scope)))
     (if (is entry None)
-        (do (= entry (, scope (threading.RLock) {}))
+        (do (= entry (_NreplScopeEntry scope))
             (= (sub _NREPL-SCOPE-LOCKS (id scope)) entry))))
   (return entry))
 
@@ -999,20 +1009,26 @@
   "The lock of scope's macro table, created on first use.  Connections are
    served on threads and share the session scope and file scopes.
    Compiling (an eval's compile phase, a macroexpand) holds it, so two
-   compiles never reshape one table at once and completion, which takes
-   its snapshot under it, never sees a table half reset by a unit start.
-   Running code holds no lock and may still add to the table (a compiled
-   defmacro or require), so every iteration over the table or scope is
-   over a snapshot (list/dict), never the live dict."
-  (return (sub (_nrepl-scope-entry scope) 1)))
+   compiles never reshape one table at once.  ⚠️ Completion never takes it,
+   because a compile runs user macros and requires that may never return,
+   and the connection's reader, which answers complete, would then read no
+   interrupt and no EOF: it reads the table and the scope with no lock,
+   over snapshots (list), and a unit start swaps a whole new table in
+   (MacroTable.reset), so it never sees one half reset.  Running code holds
+   no lock and may still add to the table (a compiled defmacro or require),
+   so every iteration over the table or scope is over a snapshot
+   (list/dict), never the live dict."
+  (return (. (_nrepl-scope-entry scope) lock)))
 
 (def nrepl-scope-spellings [scope]
   "Python name -> the code spelling evaluated in scope for it, when that is
    no hyphenated spelling of the name (ok? for ok_p, ->foo for _to_foo: the
    part of name-spellings' map nrepl-eval records), which completion labels
-   the name by (completion-label, the LSP's rule over its buffer).  Read
-   and written only under nrepl-scope-lock."
-  (return (sub (_nrepl-scope-entry scope) 2)))
+   the name by (completion-label, the LSP's rule over its buffer).  The
+   dict is never changed once published: nrepl-eval builds the next record
+   under nrepl-scope-lock and swaps it in, so a reader holding no lock
+   (completion) gets a whole record; callers only read it."
+  (return (. (_nrepl-scope-entry scope) spellings)))
 
 (= NREPL-NS-FIELD "ns")  ; the request field naming an eval/complete/macroexpand scope
 
@@ -1155,9 +1171,10 @@
 
 (def _scope-macro-names [scope]
   "The keys of scope's macro table, as written ((require mod) registers
-   mod.name); a call finds one by any spelling of its name (find-macro)."
-  (with [(nrepl-scope-lock scope)]
-    (return (list (.get scope "__macro_namespace" {})))))
+   mod.name); a call finds one by any spelling of its name (find-macro).
+   Read with no lock (nrepl-scope-lock): list is a snapshot of a MacroTable
+   (its iteration) and of a plain dict (one C call over str keys)."
+  (return (list (.get scope "__macro_namespace" {}))))
 
 (def nrepl-complete [prefix scope]
   "Return completions matching prefix, including dot-completion, filtered
@@ -1176,8 +1193,8 @@
    scope (ok? for ok_p, else the hyphen spelling), a macro key by the
    hyphen spelling of its parts after the head, own names and keywords as
    they are."
-  (with [(nrepl-scope-lock scope)]
-    (= spellings (dict (nrepl-scope-spellings scope))))
+  ;; No lock: complete runs on the connection's reader (nrepl-scope-lock).
+  (= spellings (nrepl-scope-spellings scope))
   (= parts (.split prefix "."))
   (= head-parts (sub parts [: -1]))
   ;; The typed text through the last ., which every candidate starts with.
@@ -1213,8 +1230,7 @@
           (offer k (_tagged (sub _OWN-NAME-TAGS k))))
         (for k in keyword.kwlist
           (offer k (_untagged "keyword")))
-        (with [(nrepl-scope-lock scope)]
-          (= names (list scope)))
+        (= names (list scope))
         ;; A scope binding shadows the builtin of the same name.
         (for k in names
           (offer (completion-label k spellings)
@@ -1427,7 +1443,7 @@
   RLock listed here: the linecache and file-scope locks, every scope lock,
   and the compiler's warnings lock."
   (with [_NREPL-FILE-SCOPES-LOCK]
-    (= scope-locks [(sub entry 1) for entry in (.values _NREPL-SCOPE-LOCKS)]))
+    (= scope-locks [entry.lock for entry in (.values _NREPL-SCOPE-LOCKS)]))
   (for lock [_NREPL-LINECACHE-LOCK _NREPL-FILE-SCOPES-LOCK errors-module._WARNINGS_LOCK
              *scope-locks]
     (_nrepl-release-owned lock)))
@@ -1476,6 +1492,17 @@
 ;; only its daemon thread is left behind.
 (= NREPL-CLOSE-TIMEOUT 2)  ; seconds
 (= _NREPL-WORKER-STOP (object))  ; queued by close(): the worker returns
+;; How long an interrupt waits for the compiler's warnings lock
+;; (_NreplConnection._raise-in) before it gives up and asks for a resend.
+(= NREPL-WARNINGS-WAIT 1)  ; seconds
+;; _NreplConnection._raise-in's outcomes.
+(= _NREPL-RAISED "raised")
+(= _NREPL-TOO-SOON "too-soon")  ; raised there within NREPL-INTERRUPT-REPEAT
+(= _NREPL-BUSY "busy")  ; the warnings lock stayed held for NREPL-WARNINGS-WAIT
+;; Requests that can run user code (macros; _resolve-obj evaluates a dotted
+;; name, so a property runs) and so leave the reader while an eval is not
+;; waited for (_NreplConnection.aside).  complete stays on the reader.
+(= _NREPL-ASIDE-OPS (frozenset ["macroexpand" "docs" "annotate"]))
 
 (class _NreplConnection []
   "One client connection: its send lock and its eval worker.
@@ -1494,8 +1521,19 @@
   for either, because the reader would then stop reading (no interrupt, no
   EOF) for as long as the stream eval runs; its reply comes when it ran.
 
+  The reader never waits on user code while an eval is not waited for, or
+  an interrupt sent then would never be read: complete takes no lock
+  (nrepl-scope-lock), and macroexpand, docs and annotate, which may run
+  macros or a property (_NREPL-ASIDE-OPS), go to the connection's side
+  worker, one lazily started thread with its own FIFO queue, whenever a
+  job is queued or running or an earlier side request is still pending
+  (so a later inline request never overtakes one); otherwise they run on
+  the reader as before.  Their replies have the reader's shapes.  A side
+  request that never returns leaves only its daemon thread behind, and
+  the side requests after it on that connection wait for it.
+
   Every send on the connection is one whole line under one lock (sendall),
-  so the reader, the worker and a stream's flusher never interleave bytes."
+  so the reader, the workers and a stream's flusher never interleave bytes."
   (def __init__ [self conn scope]
     (= self.conn conn)
     (= self.scope scope)
@@ -1508,7 +1546,10 @@
     (= self._queue (queue.SimpleQueue))
     (= self._worker (threading.Thread :target self._work :daemon True
                                       :name "nrepl-eval"))
-    (self._worker.start))
+    (self._worker.start)
+    (= self._side None)  ; the side worker, once started (aside)
+    (= self._side-queue (queue.SimpleQueue))
+    (= self._side-pending 0))  ; side requests not yet answered, under the lock
 
   (def sendall [self data]
     (with [self._send-lock]
@@ -1549,24 +1590,42 @@
                 (raise job.send-error)))))
 
   (def _raise-in [self job :force False]
-    "Raise KeyboardInterrupt in RUNNING job, unless it was raised there
-    within NREPL-INTERRUPT-REPEAT (force: regardless).  True when it raised.
-    Called under the lock."
+    "Raise KeyboardInterrupt in RUNNING job and return _NREPL-RAISED, unless
+    it was raised there within NREPL-INTERRUPT-REPEAT (_NREPL-TOO-SOON) or
+    the warnings lock stayed held for NREPL-WARNINGS-WAIT (_NREPL-BUSY);
+    force raises regardless.  Called under the lock."
     (= now (time.monotonic))
     (if (not (or force (is job.raised-at None)
                  (>= (- now job.raised-at) NREPL-INTERRUPT-REPEAT)))
-        (return False))
-    (= job.raised-at now)
-    (_nrepl-raise-in job.ident KeyboardInterrupt)
-    (return True))
+        (return _NREPL-TOO-SOON))
+    ;; Raised only while this thread holds the compiler's warnings lock
+    ;; (errors._WARNINGS_LOCK), so the exception can never be set while the
+    ;; job is inside filtered_warnings, whose catch_warnings setup or
+    ;; teardown it would cut short, leaving the process-wide filters and
+    ;; showwarning swapped.  That region runs no user code, so the wait is
+    ;; short; the exception can at worst fire right after the job's own
+    ;; acquire, which _nrepl-release-window-locks undoes.  No deadlock:
+    ;; nothing holding the warnings lock takes a connection lock, except a
+    ;; worker an interrupt left holding it on its way to _close-window, and
+    ;; the timeout bounds that wait.
+    (= held (errors-module._WARNINGS_LOCK.acquire :timeout NREPL-WARNINGS-WAIT))
+    (if (and (not held) (not force))
+        (return _NREPL-BUSY))
+    (try
+      (= job.raised-at now)
+      (_nrepl-raise-in job.ident KeyboardInterrupt)
+      (finally
+        (if held
+            (errors-module._WARNINGS_LOCK.release))))
+    (return _NREPL-RAISED))
 
   (def interrupt [self msg]
     "Answer an interrupt request: raise KeyboardInterrupt in the eval whose
     id is its NREPL-INTERRUPT-ID-FIELD when that eval runs, or cancel it
     when it is queued, and reply interrupt-result; an error reply when there
     is no such eval, or when it was interrupted less than
-    NREPL-INTERRUPT-REPEAT ago and this one raised nothing (the client may
-    send it again).  Only a stream eval, or a plain one queued behind one,
+    NREPL-INTERRUPT-REPEAT ago or busy in the compiler's warnings lock
+    (_raise-in) and this one raised nothing (the client may send it again).  Only a stream eval, or a plain one queued behind one,
     can be interrupted.  The reply goes out under the lock, so it precedes
     the eval's final result."
     (= target (.get msg NREPL-INTERRUPT-ID-FIELD))
@@ -1574,14 +1633,19 @@
     (with [self._lock]
       (= job (ife (is key None) None (.get self._by-id key)))
       (= error None)
+      (= raised None)
       (cond (or (is job None) (not-in job.state (, _NREPL-QUEUED _NREPL-RUNNING)))
             (= error (+ "no queued or running eval with id " (json.dumps target)))
             (== job.state _NREPL-QUEUED)
             (= job.cancelled True)
-            (not (self._raise-in job))
+            True
+            (= raised (self._raise-in job)))
+      (cond (== raised _NREPL-TOO-SOON)
             (= error (+ "eval " (json.dumps target) " was interrupted less than "
                         (str NREPL-INTERRUPT-REPEAT) " s ago; send the interrupt again"
-                        " to interrupt it again")))
+                        " to interrupt it again"))
+            (== raised _NREPL-BUSY)
+            (= error (+ "eval " (json.dumps target) " is busy; send the interrupt again")))
       (if (is error None)
           (_nrepl-reply self msg {"op" NREPL-INTERRUPT-RESULT-OP
                                   NREPL-INTERRUPT-ID-FIELD target})
@@ -1590,8 +1654,9 @@
   (def close [self]
     "End the connection's evals: cancel the queued ones, interrupt the
     running one, shut the socket down (so their final replies fail at once
-    instead of waiting on a peer that is gone), and join the worker for at
-    most NREPL-CLOSE-TIMEOUT.  The caller closes the socket."
+    instead of waiting on a peer that is gone), and join the eval worker
+    and the side worker for at most NREPL-CLOSE-TIMEOUT together.  The
+    caller closes the socket."
     (with [self._lock]
       (for job self._jobs
         (cond (== job.state _NREPL-QUEUED)
@@ -1605,7 +1670,52 @@
           (except [OSError]
             (pass))))
     (self._queue.put _NREPL-WORKER-STOP)
-    (self._worker.join NREPL-CLOSE-TIMEOUT))
+    (self._side-queue.put _NREPL-WORKER-STOP)
+    (= deadline (+ (time.monotonic) NREPL-CLOSE-TIMEOUT))
+    (self._worker.join NREPL-CLOSE-TIMEOUT)
+    (with [self._lock]
+      (= side self._side))
+    (if (is-not side None)
+        (side.join (max 0 (- deadline (time.monotonic))))))
+
+  (def aside [self msg]
+    "Send msg, a request of _NREPL-ASIDE-OPS, to the side worker and return
+    True when an eval is queued or running or an earlier side request is
+    still unanswered; else False, and the reader answers it itself.  The
+    side worker is started on first use."
+    (with [self._lock]
+      (if (not (or self._jobs (> self._side-pending 0)))
+          (return False))
+      (+= self._side-pending 1)
+      (if (is self._side None)
+          (do (= self._side (threading.Thread :target self._side-work :daemon True
+                                              :name "nrepl-side"))
+              (self._side.start))))
+    (self._side-queue.put msg)
+    (return True))
+
+  (def _side-work [self]
+    ;; Every request gets its one reply, a failure an error reply, as on
+    ;; the reader; nothing escapes the thread (a failed send included), so
+    ;; the requests after it are still answered.  pending drops only once
+    ;; the reply is sent, so a later inline request never overtakes it.
+    (while True
+      (= msg (self._side-queue.get))
+      (if (is msg _NREPL-WORKER-STOP)
+          (return))
+      (try
+        (try
+          (= result (_nrepl-dispatch msg self.scope))
+          (except [BaseException as e]
+            (_nrepl-error-reply self msg (_nrepl-failure-text e))
+            (= result None)))
+        (if (is-not result None)
+            (_nrepl-send-result self msg result))
+        (except [BaseException]
+          (pass))
+        (finally
+          (with [self._lock]
+            (-= self._side-pending 1))))))
 
   (def _work [self]
     ;; An exception escaping _serve is the worker's own fault (_serve absorbs
@@ -1798,6 +1908,8 @@
               (connection.evaluate msg)
               (== op NREPL-INTERRUPT-OP)
               (connection.interrupt msg)
+              (and (in op _NREPL-ASIDE-OPS) (connection.aside msg))
+              (pass)
               True
               (do (try
                     (= result (_nrepl-dispatch msg scope))
