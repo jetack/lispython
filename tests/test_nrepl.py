@@ -1180,7 +1180,8 @@ def test_a_pending_side_request_keeps_later_requests_off_the_reader(connect, iso
         assert pong == {"op": "pong", "id": 6}
         go.set()
         # The eval ended; the macroexpand still waits.
-        assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["id"] == 1
+        result = client.until(lambda m: m.get("id") == 1 and not is_out(m, 1))[-1]
+        assert result["id"] == 1
         # The reader's pong does not say the side worker already runs the
         # macro; without the scope lock held, eval 4 would finish before pong 5.
         assert entered.wait(WAIT)
