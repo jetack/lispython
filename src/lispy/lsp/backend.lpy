@@ -1273,6 +1273,28 @@
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
 
+  (def files-changed [self lpy-uris]
+    "Files that name the modules of documents lpy-uris changed (a module
+     file created or deleted, the workspace folders changed): every backend
+     of one of them that runs or is starting sweeps its view root once, as
+     a save of its documents among them (BackendClient.saved), so its
+     package overlays and import roots follow the new naming.  Call on the
+     loop."
+    (= by-client {})
+    (for lpy-uri in lpy-uris
+      (try
+        (= client (._existing self lpy-uri))
+        (if (and (is-not client None) (or client.running client.starting))
+            (.append (.setdefault by-client client (list)) lpy-uri))
+        (except [Exception]
+          (.exception logger "lispython LSP: no Python backend for %s" lpy-uri))))
+    (for [client uris] in (.items by-client)
+      (try
+        (._schedule self (.saved client *uris))
+        (except [Exception]
+          (.exception logger "lispython LSP: backend sweep failed for %s"
+                      client.project-root)))))
+
   (async-def shutdown-all [self]
     "Shut every backend down (the LSP's shutdown); none starts afterwards."
     (= self._closed True)

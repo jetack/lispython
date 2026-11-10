@@ -25,7 +25,7 @@ from pygls.workspace import TextDocument
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 import lispy.core.macro
-from tests.test_lsp_backend import FAKE_SERVER, hover_params, run_bounded
+from tests.test_lsp_backend import FAKE_SERVER, fake_hover, hover_params, run_bounded
 
 backend = importlib.import_module("lispy.lsp.backend")
 macro_modules = importlib.import_module("lispy.lsp.macro_modules")
@@ -641,9 +641,9 @@ def test_a_document_closed_during_a_refresh_is_left_closed(
 @pytest.fixture
 def outside_documents(fake_served, monkeypatch):
     """(editor, outside, mod, folders): a document outside/<pkg>/mod.lpy,
-    in no workspace folder (folders, the server's, which a test may grow)
-    and with no __init__, requiring the sibling macro module relatively,
-    the backend off."""
+    in no workspace folder (folders, the server's and the backends', which
+    a test may change) and with no __init__, requiring the sibling macro
+    module relatively, the backend off."""
     _, backends = fake_served
     backends.configure({"backend": "off"})
     project = pathlib.Path(backends.folders()[0].uri[len("file://") :])
@@ -656,6 +656,8 @@ def outside_documents(fake_served, monkeypatch):
     mod.write_text("(require .mac *)\n(= yy (twice 2))\n")
     folders = [SimpleNamespace(uri=project.as_uri())]
     monkeypatch.setattr(server, "workspace_folders", lambda: list(folders))
+    # As the server's: the backends read the same folders.
+    monkeypatch.setattr(backends, "folders", lambda: list(folders))
     for key in [name, name + ".mac"]:
         monkeypatch.delitem(sys.modules, key, raising=False)
     yield Documents(), outside, mod, folders
@@ -684,10 +686,7 @@ def test_a_created_init_file_republishes_the_open_documents(outside_documents):
         count = len(editor.published[uri])
         init = mod.parent / "__init__.py"
         init.write_text("")
-        change = lsp.FileEvent(uri=init.as_uri(), type=lsp.FileChangeType.Created)
-        server.did_change_watched_files(
-            editor, lsp.DidChangeWatchedFilesParams(changes=[change])
-        )
+        files_changed(editor, init)
         await until(lambda: len(editor.published[uri]) > count, timeout=5)
         assert editor.published[uri][-1] == []
 
@@ -707,12 +706,123 @@ def test_an_added_workspace_folder_republishes_the_open_documents(
         count = len(editor.published[uri])
         folder = lsp.WorkspaceFolder(uri=outside.as_uri(), name="outside")
         folders.append(folder)
-        event = lsp.WorkspaceFoldersChangeEvent(added=[folder], removed=[])
-        server.did_change_workspace_folders(
-            editor, lsp.DidChangeWorkspaceFoldersParams(event=event)
-        )
+        folders_changed(editor, added=[folder])
         await until(lambda: len(editor.published[uri]) > count, timeout=5)
         assert editor.published[uri][-1] == []
+
+    run_bounded(scenario())
+
+
+def files_changed(ls, path, kind=lsp.FileChangeType.Created):
+    """The client tells the server path was created (or kind)."""
+    change = lsp.FileEvent(uri=path.as_uri(), type=kind)
+    server.did_change_watched_files(
+        ls, lsp.DidChangeWatchedFilesParams(changes=[change])
+    )
+
+
+def folders_changed(ls, added=(), removed=()):
+    """The client tells the server its folders changed (pygls has already
+    updated them)."""
+    event = lsp.WorkspaceFoldersChangeEvent(added=list(added), removed=list(removed))
+    server.did_change_workspace_folders(
+        ls, lsp.DidChangeWorkspaceFoldersParams(event=event)
+    )
+
+
+def test_a_module_file_ending_a_namespace_package_republishes(outside_documents):
+    # Defect: only an __init__ is heard, but a module file created beside a
+    # namespace directory of its name ends that package too, so the open
+    # document keeps the diagnostics of its old package naming.
+    editor, outside, mod, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+
+    async def scenario():
+        uri = editor.open(mod)
+        await until(lambda: uri in editor.published)
+        assert editor.published[uri][-1] == []
+        count = len(editor.published[uri])
+        module = outside / "diagrepub.py"
+        module.write_text("")
+        files_changed(editor, module)
+        await until(lambda: len(editor.published[uri]) > count, timeout=5)
+        [warning] = editor.published[uri][-1]
+        assert "relative" in warning.message
+
+    run_bounded(scenario())
+
+
+def test_a_module_file_change_sweeps_the_running_backend(fake_served):
+    # Defect: a naming change publishes the buffers again but never rewrites
+    # the backend's view root (package overlays, import roots), which only a
+    # start or a save sweeps, so the backend keeps resolving the old names.
+    editor, backends = fake_served
+    project = pathlib.Path(editor.uri[len("file://") :]).parent
+
+    async def scenario():
+        try:
+            editor.open("(= y 1)\n")
+            client = backends.client_for(editor.uri)
+            await until(lambda: client.running)
+            init = project / "pkg" / "__init__.py"
+            init.parent.mkdir()
+            init.write_text("")
+            files_changed(editor, init)
+            await asyncio.gather(*backends._tasks)
+            params = hover_params(client.backend_uri(editor.uri))
+            answer = await backends.request(editor.uri, lsp.TEXT_DOCUMENT_HOVER, params)
+            return client.backend_uri(editor.uri), fake_hover(answer)["watched"]
+        finally:
+            await backends.shutdown_all()
+
+    shadow, watched = run_bounded(scenario())
+    assert shadow in watched
+
+
+def test_an_added_workspace_folder_starts_its_open_documents_backend(
+    outside_documents, fake_served
+):
+    # Defect: only an open starts a backend, so a document that a folder
+    # added later puts in a project never gets one, nor its diagnostics.
+    editor, outside, mod, folders = outside_documents
+    _, backends = fake_served
+    backends.configure(None)
+
+    async def scenario():
+        try:
+            uri = await published_as_script(editor, mod)
+            folder = lsp.WorkspaceFolder(uri=outside.as_uri(), name="outside")
+            folders.append(folder)
+            folders_changed(editor, added=[folder])
+            await until(lambda: getattr(backends._existing(uri), "running", False))
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+
+
+def test_the_workspace_index_follows_the_folders(outside_documents):
+    # Defect: the workspace is indexed only at initialized, so a folder
+    # added later offers none of its definitions and a removed one keeps
+    # offering them.
+    editor, outside, _, folders = outside_documents
+    defs = outside / "defs.lpy"
+    defs.write_text("(def far-away [] 1)\n")
+    folder = lsp.WorkspaceFolder(uri=outside.as_uri(), name="outside")
+
+    def found():
+        query = SimpleNamespace(query="far")
+        return [s.location.uri for s in server.workspace_symbol(editor, query)]
+
+    async def scenario():
+        folders.append(folder)
+        folders_changed(editor, added=[folder])
+        assert found() == [defs.as_uri()]
+        folders.remove(folder)
+        folders_changed(editor, removed=[folder])
+        assert found() == []
+        indexed = [loc.uri for locs in server.WORKSPACE_INDEX.values() for loc in locs]
+        assert defs.as_uri() not in indexed
 
     run_bounded(scenario())
 
@@ -737,11 +847,11 @@ class Registering:
         return refused
 
 
-def test_init_files_are_watched_only_where_the_client_can_register(caplog):
+def test_module_files_are_watched_only_where_the_client_can_register(caplog):
     # Defects: the watch is registered with a client that cannot take a
-    # dynamic registration, or never asked for at all, so no __init__
-    # change is ever heard; a refused registration raises out of
-    # initialized.
+    # dynamic registration, or never asked for at all, so no module file
+    # created or deleted is ever heard; a refused registration raises out
+    # of initialized.
     unable, able = Registering(None), Registering(True)
     server.on_initialized(unable, None)
     server.on_initialized(able, None)
@@ -1089,6 +1199,20 @@ def refreshes(monkeypatch, runs, now, refreshed_epoch, compiled_epoch):
     compiled = SimpleNamespace(epoch=compiled_epoch)
     asyncio.run(server.refresh_outdated(None, "self", compiled))
     return refreshed
+
+
+def test_a_refresh_keeps_a_compiling_saves_recompile_and_refresh(scripted):
+    # Defect: a refresh run (a republish) replacing a save's run whose
+    # compile is in flight drops its recompile and its refresh: the save's
+    # refresh-outdated never runs, and if that compile is given up the new
+    # run serves the cached view from before the save.
+    editor, _ = scripted
+    held_runs(editor)
+    server.publish_diagnostics(editor, editor.uri, recompile=True)
+    server.DIAGNOSTIC_RUNS[editor.uri].compiled = True  # compiling
+    server.publish_diagnostics(editor, editor.uri, refresh=True)
+    run = server.DIAGNOSTIC_RUNS[editor.uri]
+    assert (run.recompile, run.refresh) == (True, False)
 
 
 def test_a_run_under_an_older_epoch_refreshes_nothing(scripted, monkeypatch):

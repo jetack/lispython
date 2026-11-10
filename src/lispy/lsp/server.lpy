@@ -182,15 +182,8 @@
           (except [LispyCompileError]
             (pass))))))
 
-(def index-file [uri]
-  "Parse a .lpy file and add its definitions to the workspace index.
-   Removes old entries for this URI before re-indexing.  Only a file inside
-   a workspace folder publishes workspace/symbol results: a dependency
-   indexed so that go-to-definition can reach it is not the user's code and
-   would flood the symbol search.  Membership is decided here from the
-   file's path, never by the caller, so every route to index-file (startup
-   scan, didOpen/didSave, a require, go-to-definition) agrees about a file."
-  ;; Remove old entries for this URI
+(def unindex-file [uri]
+  "Drop every entry of the file at uri from the workspace index."
   (= to-remove [])
   (for [name locs] in (.items WORKSPACE-INDEX)
     (= (sub WORKSPACE-INDEX name)
@@ -199,8 +192,17 @@
         (.append to-remove name)))
   (for name in to-remove
     (del (sub WORKSPACE-INDEX name)))
-  (.pop WORKSPACE-SYMBOLS uri None)
+  (.pop WORKSPACE-SYMBOLS uri None))
 
+(def index-file [uri]
+  "Parse a .lpy file and add its definitions to the workspace index.
+   Removes old entries for this URI before re-indexing.  Only a file inside
+   a workspace folder publishes workspace/symbol results: a dependency
+   indexed so that go-to-definition can reach it is not the user's code and
+   would flood the symbol search.  Membership is decided here from the
+   file's path, never by the caller, so every route to index-file (startup
+   scan, didOpen/didSave, a require, go-to-definition) agrees about a file."
+  (unindex-file uri)
   ;; Parse and collect definitions
   (= fpath (uri-to-path uri))
   (if (not (osp.isfile fpath))
@@ -945,7 +947,9 @@
    started by refresh-outdated or finish-run, so it starts no refresh
    itself.  rerun: the refresh target (_REFRESH-TARGET) finish-run started
    it for, a compile having missed that target; None when it is no rerun.
-   It is rerun again only for a greater target."
+   It is rerun again only for a greater target.  finishing is set once its
+   finish-run began: its compile returned, and a run that is
+   no refresh refreshes (refresh-outdated) even if superseded later."
   (def __init__ [self ls doc :recompile False :refresh False :rerun None]
     (= self.ls ls)
     (= self.doc doc)
@@ -953,6 +957,7 @@
     (= self.refresh refresh)
     (= self.rerun rerun)
     (= self.compiled False)
+    (= self.finishing False)
     (= self.epoch None)
     (= self.superseded (asyncio.Event))
     (= self.lispy None)
@@ -1002,12 +1007,15 @@
    so a change before the open's compile cannot skip the start.
    recompile: compile again even at a cached version (a save: the macros
    may read what changed on disk).  refresh, rerun: DiagnosticRun's.  A
-   run replaced before its compile began hands on its own: the new run
+   run replaced before its finish-run began (pending, compiling, or its
+   compile failed or was given up on) hands on its own: the new run
    recompiles if either does, and is a refresh run only if both are, so a
-   refresh never drops a pending change's refresh or a save's recompile."
+   refresh never drops a pending change's refresh or a save's recompile,
+   since such a run never refreshes and its compile may never reach the
+   view cache."
   (= doc (document-snapshot (.get-text-document ls.workspace uri)))
   (= prev (.get DIAGNOSTIC-RUNS uri))
-  (if (and (is-not prev None) (not prev.compiled))
+  (if (and (is-not prev None) (not prev.finishing))
       (do (= recompile (or recompile prev.recompile))
           (= refresh (and refresh prev.refresh))))
   (= run (DiagnosticRun ls doc :recompile recompile :refresh refresh :rerun rerun))
@@ -1140,6 +1148,7 @@
    target already."
   (if (not (_current-p run))
       (return))
+  (= run.finishing True)
   (= doc run.doc)
   (= run.lispy (compute-diagnostics doc.source doc.uri :compiled compiled :doc doc))
   (= run.view compiled.view)
@@ -1217,19 +1226,25 @@
 
 (def republish-open-documents [ls]
   "Publish every open document again, after a change that can rename its
-   module (an __init__ created or deleted, the workspace folders changed:
-   uri-module-names), since its published diagnostics came from a compile
-   under the old naming.  Every document is published, as a refresh run:
-   one whose naming did not change finds its view cached (the ViewCache
-   key holds version, epoch and naming), so nothing compiles; one
-   compiling now gets a run queued behind that compile (compile-latest),
-   compiled under the new naming.  A refresh run starts no refresh-outdated,
-   which is not needed here since every open document is published anyway."
-  (for uri in (list DIAGNOSTIC-RUNS)
+   module (a module file created or deleted, the workspace folders
+   changed: uri-module-names), since its published diagnostics came from a
+   compile under the old naming, and have each backend of an open document
+   sweep its view root again (Backends.files-changed), whose package
+   overlays and import roots follow the naming too.  Every document is
+   published, as a refresh run: one whose naming did not change finds its
+   view cached (the ViewCache key holds version, epoch and naming), so
+   nothing compiles; one compiling now gets a run queued behind that
+   compile (compile-latest), compiled under the new naming, which keeps
+   the unfinished run's recompile and refresh (publish-diagnostics).  A
+   refresh run starts no refresh-outdated, which is not needed here since
+   every open document is published anyway."
+  (= uris (list DIAGNOSTIC-RUNS))
+  (for uri in uris
     (try
       (publish-diagnostics ls uri :refresh True)
       (except [Exception]
-        (.exception logger "lispython LSP: cannot republish %s" uri)))))
+        (.exception logger "lispython LSP: cannot republish %s" uri))))
+  (.files-changed backends uris))
 
 (async-def wait-backend-diagnostics [run]
   "Wait until the backend's diagnostics for run's view are known, at most
@@ -1631,30 +1646,32 @@
                   []))
   (if folders
       (index-workspace folders))
-  (watch-init-files ls)))
+  (watch-module-files ls)))
 
-;; The files whose creation or deletion renames the modules around them
-;; (package_root's regular packages); their content never does, so only
-;; Create and Delete are watched.
-(= INIT-FILE-NAMES ["__init__.py" "__init__.lpy"])
+;; The module files whose creation or deletion renames the modules around
+;; them (package_root): an __init__ makes its directory a regular package,
+;; and a module file beside a namespace directory of its name ends that
+;; package.  Their content never does, so only Create and Delete are
+;; watched.
+(= MODULE-FILE-GLOBS ["**/*.py" "**/*.lpy"])
 
 (def _registration-done [future]
   (if (and (not (.cancelled future)) (is-not (.exception future) None))
-      (.error logger "lispython LSP: the client refused the __init__ file watch: %s"
+      (.error logger "lispython LSP: the client refused the module file watch: %s"
               (.exception future))))
 
-(def watch-init-files [ls]
-  "Ask the client to tell us (didChangeWatchedFiles) when an __init__ file
-   is created or deleted anywhere, when it can register a file watch
+(def watch-module-files [ls]
+  "Ask the client to tell us (didChangeWatchedFiles) when a module file is
+   created or deleted anywhere, when it can register a file watch
    dynamically; a failure is logged, never raised."
   (if (not (client-capability-p
              ls ["workspace" "did_change_watched_files" "dynamic_registration"]))
       (return))
   (= kind (| lsp.WatchKind.Create lsp.WatchKind.Delete))
-  (= watchers [(lsp.FileSystemWatcher :glob-pattern f"**/{name}" :kind kind)
-               for name in INIT-FILE-NAMES])
+  (= watchers [(lsp.FileSystemWatcher :glob-pattern glob :kind kind)
+               for glob in MODULE-FILE-GLOBS])
   (= options (lsp.DidChangeWatchedFilesRegistrationOptions :watchers watchers))
-  (= registration (lsp.Registration :id "lispython-init-files"
+  (= registration (lsp.Registration :id "lispython-module-files"
                                     :method lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES
                                     :register-options options))
   (try
@@ -1663,21 +1680,45 @@
         ls (lsp.RegistrationParams :registrations [registration]))
       _registration-done)
     (except [Exception]
-      (.exception logger "lispython LSP: cannot register the __init__ file watch"))))
+      (.exception logger "lispython LSP: cannot register the module file watch"))))
 
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
 (def did-change-watched-files [ls params]
-  "An __init__ file created or deleted may rename open documents' modules;
-   any other file event is not ours (watch-init-files)."
-  (if (any ((in (osp.basename (uri-to-path change.uri)) INIT-FILE-NAMES)
+  "A file created or deleted may rename open documents' modules
+   (watch-module-files); a change of content never does."
+  (if (any ((in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
             for change in params.changes))
       (republish-open-documents ls))))
 
+(def reindex-folders [added removed]
+  "Keep the workspace index to the folders: index every file of the added
+   folders, and every indexed file under a removed one again (index-file
+   decides its membership) when it is open or still in a folder, else
+   drop it (unindex-file, and its parsed tree)."
+  (index-workspace added)
+  (if (not removed)
+      (return))
+  (= folders (workspace-folders))
+  (for uri in (list FILE-TREES)
+    (= path (uri-to-path uri))
+    (if (is-not (project-root-of path removed) None)
+        (if (or (in uri DIAGNOSTIC-RUNS) (under-workspace path folders))
+            (index-file uri)
+            (do (unindex-file uri)
+                (.pop FILE-TREES uri None))))))
+
 ;; pygls updates workspace.folders before it calls this, so workspace-folders
-;; already gives the new ones.
+;; already gives the new ones.  An open document now in a project with no
+;; backend yet starts one, as an open does.
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WORKSPACE_FOLDERS)
 (def did-change-workspace-folders [ls params]
-  (republish-open-documents ls)))
+  (try
+    (reindex-folders (or params.event.added []) (or params.event.removed []))
+    (except [Exception]
+      (.exception logger "lispython LSP: cannot reindex the workspace folders")))
+  (republish-open-documents ls)
+  (for uri in (list DIAGNOSTIC-RUNS)
+    (.document-opened backends uri))))
 
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
