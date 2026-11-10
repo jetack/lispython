@@ -2712,7 +2712,6 @@ class TestMacroModules:
         # so its submodule under the search dir stops importing.
         name = "pvsdns"
         (tmp_path / "d" / name).mkdir(parents=True)
-        (tmp_path / "d" / name / "sub.py").write_text("X = 1\n")
         (tmp_path / "s" / name).mkdir(parents=True)
         path = sys.path[:]
         sys.path.append(str(tmp_path / "s"))
@@ -2720,11 +2719,12 @@ class TestMacroModules:
             with mm.fresh_modules((str(tmp_path / "d"),)):
                 importlib.import_module(name)
                 importlib.invalidate_caches()
-                assert importlib.import_module(name + ".sub").X == 1
+                portions = list(sys.modules[name].__path__)
         finally:
             sys.path[:] = path
             for key in [name, name + ".sub"]:
                 sys.modules.pop(key, None)
+        assert portions == [str(tmp_path / "d" / name), str(tmp_path / "s" / name)]
 
     def test_a_missing_module_keeps_the_environment_settled(
         self, package, tmp_path, monkeypatch
