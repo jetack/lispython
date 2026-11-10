@@ -530,7 +530,7 @@
 ;; routers (_NreplRouter) that look the writing thread's sink up.  A sink
 ;; is anything with write(key, text) and flush(), key NREPL-STDOUT-FIELD or
 ;; NREPL-STDERR-FIELD: a _NreplCapture (a plain eval, returned in its
-;; result) or a _NreplStream (a stream eval, sent as out messages).
+;; result, bounded by NREPL-CAPTURE-CAP) or a _NreplStream (a stream eval, sent as out messages).
 ;; ⚠️ Output of a thread the user's code starts goes to the server's own
 ;; stream, never to the eval: that thread has no sink, and a sink found by
 ;; anything but the writing thread would cross between connections.
@@ -651,21 +651,42 @@
 
 (= _NREPL-OUTPUT (_NreplOutputRouting))
 
+(= NREPL-CAPTURE-CAP (* 1024 1024))
+;; The most characters a plain eval's result keeps, stdout and stderr together;
+;; beyond it output is dropped and counted, so a plain eval holds bounded memory
+;; (a stream eval has no such limit, its output goes out as it is written).
+
 (class _NreplCapture []
-  "A sink keeping an eval's stdout and stderr for its result."
+  "A sink keeping an eval's stdout and stderr for its result, at most
+  NREPL-CAPTURE-CAP characters of both together; the rest is only counted."
   (def __init__ [self]
-    (= self.streams {NREPL-STDOUT-FIELD (io.StringIO) NREPL-STDERR-FIELD (io.StringIO)}))
+    (= self.streams {NREPL-STDOUT-FIELD (io.StringIO) NREPL-STDERR-FIELD (io.StringIO)})
+    (= self.dropped {NREPL-STDOUT-FIELD 0 NREPL-STDERR-FIELD 0})
+    (= self.kept 0))
 
   (def write [self key text]
-    (.write (sub self.streams key) text))
+    (= room (max 0 (- NREPL-CAPTURE-CAP self.kept)))
+    (if (> (len text) room)
+        (do (+= (sub self.dropped key) (- (len text) room))
+            (= text (sub text (slice None room)))))
+    (if text
+        (do (.write (sub self.streams key) text)
+            (+= self.kept (len text)))))
 
   (def flush [self]
     (pass))
 
+  (def _text [self key]
+    (= text (.getvalue (sub self.streams key)))
+    (= count (sub self.dropped key))
+    (return (ife count
+        (+ text f"\n[nREPL: {count} more characters of {key} dropped; send the eval with \"stream\": true to see all output]\n")
+        text)))
+
   (def put-into [self result]
-    "Set result's stdout, and its stderr when any was written."
-    (= (sub result NREPL-STDOUT-FIELD) (.getvalue (sub self.streams NREPL-STDOUT-FIELD)))
-    (= stderr-out (.getvalue (sub self.streams NREPL-STDERR-FIELD)))
+    "Set result's stdout, and its stderr when any was written or dropped."
+    (= (sub result NREPL-STDOUT-FIELD) (._text self NREPL-STDOUT-FIELD))
+    (= stderr-out (._text self NREPL-STDERR-FIELD))
     (if stderr-out
         (= (sub result NREPL-STDERR-FIELD) stderr-out))))
 

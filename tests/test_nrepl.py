@@ -1524,3 +1524,30 @@ def test_a_plain_complete_never_reads_a_values_class_attribute(isolated):
     [item] = tools.nrepl_complete("oddv", isolated)["items"]
     assert item["label"] == "oddval"
     assert item["kind"] == tools.VARIABLE_KIND
+
+
+def test_a_plain_eval_keeps_a_bounded_result_and_counts_the_rest(monkeypatch):
+    # A client that never streams must not grow server memory without limit
+    # by printing endlessly: the result keeps a shared budget and counts the rest.
+    monkeypatch.setattr(tools, "NREPL_CAPTURE_CAP", 10)
+    capture = tools._NreplCapture()
+    capture.write("stdout", "a" * 6)
+    capture.write("stderr", "b" * 10)  # only 4 fit
+    capture.write("stdout", "c" * 100)  # none fit
+    result = {}
+    capture.put_into(result)
+    assert (
+        result["stdout"].startswith("a" * 6 + "\n") and "c" * 5 not in result["stdout"]
+    )
+    assert "100 more" in result["stdout"]
+    assert (
+        result["stderr"].startswith("b" * 4 + "\n") and "b" * 5 not in result["stderr"]
+    )
+    assert "6 more" in result["stderr"]
+
+
+def test_a_plain_eval_result_is_cut_at_the_capture_cap(monkeypatch, isolated):
+    monkeypatch.setattr(tools, "NREPL_CAPTURE_CAP", 10)
+    out = tools.nrepl_eval('(print (* "x" 5000))', isolated)
+    assert out["stdout"].startswith("x" * 10 + "\n") and "x" * 11 not in out["stdout"]
+    assert "4991 more" in out["stdout"]
