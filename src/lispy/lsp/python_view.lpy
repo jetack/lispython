@@ -1039,12 +1039,12 @@
    (buffer-definition-names in server.lpy); a stored attribute is never
    self-bound (_bindings), so the backend's own self.x item at
    (= self.x| ...) stays offered, because a real member must never be
-   dropped.  Accepted limit: any other binding of the name anywhere in the
-   tree, in another scope ((def m [self] 1) beside (def n [self|] 1), a
-   loop or parameter name reused across functions), turns the drop off, so
-   the item equal to the word is still offered there.  Telling the scopes
-   apart is Python scope analysis, which the backend owns, and the item is
-   only the word already typed."
+   dropped; any other binding of the name anywhere in the tree, in another
+   scope ((def m [self] 1) beside (def n [self|] 1), a loop or parameter
+   name reused across functions), turns the drop off, so the item equal to
+   the word is still offered there (telling the scopes apart is Python
+   scope analysis, which the backend owns, and the item is only the word
+   already typed)."
   (if (or (not restored) (in restored (vars builtins)) (_dunder-p restored))
       (return False))
   (= pure-seen False)

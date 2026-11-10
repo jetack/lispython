@@ -732,13 +732,9 @@ def test_the_word_being_typed_is_never_offered_as_its_own_name(
     # defines heap), and over a cursor view the backend offers the binding
     # the restored word makes (def f [ab|] offers ab); a later reference
     # ((print ab)) binds nothing, so it must not count as another binding.
-    items = by_label(merged(source)[2])
-    assert word not in items
-    if source is SCREENSHOT:
-        assert "heappop" in items  # the backend did answer
-    # Positive control, per case: the drop was armed (a backend offers the
-    # word only at some positions, none at a parameter or alias on some, so
-    # its absence alone proves nothing).
+    # Control: basedpyright offers the word at no position and pyrefly at none
+    # of the aliases, so its absence alone proves nothing; the control is that
+    # the drop was armed.
     armed = []
     drop = server.without_self_binding
     monkeypatch.setattr(
@@ -746,8 +742,11 @@ def test_the_word_being_typed_is_never_offered_as_its_own_name(
         "without_self_binding",
         lambda view, items: armed.append(view.self_bound) or drop(view, items),
     )
-    if source is not SCREENSHOT:  # a fallback view has its own control above
-        merged(source)
+    items = by_label(merged(source)[2])
+    assert word not in items
+    if source is SCREENSHOT:
+        assert "heappop" in items  # the backend did answer
+    else:  # a fallback view has its own control above
         assert armed and all(armed)
 
 
