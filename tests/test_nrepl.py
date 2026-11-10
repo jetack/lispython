@@ -1318,11 +1318,14 @@ def test_a_plain_eval_running_behind_a_stream_eval_can_be_interrupted(
     import threading
 
     isolated["gate"] = gate = threading.Event()
+    isolated["running"] = running = threading.Event()
     client = connect()
     client.send(op="eval", id=1, stream=True, code="(gate.wait 10)")
-    client.send(op="eval", id=2, code=ENDLESS)  # queued: 1 is ahead
+    # queued: 1 is ahead
+    client.send(op="eval", id=2, code='(print "tick")\n(running.set)\n' + ENDLESS)
     gate.set()
     assert client.recv()["id"] == 1  # the stream eval's result: 2 now runs
+    assert running.wait(WAIT)  # interrupted while running, not cancelled
     client.send(op="interrupt", id=3, **{"interrupt-id": 2})
     messages = client.until(lambda m: m.get("id") == 2)
     assert [(m["id"], m["op"]) for m in messages] == [
@@ -1336,8 +1339,8 @@ def test_a_plain_eval_running_behind_a_stream_eval_can_be_interrupted(
 # A plain eval alone on its connection (vsc-lispy sends only plain evals):
 # the reader must still read the interrupt or the EOF while it runs.
 STARTED_ENDLESS = (
-    "(import time)\n(started.set)\n"
-    '(try (while True (print "tick") (time.sleep 0.005)) (finally (stopped.set)))'
+    '(import time)\n(try (print "tick") (started.set)\n'
+    '  (while True (print "tick") (time.sleep 0.005))\n  (finally (stopped.set)))'
 )
 
 
@@ -1444,6 +1447,11 @@ def test_closing_gives_up_on_an_eval_that_never_stops(isolated, monkeypatch):
         assert server_sock.fileno() == -1  # closed
     finally:
         gate.set()  # lets the eval, and its worker, end
+        # Joined here: a worker still unrouting its output would swap
+        # sys.stdout under the next test.
+        for worker in threading.enumerate():
+            if worker.name == "nrepl-eval":
+                worker.join(WAIT)
 
 
 def test_an_eval_replacing_stdout_gets_the_original_back(isolated):
