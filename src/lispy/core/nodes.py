@@ -1212,3 +1212,27 @@ def mark_compiler_forms(root, user_forms=()):
         elif isinstance(node, MetaIndicator):
             stack.append(node.value)
     return root
+
+
+def clear_positions(forms):
+    """Make every node of the forms ``forms`` positionless (the Node default,
+    which macro_expansion_nodes places at the macro call) and return
+    ``forms``. Iterative, each node once."""
+    seen = set()
+    stack = list(forms)
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, Node) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        # The node's own attributes: Wrapper.update_dict would also set them
+        # on the wrapped value.
+        for key in _POSITION_KEYS:
+            node.__dict__[key] = 0
+        if isinstance(node, Expression):
+            stack.extend(node.list)
+        elif isinstance(node, Wrapper):
+            stack.extend(getattr(node, key) for key in wrapper_form_keys(node))
+        else:
+            stack.extend(getattr(node, key) for key in _child_form_keys(node))
+    return forms

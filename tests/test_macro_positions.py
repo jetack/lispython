@@ -4,11 +4,14 @@ Without one they would carry the Node default (line 0), so a traceback or a
 compile error in macro-generated code would point nowhere."""
 
 import ast
+import importlib
+import sys
+import warnings
 from collections import deque
 
 import pytest
 
-from lispy.core.errors import LispyCompileError
+from lispy.core.errors import LispyCompileError, compile_errors
 from lispy.core.macro import macroexpand_then_compile
 from lispy.core.nodes import (
     Bracket,
@@ -615,3 +618,162 @@ def test_a_template_name_spans_the_whole_macro_call(macros, src, generated, scop
     for part in parts:
         assert (part.lineno, part.col_offset) == (2, 0)
         assert (part.end_lineno, part.end_col_offset) == (2, len(src))
+
+
+def _bad_include():
+    parse("(a")
+
+
+def _include_return_outside_def():
+    [form] = parse("\n\n(print (return 2))")
+    return form
+
+
+def _bad_operand(x):
+    raise LispyCompileError("no", x)
+
+
+def _compile_m(src, scope, filename="m.lpy"):
+    with compile_errors(filename, src):
+        macroexpand_then_compile(parse(src), scope)
+
+
+@pytest.mark.parametrize("filename", ["m.lpy", "<string>"])
+@pytest.mark.parametrize("line", [1, 5])
+def test_error_from_parsing_other_text_is_placed_at_the_call(line, filename):
+    # Defect: the error's position (line 1, column 1) is of the string the
+    # macro parses, yet named that place in the module, with its text;
+    # "<string>" is also the file of lpy -c, so naming the error's file
+    # "<string>" attached an unrelated line all the same.
+    scope = {"__macro_namespace": {"bad_include": _bad_include}}
+    src = "(x)\n" * (line - 1) + "(x) (bad-include)"
+    with pytest.raises(LispyCompileError) as info:
+        _compile_m(src, scope, filename)
+    error = info.value
+    assert (error.filename, error.lineno, error.offset) == (filename, line, 5)
+    assert error.text == "(x) (bad-include)"
+
+
+def test_nodes_parsed_from_other_text_are_placed_at_the_call():
+    # Defect: the parsed nodes kept their line 3 of the other text, so the
+    # compile error after the expansion named line 3 of the module.
+    scope = {"__macro_namespace": {"inc": _include_return_outside_def}}
+    with pytest.raises(LispyCompileError) as info:
+        _compile_m("(x)\n(inc)\n(x)\n(x)", scope)
+    error = info.value
+    assert (error.filename, error.lineno) == ("m.lpy", 2)
+    assert error.text == "(inc)"
+
+
+def test_error_on_an_operand_keeps_the_operand_position():
+    scope = {"__macro_namespace": {"bad_operand": _bad_operand}}
+    with pytest.raises(LispyCompileError) as info:
+        _compile_m("\n\n(bad-operand\n    foo)", scope)
+    error = info.value
+    assert (error.filename, error.lineno, error.offset) == ("m.lpy", 4, 5)
+
+
+def test_error_on_a_node_kept_from_an_earlier_form_keeps_its_line():
+    # A macro may raise on a node it saved at an earlier call: that node is
+    # of this file, so its line stands, though it lies outside the call.
+    kept = []
+
+    def keep(x):
+        kept.append(x)
+        return None
+
+    def refuse():
+        raise LispyCompileError("refused", kept[0])
+
+    scope = {"__macro_namespace": {"keep": keep, "refuse": refuse}}
+    with pytest.raises(LispyCompileError) as info:
+        _compile_m("(keep foo)\n\n(refuse)", scope)
+    error = info.value
+    assert (error.filename, error.lineno, error.offset) == ("m.lpy", 1, 7)
+    assert error.text == "(keep foo)"
+
+
+def _include_deprecated_field():
+    [form] = parse('\n\n\n(f"{(.get d \\"k\\")}")')
+    return form
+
+
+def test_warning_from_parsing_other_text_names_the_call_line():
+    # Defect: the deprecated-field warning took the line of the string the
+    # macro parses (4) and named it in m.lpy; then line 0, where warnings of
+    # two calls collapsed into one.
+    scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
+    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert (warning.filename, warning.lineno) == ("m.lpy", 2)
+
+
+def _include_escape_in_fstring():
+    [form] = parse('\n\n\n(f"\\d{x}")')
+    return form
+
+
+def test_escape_warning_from_parsing_other_text_names_the_call_line():
+    # Defect: the invalid-escape warning of an f-string literal the macro
+    # parses took that text's line (4) and named it in m.lpy; then line 0.
+    scope = {"__macro_namespace": {"inc": _include_escape_in_fstring}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
+    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert (warning.filename, warning.lineno) == ("m.lpy", 2)
+
+
+def test_warnings_from_two_calls_each_name_their_own_line():
+    # Defect: both calls warned at the same line 0, so their warnings were
+    # one identical report and neither named its call.
+    scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        _compile_m("(x)\n(inc)\n(x)\n(inc)", scope)
+    lines = [
+        (w.filename, w.lineno) for w in caught if issubclass(w.category, SyntaxWarning)
+    ]
+    assert lines == [("m.lpy", 2), ("m.lpy", 4)]
+
+
+def test_warning_from_a_macro_call_a_macro_parses_names_the_outer_call_line():
+    # Defect: the inner call, parsed by the outer macro and so positionless,
+    # replaced the outer call's line with its own line 0.
+    inner_scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+
+    def outer():
+        macroexpand_then_compile(parse("(inc)"), inner_scope)
+        return None
+
+    scope = {"__macro_namespace": {"outer": outer}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compile_m("(x)\n(outer)", scope)
+    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert (warning.filename, warning.lineno) == ("m.lpy", 2)
+
+
+def test_module_a_macro_imports_keeps_its_own_positions(tmp_path, monkeypatch):
+    # Defect: the importer's compile of badmod ran with the macro call's
+    # MACRO_CALL_POSITION still set, so badmod's own nodes lost their positions and
+    # its error was placed at the macro call in m.lpy.
+    (tmp_path / "badmod.lpy").write_text("(x)\n(x)\n(print (return 2))\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    before = set(sys.modules)
+
+    def import_bad():
+        importlib.import_module("badmod")
+
+    scope = {"__macro_namespace": {"import_bad": import_bad}}
+    try:
+        with pytest.raises(LispyCompileError) as info:
+            _compile_m("(x)\n(import-bad)", scope)
+    finally:
+        for name in set(sys.modules) - before:
+            del sys.modules[name]
+    error = info.value
+    assert (error.filename, error.lineno) == (str(tmp_path / "badmod.lpy"), 3)
+    assert error.text == "(print (return 2))"

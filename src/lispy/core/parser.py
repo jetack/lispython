@@ -10,7 +10,7 @@ from lispy.core.compiler.literal import (
     check_plain_string_prefix,
     string_literal_value,
 )
-from lispy.core.errors import LispyCompileError, compile_warning
+from lispy.core.errors import MACRO_CALL_POSITION, LispyCompileError, compile_warning
 from lispy.core.nodes import *
 from lispy.core.nodes import (
     Brace,
@@ -25,6 +25,7 @@ from lispy.core.nodes import (
     Unquote,
     UnquoteSplice,
     Wrapper,
+    clear_positions,
 )
 from lispy.core.utils import augassignop_dict
 
@@ -1067,7 +1068,15 @@ def parse(src, partial=False):
     form.  The LSP's diagnostics still use the strict parse to report it.
     """
     if not partial:
-        return _parse_into(src, [])
+        if MACRO_CALL_POSITION.get() is None:
+            return _parse_into(src, [])
+        # Text a macro parses is not the module's source, so nothing of it
+        # may carry a position in that source: its nodes are positionless,
+        # and its error too, which the expander then places at the call.
+        try:
+            return clear_positions(_parse_into(src, []))
+        except LispyCompileError as err:
+            raise LispyCompileError(err.msg) from err
     rst = []
     token = _PARTIAL.set(True)
     try:

@@ -18,6 +18,17 @@ from types import SimpleNamespace
 # issued where they are found, so unlike errors they cannot get it afterwards.
 _COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default=None)
 
+# The macro call's position_info while its macro function runs (macro.py
+# _expand_1), None outside one and again inside a compile_errors it enters.
+# Text a macro parses there is not the module's source, and nodes carry no
+# file identity, so the strict parse() gives its nodes and its error no
+# position: a position in that text would name an unrelated line of the
+# module being compiled, and positionless they are placed at the macro call.
+# A warning there is issued at the call's line (compile_warning).  A nested
+# compile (a required .lpy) is its own source and keeps its positions, hence
+# the reset in compile_errors.
+MACRO_CALL_POSITION = contextvars.ContextVar("lispy_macro_call_position", default=None)
+
 # Held by every warnings.catch_warnings lispython enters (filtered_warnings).
 # catch_warnings swaps the process-wide filter list and puts back, on exit,
 # the one it found on entry, so two threads inside it at once (the LSP
@@ -124,6 +135,7 @@ def compile_errors(filename, source):
     A compile_warning issued meanwhile names ``filename``.
     """
     token = _COMPILING_FILENAME.set(filename)
+    macro_token = MACRO_CALL_POSITION.set(None)
     try:
         yield
     except LispyCompileError as err:
@@ -132,6 +144,7 @@ def compile_errors(filename, source):
         converted = LispyCompileError.from_syntax_error(err)
         raise attach_source(converted, filename, source) from err
     finally:
+        MACRO_CALL_POSITION.reset(macro_token)
         _COMPILING_FILENAME.reset(token)
 
 
@@ -140,16 +153,27 @@ def compile_warning(msg, category, position_info):
     (``_PyErr_EmitSyntaxWarning``).
 
     The warning goes through warnings.warn_explicit at ``position_info``'s
-    line, naming the file compile_errors is compiling (``<unknown>`` outside
-    one), so filters select it as any other warning. Where a filter turns it
-    into an exception of ``category``, that exception becomes a
-    LispyCompileError with the same message at the whole position, as CPython
-    replaces it with a SyntaxError, so every entry point reports it as a
-    compile error; any other exception a filter or hook raises passes through.
+    line, or the macro call's line while a macro function runs
+    (MACRO_CALL_POSITION), naming the file compile_errors is compiling
+    (``<unknown>`` outside one), or line 0 for a position with no line, so
+    filters select it as any other warning. Where a filter turns it into an
+    exception of ``category``, that exception becomes a LispyCompileError
+    with the same message at the whole position (none while a macro function
+    runs), as CPython replaces it with a SyntaxError, so every entry point
+    reports it as a compile error; any other exception a filter or hook
+    raises passes through.
     """
     filename = _COMPILING_FILENAME.get() or "<unknown>"
+    lineno = position_info.get("lineno")
+    call_position = MACRO_CALL_POSITION.get()
+    if call_position is not None:
+        # Text a macro parses or compiles is not the module's source, so its
+        # warning takes the call's line, never one of that text, and its
+        # error no position, which the expander then places at the call.
+        lineno = call_position.get("lineno")
+        position_info = {}
     try:
-        warnings.warn_explicit(msg, category, filename, position_info["lineno"])
+        warnings.warn_explicit(msg, category, filename, lineno or 0)
     except category:
         # ``from None`` hides the warning from the traceback, as CPython
         # clears it before raising the SyntaxError.
