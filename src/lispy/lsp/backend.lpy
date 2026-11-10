@@ -428,10 +428,16 @@
     ;; The replays of those saves still running (_replay-saves); kept here
     ;; because the loop holds tasks only weakly.
     (= self._replays (set))
-    ;; lpy uri -> [backend uri, version, text last sent, origin], for this
-    ;; spawn: origin is (source, view), the .lpy source and the PythonView
-    ;; whose text was sent, or None when the sender did not say (locate).
+    ;; lpy uri -> [backend uri, version last sent, text last sent, origin],
+    ;; for this spawn: origin is (source, view), the .lpy source and the
+    ;; PythonView whose text was sent, or None when the sender did not say
+    ;; (locate).
     (= self._docs {})
+    ;; The last version sent to the backend, for any document, never reset:
+    ;; a reopened document continues past every version it had.  A reopen at
+    ;; a version already used would let a late publish for the old open's
+    ;; text pass (_diagnostics-published) as the new text's.
+    (= self._sent-version 0)
     ;; lpy uri -> (text, origin) of the buffer's latest full view
     ;; (push-buffer), kept across spawns: a start opens each in the new
     ;; process, and a request that synced a cursor view puts it back.
@@ -673,6 +679,11 @@
     (.add-done-callback cleanup self._cleanups.discard)
     (await (asyncio.shield cleanup)))
 
+  (def _next-version [self]
+    "The next version to send for any document (see _sent-version)."
+    (+= self._sent-version 1)
+    (return self._sent-version))
+
   (def _sync [self lpy-uri text :origin None]
     "Make the backend's copy of document lpy-uri text: didOpen when it is
      not open in this process, didChange with the whole text when it
@@ -687,16 +698,17 @@
         (do (= uri (.backend-uri self lpy-uri))
             (if (is uri None)
                 (return False))
+            (= version (._next-version self))
             (.text-document-did-open client
               (lsp.DidOpenTextDocumentParams
                 :text-document (lsp.TextDocumentItem :uri uri :language-id "python"
-                                                     :version 1 :text text)))
-            (= (sub self._docs lpy-uri) [uri 1 text origin])
+                                                     :version version :text text)))
+            (= (sub self._docs lpy-uri) [uri version text origin])
             (._tell-input-changed self lpy-uri)
             (return True)))
     (= (sub doc 3) origin)
     (if (!= (sub doc 2) text)
-        (do (+= (sub doc 1) 1)
+        (do (= (sub doc 1) (._next-version self))
             (= (sub doc 2) text)
             (.text-document-did-change client
               (lsp.DidChangeTextDocumentParams
