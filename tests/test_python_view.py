@@ -966,8 +966,11 @@ class TestShadows:
         # Defects: the sweep names scripts/x.lpy by the regular-package rule
         # alone, so its relative require fails; or only the project root is
         # on sys.path while its macros run, so its sibling require loads no
-        # macros; or scripts/ is no search path of the backend, so a sibling
-        # (import ...) the script run resolves stops resolving.
+        # macros; or scripts/ is no search path of the backend for its own
+        # files, so a sibling (import ...) the script run resolves stops
+        # resolving; or it is one for every file of the project, so a
+        # root module's (import helper) resolves to scripts/helper, which
+        # `lpy m.lpy` never finds.
         project, root = tmp_path / "project", tmp_path / "view"
         scripts = project / "pvnsscripts"
         self.write(scripts / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
@@ -988,10 +991,55 @@ class TestShadows:
         view = root / "pvnsscripts"
         assert (view / "rel.py").read_text().endswith("y = 2 + 2")
         assert (view / "bare.py").read_text().endswith("y = 2 + 2 + 2")
-        path = pv.write_pyright_config(
-            str(project), str(root), import_roots=manifest.import_roots
+        config = json.loads(
+            open(
+                pv.write_pyright_config(
+                    str(project),
+                    str(root),
+                    environments=manifest.environments,
+                    shared_roots=manifest.shared_roots,
+                )
+            ).read()
         )
-        assert str(view) in json.loads(open(path).read())["extraPaths"]
+        assert str(view) not in config["extraPaths"]
+        assert str(scripts) not in config["extraPaths"]
+        [env] = config["executionEnvironments"]
+        assert env["root"] == str(view)
+        assert env["extraPaths"][:2] == [str(view), str(root)]
+        assert str(scripts) in env["extraPaths"]
+        # pyrefly: the nearest pyrefly.toml up from a file is its config.
+        top = self.pyrefly_config(
+            project,
+            root,
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
+        )
+        assert str(view) not in top["search-path"]
+        assert str(scripts) not in top["search-path"]
+        with open(view / "pyrefly.toml", "rb") as f:
+            nested = tomllib.load(f)
+        assert nested["search-path"] == env["extraPaths"]
+        assert {k: v for k, v in nested.items() if k != "search-path"} == {
+            k: v for k, v in top.items() if k != "search-path"
+        }
+        assert pv.config_files(str(root), "pyrefly.toml") == sorted(
+            [str(root / "pyrefly.toml"), str(view / "pyrefly.toml")]
+        )
+        # Once scripts/ holds no shadow, its environment and nested config go.
+        for name in ["mac.lpy", "pvnshelper.lpy", "rel.lpy", "bare.lpy"]:
+            (scripts / name).unlink()
+        (project / "top.lpy").write_text("(= t 1)")
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        assert manifest.environments == {str(project): (str(project),)}
+        self.pyrefly_config(
+            project,
+            root,
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
+        )
+        assert pv.config_files(str(root), "pyrefly.toml") == [
+            str(root / "pyrefly.toml")
+        ]
 
     def test_a_regular_package_in_a_plain_directory_keeps_its_script_root(
         self, tmp_path, monkeypatch
@@ -1025,9 +1073,14 @@ class TestShadows:
                 sys.modules.pop(name, None)
         assert (root / "pvtools" / "pvmypkg" / "a.py").read_text().endswith("y = 2 + 2")
         path = pv.write_pyright_config(
-            str(project), str(root), import_roots=manifest.import_roots
+            str(project),
+            str(root),
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
         )
-        assert str(root / "pvtools") in json.loads(open(path).read())["extraPaths"]
+        [env] = json.loads(open(path).read())["executionEnvironments"]
+        assert env["root"] == str(root / "pvtools")
+        assert env["extraPaths"][0] == str(root / "pvtools")
 
     def test_a_bare_sibling_require_resolves_from_the_files_own_directory(
         self, tmp_path, monkeypatch
@@ -1056,9 +1109,9 @@ class TestShadows:
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
         # The package interior src/pkg is searched by the compile but is no
-        # backend search path: the backend config is project-wide, so it
-        # would resolve every file's `import helper` (or a src/pkg/json.py
-        # every `import json`) to that package's modules.
+        # backend search path: it would resolve the module's `import helper`
+        # (or a src/pkg/json.py its `import json`) to that package's
+        # modules, where Python imports it as pkg.m from src.
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pkg"
         self.write(pkg / "__init__.py", "from .helper import h")
@@ -1067,15 +1120,20 @@ class TestShadows:
         self.write(pkg / "notes.txt", "")
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
-        assert manifest.import_roots == [str(project / "src")]
+        src = str(project / "src")
+        assert (manifest.environments, manifest.shared_roots) == ({src: (src,)}, [src])
         for name in ["__init__.py", "helper.py"]:
             assert os.readlink(root / "src" / "pkg" / name) == str(pkg / name)
 
         path = pv.write_pyright_config(
-            str(project), str(root), import_roots=manifest.import_roots
+            str(project),
+            str(root),
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
         )
-        extra = json.loads(open(path).read())["extraPaths"]
-        assert extra == [str(root / "src"), str(project / "src"), str(project)]
+        config = json.loads(open(path).read())
+        assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
+        assert "executionEnvironments" not in config
 
         (pkg / "helper.py").unlink()
         self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py
@@ -1100,12 +1158,17 @@ class TestShadows:
         self.write(res / "sub" / "y.lpy", "(= y 1)")
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
-        assert manifest.import_roots == [str(project / "src")]
+        src = str(project / "src")
+        assert (manifest.environments, manifest.shared_roots) == ({src: (src,)}, [src])
         path = pv.write_pyright_config(
-            str(project), str(root), import_roots=manifest.import_roots
+            str(project),
+            str(root),
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
         )
-        extra = json.loads(open(path).read())["extraPaths"]
-        assert extra == [str(root / "src"), str(project / "src"), str(project)]
+        config = json.loads(open(path).read())
+        assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
+        assert "executionEnvironments" not in config
 
     def test_an_import_roots_modules_are_linked_beside_its_packages(self, tmp_path):
         # Defect: an import root holding only shadowed packages has none of
@@ -1278,7 +1341,10 @@ class TestShadows:
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
         path = pv.write_pyright_config(
-            str(project), str(root), import_roots=manifest.import_roots
+            str(project),
+            str(root),
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
         )
         config = json.loads(open(path).read())
         config.update(settings, reportMissingImports="error")
@@ -1593,9 +1659,14 @@ class TestShadows:
         project, root = tmp_path / "pkg" / "project", tmp_path / "view"
         project.mkdir(parents=True)
         path = pv.write_pyright_config(
-            str(project), str(root), import_roots=[str(tmp_path)]
+            str(project),
+            str(root),
+            environments={str(tmp_path): (str(tmp_path),)},
+            shared_roots=[str(tmp_path)],
         )
-        assert json.loads(open(path).read())["extraPaths"] == [str(project)]
+        config = json.loads(open(path).read())
+        assert config["extraPaths"] == [str(root), str(project)]
+        assert "executionEnvironments" not in config
 
     def test_overlap_check_takes_two_drives_as_apart(self, monkeypatch):
         monkeypatch.setattr(pv, "osp", ntpath)
@@ -1631,7 +1702,7 @@ class TestShadows:
         assert config["strictListInference"] is True
         assert config["reportInvalidStringEscapeSequence"] == "none"
         assert "include" not in config
-        assert config["extraPaths"] == [str(project)]
+        assert config["extraPaths"] == [str(root), str(project)]
         assert config.get("venv") != "other"
         # pyrightconfig.json wins over pyproject.toml, as for pyright.
         (project / "pyrightconfig.json").write_text('{"typeCheckingMode": "basic"}')
@@ -1700,7 +1771,7 @@ class TestShadows:
             # with no annotations; string escapes are the reader's.
             "typeCheckingMode": "standard",
             "reportInvalidStringEscapeSequence": "none",
-            "extraPaths": [str(project), str(site)],
+            "extraPaths": [str(root), str(project), str(site)],
             "venvPath": "/envs",
             "venv": "my-venv",
         }
@@ -1820,27 +1891,48 @@ class TestShadows:
     def test_pyrefly_search_path_is_pyrights(self, tmp_path):
         # Defect: the two backends' search paths drift apart, so a module
         # one resolves (a shadowed src package, a .venv package) the other
-        # does not.  pyrefly's leads with the view root, which pyright
-        # searches first as its execution root.
+        # does not.  Each list leads with its config's own directory, which
+        # pyright searches first as its execution root and pyrefly only
+        # after search-path.
         project, root = tmp_path / "project", tmp_path / "view"
         (project / "src" / "pkg").mkdir(parents=True)
         site = project / ".venv" / "lib" / "python3.99" / "site-packages"
         site.mkdir(parents=True)
-        roots = [str(project / "src"), str(tmp_path)]
-        extra = json.loads(
-            open(
-                pv.write_pyright_config(str(project), str(root), import_roots=roots)
-            ).read()
-        )["extraPaths"]
-        assert extra == [
+        tools = str(project / "my-tools")
+        search = {
+            "environments": {tools: (tools,), str(tmp_path): (str(tmp_path),)},
+            "shared_roots": [str(project / "src"), str(tmp_path)],
+        }
+        config = json.loads(
+            open(pv.write_pyright_config(str(project), str(root), **search)).read()
+        )
+        assert config["extraPaths"] == [
+            str(root),
             str(root / "src"),
-            str(project / "src"),
             str(project),
+            str(project / "src"),
             str(site),
         ]
-        assert self.pyrefly_config(project, root, import_roots=roots)[
-            "search-path"
-        ] == [str(root), *extra]
+        assert config["executionEnvironments"] == [
+            {
+                "root": str(root / "my-tools"),
+                "extraPaths": [
+                    str(root / "my-tools"),
+                    str(root / "src"),
+                    str(root),
+                    tools,
+                    str(project / "src"),
+                    str(project),
+                    str(site),
+                ],
+            }
+        ]
+        pyrefly = self.pyrefly_config(project, root, **search)
+        assert pyrefly["search-path"] == config["extraPaths"]
+        with open(root / "my-tools" / "pyrefly.toml", "rb") as f:
+            nested = tomllib.load(f)
+        [env] = config["executionEnvironments"]
+        assert nested["search-path"] == env["extraPaths"]
 
     def test_pyrefly_config_is_toml_for_any_path_and_value(self, tmp_path):
         # Defects: the hand-written TOML breaks on a path TOML must escape

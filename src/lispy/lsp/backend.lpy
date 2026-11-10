@@ -30,9 +30,9 @@
 (from pygls.protocol [default-converter])
 (from pygls.uris [to-fs-path])
 
-(from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest read-quietly
-                             view-path view-root-for write-pyrefly-config
-                             write-pyright-config write-shadows])
+(from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest config-files
+                             read-quietly view-path view-root-for
+                             write-pyrefly-config write-pyright-config write-shadows])
 
 (= logger (logging.getLogger __name__))
 
@@ -186,14 +186,15 @@
   "The function writing backend name's config file into a view root."
   (return (.get CONFIG-WRITERS name write-pyright-config)))
 
-;; Backend name -> the name of the config file its writer writes in the view
-;; root; any other name (a test's fake) takes pyrightconfig.json, as in
+;; Backend name -> the name of the config files its writer writes in the
+;; view root (the root's, and pyrefly's nested ones, python_view.config-files);
+;; any other name (a test's fake) takes pyrightconfig.json, as in
 ;; CONFIG-WRITERS.
 (= CONFIG-FILES {"basedpyright" PYRIGHT-CONFIG
                  "pyrefly" PYREFLY-CONFIG})
 
 (def config-file [name]
-  "The name of backend name's config file in a view root."
+  "The name of backend name's config files in a view root."
   (return (.get CONFIG-FILES name PYRIGHT-CONFIG)))
 
 ;; Backends whose definition answer for a name with no declarations walks up
@@ -453,9 +454,10 @@
     ;; (file-saved, saved); set by Backends.  Never raises
     ;; (_tell-input-changed catches).
     (= self.on-input-changed None)
-    ;; The view root's config file text the running process last read: at
-    ;; its start (_spawn) or when told it changed (saved).
-    (= self._config-text None)
+    ;; Path -> text of each of the view root's config files the running
+    ;; process last read (_read-configs): at its start (_spawn) or when told
+    ;; they changed (saved).
+    (= self._config-texts {})
     ;; lpy uri -> its requests in flight (request), which a full view's
     ;; sync waits for.
     (= self._in-flight {}))
@@ -495,7 +497,8 @@
     (os.makedirs root :exist-ok True)
     (= sweep (write-shadows self.project-root root :manifest self.manifest))
     ((config-writer self.name) self.project-root self.view-root
-                               :import-roots self.manifest.import-roots
+                               :environments self.manifest.environments
+                               :shared-roots self.manifest.shared-roots
                                :check-types self.check-types)
     (return sweep))
 
@@ -602,13 +605,15 @@
             (.exception logger "lispython LSP: reacting to the view of %s failed"
                         self.project-root)))))
 
-  (def _config-path [self]
-    "The backend's config file in the view root."
-    (return (osp.join (os.fspath self.view-root) (config-file self.name))))
+  (def _read-configs [self]
+    "Path -> text (None when unreadable) of each of the backend's config
+     files in the view root (config-files)."
+    (return {path (read-quietly path)
+             for path in (config-files self.view-root (config-file self.name))}))
 
   (async-def _spawn [self]
     (await (asyncio.to-thread self._prepare-view-root))
-    (= self._config-text (await (asyncio.to-thread read-quietly (._config-path self))))
+    (= self._config-texts (await (asyncio.to-thread self._read-configs)))
     (= self._docs {})
     (= root (os.fspath self.view-root))
     (= root-uri (.as-uri (pathlib.Path root)))
@@ -932,23 +937,29 @@
 
   (async-def saved [self *lpy-uris]
     "Documents lpy-uris were saved: file-saved, then, when that changed the
-     view root's config file, tell the running backend the file changed and
-     call on-view-prepared.  A running backend reads its config at start
-     and when told the file changed, then republishes its open documents;
-     it never re-reads it on its own.  A save during a start is replayed
-     through here once it runs (_replay-saves)."
+     view root's config files (one written or rewritten, one removed), tell
+     the running backend each that changed and call on-view-prepared.  A
+     running backend reads its config at start and when told a file
+     changed, then republishes its open documents; it never re-reads it on
+     its own.  A save during a start is replayed through here once it runs
+     (_replay-saves)."
     (await (.file-saved self *lpy-uris))
     (if (not self.running)
         (return))
-    (= path (._config-path self))
-    (= text (await (asyncio.to-thread read-quietly path)))
-    (if (or (not self.running) (== text self._config-text))
+    (= texts (await (asyncio.to-thread self._read-configs)))
+    (= known self._config-texts)
+    (= changes (+ [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
+                                  :type lsp.FileChangeType.Changed)
+                   for [path text] in (.items texts)
+                   if (or (not-in path known) (!= text (sub known path)))]
+                  [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
+                                  :type lsp.FileChangeType.Deleted)
+                   for path in known if (not-in path texts)]))
+    (if (or (not self.running) (not changes))
         (return))
-    (= self._config-text text)
+    (= self._config-texts texts)
     (.workspace-did-change-watched-files self._client
-      (lsp.DidChangeWatchedFilesParams
-        :changes [(lsp.FileEvent :uri (.as-uri (pathlib.Path path))
-                                 :type lsp.FileChangeType.Changed)]))
+      (lsp.DidChangeWatchedFilesParams :changes changes))
     (._tell-input-changed self None)
     (._tell-view-prepared self))
 

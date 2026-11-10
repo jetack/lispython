@@ -1755,18 +1755,19 @@
 
 (def backend-search-dirs [names]
   "The search dirs of module-names' result names that the backend searches
-   for the module (ShadowManifest.import-roots): the import root, and each
-   other search dir that is no regular package and lies inside none below
-   the import root (_in-regular-package-p)."
-  ;; The backend config (extraPaths, search-path) is project-wide, while
-  ;; `lpy` puts the own directory on sys.path only for the file it runs.  A
-  ;; directory inside a package (src/pkg, or src/pkg/res with no __init__ of
-  ;; its own) as a top-level root would shadow the stdlib and top-level
-  ;; names for every file (src/pkg/json.py answering `import json`) and make
-  ;; one module importable under two names (helper and pkg.helper).  A
-  ;; script directory in no package is a top-level root anyway.  Derived
-  ;; from names alone, so module-names stays the one home of the script
-  ;; root and import root.
+   for the module, in their order (ShadowManifest.environments): the import
+   root, and each other search dir that is no regular package and lies
+   inside none below the import root (_in-regular-package-p).  The first is
+   the module's environment root: its own directory or the nearest ancestor
+   of it that is kept."
+  ;; A directory inside a package (src/pkg, or src/pkg/res with no __init__
+  ;; of its own) as a top-level root would shadow the stdlib and top-level
+  ;; names for the module (src/pkg/json.py answering its `import json`,
+  ;; where Python imports the module as pkg.m from src and never searches
+  ;; src/pkg) and make one module importable under two names (helper and
+  ;; pkg.helper).  A script directory in no package is a top-level root
+  ;; anyway.  Derived from names alone, so module-names stays the one home
+  ;; of the script root and import root.
   (= import-root (sub names 2))
   (= kept [])
   (for directory in (sub names 3)
@@ -1818,12 +1819,17 @@
   "What write-shadows last saw of each source: path -> ((mtime_ns, size),
    module-names, whether its shadow is written, the macro environment it
    compiled in (macro_modules.epoch)), so a file unchanged since, under the
-   same macro environment, is not compiled again; and import-roots, the
-   sorted backend-search-dirs of the written shadows' sources
-   (_search-paths)."
+   same macro environment, is not compiled again.  And the backend search
+   dirs of the written shadows' sources (backend-search-dirs), which the
+   config writers read (_search-paths, search-environments): environments,
+   environment root -> the search dirs of the sources it is the first of,
+   in order (merged, each once, should two sources of one root differ);
+   shared-roots, the sorted import roots of those sources that are
+   project-import-roots, which every module of the project searches."
   (def __init__ [self]
     (= self.sources {})
-    (= self.import-roots [])))
+    (= self.environments {})
+    (= self.shared-roots [])))
 
 (def _regular-package-p [directory]
   "Whether directory is a regular package (it holds an __init__.py or
@@ -1831,7 +1837,7 @@
   (return (any ((osp.isfile (osp.join directory name))
                 for name in (, "__init__.py" "__init__.pyi")))))
 
-(def _mirror-py-files [project-root root directory shadows links]
+(def _mirror-py-files [project-root root directory shadows links reserved]
   "Link the modules of directory, an import root with a shadow, into the
    view beside its shadows: each real .py and .pyi file as a file link, each
    regular package (_regular-package-p) as one directory link, so the
@@ -1840,8 +1846,8 @@
    holding a shadow or a link of it (a package overlaid around a shadow,
    _overlay-package, which runs first; a stale view directory of a package
    that lost its last .lpy is replaced by the link), a .py that a shadow
-   replaces (its .lpy wins on import), _pruned-p directories and the view
-   root's own files (_ROOT-FILES).  A namespace package (no __init__) or an
+   replaces (its .lpy wins on import), _pruned-p directories and the view's
+   own files (reserved, _view-own-files).  A namespace package (no __init__) or an
    extension module is not linked, nor is a regular package holding a
    nested import root's shadow (pkg/sub/x.lpy with no pkg/sub/__init__),
    whose view directory is real but holds no __init__: the import root is
@@ -1850,7 +1856,6 @@
   (= view-dir (_view-dir project-root root directory))
   (if (is view-dir None)
       (return))
-  (= reserved (frozenset [(osp.join root name) for name in _ROOT-FILES]))
   ;; The entries of view-dir that hold a shadow or link of this sweep.
   (= needed (set))
   (for kept in (+ (list shadows) (list links))
@@ -1897,7 +1902,7 @@
       (return project-root))
   (return top))
 
-(def _overlay-package [project-root root package source-dirs shadows links]
+(def _overlay-package [project-root root package source-dirs shadows links reserved]
   "Mirror the package directory package into the view whole.  Its view
    directory is a regular package once its __init__.py is there, and so
    hides the real one from the backend: whatever the view lacks of it does
@@ -1906,10 +1911,9 @@
    linked: a file (.py, .pyi stub, py.typed, extension module, data) as a
    file link, a subdirectory with no .lpy at any depth as one directory
    link, never walked.  Left out: .lpy files, a .py that a shadow replaces
-   (its .lpy wins on import), _pruned-p directories, and the view root's
-   own files (_ROOT-FILES).  Each link made or kept is added to links; a
-   failure is logged and skipped."
-  (= reserved (frozenset [(osp.join root name) for name in _ROOT-FILES]))
+   (its .lpy wins on import), _pruned-p directories, and the view's own
+   files (reserved, _view-own-files).  Each link made or kept is added to
+   links; a failure is logged and skipped."
   (= stack [package])
   (while stack
     (= directory (.pop stack))
@@ -1946,7 +1950,7 @@
    .py file that is neither a shadow nor a link of this sweep, every
    temporary file older than _TEMP-MAX-AGE, then every directory left empty
    (bottom up, never root).  Other files, the view root's own files
-   (_ROOT-FILES) among them, are never touched.  A directory link is unlinked, never
+   (_view-own-files) among them, are never touched.  A directory link is unlinked, never
    followed, and nothing is removed in a directory that leaves root
    (_check-in-root): that one is logged and skipped.  Returns the links and
    .py files removed."
@@ -2070,25 +2074,35 @@
       (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
       (except [OSError as e]
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
-  (= import-roots (set))
+  (= environments {})
+  (= shared-roots (set))
+  (= project-roots (set (project-import-roots project-root)))
   (= packages (set))
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
     (= import-root (sub (sub names-of lpy-path) 2))
-    (.update import-roots (backend-search-dirs (sub names-of lpy-path)))
+    (= dirs (backend-search-dirs (sub names-of lpy-path)))
+    (= env-root (sub dirs 0))
+    (= (sub environments env-root)
+       (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs))))
+    (if (in import-root project-roots)
+        (.add shared-roots import-root))
     ;; module-dirs: every import root with a shadow, whose other modules
     ;; are linked in (_mirror-py-files).
     (.add module-dirs import-root)
     (= directory (osp.dirname (osp.abspath lpy-path)))
     (if (!= directory import-root)
         (.add packages (_top-package project-root import-root directory))))
-  (= manifest.import-roots (sorted import-roots))
+  (= manifest.environments (dict (sorted (.items environments))))
+  (= manifest.shared-roots (sorted shared-roots))
+  (= reserved (_view-own-files project-root root manifest.environments
+                               manifest.shared-roots))
   (= source-dirs (_source-dirs project-root sources))
   (= links (set))
   (for package in (sorted packages)
-    (_overlay-package project-root root package source-dirs shadows links))
+    (_overlay-package project-root root package source-dirs shadows links reserved))
   (for directory in (sorted module-dirs)
-    (_mirror-py-files project-root root directory shadows links))
+    (_mirror-py-files project-root root directory shadows links reserved))
   (= removed (_sweep-orphans root shadows links))
   (return (ShadowSweep (sorted shadows) (sorted written) (sorted removed))))
 
@@ -2196,38 +2210,98 @@
   (= (sub rules "reportInvalidStringEscapeSequence") "none")
   (return rules))
 
-(def _search-paths [project-root root import-roots]
-  "The backend's search paths for the view root root of project-root (both
-   absolute), in order: the view-root counterpart of every import root
-   strictly inside the project (ShadowManifest.import-roots; <view>/src in
-   a src layout; one above the project, which lies inside a package, is
-   left out), so import pkg finds the shadows before any real directory of
-   uncompiled .lpy; then those import roots themselves, so what the view
-   lacks of one still resolves: its namespace packages, its extension
-   modules and, whole, a package of it that holds a nested import root
-   (_mirror-py-files links every other module of it into the view);
-   then the project and its .venv site-packages.  The one list of every
-   backend's config.  The paths are project-wide, so a module of one
-   import root (a script directory's sibling) is visible from every file
-   of the project, not only from the modules that search it."
-  (= roots [])
-  (for import-root in (or import-roots [])
-    (= import-root (osp.abspath import-root))
-    (if (and (!= import-root project-root) (not (in import-root roots))
-             (is-not (_view-dir project-root root import-root) None))
-        (.append roots import-root)))
-  (= paths (+ [(_view-dir project-root root import-root) for import-root in roots]
-              roots
-              [project-root]))
-  (.extend paths (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
-                                              "site-packages"))))
-  (return paths))
+(def _search-paths [project-root root dirs shared-roots]
+  "The backend's search paths, in order, for the modules whose search dirs
+   are dirs (backend-search-dirs; (project-root,) for the default list,
+   which a module of the project root and any file in no environment of
+   search-environments get), in view root root of project-root (both
+   absolute).  The dirs searched are dirs, then shared-roots (the project's
+   import roots with a shadow, ShadowManifest.shared-roots: an editable
+   install puts them on sys.path for every module, so tests/x.lpy still
+   sees src/pkg), then the project root, each once and only inside the
+   project (an import root above it, the project lying inside a package,
+   is left out).  First the view counterpart of each, so `import pkg` finds
+   the shadows before any real directory of uncompiled .lpy; then each
+   real directory, so what the view lacks of one still resolves: its
+   namespace packages, its extension modules and, whole, a package of it
+   that holds a nested import root (_mirror-py-files links every other
+   module of an import root into the view); then the project's .venv
+   site-packages.  The one search-path list of every backend's config.  A
+   search dir that is no shared root (a script directory, a non-identifier
+   import root) is so searched only by the modules that search it, as
+   `lpy` puts it on sys.path only for the file it runs."
+  (= kept [])
+  (for directory in (+ (list dirs) (list (or shared-roots [])) [project-root])
+    (= directory (osp.abspath directory))
+    (if (and (not (in directory kept))
+             (is-not (_view-dir project-root root directory) None))
+        (.append kept directory)))
+  (= paths (+ [(_view-dir project-root root directory) for directory in kept]
+              kept
+              (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
+                                           "site-packages")))))
+  (return (list (dict.fromkeys paths))))
 
-(def write-pyright-config [project-root view-root :import-roots None :check-types True]
+(def search-environments [project-root root environments shared-roots]
+  "The search environments of view root root besides its default list:
+   (view directory, search paths) for each environment root of
+   environments (ShadowManifest.environments) inside the project that is
+   neither the project root nor a shared root, with the search paths of
+   its search dirs (_search-paths): scripts/x.lpy searches scripts/ first,
+   as `lpy scripts/x.lpy` does, and no module outside scripts/ searches
+   it.  A shared root's modules take the default list, which
+   holds the same directories.  Deepest first, then by path, so a backend
+   that takes the first environment holding a file (pyright) finds the
+   nearest, and a config's text does not change with dict order.  The one
+   home of which environments the configs get (pyright's
+   executionEnvironments, pyrefly's nested pyrefly.toml)."
+  (= shared (set (or shared-roots [])))
+  (= found [])
+  (for [env-root dirs] in (.items (or environments {}))
+    (= view-dir (_view-dir project-root root env-root))
+    (if (and (is-not view-dir None) (!= env-root project-root) (not (in env-root shared)))
+        (.append found (, view-dir (_search-paths project-root root dirs shared-roots)))))
+  (return (sorted found :key (fn [entry] (, (- (len (.split (sub entry 0) os.sep)))
+                                            (sub entry 0))))))
+
+(def _view-own-files [project-root root environments shared-roots]
+  "The view's own files, which no shadow writer links over or removes: the
+   view root's (_ROOT-FILES) and the nested pyrefly.toml of each search
+   environment (search-environments), which a project file of that name
+   in an overlaid package would otherwise replace."
+  (return (frozenset (+ [(osp.join root name) for name in _ROOT-FILES]
+                        [(osp.join view-dir PYREFLY-CONFIG)
+                         for [view-dir _] in (search-environments project-root root
+                                                                  environments
+                                                                  shared-roots)]))))
+
+(def config-files [view-root name]
+  "Every config file named name of view-root (a backend's, CONFIG-FILES in
+   backend.lpy): the root's own and every nested one, each a regular file
+   in a real directory of it (no link is followed, so a project's own file
+   that a package overlay linked in is none), sorted.  The one home of
+   which files a backend reads its config from, so a save can tell it of
+   each that changed."
+  (= root (osp.abspath (os.fspath view-root)))
+  (= found [])
+  (for [dirpath dirnames filenames] in (os.walk root :followlinks False)
+    (if (in name filenames)
+        (do (= path (osp.join dirpath name))
+            (if (_regular-file-p path)
+                (.append found path)))))
+  (return (sorted found)))
+
+(def write-pyright-config [project-root view-root :environments None :shared-roots None
+                          :check-types True]
   "Write view-root's pyrightconfig.json when it changed: the project's
    rule settings (_rule-settings; check-types false, as when no diagnostic
-   is forwarded, turns checking off), the search paths (_search-paths, as
-   extraPaths), and the environment of this process's interpreter.  pyright's config has no interpreter path; it takes a
+   is forwarded, turns checking off), the default search paths
+   (_search-paths, as extraPaths), one executionEnvironments entry per
+   search environment (search-environments: its view directory as root,
+   its search paths as extraPaths, which replace the top-level ones for
+   it; pyright searches an environment's root before its extraPaths, and
+   takes the first environment whose root holds the file), and the
+   environment of this process's interpreter.  pyright's config has no interpreter path; it takes a
    virtualenv as venvPath (its parent) and venv (its name), so a base
    interpreter is left to the backend's own discovery and to
    ViewRoot.python, sent as python.pythonPath.  A view root that overlaps
@@ -2239,7 +2313,11 @@
   ;; Every server of the project shares the view root: two run with
   ;; different pythonDiagnostics, the last to write decides its checking.
   (= config (_rule-settings project-root check-types))
-  (= (sub config "extraPaths") (_search-paths project-root root import-roots))
+  (= (sub config "extraPaths") (_search-paths project-root root [project-root] shared-roots))
+  (= envs (search-environments project-root root environments shared-roots))
+  (if envs
+      (= (sub config "executionEnvironments")
+         [{"root" view-dir "extraPaths" paths} for [view-dir paths] in envs]))
   (if (!= sys.prefix sys.base-prefix)
       (do (= (sub config "venvPath") (osp.dirname sys.prefix))
           (= (sub config "venv") (osp.basename sys.prefix))))
@@ -2411,11 +2489,33 @@
 ;; fixed and broken again is told again.
 (= _MALFORMED-PYREFLY {})
 
-(def write-pyrefly-config [project-root view-root :import-roots None :check-types True
-                          :python None :check None]
+(def _write-nested-configs [root nested]
+  "Make the nested pyrefly.toml files of view root root (held locked) be
+   nested, path -> text: write each that changed, and remove every other
+   nested pyrefly.toml (config-files: regular files in real directories,
+   never through a link), so a directory that stopped being a search
+   environment no longer reads one.  A failure is logged and skipped, as a
+   shadow's is."
+  (for [path text] in (.items nested)
+    (try
+      (_write-if-changed root path text)
+      (except [OSError as e]
+        (.warning logger "lispython view: cannot write %s: %s" path e))))
+  (for path in (config-files root PYREFLY-CONFIG)
+    (if (not (or (in path nested) (== (osp.dirname path) root)))
+        (try
+          (_check-in-root root (osp.dirname path))
+          (os.remove path)
+          (except [FileNotFoundError]
+            (pass))
+          (except [OSError as e]
+            (.warning logger "lispython view: cannot remove %s: %s" path e))))))
+
+(def write-pyrefly-config [project-root view-root :environments None :shared-roots None
+                          :check-types True :python None :check None]
   "Write view-root's pyrefly.toml when it changed: the project's rule
    settings (_pyrefly-rule-settings; check-types false turns checking off),
-   the search paths, and python as python-interpreter-path (default
+   the default search paths, and python as python-interpreter-path (default
    view-root's ViewRoot.python, else this process's interpreter), since
    pyrefly otherwise queries the python3 on PATH for its site-packages.  A
    pyrefly.toml wins over a pyrightconfig.json in the same directory.
@@ -2428,26 +2528,35 @@
    project config that cannot be read is warned about once per view root
    until its problem changes (_MALFORMED-PYREFLY).  Why the written file
    runs DEFAULT-PYREFLY-PRESET, if it does, is recorded for
-   pyrefly-fallback.  A view root that overlaps the project is a
-   ValueError; the write holds the view root's lock.  Returns the path."
+   pyrefly-fallback.  pyrefly has no execution environments; it takes each
+   file's config from the nearest pyrefly.toml up from it, so each search
+   environment (search-environments) gets a pyrefly.toml of its own in its
+   view directory, the same settings with that environment's search paths,
+   and a nested one no environment has any more is removed.  A view root
+   that overlaps the project is a ValueError; the writes hold the view
+   root's lock.  Returns the root file's path (config-files lists them
+   all)."
   (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
   (= [source project reason unreadable] (_project-pyrefly-config project-root))
-  (= paths {;; pyrefly looks in search-path before the directory of its
-            ;; config (the view root), where pyright looks in its execution
-            ;; root first: the root leads, so a module the view links (most
-            ;; modules of an import root with a shadow, _mirror-py-files)
-            ;; resolves to the link and is analysed under this config, never
-            ;; as the real file under the project's own.
-            "search-path" (+ [root] (_search-paths project-root root import-roots))
-            "python-interpreter-path"
-            (ife (is python None) (getattr view-root "python" sys.executable) python)})
+  (= interpreter (ife (is python None) (getattr view-root "python" sys.executable) python))
+  ;; pyrefly looks in search-path before the directory of its config, where
+  ;; pyright looks in its execution root first: each list leads with its
+  ;; config's own directory (_search-paths puts the view counterpart of the
+  ;; environment root first, the view root for the default list), so a
+  ;; module the view links (most modules of an import root with a shadow,
+  ;; _mirror-py-files) resolves to the link and is analysed under the view's
+  ;; config, never as the real file under the project's own.
+  (= paths {"search-path" (_search-paths project-root root [project-root] shared-roots)
+            "python-interpreter-path" interpreter})
+  (= envs (search-environments project-root root environments shared-roots))
   (= path (osp.join root PYREFLY-CONFIG))
   ;; Every server of the project shares the view root: two run with
   ;; different pythonDiagnostics, the last to write decides its checking.
   (with [(_view-root-lock root)]
-    (= text (_pyrefly-toml (| (_pyrefly-rule-settings project check-types) paths)))
+    (= rules (_pyrefly-rule-settings project check-types))
+    (= text (_pyrefly-toml (| rules paths)))
     ;; No usable project config: a refusal remembered from before no longer
     ;; holds, so the same config restored later is checked and told again.
     (if (is project None)
@@ -2469,7 +2578,8 @@
       ;; from it on every save; checked and warned about once.
       (== text (.get _REFUSED-PYREFLY root))
       (do (= reason "refused")
-          (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types) paths))))
+          (= rules (_pyrefly-rule-settings None check-types))
+          (= text (_pyrefly-toml (| rules paths))))
 
       True
       (do (= problem (check text))
@@ -2479,9 +2589,17 @@
                             source problem)
                   (= (sub _REFUSED-PYREFLY root) text)
                   (= reason "refused")
-                  (= text (_pyrefly-toml (| (_pyrefly-rule-settings None check-types)
-                                            paths)))))))
+                  (= rules (_pyrefly-rule-settings None check-types))
+                  (= text (_pyrefly-toml (| rules paths)))))))
     (_write-if-changed root path text)
+    ;; The root file's settings decision holds for every nested one: they
+    ;; differ only in search-path, so none is checked again.
+    (= nested {})
+    (for [view-dir env-paths] in envs
+      (= (sub nested (osp.join view-dir PYREFLY-CONFIG))
+         (_pyrefly-toml (| rules {"search-path" env-paths
+                                  "python-interpreter-path" interpreter}))))
+    (_write-nested-configs root nested)
     (= (sub _PYREFLY-FALLBACKS root)
        (ife (and check-types (is-not reason None)) (PyreflyFallback reason source) None)))
   (return path))
