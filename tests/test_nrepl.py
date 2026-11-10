@@ -755,11 +755,19 @@ def without_out(messages, req_id):
 
 
 @pytest.fixture
-def connect(isolated):
+def connect(isolated, monkeypatch):
     import socket
     import threading
 
     served = []
+    connections = []
+
+    class RecordedConnection(tools._NreplConnection):
+        def __init__(self, *args):
+            super().__init__(*args)
+            connections.append(self)
+
+    monkeypatch.setattr(tools, "_NreplConnection", RecordedConnection)
 
     def connect():
         client_sock, server_sock = socket.socketpair()
@@ -780,6 +788,12 @@ def connect(isolated):
     for _, thread in served:
         thread.join(WAIT)
     assert not any(thread.is_alive() for _, thread in served)
+    # Closing ended each connection's eval worker and side worker too.
+    workers = [c._worker for c in connections]
+    workers += [c._side for c in connections if c._side is not None]
+    for worker in workers:
+        worker.join(WAIT)
+    assert not any(worker.is_alive() for worker in workers)
 
 
 def test_stream_eval_streams_output_before_its_result(connect):
@@ -1080,12 +1094,96 @@ def test_a_slow_require_keeps_the_built_ins_in_the_table(
         code="(require lockfreeze-spin)",
     )
     assert is_out(client.recv(), 1)
-    # docs reads the table with no lock (complete would offer cond anyway,
-    # as one of lispython's own names).
+    # docs runs on the side worker while the require runs, and reads the
+    # table there with no lock (complete would offer cond anyway, as one of
+    # lispython's own names).
     client.send(op="docs", id=2, symbol="cond", file=path)
     reply = without_out(client.until(lambda m: m.get("id") == 2), 1)[-1]
     assert reply["op"] == "docs-result"
     assert reply["docs"].startswith("cond")
+    client.send(op="interrupt", id=3, **{"interrupt-id": 1})
+    replies = without_out(client.until(lambda m: m.get("op") == "eval-result"), 1)
+    assert replies[0] == {"op": "interrupt-result", "interrupt-id": 1, "id": 3}
+    assert replies[1]["error"].endswith("KeyboardInterrupt")
+
+
+@pytest.mark.parametrize("bad_op", [["x"], {"k": 1}])
+def test_an_unhashable_op_is_an_unknown_op(connect, bad_op):
+    client = connect()
+    client.send(op=bad_op, id=1)
+    assert client.recv() == {
+        "op": "error",
+        "error": f"unknown op: {bad_op}",
+        "id": 1,
+    }
+    client.send(op="ping", id=2)
+    assert client.recv() == {"op": "pong", "id": 2}
+
+
+def test_a_dotted_complete_runs_off_the_reader_while_an_eval_runs(connect, isolated):
+    # Resolving the head of a dotted prefix runs user code (here __dir__),
+    # which must not hold up the reader while an eval is not waited for.
+    import threading
+
+    gate = threading.Event()
+
+    class Slow:
+        def __dir__(self):
+            gate.wait(WAIT)
+            return ["attr"]
+
+    isolated["slow"] = Slow()
+    client = connect()
+    client.sock.settimeout(3)
+    try:
+        client.send(op="eval", id=1, stream=True, code=ENDLESS)
+        assert is_out(client.recv(), 1)
+        client.send(op="complete", id=2, prefix="slow.a")
+        client.send(op="ping", id=3)
+        assert without_out(client.until(lambda m: m.get("id") in (2, 3)), 1) == [
+            {"op": "pong", "id": 3}
+        ]
+    finally:
+        gate.set()
+    reply = without_out(client.until(lambda m: m.get("id") == 2), 1)[-1]
+    assert reply["completions"] == ["slow.attr"]
+    client.send(op="interrupt", id=4, **{"interrupt-id": 1})
+    client.until(lambda m: m.get("op") == "eval-result")
+
+
+def test_a_pending_side_request_keeps_later_requests_off_the_reader(connect, isolated):
+    # A side request stuck in a macro holds the scope lock.  After the eval
+    # that sent it aside has ended, a later macroexpand must still queue
+    # behind it, and a plain eval (whose compile needs the lock) must not be
+    # waited for, or the reader would read nothing more.
+    import threading
+
+    isolated["gate"] = gate = threading.Event()
+    isolated["go"] = go = threading.Event()
+    tools.nrepl_eval("(defmacro wait-gate [] (gate.wait 10) (return 1))", isolated)
+    client = connect()
+    client.sock.settimeout(3)
+    try:
+        # Compiled whole before it runs: once it prints, it holds no lock.
+        client.send(op="eval", id=1, stream=True, code='(print "up")\n(go.wait 10)')
+        assert is_out(client.recv(), 1)
+        client.send(op="macroexpand", id=2, code="(wait-gate)")
+        go.set()
+        # The eval ended; the macroexpand still waits.
+        assert without_out(client.until(lambda m: m.get("id") == 1), 1)[-1]["id"] == 1
+        client.send(op="macroexpand", id=3, code="(inc 1)")
+        client.send(op="eval", id=4, code="(+ 1 2)")
+        client.send(op="ping", id=5)
+        assert client.recv() == {"op": "pong", "id": 5}
+    finally:
+        gate.set()
+    replies = {}
+    while len(replies) < 3:
+        msg = client.recv()
+        replies[msg["id"]] = msg
+    assert replies[2]["expansion"] == "1"
+    assert replies[3]["expansion"] == "(+ 1 1)"
+    assert replies[4]["value"] == "3"
 
 
 def test_an_interrupt_waits_for_the_warnings_lock(connect, monkeypatch):
@@ -1374,3 +1472,39 @@ def test_long_output_is_split_into_capped_out_messages(monkeypatch):
     stream.stop()
     assert [len(m["stdout"]) for m in sent] == [64, 64, 22]
     assert all(m == {"op": "out", "stdout": m["stdout"], "id": 1} for m in sent)
+
+
+def test_closing_waits_for_the_warnings_lock_before_interrupting(
+    connect, isolated, monkeypatch
+):
+    # A closing connection's interrupt must not land inside
+    # filtered_warnings either: it waits for the lock within the close
+    # budget, well past NREPL_WARNINGS_WAIT.
+    import threading
+    import time
+
+    from lispy.core import errors
+
+    monkeypatch.setattr(tools, "NREPL_WARNINGS_WAIT", 0.05)
+    isolated["wlock"] = errors._WARNINGS_LOCK
+    isolated["seen"] = seen = []
+    isolated["started"] = started = threading.Event()
+    code = (
+        "(import time)\n(.set started)\n"
+        "(try (while True (time.sleep 0.005))\n"
+        "  (except [KeyboardInterrupt]\n"
+        "    (= free (.acquire wlock :blocking False))\n"
+        "    (.append seen free)\n"
+        "    (if free (.release wlock))\n"
+        "    (raise)))"
+    )
+    client = connect()
+    client.send(op="eval", id=1, stream=True, code=code)
+    assert started.wait(WAIT)
+    with errors._WARNINGS_LOCK:
+        client.sock.close()  # EOF: the reader closes the connection
+        time.sleep(0.3)
+    deadline = time.monotonic() + WAIT
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert seen == [True]

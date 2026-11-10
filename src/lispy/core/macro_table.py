@@ -132,7 +132,9 @@ class MacroTable(MutableMapping):
         table or the new one. table is built off to the side and not used
         after. A macro other running code registers into the old entries
         while the new state is being built is lost, as it would be by a
-        clear() in place."""
+        clear() in place, and one racing the swap may discard its replaced
+        spelling from the new seeded set, un-seeding a built-in it never
+        replaced there (a later TOP start then keeps that built-in)."""
         self.seeded = table.seeded
         self._entries = table._entries
         self.prelude = table.prelude

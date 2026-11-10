@@ -1493,16 +1493,32 @@
 (= NREPL-CLOSE-TIMEOUT 2)  ; seconds
 (= _NREPL-WORKER-STOP (object))  ; queued by close(): the worker returns
 ;; How long an interrupt waits for the compiler's warnings lock
-;; (_NreplConnection._raise-in) before it gives up and asks for a resend.
+;; (_NreplConnection._raise-in) before it gives up and asks for a resend; a
+;; closing connection waits up to its NREPL-CLOSE-TIMEOUT budget instead.
 (= NREPL-WARNINGS-WAIT 1)  ; seconds
 ;; _NreplConnection._raise-in's outcomes.
 (= _NREPL-RAISED "raised")
 (= _NREPL-TOO-SOON "too-soon")  ; raised there within NREPL-INTERRUPT-REPEAT
 (= _NREPL-BUSY "busy")  ; the warnings lock stayed held for NREPL-WARNINGS-WAIT
 ;; Requests that can run user code (macros; _resolve-obj evaluates a dotted
-;; name, so a property runs) and so leave the reader while an eval is not
-;; waited for (_NreplConnection.aside).  complete stays on the reader.
+;; name, so a property, a __getattr__ or a lazy import runs) and so leave the
+;; reader while an eval is not waited for (_NreplConnection.aside).  A
+;; complete does too when its prefix has a dot (_resolve-obj on its head,
+;; dir running __dir__); a plain-prefix complete runs no user code and
+;; stays on the reader (_nrepl-runs-user-code-p).
 (= _NREPL-ASIDE-OPS (frozenset ["macroexpand" "docs" "annotate"]))
+
+(def _nrepl-runs-user-code-p [msg]
+  "Whether the request msg (not an eval, load-file or interrupt) may run
+   user code: an op of _NREPL-ASIDE-OPS, or a complete of a dotted prefix.
+   Any op that is not a string is not one (the dispatch refuses it)."
+  (= op (.get msg "op"))
+  (if (not (isinstance op str))
+      (return False))
+  (if (in op _NREPL-ASIDE-OPS)
+      (return True))
+  (= prefix (.get msg "prefix"))
+  (return (and (== op "complete") (isinstance prefix str) (in "." prefix))))
 
 (class _NreplConnection []
   "One client connection: its send lock and its eval worker.
@@ -1523,14 +1539,16 @@
 
   The reader never waits on user code while an eval is not waited for, or
   an interrupt sent then would never be read: complete takes no lock
-  (nrepl-scope-lock), and macroexpand, docs and annotate, which may run
-  macros or a property (_NREPL-ASIDE-OPS), go to the connection's side
-  worker, one lazily started thread with its own FIFO queue, whenever a
-  job is queued or running or an earlier side request is still pending
-  (so a later inline request never overtakes one); otherwise they run on
-  the reader as before.  Their replies have the reader's shapes.  A side
-  request that never returns leaves only its daemon thread behind, and
-  the side requests after it on that connection wait for it.
+  (nrepl-scope-lock), and the requests that may run user code (macroexpand,
+  docs, annotate, a dotted complete: _nrepl-runs-user-code-p) go to the
+  connection's side worker, one lazily started thread with its own FIFO
+  queue, whenever a job is queued or running or an earlier side request is
+  still pending (so a later inline request never overtakes one); otherwise
+  they run on the reader as before.  Their replies have the reader's
+  shapes.  A plain eval is waited for only with no job and no side request
+  pending, since a side request may hold the scope lock its compile needs.
+  A side request that never returns leaves only its daemon thread behind,
+  and the side requests after it on that connection wait for it.
 
   Every send on the connection is one whole line under one lock (sendall),
   so the reader, the workers and a stream's flusher never interleave bytes."
@@ -1569,9 +1587,11 @@
     (= refusal None)
     (with [self._lock]
       ;; Waited for only behind nothing: a plain eval behind any unwaited one
-      ;; (stream or plain) may wait for an endless eval, and the reader would
-      ;; then read no interrupt and no EOF.
-      (= wait (and (not stream) (not self._jobs)))
+      ;; (stream or plain) may wait for an endless eval, and one behind a
+      ;; pending side request may wait for its scope lock forever (a macro
+      ;; that never returns), and the reader would then read no interrupt
+      ;; and no EOF.  _side-pending changes only under this lock.
+      (= wait (and (not stream) (not self._jobs) (== self._side-pending 0)))
       (cond (and stream (is key None))
             (= refusal "a stream eval needs an id: a non-empty string or a non-zero number")
             (and (not wait) (is-not key None) (in key self._by-id))
@@ -1589,11 +1609,13 @@
             (if (is-not job.send-error None)
                 (raise job.send-error)))))
 
-  (def _raise-in [self job :force False]
+  (def _raise-in [self job :force False :wait None]
     "Raise KeyboardInterrupt in RUNNING job and return _NREPL-RAISED, unless
     it was raised there within NREPL-INTERRUPT-REPEAT (_NREPL-TOO-SOON) or
-    the warnings lock stayed held for NREPL-WARNINGS-WAIT (_NREPL-BUSY);
-    force raises regardless.  Called under the lock."
+    the warnings lock stayed held for wait seconds (default
+    NREPL-WARNINGS-WAIT, read at the call) (_NREPL-BUSY); force
+    raises regardless, once the warnings lock is taken or wait ran out.
+    Called under the lock."
     (= now (time.monotonic))
     (if (not (or force (is job.raised-at None)
                  (>= (- now job.raised-at) NREPL-INTERRUPT-REPEAT)))
@@ -1607,8 +1629,11 @@
     ;; acquire, which _nrepl-release-window-locks undoes.  No deadlock:
     ;; nothing holding the warnings lock takes a connection lock, except a
     ;; worker an interrupt left holding it on its way to _close-window, and
-    ;; the timeout bounds that wait.
-    (= held (errors-module._WARNINGS_LOCK.acquire :timeout NREPL-WARNINGS-WAIT))
+    ;; the timeout bounds that wait.  A forced raise (close) waits too, as
+    ;; long as close's budget allows, and raises anyway only once that ran
+    ;; out: an eval that never leaves the region must still be stopped.
+    (= held (errors-module._WARNINGS_LOCK.acquire
+              :timeout (ife (is wait None) NREPL-WARNINGS-WAIT wait)))
     (if (and (not held) (not force))
         (return _NREPL-BUSY))
     (try
@@ -1625,8 +1650,9 @@
     when it is queued, and reply interrupt-result; an error reply when there
     is no such eval, or when it was interrupted less than
     NREPL-INTERRUPT-REPEAT ago or busy in the compiler's warnings lock
-    (_raise-in) and this one raised nothing (the client may send it again).  Only a stream eval, or a plain one queued behind one,
-    can be interrupted.  The reply goes out under the lock, so it precedes
+    (_raise-in) and this one raised nothing (the client may send it again).
+    Only a stream eval, or a plain one queued behind one, can be
+    interrupted.  The reply goes out under the lock, so it precedes
     the eval's final result."
     (= target (.get msg NREPL-INTERRUPT-ID-FIELD))
     (= key (_nrepl-interrupt-key target))
@@ -1655,14 +1681,17 @@
     "End the connection's evals: cancel the queued ones, interrupt the
     running one, shut the socket down (so their final replies fail at once
     instead of waiting on a peer that is gone), and join the eval worker
-    and the side worker for at most NREPL-CLOSE-TIMEOUT together.  The
-    caller closes the socket."
+    and the side worker, all within NREPL-CLOSE-TIMEOUT together (the
+    interrupt's wait for the warnings lock included).  The caller closes
+    the socket."
+    (= deadline (+ (time.monotonic) NREPL-CLOSE-TIMEOUT))
     (with [self._lock]
       (for job self._jobs
         (cond (== job.state _NREPL-QUEUED)
               (= job.cancelled True)
               (== job.state _NREPL-RUNNING)
-              (self._raise-in job :force True))))
+              (self._raise-in job :force True
+                              :wait (max 0 (- deadline (time.monotonic)))))))
     (= shutdown (getattr self.conn "shutdown" None))
     (if (is-not shutdown None)
         (try
@@ -1671,16 +1700,15 @@
             (pass))))
     (self._queue.put _NREPL-WORKER-STOP)
     (self._side-queue.put _NREPL-WORKER-STOP)
-    (= deadline (+ (time.monotonic) NREPL-CLOSE-TIMEOUT))
-    (self._worker.join NREPL-CLOSE-TIMEOUT)
+    (self._worker.join (max 0 (- deadline (time.monotonic))))
     (with [self._lock]
       (= side self._side))
     (if (is-not side None)
         (side.join (max 0 (- deadline (time.monotonic))))))
 
   (def aside [self msg]
-    "Send msg, a request of _NREPL-ASIDE-OPS, to the side worker and return
-    True when an eval is queued or running or an earlier side request is
+    "Send msg, a request that may run user code (_nrepl-runs-user-code-p),
+    to the side worker and return True when an eval is queued or running or an earlier side request is
     still unanswered; else False, and the reader answers it itself.  The
     side worker is started on first use."
     (with [self._lock]
@@ -1908,7 +1936,7 @@
               (connection.evaluate msg)
               (== op NREPL-INTERRUPT-OP)
               (connection.interrupt msg)
-              (and (in op _NREPL-ASIDE-OPS) (connection.aside msg))
+              (and (_nrepl-runs-user-code-p msg) (connection.aside msg))
               (pass)
               True
               (do (try
