@@ -9,7 +9,7 @@ from lispy.core.compiler.literal import (
     string_node_value,
 )
 from lispy.core.compiler.utils import compile_nesting_errors
-from lispy.core.errors import IN_MACRO_CALL, LispyCompileError
+from lispy.core.errors import MACRO_CALL_POSITION, LispyCompileError
 from lispy.core.macro_table import MacroTable, find_entry, find_macro
 from lispy.core.meta_functions import defmacro_transform, require_transform
 from lispy.core.nodes import *
@@ -166,8 +166,9 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
             and (macro := find_macro(scope.get("__macro_namespace"), name)) is not None
         ):
             # Text the macro parses is not this module's source: parse()
-            # gives its nodes and errors no position (IN_MACRO_CALL).
-            in_macro = IN_MACRO_CALL.set(True)
+            # gives its nodes and errors no position, and its warnings take
+            # the call's line (MACRO_CALL_POSITION).
+            in_macro = MACRO_CALL_POSITION.set(sexp.position_info)
             try:
                 expansion = macro(*[_unwrap_literal(o) for o in operands])
             except LispyCompileError as error:
@@ -178,7 +179,7 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
                     raise
                 raise LispyCompileError(error.msg, sexp) from None
             finally:
-                IN_MACRO_CALL.reset(in_macro)
+                MACRO_CALL_POSITION.reset(in_macro)
             # Python data anywhere in the expansion becomes nodes, and
             # template-built nodes take the call's position, so tracebacks and
             # compile errors point at the macro call, not line 0. The

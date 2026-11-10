@@ -698,15 +698,16 @@ def _include_deprecated_field():
     return form
 
 
-def test_warning_from_parsing_other_text_names_no_line_of_the_module():
+def test_warning_from_parsing_other_text_names_the_call_line():
     # Defect: the deprecated-field warning took the line of the string the
-    # macro parses (4) and named it in m.lpy.
+    # macro parses (4) and named it in m.lpy; then line 0, where warnings of
+    # two calls collapsed into one.
     scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
     [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
-    assert (warning.filename, warning.lineno) == ("m.lpy", 0)
+    assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
 
 def _include_escape_in_fstring():
@@ -714,20 +715,33 @@ def _include_escape_in_fstring():
     return form
 
 
-def test_escape_warning_from_parsing_other_text_names_no_line_of_the_module():
+def test_escape_warning_from_parsing_other_text_names_the_call_line():
     # Defect: the invalid-escape warning of an f-string literal the macro
-    # parses took that text's line (4) and named it in m.lpy.
+    # parses took that text's line (4) and named it in m.lpy; then line 0.
     scope = {"__macro_namespace": {"inc": _include_escape_in_fstring}}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
     [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
-    assert (warning.filename, warning.lineno) == ("m.lpy", 0)
+    assert (warning.filename, warning.lineno) == ("m.lpy", 2)
+
+
+def test_warnings_from_two_calls_each_name_their_own_line():
+    # Defect: both calls warned at the same line 0, so their warnings were
+    # one identical report and neither named its call.
+    scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("default")
+        _compile_m("(x)\n(inc)\n(x)\n(inc)", scope)
+    lines = [
+        (w.filename, w.lineno) for w in caught if issubclass(w.category, SyntaxWarning)
+    ]
+    assert lines == [("m.lpy", 2), ("m.lpy", 4)]
 
 
 def test_module_a_macro_imports_keeps_its_own_positions(tmp_path, monkeypatch):
     # Defect: the importer's compile of badmod ran with the macro call's
-    # IN_MACRO_CALL still set, so badmod's own nodes lost their positions and
+    # MACRO_CALL_POSITION still set, so badmod's own nodes lost their positions and
     # its error was placed at the macro call in m.lpy.
     (tmp_path / "badmod.lpy").write_text("(x)\n(x)\n(print (return 2))\n")
     monkeypatch.syspath_prepend(str(tmp_path))
