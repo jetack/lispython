@@ -550,6 +550,12 @@ class TestCursor:
         # value +U, which resolves U outside the alias's type parameters.
         assert pv.view_at_cursor(*at_bar("(type A[U] (+ U|")) is None
 
+    @pytest.mark.skipif(sys.version_info >= (3, 12), reason="type needs 3.12")
+    def test_a_type_alias_without_type_parameters_keeps_its_unwrapped_view(self):
+        # Defect guarded: refusing every type value on 3.11 also lost the
+        # view of an alias that binds no name.
+        assert pv.view_at_cursor(*at_bar("(type A x.|)")).text == "x."
+
     def test_a_type_head_with_glued_params_gives_no_view_in_its_value(self):
         # Defect: type[T] (not legal) was unwrapped to the bare value +U, which
         # resolves U outside the alias's type parameters.

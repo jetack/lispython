@@ -1229,9 +1229,12 @@
            (_holds-sentinel (. (sub form 1) params)))
       (return True))
   ;; A type alias's value is read with its type parameters bound.  Reached
-  ;; only for a form the compiler refuses: the glued head (type[T]), or any
-  ;; type statement on 3.11.
+  ;; only when the compiler refuses the type form or its type-parameter
+  ;; bracket: the glued head (type[T]), or any type statement on 3.11.  An
+  ;; alias with no type parameters binds nothing, so it unwraps freely.
   (if (and (== (_head-name form) "type") (> (len form) 2)
+           (or (isinstance (sub form 0) GluedHead)
+               (isinstance (sub form 1) GluedHead))
            (any ((_holds-sentinel part) for part in (sub form.list [: 2 None]))))
       (return True))
   (= slot (_param-slot form))
