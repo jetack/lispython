@@ -99,6 +99,10 @@ _LINE_BREAK_CHARS = "\\r\\n"
 # (completion_word_span lexes the line as code: f"ab{wi" is the word wi).
 # x{y} is the symbol x then the dict {y}, never a glued head.
 _SYMBOL_STOP = _FORM_END + '\\"\\[\\{'
+# What ends a number token: a form end, or the "{" a symbol stops at, so 1{2}
+# is the number 1 then {2} as a{b} is a then {b} (a number ending only at a
+# form end would leave 1 to the symbol pattern, refused as a name).
+_NUMBER_END = _FORM_END + "\\{"
 # A line continuation in a field: a backslash before a line break or the end
 # of the source (_token_patterns).
 _FIELD_CONTINUATION = "\\\\(?:\\r\\n|\\r|\\n|\\Z)"
@@ -167,7 +171,7 @@ def _token_patterns(in_field, field_level=False):
         [_WRAPPER + _META_CHARS + f"(?![{_FORM_END}]|{end})", "meta-indicator"],
         [f"\\^\\*+(?:{_OPENING}|{_META_CHARS}|{stop_ahead})", "bad-prefix"],
         [f";(?:{comment_char})*+", "comment"],
-        [_NUMBER_TOKEN + f"(?=[{_FORM_END}]|{end})", "number"],
+        [_NUMBER_TOKEN + f"(?=[{_NUMBER_END}]|{end})", "number"],
         [",", "comma"],
         # A symbol stops at _SYMBOL_STOP (f[T] is a symbol glued to a
         # bracket). At a field's own level a lone ":" or "!" matches too, so

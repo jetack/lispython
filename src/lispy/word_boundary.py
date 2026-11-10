@@ -124,6 +124,11 @@ CASE_INPUTS = (
     # a word, on both sides of it: a client word set that drops one fails.
     "a{b|",
     "a|{b",
+    # A number ends at { too (numberEndChars), never left to the symbol rule,
+    # which would peel the signed complex's sign.
+    "1|{x",
+    "-1+2j|{x",
+    "1{x|",
     "a;b|",
     "a|;b",
     "a]b|",
@@ -184,6 +189,7 @@ def rule():
         # Python's re \s for str: the code points str.isspace holds.
         "stopChars": _class_members(parser._SYMBOL_STOP),
         "formEndChars": _class_members(parser._FORM_END),
+        "numberEndChars": _class_members(parser._NUMBER_END),
         "wrappers": _matching(parser._WRAPPER, 2),
         "openings": _matching(parser._OPENING, 1),
         "metaChars": _matching(parser._META_CHARS, 2),
@@ -208,7 +214,7 @@ def rule():
             "entry, followed by anything but a formEndChars character or the "
             "line's end); a bad prefix (^ + one or more *, then an openings "
             "entry, a metaChars entry, or before a stopChars character or the "
-            "line's end); a number (numberToken, followed by a formEndChars "
+            "line's end); a number (numberToken, followed by a numberEndChars "
             "character or the line's end); else a symbol (the rest of the "
             "run). Entries are tried longest first. ~ is a metaChars entry and "
             "no danglingQuotes one: a ~ followed by a formEndChars character "

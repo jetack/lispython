@@ -17,6 +17,7 @@ print("Hello, World!")
 ## Lexical syntax
 - `;` starts a comment that runs to the end of the line. It ends any token, so a comment may follow with no space: `(print "a"); comment`.
 - Hyphens in a name become underscores in Python: `my-var` is `my_var`.
+- `[` and `{` end a name: `a{b}` is `a` followed by `{b}`. Only `[` glues to the name before it (`f[T]`, see [Generic Functions and Classes](statements.md#generic-functions-and-classes)).
 - `:kw value` inside a call is the keyword argument `kw=value`: `(f a :kw 1 :other-kw 2)` is `f(a, kw=1, other_kw=2)`.
 - `*x` and `**x` unpack a sequence or mapping in a call: `(f *xs **kw)` is `f(*xs, **kw)`. The `*` or `**` is glued to the form.
 - `^type` is a type annotation; it follows the name it annotates: `(def f [a ^int b] ^int ...)` is `def f(a: int, b) -> int`, and `(= a ^int 1)` is `a: int = 1`.

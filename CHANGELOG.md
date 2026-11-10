@@ -103,8 +103,10 @@ follows [Semantic Versioning](https://semver.org/).
 - `{` now ends a symbol, as `[` does, so a symbol can no longer contain `{`:
   `a{b}` reads as the symbol `a` and the brace form `{b}` (it was an
   unmatched `}`), and `x{` is an unclosed `{` (it was the symbol `x{`). A
-  `{` never glues to the name before it. The word boundary spec
-  (`python -m lispy.word_boundary`) is version 4: `{` is in `stopChars`.
+  `{` never glues to the name before it. A number ends at `{` too: `1{2}` is
+  the number `1` then `{2}`. The word boundary spec
+  (`python -m lispy.word_boundary`) is version 4: `{` is in `stopChars`, and
+  the new `numberEndChars` field is what may follow a number token.
 - nREPL: an eval's output is captured per thread, no longer by swapping
   `sys.stdout` for the whole process. Output of a thread the evaluated code
   starts now goes to the server's own stdout/stderr, plain evals included,

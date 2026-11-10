@@ -235,6 +235,10 @@ class TestBraceEndsSymbol:
         [
             ("a{b}", "[Sym(a), Brace(Sym(b))]"),
             ("(f x{y})", "[Paren(Sym(f), Sym(x), Brace(Sym(y)))]"),
+            # A number ends at the brace too, never left to the symbol rule.
+            ("1{2}", "[Const('1'), Brace(Const('2'))]"),
+            ("-1{2}", "[Paren(Sym(-), Const('1')), Brace(Const('2'))]"),
+            ("1.5{2}", "[Const('1.5'), Brace(Const('2'))]"),
         ],
     )
     def test_a_brace_after_a_symbol_opens_a_dict(self, src, parsed):
