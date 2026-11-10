@@ -418,7 +418,8 @@
     ;; _discard's cleanups still running (_reap).
     (= self._cleanups (set))
     ;; lpy uris saved while a start was in progress (file-saved), which its
-    ;; sweep may have missed: replayed once it runs, dropped when it fails.
+    ;; sweep may have missed: replayed once it runs; the next start clears
+    ;; them before its own sweep (_start).
     (= self._saved-while-starting (set))
     ;; The replays of those saves still running (_replay-saves); kept here
     ;; because the loop holds tasks only weakly.
@@ -540,6 +541,9 @@
   (async-def _start [self]
     "Start a backend process; True when it runs.  Cancelled only by
      shutdown."
+    ;; Before the first await: this start's own sweep covers every save
+    ;; recorded so far, a failed start's included.
+    (.clear self._saved-while-starting)
     (try
       (if (is-not self._client None)
           ;; the dead process's client: its tasks end, its pipes close
@@ -548,20 +552,16 @@
       (except [Exception as e]
         (.warning logger "lispython LSP: Python backend for %s failed to start: %s"
                   self.project-root e)
-        ;; the next start's own sweep reads the disk anew
-        (.clear self._saved-while-starting)
         (await (._discard self))
         (if (!= self.state "closed")
             (= self.state (ife (>= self.spawns MAX-SPAWNS) OFF "dead")))
         (return False))
       (except [asyncio.CancelledError]
-        (.clear self._saved-while-starting)
         (await (._discard self))
         (raise)))
     (if (== self.state "closed")
         ;; shutdown came during the spawn
-        (do (.clear self._saved-while-starting)
-            (await (._discard self))
+        (do (await (._discard self))
             (return False)))
     (= self.state "running")
     ;; The buffers pushed while it started: their diagnostics need their
@@ -954,7 +954,9 @@
      send shutdown and exit and wait for the process to end, all within
      SHUTDOWN-TIMEOUT, then kill and reap it (_reap: up to three
      KILL-TIMEOUT waits), about 3.5 s at worst; a start it cancels reaps
-     its own client instead.  No request spawns one afterwards."
+     its own client instead.  A replay cancelled inside its to_thread sweep
+     stops waiting for it, as a start does; the thread finishes that write
+     under the view root's lock.  No request spawns one afterwards."
     (= self.state "closed")
     (= deadline (+ (.time (asyncio.get-running-loop)) SHUTDOWN-TIMEOUT))
     (= starting self._starting)
