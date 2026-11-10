@@ -405,7 +405,8 @@
       (if (not switching)
           (do (= switching True)
               (+= _SHARED.switching 1)))
-      ;; The wait is bounded from when these dirs were loaded, once.
+      ;; WAIT-LIMIT per loaded dirs: another switch landing meanwhile brings
+      ;; new compiles, which get their own WAIT-LIMIT before they are hung.
       (if (or (is target None) (!= (sub target 0) _SHARED.loaded-dirs))
           (= target (, _SHARED.loaded-dirs (+ (time.monotonic) WAIT-LIMIT))))
       (= blockers (- (.keys _SHARED.running) _SHARED.hung))
