@@ -1186,6 +1186,9 @@
           (.extend pending [(, node.head None) (, node.params None)])
           (isinstance node MetaIndicator)
           (.append pending (, node.value (ife (is marks None) (_position node) marks)))
+          ;; No cursor view reaches an f/t-string here today (the prefix
+          ;; would end inside it, which open-forms refuses); the spec is
+          ;; walked so the scan reads every form all the same.
           (isinstance node Wrapper)
           (.extend pending ((, child None) for child in (wrapper-forms node)))))
   (if (is form None)
@@ -1278,6 +1281,7 @@
           (.extend pending node.list)
           (isinstance node GluedHead)
           (.extend pending [node.head node.params])
+          ;; As in _unwrap, no sentinel reaches an f/t-string field today.
           (isinstance node (, Wrapper MetaIndicator))
           (.extend pending (wrapper-forms node))
           ;; The sentinel's own token may glue it to a base (grid.___).

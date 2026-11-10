@@ -1345,37 +1345,39 @@
 ;; Hover
 ;; ---------------------------------------------------------------------------
 
-(def _node-span [node]
-  "node's 0-based (start, end) as (line, col) pairs."
-  (return (, (, (- node.lineno 1) node.col_offset)
-             (, (- node.end_lineno 1) node.end_col_offset))))
+(def _holder [nodes cursor]
+  "The first of nodes whose span holds cursor, a 0-based (line, col), or None."
+  (for node in nodes
+    (if (<= (, (- node.lineno 1) node.col_offset) cursor
+            (, (- node.end_lineno 1) node.end_col_offset))
+        (return node)))
+  (return None))
 
 (def node-at-position [nodes line-0 col]
   "Find the most specific node at the given 0-based position."
-  ;; Of the nodes holding the position, the first one, unless a later one
-  ;; lies inside it: an f/t-string's head Symbol spans the whole literal, so
-  ;; first-match alone never reached a name in one of its fields.
+  ;; One loop down the tree, never a call per level, so any depth the
+  ;; reader parses is walked.  An f/t-string's head Symbol spans the whole
+  ;; literal: the cursor in a field reads that field's forms, anywhere else
+  ;; in the literal (its text, braces, delimiters) it stays on the head.
   (= cursor (, line-0 col))
-  (= node None)
-  (for candidate in nodes
-    (= [start end] (_node-span candidate))
-    (if (not (<= start cursor end))
-        (continue))
-    (if (is-not node None)
-        (do (= [best-start best-end] (_node-span node))
-            (if (not (and (<= best-start start) (<= end best-end)
-                          (!= (, start end) (, best-start best-end))))
-                (continue))))
-    (= node candidate))
-  (if (is node None)
-      (return None))
-  ;; Position is within this node — try to go deeper
-  (cond (isinstance node Expression) (= children node.list)
-        (isinstance node (, Wrapper MetaIndicator)) (= children (wrapper-forms node))
-        (isinstance node GluedHead) (= children [node.head node.params])
-        True (= children []))
-  (= deeper (node-at-position children line-0 col))
-  (return (ife (is deeper None) node deeper)))
+  (= found None)
+  (while True
+    (= node (_holder nodes cursor))
+    (if (is node None)
+        (return found))
+    (= found node)
+    (cond (isinstance node Expression)
+          (do (= field (_holder [child for child in node.list if (isinstance child FStrExpr)] cursor))
+              (if (is field None)
+                  (= nodes node.list)
+                  (do (= found (_holder node.list cursor))
+                      (= nodes (wrapper-forms field)))))
+          (isinstance node (, Wrapper MetaIndicator))
+          (= nodes (wrapper-forms node))
+          (isinstance node GluedHead)
+          (= nodes [node.head node.params])
+          True
+          (return found))))
 
 (def form-heads [nodes]
   "The ids of every form head in nodes, a parsed tree: the first element of
@@ -1934,9 +1936,18 @@
   (= path [])
   (= node (ife tree (sub tree -1) None))
   (while (is-not node None)
-    (while (and (isinstance node (, Wrapper MetaIndicator))
-                (is-not node.value None))
-      (= node node.value))
+    ;; A wrapper stands for its last child form that starts before the
+    ;; cursor, else its first: a cursor in a field's format spec is in the
+    ;; spec's own fields.
+    (while (isinstance node (, Wrapper MetaIndicator))
+      (= children (wrapper-forms node))
+      (if (not children)
+          (break))
+      (= node (sub children 0))
+      (for child in (reversed children)
+        (if (< (, child.lineno child.col_offset) cursor)
+            (do (= node child)
+                (break)))))
     (if (and (isinstance node Expression) (> (node-end node) cursor))
         (do (.append path node)
             ;; The last element that starts before the cursor: past an f/t-string
@@ -1945,12 +1956,7 @@
             (for child in (reversed (sub path -1))
               (if (< (, child.lineno child.col_offset) cursor)
                   (do (= node child)
-                      (break))))
-            ;; A cursor in a field's format spec is in the spec's own fields.
-            (= spec (getattr node "format_spec" None))
-            (if (and (is-not spec None)
-                     (< (, spec.lineno spec.col_offset) cursor))
-                (= node spec)))
+                      (break)))))
         (return (, path (ife (== (node-end node) cursor) node None)))))
   (return (, path None)))
 

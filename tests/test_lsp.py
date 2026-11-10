@@ -1340,6 +1340,31 @@ def test_hover_inside_a_format_spec_reads_the_spec():
     assert hover.contents.value == server.SPECIAL_FORM_DOCS["ife"]
 
 
+@pytest.mark.parametrize("character", [8, 9, 11, 14, 15, 18, 20, 22])
+def test_hover_on_an_f_strings_own_text_is_the_form(character):
+    # Defect: a cursor on the literal's text, braces or delimiters left the
+    # head for a string part or the field, so there was no hover.
+    # Columns: the quote, a, the field's {, the spec's > and {, the
+    # field's closing }, c, the closing quote.
+    source = '(print f"ab{x:>{w}} cd")'
+    hover = run_hover(ls_with(source), position(0, character))
+    assert hover.contents.value == server.SPECIAL_FORM_DOCS["f-string"]
+
+
+def test_node_at_position_walks_any_depth():
+    # Defect: one call per nesting level, so a deep buffer raised
+    # RecursionError out of hover.
+    # The RecursionError is caught here: pytest formatting its frames, each
+    # holding a node whose repr walks the tree, would never finish.
+    depth = 5000
+    tree = parse("(" * depth + "x" + ")" * depth, partial=True)
+    try:
+        name = server.node_at_position(tree, 0, depth).value
+    except RecursionError:
+        name = "RecursionError"
+    assert name == "x"
+
+
 def test_completion_reads_the_view_generation_before_the_hand_off(
     monkeypatch, tmp_path
 ):

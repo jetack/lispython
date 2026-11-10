@@ -950,8 +950,9 @@ class FStrExpr(Wrapper):
 def wrapper_form_keys(node):
     """Attributes of the Wrapper ``node`` holding its child forms, in source
     order: ``value``, then an f/t-string field's format spec when it has one.
-    Macro expansion, name_spellings, mark_compiler_forms and replace_symbol
-    walk a wrapper through it, so they never miss the spec's own fields."""
+    Macro expansion, name_spellings, mark_compiler_forms, replace_symbol and
+    the LSP's tree walks (``wrapper-forms`` in lsp/python_view.lpy) walk a
+    wrapper through it, so they never miss the spec's own fields."""
     if isinstance(node, FStrExpr) and node.format_spec is not None:
         return ("value", "format_spec")
     return ("value",)
