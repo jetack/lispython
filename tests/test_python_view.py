@@ -33,12 +33,13 @@ mm = importlib.import_module("lispy.lsp.macro_modules")
 
 
 def locate(text, word, nth=0):
-    """(1-based line, code-point column) of the nth occurrence of word."""
+    """(1-based line, code-point column) of the nth occurrence of word, on
+    the reader's lines (a lone CR ends one too)."""
     index = -1
     for _ in range(nth + 1):
         index = text.index(word, index + 1)
-    line = text.count("\n", 0, index) + 1
-    return line, index - (text.rfind("\n", 0, index) + 1)
+    lines = parser.split_lines(text[:index])
+    return len(lines), len(lines[-1])
 
 
 def plus(pos, cols):
