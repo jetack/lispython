@@ -167,8 +167,15 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
         ):
             # Text the macro parses is not this module's source: parse()
             # gives its nodes and errors no position, and its warnings take
-            # the call's line (MACRO_CALL_POSITION).
-            in_macro = MACRO_CALL_POSITION.set(sexp.position_info)
+            # the call's line (MACRO_CALL_POSITION). A positionless call is
+            # one a macro function expands from text it parsed, so its
+            # warnings keep the outer call's line, never line 0.
+            outer_call = MACRO_CALL_POSITION.get()
+            in_macro = MACRO_CALL_POSITION.set(
+                outer_call
+                if outer_call is not None and not sexp.lineno
+                else sexp.position_info
+            )
             try:
                 expansion = macro(*[_unwrap_literal(o) for o in operands])
             except LispyCompileError as error:

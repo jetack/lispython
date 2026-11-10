@@ -739,6 +739,23 @@ def test_warnings_from_two_calls_each_name_their_own_line():
     assert lines == [("m.lpy", 2), ("m.lpy", 4)]
 
 
+def test_warning_from_a_macro_call_a_macro_parses_names_the_outer_call_line():
+    # Defect: the inner call, parsed by the outer macro and so positionless,
+    # replaced the outer call's line with its own line 0.
+    inner_scope = {"__macro_namespace": {"inc": _include_deprecated_field}}
+
+    def outer():
+        macroexpand_then_compile(parse("(inc)"), inner_scope)
+        return None
+
+    scope = {"__macro_namespace": {"outer": outer}}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _compile_m("(x)\n(outer)", scope)
+    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    assert (warning.filename, warning.lineno) == ("m.lpy", 2)
+
+
 def test_module_a_macro_imports_keeps_its_own_positions(tmp_path, monkeypatch):
     # Defect: the importer's compile of badmod ran with the macro call's
     # MACRO_CALL_POSITION still set, so badmod's own nodes lost their positions and
