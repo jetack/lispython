@@ -1228,6 +1228,13 @@
            (isinstance (sub form 1) GluedHead)
            (_holds-sentinel (. (sub form 1) params)))
       (return True))
+  ;; A type alias's value is read with its type parameters bound.  A plain
+  ;; type form is never unwrapped, so only the glued head (type[T], refused
+  ;; at its head) reaches here.
+  (if (and (== (_head-name form) "type") (isinstance (sub form 0) GluedHead)
+           (> (len form) 2)
+           (any ((_holds-sentinel part) for part in (sub form.list [: 2 None]))))
+      (return True))
   (= slot (_param-slot form))
   (if (or (is slot None) (<= (len form) slot)
           (not (isinstance (sub form slot) Bracket)))

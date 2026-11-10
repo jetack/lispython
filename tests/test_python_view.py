@@ -544,6 +544,11 @@ class TestCursor:
         # at module scope and x resolved outside the lambda's parameters.
         assert pv.view_at_cursor(*at_bar("(fn[T] [x] ^x|")) is None
 
+    def test_a_type_head_with_glued_params_gives_no_view_in_its_value(self):
+        # Defect: type[T] (not legal) was unwrapped to the bare value +U, which
+        # resolves U outside the alias's type parameters.
+        assert pv.view_at_cursor(*at_bar("(type[T] A[U] (+ U|")) is None
+
     def test_a_def_head_with_glued_params_gives_no_view_in_its_body(self):
         # Defect: def[T] (not legal) read as no slot, so the body unwrapped
         # to a bare +x outside the def's parameters.
