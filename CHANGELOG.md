@@ -94,12 +94,12 @@ follows [Semantic Versioning](https://semver.org/).
   request (`complete`, `macroexpand`, `docs`, ...) no longer waits for an
   earlier eval, so it may see the scope as it was before that eval, and its
   reply can arrive before the eval's result: match replies by `id`. An
-  id-less eval no longer keeps reply order either, and a later request's
-  reply arriving first then has nothing to match by. A plain eval reusing
-  the `id` of one still queued or running is refused. A client that
-  half-closes its socket after sending an eval (`shutdown(SHUT_WR)`,
-  `nc -N`) gets no reply: EOF cancels or interrupts the connection's
-  unfinished evals and shuts the socket down.
+  id-less eval no longer keeps reply order either, and its reply has
+  nothing to match by. A plain eval reusing the `id` of one still queued
+  or running is refused. A client that half-closes its socket after
+  sending an eval (`shutdown(SHUT_WR)`, `nc -N`) usually loses the reply:
+  EOF cancels or interrupts the connection's unfinished evals and shuts
+  the socket down, so only an eval that finished first is sure to reply.
 - nREPL: an eval's output is captured per thread, no longer by swapping
   `sys.stdout` for the whole process. Output of a thread the evaluated code
   starts now goes to the server's own stdout/stderr, plain evals included,
