@@ -2706,6 +2706,73 @@ class TestMacroModules:
             compiled = pv.compile_buffer("(= yy 1)", search_dirs=(helper.b,))
         assert compiled.epoch == before + 1
 
+    def raced(self, helper):
+        """Two compiles admitted together, nothing tracked yet: one searching
+        a/ imports the helper, then the other, searching b/, reuses it.
+        Returns the epoch before and after the second one ended."""
+        imported, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules((helper.a,)):
+                importlib.import_module(helper.name)
+                imported.set()
+                release.wait(30)
+
+        with mm.fresh_modules((helper.b,)) as before:
+            holder = threading.Thread(target=hold, daemon=True)
+            holder.start()
+            try:
+                assert imported.wait(10)
+                assert importlib.import_module(helper.name).__file__.startswith(
+                    helper.a
+                )
+            except BaseException:
+                release.set()
+                raise
+        after = mm.current_epoch()
+        release.set()
+        holder.join(10)
+        assert not holder.is_alive()
+        return before, after
+
+    def test_a_module_reused_from_other_search_dirs_moves_the_epoch(self, helper):
+        # Defect: the compile searching b/ used a/'s helper, and its result
+        # stays current under the epoch.
+        before, after = self.raced(helper)
+        assert after == before + 1
+
+    def test_a_raced_name_keeps_the_two_compiles_apart(self, helper, monkeypatch):
+        # Defect: after the race the next compile searching b/ drops the
+        # helper, a compile searching a/ is admitted beside it and imports it
+        # again, and the race (and its recompile of every document) repeats.
+        self.raced(helper)
+        monkeypatch.setattr(mm, "WAIT_LIMIT", 30)
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules((helper.b,)):
+                held.set()
+                release.wait(30)
+
+        def enter():
+            with mm.fresh_modules((helper.a,)):
+                pass
+
+        holder = threading.Thread(target=hold, daemon=True)
+        other = threading.Thread(target=enter, daemon=True)
+        holder.start()
+        try:
+            assert held.wait(10)
+            other.start()
+            other.join(0.5)
+            assert other.is_alive()
+        finally:
+            release.set()
+            holder.join(10)
+            if other.ident is not None:
+                other.join(10)
+        assert not other.is_alive()
+
     def test_a_namespace_package_keeps_its_search_dir_portion(self, tmp_path):
         # Defect: a namespace package with portions under a search dir and on
         # sys.path recomputes them from sys.path alone on invalidate_caches,
@@ -3041,12 +3108,7 @@ def test_a_slow_macro_in_a_view_never_holds_up_another_compile(monkeypatch):
     # as long as a worker's macro runs, and a hanging macro freezes the LSP.
     gate = SimpleNamespace(entered=threading.Event(), release=threading.Event())
     monkeypatch.setitem(sys.modules, "lpy_test_gate", gate)
-    # The other file's search dirs: compiles under other dirs wait for each
-    # other by design (macro_modules._enter).
-    dirs = pv.module_names("/other.lpy")[3]
-    worker = threading.Thread(
-        target=pv.compile_view, args=(SLOW_MACRO,), kwargs={"search_dirs": dirs}
-    )
+    worker = threading.Thread(target=pv.compile_view, args=(SLOW_MACRO,))
     worker.start()
     try:
         assert gate.entered.wait(10)

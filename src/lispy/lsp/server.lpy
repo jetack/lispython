@@ -837,7 +837,8 @@
    the compile's late outcome is dropped."
   ;; A given-up compile's thread keeps running (a parked thread per hung
   ;; macro, capped); its fresh-modules token is marked hung by the next
-  ;; drop's wait (macro_modules), so it holds up no later drop either.  The
+  ;; compile that waits on it to drop modules (a stale drop or a search-dirs
+  ;; conflict, macro_modules), so it holds up no later drop either.  The
   ;; same WAIT-LIMIT: past it a compile counts as hung for both.
   (= future thread.future)
   (= loop (asyncio.get-running-loop))

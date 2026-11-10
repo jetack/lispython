@@ -40,11 +40,11 @@
 ;; as it expanded), so no window sees them.  dirs maps a directory searched
 ;; for a module no finder found, or holding a namespace package, to its
 ;; st_mtime_ns then.  running maps a token per compile in progress (one
-;; object per fresh-modules entry) to its search dirs, hung holds the running
-;; ones a wait timed out on: a token leaves both when its compile ends.
-;; loaded-dirs are the search dirs the modules in names were imported under
-;; (None: mixed); every running compile that is not hung has those dirs.
-;; switching counts the compiles waiting to change them.  search-dirs is the
+;; object per fresh-modules entry) to (its search dirs, its window's reads so
+;; far), hung holds the running ones a wait timed out on: a token leaves both
+;; when its compile ends.  switching counts the compiles waiting to drop
+;; modules of other search dirs (_enter); contested holds the top-level names
+;; two compiles' search dirs were found to give apart.  search-dirs is the
 ;; running compile's search dirs, per thread (_SearchDirsFinder).  epoch is
 ;; the macro environment's version.
 (class _Shared []
@@ -59,8 +59,8 @@
     (= self.dirs {})
     (= self.running {})
     (= self.hung (set))
-    (= self.loaded-dirs None)
     (= self.switching 0)
+    (= self.contested (set))
     (= self.search-dirs (contextvars.ContextVar "lispy_search_dirs" :default (,)))
     (= self.epoch 0)))
 
@@ -205,7 +205,10 @@
       (if (and (is-not spec None)
                (is-not spec.submodule-search-locations None)
                (not (isinstance spec.submodule-search-locations list)))
-          (= spec.submodule-search-locations (list spec.submodule-search-locations)))
+          (do (= locations (list spec.submodule-search-locations))
+              (= dirs (.get _SHARED.search-dirs))
+              (if (any ((in (osp.dirname portion) dirs) for portion in locations))
+                  (= spec.submodule-search-locations locations))))
       (return spec))))
 
 ;; The fresh-modules windows open on each thread, innermost last: each a list
@@ -379,39 +382,100 @@
     (if (_trackable-path-p real)
         (.setdefault _SHARED.dep-files real (, mtime size)))))
 
-(def _enter [token search-dirs]
-  "Admit the compile token with search-dirs: once nothing tracked is stale
-   (_drop-stale), and once the modules in names were imported under the
-   same search dirs.  Else it switches them: it waits until no compile
-   (less the hung ones) runs, up to WAIT-LIMIT, then drops the modules in
-   names.  Under _SHARED.condition."
-  ;; A module two search dirs both hold (a script's sibling helper) is one
-  ;; sys.modules entry, so it may serve only compiles of the dirs it was
-  ;; imported under.  A switch keeps files, dep-files and dirs: no file
-  ;; changed, so they still say when the epoch's modules are stale, and the
-  ;; epoch stays, or every other open document would recompile and switch
-  ;; back.  Compiles arriving with the loaded dirs wait behind a switch, so
-  ;; a stream of them cannot starve it.
-  (= switching False)
-  (= target None)
+(def _tracked-names [reads]
+  "The modules among a window's reads that its end tracks (names)."
+  (= tracked [])
+  (for [name path stamp] in reads
+    (if (and (is-not name None)
+             (ife (is path None)
+                  (not (_lispy-module-p name))
+                  (_trackable-p name path)))
+        (.append tracked name)))
+  (return tracked))
+
+(def _identity [spec]
+  "What a top-level spec resolves to: its file and its portions."
+  (if (is spec None)
+      (return None))
+  (= locations spec.submodule-search-locations)
+  (return (, spec.origin (ife (is locations None) None (tuple locations)))))
+
+(def _resolved [name search-dirs]
+  "_identity of the top-level name name as a compile searching search-dirs
+   would import it, None when it finds none; PathFinder imports nothing."
+  (try
+    (return (_identity (importlib.machinery.PathFinder.find-spec
+                         name (+ (list search-dirs) sys.path))))
+    (except [Exception]
+      (return None))))
+
+(def _conflicts [search-dirs token]
+  "The top-level modules in sys.modules that a compile searching search-dirs
+   would reuse though its dirs give another one: those tracked (names) and
+   those the running compiles other than token read so far.  A module its
+   dirs find nowhere is none: reusing it costs a missing-module error at
+   most, and counting it would set every compile of a script directory
+   against each module of the src layout.  Under _SHARED.condition."
+  (= candidates (set _SHARED.names))
+  (for [other [_ reads]] in (list (.items _SHARED.running))
+    (if (is-not other token)
+        (.update candidates (_tracked-names (list reads)))))
+  (= found [])
+  (for name in candidates
+    (if (in "." name)
+        (continue))
+    (= spec (getattr (.get sys.modules name) "__spec__" None))
+    (if (is spec None)
+        (continue))
+    (= resolved (_resolved name search-dirs))
+    (if (and (is-not resolved None) (!= (_identity spec) resolved))
+        (.append found name)))
+  (return found))
+
+(def _contested-p [search-dirs]
+  "Whether a running compile (less the hung ones) searches dirs that find a
+   contested name elsewhere than search-dirs do.  Under _SHARED.condition."
+  (for [token [dirs _]] in (list (.items _SHARED.running))
+    (if (and (not (in token _SHARED.hung)) (!= dirs search-dirs))
+        (for name in _SHARED.contested
+          (= theirs (_resolved name dirs))
+          (= ours (_resolved name search-dirs))
+          (if (and (is-not theirs None) (is-not ours None) (!= theirs ours))
+              (return True)))))
+  (return False))
+
+(def _enter [token search-dirs reads]
+  "Admit the compile token searching search-dirs, its window reads: once
+   nothing tracked is stale (_drop-stale), and once no module it would reuse
+   comes from other dirs (_conflicts) and no running compile's dirs find a
+   contested name apart (_contested-p).  On a conflict it waits until no
+   compile (less the hung ones) runs, up to WAIT-LIMIT from its first wait,
+   then drops every tracked module.  Under _SHARED.condition."
+  ;; One sys.modules entry serves every compile, so a module two search dirs
+  ;; find apart (a script's sibling helper) may serve only the compiles whose
+  ;; dirs give that file; every other compile runs at once, alongside.  A
+  ;; drop for a conflict keeps files, dep-files and dirs (no file changed, so
+  ;; they still say when the epoch's modules are stale) and the epoch, or
+  ;; every other open document would recompile and drop back.  Compiles
+  ;; arriving while one waits to drop wait behind it, so a stream of them
+  ;; cannot starve it.
+  (= waiting False)
+  (= deadline None)
   (try
     (while True
       (_drop-stale True)
-      (if (== _SHARED.loaded-dirs search-dirs)
-          (do (if (or switching (not _SHARED.switching))
-                  (break))
-              (.wait _SHARED.condition)
+      (if (and (not waiting) _SHARED.switching)
+          (do (.wait _SHARED.condition)
               (continue)))
-      (if (not switching)
-          (do (= switching True)
-              (+= _SHARED.switching 1)))
-      ;; WAIT-LIMIT per loaded dirs: another switch landing meanwhile brings
-      ;; new compiles, which get their own WAIT-LIMIT before they are hung.
-      (if (or (is target None) (!= (sub target 0) _SHARED.loaded-dirs))
-          (= target (, _SHARED.loaded-dirs (+ (time.monotonic) WAIT-LIMIT))))
+      (if (not (or (_conflicts search-dirs None) (_contested-p search-dirs)))
+          (break))
+      (if (not waiting)
+          (do (+= _SHARED.switching 1)
+              (= waiting True)
+              (= deadline (+ (time.monotonic) WAIT-LIMIT))))
       (= blockers (- (.keys _SHARED.running) _SHARED.hung))
       (if blockers
-          (do (= remaining (- (sub target 1) (time.monotonic)))
+          (do (= remaining (- deadline (time.monotonic)))
               (if (> remaining 0)
                   (do (.wait _SHARED.condition remaining)
                       (continue)))
@@ -419,22 +483,25 @@
               ;; has in progress, so its result must be compiled again.
               (.update _SHARED.hung blockers)
               (+= _SHARED.epoch 1)))
-      (for name in (list _SHARED.names)
+      ;; What the hung compiles imported goes too, or it would serve this one.
+      (= dropped (list _SHARED.names))
+      (for [_ old] in (list (.values _SHARED.running))
+        (.extend dropped (_tracked-names (list old))))
+      (for name in dropped
         (.pop sys.modules name None))
       (.clear _SHARED.names)
-      (= _SHARED.loaded-dirs search-dirs)
       (break))
     (finally
-      (if switching
+      (if waiting
           (do (-= _SHARED.switching 1)
               (.notify-all _SHARED.condition)))))
-  (= (sub _SHARED.running token) search-dirs))
+  (= (sub _SHARED.running token) (, search-dirs reads)))
 
 (deco contextlib.contextmanager
   (def fresh-modules [:search-dirs (,)]
     "Wrap one compile whose top-level imports search search-dirs (a tuple)
      before sys.path (_SearchDirsFinder), on this thread only: first drop
-     every tracked module once one is stale or was imported under other
+     every tracked module once one is stale or would serve it from other
      search dirs (_enter, waiting), then track every .py or .lpy source the
      compile reads (_trackable-p) by the stamp its file had when read, the
      trackable files in each such .lpy's cache record (_track-record),
@@ -445,7 +512,7 @@
     (= reads [])
     (= token (object))
     (with [_SHARED.condition]
-      (_enter token search-dirs)
+      (_enter token search-dirs reads)
       (= current _SHARED.epoch))
     (= reset (.set _SHARED.search-dirs search-dirs))
     (try
@@ -458,7 +525,6 @@
             (.pop windows))
         (with [_SHARED.condition]
           (try
-            (= added False)
             (for [name path stamp] in reads
               (cond
                 (is name None)
@@ -468,19 +534,21 @@
 
                 (is path None)
                 (if (not (_lispy-module-p name))
-                    (do (.add _SHARED.names name)
-                        (= added True)))
+                    (.add _SHARED.names name))
 
                 (_trackable-p name path)
                 (do (.setdefault _SHARED.files path stamp)
                     (.add _SHARED.names name)
-                    (= added True)
                     (if (and (is-not stamp None) (.endswith path ".lpy"))
                         (_track-record path)))))
-            ;; Only a hung compile can end under other dirs than the loaded
-            ;; ones: its modules are mixed in, so the next compile drops them.
-            (if (and added (!= search-dirs _SHARED.loaded-dirs))
-                (= _SHARED.loaded-dirs None))
+            ;; Admitted with no conflict, this compile may still have reused
+            ;; a module another one imported meanwhile from other dirs: its
+            ;; result must be compiled again, and the name is contested, so
+            ;; the two wait for each other from then on instead of racing.
+            (= late (_conflicts search-dirs token))
+            (if late
+                (do (.update _SHARED.contested late)
+                    (+= _SHARED.epoch 1)))
             (finally
               (.pop _SHARED.running token None)
               (.discard _SHARED.hung token)
@@ -489,8 +557,9 @@
 (def epoch []
   "The macro environment's version, never waiting: it moves whenever the
    tracked modules are dropped as stale (which this does first when one is
-   and no compile, less the hung ones, runs) and whenever a search-dirs
-   switch dropped them under a hung compile (_enter).  None while such a drop is
+   and no compile, less the hung ones, runs), whenever a drop for a
+   search-dirs conflict passed a hung compile (_enter), and whenever a
+   compile may have reused a module of other search dirs (fresh-modules).  None while such a drop is
    due but compiles run: every view or shadow made before is stale then.  A
    view or shadow made under one epoch is stale under another."
   (with [_SHARED.condition]
