@@ -25,6 +25,7 @@ from lispy.core.nodes import (
     Unquote,
     UnquoteSplice,
     Wrapper,
+    clear_positions,
 )
 from lispy.core.utils import augassignop_dict
 
@@ -1067,13 +1068,15 @@ def parse(src, partial=False):
     form.  The LSP's diagnostics still use the strict parse to report it.
     """
     if not partial:
-        try:
+        if not IN_MACRO_CALL.get():
             return _parse_into(src, [])
+        # Text a macro parses is not the module's source, so nothing of it
+        # may carry a position in that source: its nodes are positionless,
+        # and its error too, which the expander then places at the call.
+        try:
+            return clear_positions(_parse_into(src, []))
         except LispyCompileError as err:
-            # Text a macro parses is not the module's source (IN_MACRO_CALL).
-            if IN_MACRO_CALL.get() and err.filename is None:
-                err.filename = "<string>"
-            raise
+            raise LispyCompileError(err.msg) from err
     rst = []
     token = _PARTIAL.set(True)
     try:

@@ -621,23 +621,45 @@ def _bad_include():
     parse("(a")
 
 
+def _include_return_outside_def():
+    [form] = parse("\n\n(print (return 2))")
+    return form
+
+
 def _bad_operand(x):
     raise LispyCompileError("no", x)
 
 
-def _compile_m(src, scope):
-    with compile_errors("m.lpy", src):
+def _compile_m(src, scope, filename="m.lpy"):
+    with compile_errors(filename, src):
         macroexpand_then_compile(parse(src), scope)
 
 
-def test_error_from_parsing_other_text_names_no_line_of_the_module():
-    # The macro parses a string: the error's position (line 1) is of that
-    # text, so it must not be reported as line 1 of m.lpy.
+@pytest.mark.parametrize("filename", ["m.lpy", "<string>"])
+@pytest.mark.parametrize("line", [1, 5])
+def test_error_from_parsing_other_text_is_placed_at_the_call(line, filename):
+    # Defect: the error's position (line 1, column 1) is of the string the
+    # macro parses, yet named that place in the module, with its text;
+    # "<string>" is also the file of lpy -c, so naming the error's file
+    # "<string>" attached an unrelated line all the same.
     scope = {"__macro_namespace": {"bad_include": _bad_include}}
+    src = "(x)\n" * (line - 1) + "(x) (bad-include)"
     with pytest.raises(LispyCompileError) as info:
-        _compile_m("(bad-include)", scope)
-    assert info.value.filename == "<string>"
-    assert info.value.text is None
+        _compile_m(src, scope, filename)
+    error = info.value
+    assert (error.filename, error.lineno, error.offset) == (filename, line, 5)
+    assert error.text == "(x) (bad-include)"
+
+
+def test_nodes_parsed_from_other_text_are_placed_at_the_call():
+    # Defect: the parsed nodes kept their line 3 of the other text, so the
+    # compile error after the expansion named line 3 of the module.
+    scope = {"__macro_namespace": {"inc": _include_return_outside_def}}
+    with pytest.raises(LispyCompileError) as info:
+        _compile_m("(x)\n(inc)\n(x)\n(x)", scope)
+    error = info.value
+    assert (error.filename, error.lineno) == ("m.lpy", 2)
+    assert error.text == "(inc)"
 
 
 def test_error_on_an_operand_keeps_the_operand_position():

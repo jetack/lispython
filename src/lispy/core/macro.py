@@ -166,7 +166,7 @@ def _expand_1(sexp, scope, in_quasi, include_meta, expanded):
             and (macro := find_macro(scope.get("__macro_namespace"), name)) is not None
         ):
             # Text the macro parses is not this module's source: parse()
-            # names its errors' file "<string>" (IN_MACRO_CALL).
+            # gives its nodes and errors no position (IN_MACRO_CALL).
             in_macro = IN_MACRO_CALL.set(True)
             try:
                 expansion = macro(*[_unwrap_literal(o) for o in operands])

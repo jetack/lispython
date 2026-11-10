@@ -20,10 +20,11 @@ _COMPILING_FILENAME = contextvars.ContextVar("lispy_compiling_filename", default
 
 # True while a macro function runs (macro.py _expand_1), False again inside a
 # compile_errors it enters.  Text a macro parses there is not the module's
-# source, and nodes carry no file identity, so parse() names such an error's
-# file "<string>": otherwise its position would name an unrelated line of the
-# module being compiled.  A nested compile (a required .lpy) is its own source
-# and keeps its own filename, hence the reset in compile_errors.
+# source, and nodes carry no file identity, so the strict parse() gives its
+# nodes and its error no position: a position in that text would name an
+# unrelated line of the module being compiled, and positionless they are
+# placed at the macro call.  A nested compile (a required .lpy) is its own
+# source and keeps its positions, hence the reset in compile_errors.
 IN_MACRO_CALL = contextvars.ContextVar("lispy_in_macro_call", default=False)
 
 # Held by every warnings.catch_warnings lispython enters (filtered_warnings).
