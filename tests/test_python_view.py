@@ -2773,6 +2773,43 @@ class TestMacroModules:
                 other.join(10)
         assert not other.is_alive()
 
+    def test_a_package_extending_its_path_conflicts_with_nothing(self, tmp_path):
+        # Defect: a regular package is compared by its live __path__, which
+        # its __init__ extended, so it conflicts with its own search dirs:
+        # every compile drops it and moves the epoch, and every open
+        # document recompiles for ever.
+        name = "pvsdmutpkg"
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "__init__.py").write_text(
+            "import os\n__path__.append(os.path.join(os.path.dirname(__file__), 'x'))\n"
+        )
+        try:
+            with mm.fresh_modules((str(tmp_path),)) as before:
+                first = importlib.import_module(name)
+            for _ in range(2):
+                with mm.fresh_modules((str(tmp_path),)):
+                    assert importlib.import_module(name) is first
+            assert mm.current_epoch() == before
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_module_found_only_under_other_search_dirs_is_not_reused(self, helper):
+        # Defect: y in b/ requires a helper only a/ holds, after x in a/
+        # compiled: it gets a's macros, which `lpy b/y.lpy` never finds, and
+        # creating b's own helper later moves no epoch.
+        os.remove(os.path.join(helper.b, helper.name + ".lpy"))
+        before = mm.current_epoch()
+        for _ in range(2):
+            assert self.picked(helper, helper.a) == "1"
+            assert self.picked(helper, helper.b) == "pick()"
+        # Alternating only drops and imports again: nothing to recompile.
+        assert mm.current_epoch() == before
+        next_tick()
+        (pathlib.Path(helper.b) / (helper.name + ".lpy")).write_text(
+            "(defmacro pick [] (return 2))"
+        )
+        assert self.picked(helper, helper.b) == "2"
+
     def test_a_namespace_package_keeps_its_search_dir_portion(self, tmp_path):
         # Defect: a namespace package with portions under a search dir and on
         # sys.path recomputes them from sys.path alone on invalidate_caches,

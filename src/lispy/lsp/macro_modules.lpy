@@ -65,7 +65,7 @@
     (= self.epoch 0)))
 
 ;; How long, in seconds, a compile waits for the running ones to end before
-;; it drops stale modules.  Unbounded, a macro hung in one compile would hold
+;; it drops stale modules or modules of other search dirs (_enter).  Unbounded, a macro hung in one compile would hold
 ;; every later one (filling the worker threads, and write-shadows holds the
 ;; view root's lock while it waits).  A compile still running when the wait
 ;; ends is marked hung (it may only be slow): no drop waits for it again, so
@@ -149,8 +149,8 @@
 ;; for, _top-level-path) with their mtime.
 ;; Creating a file there, or saving one by an atomic rename, changes that
 ;; mtime: the signal FileFinder itself uses.  A top-level miss of any other
-;; import (a module's try: import optional) is not recorded, because sys.path
-;; holds the import root: in a flat layout every file written there (a lock,
+;; import (a module's try: import optional) is not recorded, because the
+;; search path (_top-level-path) holds the import root: in a flat layout every file written there (a lock,
 ;; a backup) would drop every module.  The module is never probed again with
 ;; find_spec instead: that imports its parents outside any window, and the
 ;; search dirs are searched only while a compile runs.
@@ -274,17 +274,19 @@
       (.warning logger "lispython LSP: cannot remove the bytecode of %s: %s"
                 path e))))
 
-(def _drop-stale [wait]
+(def _drop-stale [wait :deadline None]
   "Drop every tracked module once one is stale, once the compiles running
-   (less the hung ones) have ended.  wait: wait for them up to WAIT-LIMIT,
-   then mark those still running hung and drop all the same; else drop
+   (less the hung ones) have ended.  wait: wait for them up to deadline
+   (time.monotonic; WAIT-LIMIT from now when None), then mark those still
+   running hung and drop all the same; else drop
    only when none is running.  True when nothing is stale afterwards (no
    drop was due, or it was made).  Under _SHARED.condition."
   ;; A wait rather than a drop at once: deleting a sys.modules entry while
   ;; another thread is importing it makes that import raise (importlib's
   ;; _load_unlocked pops the entry back out).  A compile arriving while a
   ;; module is stale waits too, so none goes on with stale modules.
-  (= deadline (+ (time.monotonic) WAIT-LIMIT))
+  (if (is deadline None)
+      (= deadline (+ (time.monotonic) WAIT-LIMIT)))
   (while True
     (= [changed stale] (_stale-state))
     (if (not stale)
@@ -394,11 +396,14 @@
   (return tracked))
 
 (def _identity [spec]
-  "What a top-level spec resolves to: its file and its portions."
+  "What a top-level spec resolves to: its file, or a namespace package's
+   portions.  Never a regular package's portions: they are its live
+   __path__, which its own code may extend."
   (if (is spec None)
       (return None))
-  (= locations spec.submodule-search-locations)
-  (return (, spec.origin (ife (is locations None) None (tuple locations)))))
+  (if (is-not spec.origin None)
+      (return spec.origin))
+  (return (tuple (or spec.submodule-search-locations []))))
 
 (def _resolved [name search-dirs]
   "_identity of the top-level name name as a compile searching search-dirs
@@ -411,11 +416,12 @@
 
 (def _conflicts [search-dirs token]
   "The top-level modules in sys.modules that a compile searching search-dirs
-   would reuse though its dirs give another one: those tracked (names) and
-   those the running compiles other than token read so far.  A module its
-   dirs find nowhere is none: reusing it costs a missing-module error at
-   most, and counting it would set every compile of a script directory
-   against each module of the src layout.  Under _SHARED.condition."
+   could reuse though its dirs give another one or none: those tracked
+   (names) and those the running compiles other than token read so far.
+   Decided by resolution alone, whether or not the compile imports the
+   name, since a reuse cannot be observed.  A name sys.path gives resolves
+   alike under every search dirs, so only search-dir modules conflict.
+   Under _SHARED.condition."
   (= candidates (set _SHARED.names))
   (for [other [_ reads]] in (list (.items _SHARED.running))
     (if (is-not other token)
@@ -427,20 +433,18 @@
     (= spec (getattr (.get sys.modules name) "__spec__" None))
     (if (is spec None)
         (continue))
-    (= resolved (_resolved name search-dirs))
-    (if (and (is-not resolved None) (!= (_identity spec) resolved))
+    (if (!= (_identity spec) (_resolved name search-dirs))
         (.append found name)))
   (return found))
 
 (def _contested-p [search-dirs]
-  "Whether a running compile (less the hung ones) searches dirs that find a
-   contested name elsewhere than search-dirs do.  Under _SHARED.condition."
+  "Whether a running compile (less the hung ones) searches dirs that
+   resolve a contested name otherwise than search-dirs do (one of them
+   finding none counts).  Under _SHARED.condition."
   (for [token [dirs _]] in (list (.items _SHARED.running))
     (if (and (not (in token _SHARED.hung)) (!= dirs search-dirs))
         (for name in _SHARED.contested
-          (= theirs (_resolved name dirs))
-          (= ours (_resolved name search-dirs))
-          (if (and (is-not theirs None) (is-not ours None) (!= theirs ours))
+          (if (!= (_resolved name dirs) (_resolved name search-dirs))
               (return True)))))
   (return False))
 
@@ -449,30 +453,35 @@
    nothing tracked is stale (_drop-stale), and once no module it would reuse
    comes from other dirs (_conflicts) and no running compile's dirs find a
    contested name apart (_contested-p).  On a conflict it waits until no
-   compile (less the hung ones) runs, up to WAIT-LIMIT from its first wait,
-   then drops every tracked module.  Under _SHARED.condition."
+   compile (less the hung ones) runs, then drops every tracked module.  Its
+   waits for running compiles, stale drop's included, share one WAIT-LIMIT
+   from its entry, renewed only after it waited behind another compile's
+   drop (whose running compiles are new ones).  Under _SHARED.condition."
   ;; One sys.modules entry serves every compile, so a module two search dirs
-  ;; find apart (a script's sibling helper) may serve only the compiles whose
-  ;; dirs give that file; every other compile runs at once, alongside.  A
-  ;; drop for a conflict keeps files, dep-files and dirs (no file changed, so
-  ;; they still say when the epoch's modules are stale) and the epoch, or
-  ;; every other open document would recompile and drop back.  Compiles
-  ;; arriving while one waits to drop wait behind it, so a stream of them
-  ;; cannot starve it.
+  ;; resolve apart (a script's sibling helper) may serve only the compiles
+  ;; whose dirs give that file.  Conflicts are decided by resolution (a
+  ;; reuse cannot be observed): a compile waits and drops whenever a module
+  ;; it could reuse resolves otherwise under its dirs, imported or not; one
+  ;; with no such module runs at once, alongside the others.  A drop for a
+  ;; conflict keeps files, dep-files and dirs (no file changed, so they
+  ;; still say when the epoch's modules are stale) and, unless it passed a
+  ;; hung compile, the epoch, or every other open document would recompile
+  ;; and drop back.  Compiles arriving while one waits to drop wait behind
+  ;; it, so a stream of them cannot starve it.
   (= waiting False)
-  (= deadline None)
+  (= deadline (+ (time.monotonic) WAIT-LIMIT))
   (try
     (while True
-      (_drop-stale True)
+      (_drop-stale True :deadline deadline)
       (if (and (not waiting) _SHARED.switching)
           (do (.wait _SHARED.condition)
+              (= deadline (+ (time.monotonic) WAIT-LIMIT))
               (continue)))
       (if (not (or (_conflicts search-dirs None) (_contested-p search-dirs)))
           (break))
       (if (not waiting)
           (do (+= _SHARED.switching 1)
-              (= waiting True)
-              (= deadline (+ (time.monotonic) WAIT-LIMIT))))
+              (= waiting True)))
       (= blockers (- (.keys _SHARED.running) _SHARED.hung))
       (if blockers
           (do (= remaining (- deadline (time.monotonic)))
