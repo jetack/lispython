@@ -43,7 +43,8 @@
 (from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
                          MetaIndicator Paren Starred Symbol Wrapper atom-text
                          wrapper-form-keys])
-(from lispy.core.parser [completion-word-span parse source-offset tokenize word-parts])
+(from lispy.core.parser [completion-word-span parse source-offset split-lines tokenize
+                          word-parts])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.literal [hyphen-spelling name-key python-name python-name-p
@@ -83,11 +84,14 @@
 ;; move-to-end), the nREPL's as well.
 
 (def source-prefix [source line col]
-  "The text of source before the 1-based line and code-point column."
-  (= lines (.split source "\n"))
-  (= before (sub lines [: None (- line 1)]))
-  (.append before (sub (sub lines (- line 1)) [: None col]))
-  (return (.join "\n" before)))
+  "The text of source before the 1-based line and code-point column (the
+   column clamped to the line), sliced from source so its line breaks stay
+   as written; all of source for a line past its end."
+  (= lines (split-lines source))
+  (if (> line (len lines))
+      (return source))
+  (= text (sub lines (- line 1)))
+  (return (sub source [: None (+ ((source-offset source) line 0) (min col (len text)))])))
 
 ;; Every LSP walk of a parsed tree reads a wrapper's children through it, so
 ;; a name in an f/t-string field's format spec (f"{w:{w}}") is never missed.
@@ -427,7 +431,7 @@
    shape) and a list field whose lengths differ are skipped with everything
    under them, never the whole map; except a Constant the unparse spells as an
    operation (-1, 1+2j, a nan), which still maps as one node."
-  (= lines (.split source "\n"))
+  (= lines (split-lines source))
   (= columns (_GeneratedColumns text))
   (= entries [])
   (= stack [(, compiled generated)])
@@ -515,7 +519,7 @@
   (def source-lines [source]
     "source split into lines, as a tuple: one split per source however many
      ranges are mapped over it."
-    (return (tuple (.split source "\n")))))
+    (return (tuple (split-lines source)))))
 
 (def spelled-in [lines start end name]
   "The .lpy span of the first word between start and end in lines
@@ -965,15 +969,16 @@
    replacement: the cursor view compiles marked, and the buffer's
    definitions are read off it (buffer-definition-names in server.lpy), so
    neither takes the word being typed for a name the buffer has."
-  (= lines (.split source "\n"))
+  (= lines (split-lines source))
   (if (not (<= 1 line (len lines)))
       (return None))
   (= text (sub lines (- line 1)))
   (if (not (<= 0 col (len text)))
       (return None))
   (= [word-start start end] (completion-word-span text col))
-  (= (sub lines (- line 1)) (+ (sub text [: None start]) CURSOR-SENTINEL (sub text [: end None])))
-  (return (, (.join "\n" lines) word-start start end (sub text [: start col]))))
+  (= marked (+ (source-prefix source line start) CURSOR-SENTINEL
+               (sub source [: (len (source-prefix source line end)) None])))
+  (return (, marked word-start start end (sub text [: start col]))))
 
 ;; The node types whose name field, a str, is a name the node binds; the
 ;; type parameters are 3.12+, so each is looked up by name.

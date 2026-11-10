@@ -224,6 +224,18 @@ def _line_starts(src):
     return line_starts
 
 
+def split_lines(src, keepends=False):
+    """src's lines where the lexer ends them (LF, CRLF, a lone CR), each with
+    its line break when keepends; the text after the last break is a line
+    too, empty when src ends with one (str.split's shape).  Never
+    str.splitlines(), which also breaks at \\x0c, \\x1c-\\x1e, \\x85 and
+    U+2028 and drops the empty last line."""
+    if not keepends:
+        return _LINE_BREAK_RE.split(src)
+    line_starts = _line_starts(src)
+    return [src[i:j] for i, j in zip(line_starts, line_starts[1:])]
+
+
 def source_offset(src):
     """offset(lineno, col_offset) -> the index in src of a position the
     lexer placed (a token's, a compile error's), the inverse of its
