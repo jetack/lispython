@@ -192,12 +192,28 @@ def test_each_failed_form_has_its_own_diagnostic():
     assert found == [(0, "(while", warning), (3, "(def", warning)]
 
 
+def assert_placed_in_required_module(diagnostic, module, line, start, end):
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character) == (0, 0)
+    assert (rng.end.line, rng.end.character) == (0, len("(require"))
+    # The full path, never the basename alone, which two packages may share.
+    assert f"({module}:{line + 1})" in diagnostic.message
+    [related] = diagnostic.related_information
+    assert related.location.uri == module.as_uri()
+    there = related.location.range
+    assert (there.start.line, there.start.character) == (line, start)
+    assert (there.end.line, there.end.character) == (line, end)
+
+
 def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
-    # Defect: a required module's compile error carries that module's line
+    # Defects: a required module's compile error carries that module's line
     # (3, its (while)), which the buffer's diagnostic took as its own: it
     # underlined the buffer's third form, (=, with a bare message naming no
-    # file. It is placed at the require that raised it.
-    (tmp_path / "lspbrokenreq.lpy").write_text("(= a 1)\n(= b 2)\n(while)\n")
+    # file. It is placed at the require that raised it. Its message then
+    # named the module by basename alone ("lspbrokenreq.lpy, line 3"), and
+    # no related location led to the line there.
+    module = tmp_path / "lspbrokenreq.lpy"
+    module.write_text("(= a 1)\n(= b 2)\n  (while)\n")
     source = "(require lspbrokenreq)\n(= a 1)\n(= b 2)"
     try:
         [diagnostic] = server.compute_diagnostics(
@@ -205,10 +221,109 @@ def test_an_error_in_a_required_module_is_not_placed_in_the_buffer(tmp_path):
         )
     finally:
         sys.modules.pop("lspbrokenreq", None)
+    # Its (while head on line 3, after two spaces.
+    assert_placed_in_required_module(diagnostic, module, 2, 2, 8)
+
+
+def test_a_required_python_modules_syntax_error_names_its_file(tmp_path):
+    # Defect: CPython's SyntaxError of a required .py reached the message as
+    # its str, "invalid syntax (lspbrokenpy.py, line 2)", by basename alone.
+    module = tmp_path / "lspbrokenpy.py"
+    module.write_text("x = 1\nx = = 2\n")
+    try:
+        [diagnostic] = server.compute_diagnostics(
+            "(require lspbrokenpy)", (tmp_path / "main.lpy").as_uri()
+        )
+    finally:
+        sys.modules.pop("lspbrokenpy", None)
+    assert diagnostic.message.startswith("Compile warning: invalid syntax (")
+    # The second = of "x = = 2", where CPython places it.
+    assert_placed_in_required_module(diagnostic, module, 1, 4, 5)
+
+
+def test_a_position_in_text_a_macro_parsed_is_not_the_buffers():
+    # Defect: an include-like macro parses other text, whose (while) error
+    # carries filename None and that text's line 3, which the diagnostic took
+    # as the buffer's third line and underlined its unrelated (= b 2).
+    source = (
+        "(defmacro inc [] (import lispy.core.parser)"
+        ' (return (sub (lispy.core.parser.parse "\\n\\n(while)") 0)))\n'
+        "(= a 1)\n"
+        "(= b 2)\n"
+        "(inc)"
+    )
+    [diagnostic] = server.compute_diagnostics(source, URI)
     rng = diagnostic.range
-    assert (rng.start.line, rng.start.character) == (0, 0)
-    assert (rng.end.line, rng.end.character) == (0, len("(require"))
-    assert "lspbrokenreq.lpy" in diagnostic.message
+    # The (inc) call raised it, on the buffer's fourth line (index 3).
+    assert (rng.start.line, rng.start.character, rng.end.character) == (3, 0, 4)
+
+
+def test_an_internal_error_range_is_not_zero_width():
+    # Defect: (0,0)-(0,0), which eglot places a character early and VS Code
+    # widens to a word of its choosing.
+    [diagnostic] = server.internal_error_diagnostics(RuntimeError("boom"))
+    rng = diagnostic.range
+    assert (rng.start.line, rng.start.character) != (rng.end.line, rng.end.character)
+
+
+def test_a_required_modules_related_range_counts_in_the_editors_units(tmp_path):
+    # Defect: the related range's columns measured over the buffer's lines,
+    # not the module's line, so the astral character before the module's
+    # (while (code point 10, UTF-16 unit 11) went uncounted.
+    from pygls.workspace import PositionCodec, TextDocument
+
+    (tmp_path / "lspastralreq.lpy").write_text('(= s "😀") (while)\n')
+    source = "(require lspastralreq)"
+    uri = (tmp_path / "main.lpy").as_uri()
+    doc = TextDocument(uri, source, position_codec=PositionCodec(encoding="utf-16"))
+    try:
+        [diagnostic] = server.compute_diagnostics(source, uri, doc=doc)
+    finally:
+        sys.modules.pop("lspastralreq", None)
+    there = diagnostic.related_information[0].location.range
+    assert (there.start.character, there.end.character) == (11, 17)
+
+
+def other_file_error(tmp_path, kind):
+    module = tmp_path / "other.lpy"
+    module.write_text("(= a 1)\n")
+    return {
+        # A name no file holds, relative to the server's working directory.
+        "relative name": SyntaxError("boom", ("rel/other.lpy", 1, 1, "(= a 1)")),
+        "no lineno": SyntaxError("boom", (str(module), None, None, None)),
+        "no msg": SyntaxError(None, (str(module), 1, 1, "(= a 1)")),
+        "non-str msg": SyntaxError(42, (str(module), 1, 1, "(= a 1)")),
+    }[kind]
+
+
+@pytest.mark.parametrize(
+    "kind", ["relative name", "no lineno", "no msg", "non-str msg"]
+)
+def test_another_files_error_names_only_what_it_carries(tmp_path, kind):
+    # Defects: a relative fake filename was resolved against the working
+    # directory into a file that does not exist; an error with no lineno
+    # named line 1; a None msg read "None (...)", and a None or non-str msg
+    # made its related information raise TypeError.
+    exc = other_file_error(tmp_path, kind)
+    diagnostic = server.error_diagnostic(
+        exc,
+        "(require other)",
+        (tmp_path / "main.lpy").as_uri(),
+        lsp.DiagnosticSeverity.Warning,
+        "Compile warning: ",
+    )
+    if kind == "relative name":
+        assert diagnostic.related_information is None
+        assert diagnostic.message == f"Compile warning: {exc}"
+    elif kind == "no lineno":
+        assert diagnostic.message.endswith(f"({tmp_path / 'other.lpy'})")
+    elif kind == "no msg":
+        assert "None" not in diagnostic.message
+        [related] = diagnostic.related_information
+        assert related.message == "SyntaxError"
+    else:
+        [related] = diagnostic.related_information
+        assert related.message == "42"
 
 
 def test_an_error_with_no_position_marks_the_form_that_raised_it():

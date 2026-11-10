@@ -634,20 +634,57 @@
     (break))
   (return (, col (+ col 1))))
 
-(def buffer-error-p [exc path]
+(def same-file-p [filename path]
+  "Whether filename, a SyntaxError's, names the file at path."
+  (return (== (osp.normcase (osp.abspath filename)) (osp.normcase (osp.abspath path)))))
+
+(def buffer-error-p [exc path :form None]
   "Whether exc, an error of the compile of the buffer at path (uri-to-path),
    is a SyntaxError (LispyCompileError is one) of the buffer: its filename
-   None (the buffer's compile errors carry none) or path.  Only such an
-   error has a position in the buffer: a SyntaxError from another file (a
-   required module that fails to parse or compile) names a line of that
-   file, and any other exception's lineno or message names a line of
-   whatever it read (a macro's json.loads), never of the buffer."
+   None (the buffer's compile errors carry none) or path, and, when form,
+   the top-level form whose compile raised it, is given, a position within
+   form's span (or none).  Only such an error has a position in the buffer:
+   a SyntaxError from another file (a required module that fails to parse
+   or compile) names a line of that file (other-file-location), and any
+   other exception's lineno or message names a line of whatever it read (a
+   macro's json.loads), never of the buffer.  The span check is there
+   because the compiler's errors for a form always lie inside it (a
+   macro-lent position is the call's), while a macro that parses other text
+   (an include) hands back nodes positioned in that text, filename None; a
+   position of other text that happens to fall inside the form cannot be
+   told apart, since nodes carry no file identity."
   (if (not (isinstance exc SyntaxError))
       (return False))
   (= filename exc.filename)
-  (return (or (is filename None)
-              (== (osp.normcase (osp.abspath filename))
-                  (osp.normcase (osp.abspath path))))))
+  (if (not (or (is filename None) (same-file-p filename path)))
+      (return False))
+  (if (or (is form None) (is exc.lineno None))
+      (return True))
+  (= at (, exc.lineno (- (or exc.offset 1) 1)))
+  (return (<= (, form.lineno form.col-offset) at (, form.end-lineno form.end-col-offset))))
+
+(def other-file-location [exc path :doc None]
+  "The lsp.Location of exc, a SyntaxError raised in a file other than the
+   buffer at path (a required module's parse or compile error), over the
+   head of the error on its line there (error-head-span over exc.text, in
+   doc's client units, code points without doc, line 0 with no lineno);
+   None for any other exception, the buffer's own file, or a filename that
+   names no existing file (None, a pseudo-name such as <string>, a relative
+   name abspath would resolve against the server's working directory)."
+  (if (not (isinstance exc SyntaxError))
+      (return None))
+  (= filename exc.filename)
+  (if (or (is filename None) (not (osp.isfile filename)) (same-file-p filename path))
+      (return None))
+  (= line (max 0 (- (or exc.lineno 1) 1)))
+  (= text (.rstrip (or exc.text "") "\r\n"))
+  (= [start end] (error-head-span text (max 0 (- (or exc.offset 1) 1))))
+  (if (is-not doc None)
+      ;; Only the error's own line is known, and a column's units need no other.
+      (= [start end] [(. (client-position doc 1 col :lines [text]) character)
+                      for col in [start end]]))
+  (return (lsp.Location :uri (path-to-uri (osp.abspath filename))
+                        :range (make-range line start line end))))
 
 ;; ---------------------------------------------------------------------------
 ;; Compiles that may never return
@@ -813,18 +850,32 @@
                      :search-dirs search-dirs :filename (uri-to-path uri)
                      :generation generation :fresh fresh)))
 
+(def syntax-error-msg [exc]
+  "The msg of exc, a SyntaxError, as a str; its type's name when it has
+   none, since its str would then read None (...)."
+  (= msg exc.msg)
+  (return (ife (in msg [None ""]) (. (type exc) __name__) (str msg))))
+
 (def error-diagnostic [exc source uri severity prefix :doc None :form None]
   "The diagnostic of exc, the parse or compile error of source, document
    uri's text, its message prefix + the error's.  A SyntaxError of the
-   buffer (buffer-error-p) is ranged over the head of the form it names
-   (error-head-span, on the reader's line, reader-line) with its bare msg,
-   whose str adds a (file, line N) the range already gives; any other error,
-   or one with no line, keeps its str (naming another file and its line)
-   and is ranged over the head of form, the top-level form that raised it,
-   when given (a macro's ValueError, a required module's error at its
-   require), else the first character of source.  The range is in doc's
-   client units (client-position), in code points when there is no doc."
-  (= own (buffer-error-p exc (uri-to-path uri)))
+   buffer (buffer-error-p, given form) is ranged over the head of the form
+   it names (error-head-span, on the reader's line, reader-line) with its
+   bare msg, whose str adds a (file, line N) the range already gives; any
+   other error, or one with no line, is ranged over the head of form, the
+   top-level form that raised it, when given (a macro's ValueError, a
+   required module's error at its require), else the first character of
+   source.  A SyntaxError of another file (other-file-location) says its msg
+   with that file's absolute path, and its line when it has a lineno, since
+   a client may ignore relatedInformation (eglot does), and carries the
+   location there as its relatedInformation; any other error keeps its str.
+   A SyntaxError's msg is worded by syntax-error-msg (its type's name when
+   it has none).  The range is in
+   doc's client units (client-position), in code points when there is no
+   doc."
+  (= path (uri-to-path uri))
+  (= own (buffer-error-p exc path :form form))
+  (= other (ife own None (other-file-location exc path :doc doc)))
   (= pos (ife own (extract-error-position exc) None))
   (if (and (is pos None) (is-not form None) form.lineno)
       (= pos (, (- form.lineno 1) form.col-offset)))
@@ -832,13 +883,22 @@
       (= [line start end] [0 0 1])
       (do (= [line col] pos)
           (= [start end] (error-head-span (reader-line source line) col))))
-  (= message (ife (and own exc.msg) exc.msg (str exc)))
+  (= related None)
+  (cond own (= message (syntax-error-msg exc))
+        (is-not other None)
+        (do (= msg (syntax-error-msg exc))
+            (= at (ife (is exc.lineno None) "" f":{exc.lineno}"))
+            (= message f"{msg} ({(osp.abspath exc.filename)}{at})")
+            (= related [(lsp.DiagnosticRelatedInformation :location other
+                                                          :message msg)]))
+        True (= message (str exc)))
   (= rng (ife (is doc None)
               (make-range line start line end)
               (lsp.Range :start (client-position doc (+ line 1) start)
                          :end (client-position doc (+ line 1) end))))
   (return (lsp.Diagnostic :range rng :severity severity :source "lpy-lsp"
-                          :message (+ prefix message))))
+                          :message (+ prefix message)
+                          :related-information related)))
 
 (def compute-diagnostics [source uri :compiled None :doc None]
   "lispython's own diagnostics of source, document uri's text: its parse
@@ -1013,8 +1073,9 @@
 
 (def internal-error-diagnostics [exc]
   "lispython's diagnostics of a document whose compile-document raised exc:
-   one Error at its start, so the editor drops the set of an older text."
-  (return [(lsp.Diagnostic :range (make-range 0 0 0 0)
+   one Error over its first character (never zero-width, which a client
+   misplaces), so the editor drops the set of an older text."
+  (return [(lsp.Diagnostic :range (make-range 0 0 0 1)
                            :severity lsp.DiagnosticSeverity.Error :source "lpy-lsp"
                            :message (+ f"Internal error: cannot compile this document: {exc}"
                                        " (the LSP log has the traceback)"))]))
