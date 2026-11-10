@@ -146,6 +146,16 @@
   "Convert a filesystem path to a file:// URI."
   (return (.as-uri (pathlib.Path path))))
 
+(def index-uri [uri]
+  "The workspace index's key of document uri (WORKSPACE-INDEX locations,
+   FILE-TREES, WORKSPACE-SYMBOLS): a file: uri as path-to-uri spells its
+   path, any other uri itself.  The one home of that key, because a client
+   may spell a file's uri otherwise (VS Code on Windows writes
+   file:///c%3A/...), and the scan, a watched file and a require reach the
+   same file through path-to-uri."
+  (= path (to-fs-path uri))
+  (return (ife (is path None) uri (path-to-uri path))))
+
 (def under-workspace [path folders]
   "True when path lies inside one of the workspace folders: it has a
    project (project-root-of), so the index agrees with the compiles about a
@@ -203,7 +213,9 @@
             (pass))))))
 
 (def unindex-file [uri]
-  "Drop every entry of the file at uri from the workspace index."
+  "Drop every entry of the file at uri, however spelled, from the
+   workspace index."
+  (= uri (index-uri uri))
   (= to-remove [])
   (for [name locs] in (.items WORKSPACE-INDEX)
     (= (sub WORKSPACE-INDEX name)
@@ -221,7 +233,9 @@
    indexed so that go-to-definition can reach it is not the user's code and
    would flood the symbol search.  Membership is decided here from the
    file's path, never by the caller, so every route to index-file (startup
-   scan, didOpen/didSave, a require, go-to-definition) agrees about a file."
+   scan, didOpen/didSave, a require, go-to-definition) agrees about a file;
+   its entries are keyed by index-uri, however the caller spelled uri."
+  (= uri (index-uri uri))
   (unindex-file uri)
   ;; Parse and collect definitions
   (= fpath (uri-to-path uri))
@@ -1709,17 +1723,19 @@
 
 (def renaming-file-p [path]
   "Whether a file created or deleted at path can rename a module of the
-   user's: it renames modules (renames-modules-p) and lies outside
-   site-packages, the stdlib and lispython (the tracked paths of
-   macro_modules), so an install or a checkout of a dependency, one event
-   per file, republishes nothing."
-  (return (and (macro-modules._trackable-path-p (osp.realpath path))
-               (renames-modules-p path))))
+   user's: it renames modules (renames-modules-p) and is no library path
+   (macro_modules.library-path-p: site-packages, the stdlib), so an
+   install of a dependency, one event per file, republishes nothing.  An
+   editable lispython checkout is the user's code like any other.  The
+   name check runs first, because the watch reports every .pyc write."
+  (return (and (renames-modules-p path)
+               (not (macro-modules.library-path-p (osp.realpath path))))))
 
 (def reindex-watched-file [uri path]
   "Keep the workspace index to an .lpy file created or deleted on disk:
    index it while it exists, inside a workspace folder or already indexed
    (index-file decides its membership), else drop it with its parsed tree."
+  (= uri (index-uri uri))
   (if (osp.isfile path)
       (if (or (in uri FILE-TREES) (under-workspace path (workspace-folders)))
           (index-file uri))
@@ -1739,7 +1755,7 @@
     (= path (uri-to-path change.uri))
     (try
       (if (.endswith path ".lpy")
-          (reindex-watched-file (path-to-uri path) path))
+          (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
       (except [Exception]
@@ -1756,10 +1772,12 @@
   (if (not removed)
       (return))
   (= folders (workspace-folders))
+  ;; DIAGNOSTIC-RUNS is keyed by the client's uris, FILE-TREES by index-uri.
+  (= open-uris {, (index-uri uri) for uri in (list DIAGNOSTIC-RUNS)})
   (for uri in (list FILE-TREES)
     (= path (uri-to-path uri))
     (if (is-not (project-root-of path removed) None)
-        (if (or (in uri DIAGNOSTIC-RUNS) (under-workspace path folders))
+        (if (or (in uri open-uris) (under-workspace path folders))
             (index-file uri)
             (do (unindex-file uri)
                 (.pop FILE-TREES uri None))))))
@@ -1982,7 +2000,8 @@
   (= ws-result (.get WORKSPACE-INDEX name))
   (if ws-result
       ;; Filter out definitions from the current file (already checked)
-      (do (= external [loc for loc in ws-result if (!= loc.uri doc.uri)])
+      (do (= own (index-uri doc.uri))
+          (= external [loc for loc in ws-result if (!= loc.uri own)])
           (if external
               (return external))))
   (return None))

@@ -877,6 +877,63 @@ def test_running_backend_follows_the_buffer(project, tmp_path, fake_default):
     run_bounded(scenario(), timeout=10)
 
 
+def test_a_request_never_reopens_a_closed_buffer_for_good(
+    project, tmp_path, fake_default
+):
+    # Defect: a request waiting for the start when its buffer closes (or
+    # moves to another project's backend) syncs its text afterwards,
+    # reopening the document, and nothing closes it again: the backend
+    # answers for that cursor view forever instead of the file on disk.
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    uri = (project / "main.lpy").as_uri()
+    params = hover_params(backends.client_for(uri).backend_uri(uri))
+
+    async def backend_text(text=None):
+        answer = await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params, text=text)
+        return fake_hover(answer)["text"]
+
+    async def scenario():
+        try:
+            pending = asyncio.ensure_future(backend_text("cursor"))
+            await asyncio.sleep(0)  # the request awaits the start
+            backends.document_closed(uri)
+            assert await pending == "cursor"
+            assert await backend_text() == "y = 1"
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario(), timeout=10)
+
+
+def test_exit_kills_a_backend_whose_folder_was_removed(project, tmp_path, fake_default):
+    # Defect: a removed folder's backend leaves clients while its shutdown
+    # still runs, so an LSP exit then (which ends the loop and that
+    # shutdown with it) never kills its process, which outlives the server.
+    folders = [SimpleNamespace(uri=project.as_uri())]
+    backends = backend.Backends(lambda: list(folders), cache_home=str(tmp_path / "c"))
+    uri = (project / "main.lpy").as_uri()
+    client = backends.client_for(uri)
+    params = hover_params(client.backend_uri(uri))
+
+    async def scenario():
+        assert await backends.request(uri, lsp.TEXT_DOCUMENT_HOVER, params)
+        pid = client.process.pid
+        try:
+            folders.clear()
+            backends.folders_changed([uri])
+            backends.kill_all()
+            tasks = list(backends._tasks)
+            for task in tasks:  # the exit stops the loop
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            assert await wait_gone(pid)
+        finally:
+            kill_quietly(pid)
+
+    run_bounded(scenario())
+
+
 # ---------------------------------------------------------------------------
 # The lpy-lsp server process and its backends
 # ---------------------------------------------------------------------------

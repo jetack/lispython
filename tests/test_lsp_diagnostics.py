@@ -843,6 +843,14 @@ def test_only_a_file_that_can_rename_a_users_module_republishes(
     run_bounded(scenario())
 
 
+def test_an_init_file_in_lispythons_own_package_renames_modules():
+    # Defect: naming borrowed the tracking exclusions, which leave out
+    # lispython's own package, so an __init__ created in an editable
+    # lispython checkout that is the workspace republishes nothing.
+    created = pathlib.Path(lispy.__file__).parent / "newpkg" / "__init__.py"
+    assert server.renaming_file_p(str(created))
+
+
 def test_an_lpy_file_created_or_deleted_on_disk_is_indexed(outside_documents):
     # Defect: the index hears of an .lpy file only when the editor opens or
     # saves it, so a file another tool wrote offers none of its
@@ -863,6 +871,36 @@ def test_an_lpy_file_created_or_deleted_on_disk_is_indexed(outside_documents):
         files_changed(editor, defs, lsp.FileChangeType.Deleted)
         assert found() == []
         assert defs.as_uri() not in server.FILE_TREES
+
+    run_bounded(scenario())
+
+
+def test_a_file_the_client_spells_otherwise_is_indexed_once(outside_documents):
+    # Defect: the index is keyed by the raw uri, and a client may spell a
+    # file's uri otherwise than pathlib (VS Code on Windows: file:///c%3A/),
+    # so a file it opened is indexed twice once a watched event reaches it,
+    # and a watched deletion leaves the client-spelled copy behind.
+    editor, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    defs = outside / "far-defs.lpy"
+    defs.write_text("(def far-away [] 1)\n")
+    spelled = defs.as_uri().replace("far-defs", "far%2Ddefs")
+    assert spelled != defs.as_uri()
+
+    def found():
+        query = SimpleNamespace(query="far")
+        return [s.location.uri for s in server.workspace_symbol(editor, query)]
+
+    async def scenario():
+        editor.documents[spelled] = TextDocument(spelled, defs.read_text(), version=1)
+        doc = SimpleNamespace(uri=spelled, version=1)
+        server.did_open(editor, SimpleNamespace(text_document=doc))
+        await until(lambda: spelled in editor.published)
+        files_changed(editor, defs)
+        assert found() == [defs.as_uri()]
+        defs.unlink()
+        files_changed(editor, defs, lsp.FileChangeType.Deleted)
+        assert found() == []
 
     run_bounded(scenario())
 
