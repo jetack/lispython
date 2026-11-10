@@ -525,10 +525,10 @@ class TestInvalidEscapeWarning:
             # Number-shaped, but CPython's word is no word for a token.
             "1.0.0",
             "1..2",
-            # Parsed as Python, "invalid syntax" or "'{' was never closed".
+            # Parsed as Python, "invalid syntax" or "'(' was never closed".
             "1=x",
             "1:x",
-            "1{",
+            "1(",
         ],
         ids=lambda name: name if len(name) < 20 else f"{name[:12]}...({len(name)})",
     )

@@ -85,6 +85,17 @@ SPANS = [
     # ~ with nothing after it is the invert symbol.
     ("~|", (0, 0, 1)),
     ("{x|", (1, 1, 2)),
+    # A { ends a symbol: in an f-string the word is the field's own name,
+    # never glued to the text or format spec before the field's brace.
+    ("a{b|", (2, 2, 3)),
+    ("a|{b", (0, 0, 1)),
+    ('f"{1:{wi|}}"', (6, 6, 8)),
+    ('f"{x:>{wi|}}"', (7, 7, 9)),
+    ('f"ab{wi|}"', (5, 5, 7)),
+    ('f"{a}b{c|}"', (7, 7, 8)),
+    # A signed complex before a { is a number, never a symbol whose sign is
+    # peeled.
+    ("-1+2j|{x", (0, 0, 5)),
     ("[x|", (1, 1, 2)),
     (",x|", (1, 1, 2)),
     ("#x|", (0, 0, 2)),
@@ -200,7 +211,7 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 3 and spec["columns"] == "code points"
+    assert spec["version"] == 4 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"])
@@ -237,6 +248,7 @@ def spec_word_span(rule):
     read here. The rule's regexes are compiled once."""
     stop = "[" + "".join(re.escape(c) for c in rule["stopChars"]) + "]"
     form_end = "(?:[" + "".join(re.escape(c) for c in rule["formEndChars"]) + "]|$)"
+    number_end = "(?:[" + "".join(re.escape(c) for c in rule["numberEndChars"]) + "]|$)"
     wrapper = f"(?:{one_of(rule['wrappers'])})"
     opening = f"(?:{one_of(rule['openings'])})"
     meta = f"(?:{one_of(rule['metaChars'])})"
@@ -253,7 +265,7 @@ def spec_word_span(rule):
                 ("dangling", f"{wrapper}{quotes}(?={form_end})"),
                 ("meta", f"{wrapper}{meta}(?!{form_end})"),
                 ("bad", f"\\^\\*+(?:{opening}|{meta}|(?={stop}|$))"),
-                ("number", f"(?:{rule['numberToken']})(?={form_end})"),
+                ("number", f"(?:{rule['numberToken']})(?={number_end})"),
                 ("symbol", f"(?:(?!{stop}).)+"),
             ]
         )
@@ -330,7 +342,7 @@ def test_the_published_rule_alone_reproduces_every_case(published):
 
 
 # Every line up to the length over each alphabet, at every caret.
-DIFFERENTIAL = [("-+*^:'`~@([\" .1jx;#", 4), ("-+*:1jx.e", 5)]
+DIFFERENTIAL = [("-+*^:'`~@([{\" .1jx;#", 4), ("-+*:1jx.e{", 5)]
 
 
 @pytest.mark.parametrize("alphabet, length", DIFFERENTIAL)

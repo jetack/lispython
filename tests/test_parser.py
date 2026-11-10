@@ -226,6 +226,42 @@ class TestSemicolonEndsToken:
         assert (info.value.lineno, info.value.offset) == (1, 9)
 
 
+class TestBraceEndsSymbol:
+    """A { ends a symbol (so a completion word stops at a field's brace), and
+    a brace after a symbol opens a dict of its own, never a glued head."""
+
+    @pytest.mark.parametrize(
+        ["src", "parsed"],
+        [
+            ("a{b}", "[Sym(a), Brace(Sym(b))]"),
+            ("(f x{y})", "[Paren(Sym(f), Sym(x), Brace(Sym(y)))]"),
+            # A number ends at the brace too, never left to the symbol rule.
+            ("1{2}", "[Const('1'), Brace(Const('2'))]"),
+            ("-1{2}", "[Paren(Sym(-), Const('1')), Brace(Const('2'))]"),
+            ("1.5{2}", "[Const('1.5'), Brace(Const('2'))]"),
+        ],
+    )
+    def test_a_brace_after_a_symbol_opens_a_dict(self, src, parsed):
+        assert repr(parse(src)) == parsed
+
+    @pytest.mark.parametrize(
+        ["src", "msg", "offset"],
+        [
+            ("x{", "'{' was never closed", 2),
+            (
+                "'(a{ b)",
+                "closing parenthesis ')' does not match opening parenthesis '{'",
+                7,
+            ),
+        ],
+    )
+    def test_an_unclosed_brace_after_a_symbol_is_refused(self, src, msg, offset):
+        with pytest.raises(LispyCompileError) as info:
+            parse(src)
+        assert info.value.msg == msg
+        assert (info.value.lineno, info.value.offset) == (1, offset)
+
+
 class TestCommentEndsAtAnyLineBreak:
     """CPython ends a comment at LF, CRLF or a lone CR."""
 
