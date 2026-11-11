@@ -151,8 +151,9 @@ follows [Semantic Versioning](https://semver.org/).
   `lpy` console script's own directory (`.venv/bin`), which is no longer on
   `sys.path`. In safe-path mode (`PYTHONSAFEPATH`, or `python -P` running
   the console script; `lpy` has no `-P` flag of its own) no entry is added,
-  for a file run and the nREPL server too. `lpy -c` used to put nothing
-  there, so a module in the working directory was not importable.
+  for a file run and the nREPL server too, except that a directory or zip
+  app still gets its own path, as under `python -P`. `lpy -c` used to put
+  nothing there, so a module in the working directory was not importable.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call
