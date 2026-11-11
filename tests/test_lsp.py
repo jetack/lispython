@@ -888,11 +888,13 @@ class TestRequireSelection:
         folders = [SimpleNamespace(uri=package.parent.as_uri())]
         assert server.find_import_target(node, folders, origin=origin) is None
 
-    # A module of a namespace package is also the script its directory runs
-    # (lpy lspnspkg/a.lpy), so it requires its package's module relatively
-    # and its sibling module bare.
+    # A module of a namespace package is the script its directory runs
+    # (lpy lspnspkg/a.lpy), so it requires its sibling module bare, and its
+    # relative require loads no macros: that run searches lspnspkg/ alone,
+    # never the project root, where lspnspkg.mac lives.  It is still named
+    # lspnspkg.a (package lspnspkg), so that require is no compile error.
     NS_SOURCE = "(require .mac *)\n(require lspnshelper *)\n(= y (twice (thrice 1)))"
-    NS_EXPANDED = "y = 1 + 1 + 1 + (1 + 1 + 1)"
+    NS_EXPANDED = "y = twice(1 + 1 + 1)"
     NS_MODULES = ["lspnspkg", "lspnspkg.mac", "lspnshelper"]
 
     @pytest.fixture
@@ -924,7 +926,9 @@ class TestRequireSelection:
         # Defects: the document is named as a top-level module, so the
         # relative require fails ("no known parent package"); or only the
         # project root is searched while its macros run, so the sibling
-        # require, which `lpy lspnspkg/a.lpy` imports, loads no macros.
+        # require, which `lpy lspnspkg/a.lpy` imports, loads no macros; or
+        # the project root is searched too, which that run never searches,
+        # so the relative require loads lspnspkg.mac.
         uri = (namespace / "a.lpy").as_uri()
         compiled = server.compile_document(uri, None, self.NS_SOURCE)
         assert compiled.error is None

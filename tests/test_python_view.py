@@ -966,10 +966,12 @@ class TestShadows:
         )
 
     def test_module_names_count_namespace_packages_under_the_project(self, tmp_path):
-        # Defects: the LSP names ns/a.lpy as the top-level module a, so its
-        # relative requires fail to compile; or it drops ns/ from the search
-        # dirs, though no regular package holds it and `lpy ns/a.lpy` runs it
-        # as a script with ns/ on sys.path, so a bare sibling stops resolving.
+        # Defects: the LSP names ns/a.lpy as the top-level module a; or it
+        # drops ns/ from the search dirs, though no regular package holds it
+        # and `lpy ns/a.lpy` runs it as a script with ns/ on sys.path, so a
+        # bare sibling stops resolving; or it also searches the import root
+        # (the project root), which that run never puts on sys.path, so a
+        # root utils.py answers its `import utils` over src/utils.py.
         (tmp_path / "src" / "sns").mkdir(parents=True)
         (tmp_path / "ns").mkdir()
         got = [
@@ -978,8 +980,8 @@ class TestShadows:
         ]
         src = tmp_path / "src"
         assert got == [
-            ("ns.a", "ns", str(tmp_path), (str(tmp_path / "ns"), str(tmp_path))),
-            ("sns.b", "sns", str(src), (str(src / "sns"), str(src))),
+            ("ns.a", "ns", str(tmp_path), (str(tmp_path / "ns"),)),
+            ("sns.b", "sns", str(src), (str(src / "sns"),)),
         ]
 
     def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):
@@ -1030,14 +1032,16 @@ class TestShadows:
     def test_a_namespace_module_compiles_and_is_searched_as_its_script(
         self, tmp_path, monkeypatch
     ):
-        # Defects: the sweep names scripts/x.lpy by the regular-package rule
-        # alone, so its relative require fails; or only the project root is
-        # on sys.path while its macros run, so its sibling require loads no
-        # macros; or scripts/ is no search path of the backend for its own
-        # files, so a sibling (import ...) the script run resolves stops
-        # resolving; or it is one for every file of the project, so a
-        # root module's (import helper) resolves to scripts/helper, which
-        # `lpy m.lpy` never finds.
+        # Defects: only the project root is on sys.path while its macros
+        # run, so its sibling require loads no macros; or the project root is
+        # searched too, which `lpy pvnsscripts/rel.lpy` never puts on
+        # sys.path, so the relative require (refused by that run: no known
+        # parent package) loads pvnsscripts.mac and the project root becomes
+        # a shared root and a search path of the script's environment; or
+        # scripts/ is no search path of the backend for its own files, so a
+        # sibling (import ...) the script run resolves stops resolving; or it
+        # is one for every file of the project, so a root module's (import
+        # helper) resolves to scripts/helper, which `lpy m.lpy` never finds.
         project, root = tmp_path / "project", tmp_path / "view"
         scripts = project / "pvnsscripts"
         self.write(scripts / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
@@ -1056,8 +1060,9 @@ class TestShadows:
             for name in names:
                 sys.modules.pop(name, None)
         view = root / "pvnsscripts"
-        assert (view / "rel.py").read_text().endswith("y = 2 + 2")
+        assert (view / "rel.py").read_text().endswith("y = twice(2)")
         assert (view / "bare.py").read_text().endswith("y = 2 + 2 + 2")
+        assert manifest.shared_roots == []
         config = json.loads(
             open(
                 pv.write_pyright_config(
@@ -1072,8 +1077,7 @@ class TestShadows:
         assert str(scripts) not in config["extraPaths"]
         [env] = config["executionEnvironments"]
         assert env["root"] == str(view)
-        assert env["extraPaths"][:2] == [str(view), str(root)]
-        assert str(scripts) in env["extraPaths"]
+        assert env["extraPaths"] == [str(view), str(scripts)]
         # pyrefly: the nearest pyrefly.toml up from a file is its config.
         top = self.pyrefly_config(
             project,
@@ -1207,7 +1211,7 @@ class TestShadows:
         assert config["executionEnvironments"] == [
             {
                 "root": str(root / "src"),
-                "extraPaths": [str(root / "src"), str(root), src, str(project)],
+                "extraPaths": [str(root / "src"), src],
             }
         ]
 
@@ -1247,7 +1251,7 @@ class TestShadows:
         assert config["executionEnvironments"] == [
             {
                 "root": str(root / "src"),
-                "extraPaths": [str(root / "src"), str(root), src, str(project)],
+                "extraPaths": [str(root / "src"), src],
             }
         ]
 
@@ -1545,13 +1549,13 @@ class TestShadows:
         )
         assert messages == []
 
-    UTILS_FILES = ("src/pkg/m.py", "src/pkg/my-res/x.py")
+    UTILS_FILES = ("scripts/x.py", "src/pkg/m.py", "src/pkg/my-res/x.py")
 
     def src_utils_layout(self, project):
-        """src/pkg/m.lpy and the script src/pkg/my-res/x.lpy importing
-        utils, which both the project root and src hold; a top-level .lpy
-        gives the root a shadow, so its utils.py is linked into the view
-        root."""
+        """src/pkg/m.lpy and the scripts src/pkg/my-res/x.lpy and
+        scripts/x.lpy importing utils, which both the project root and src
+        hold; a top-level .lpy gives the root a shadow, so its utils.py is
+        linked into the view root."""
         uses = "(import utils)\n(= w utils.SRC-ONLY)"
         for name, text in [
             ("top.lpy", "(= t 1)"),
@@ -1560,6 +1564,7 @@ class TestShadows:
             ("src/pkg/__init__.py", ""),
             ("src/pkg/m.lpy", uses),
             ("src/pkg/my-res/x.lpy", uses),
+            ("scripts/x.lpy", uses),
         ]:
             self.write(project / name, text)
 
@@ -1567,18 +1572,23 @@ class TestShadows:
         # Defects: src (a shared root) takes the default list, which leads
         # with the view root and the project root, so the backend resolves
         # the `import utils` of src/pkg/m.lpy to the root utils.py, where its
-        # run (`python -m pkg.m` from src) resolves src/utils.py; and the
-        # script src/pkg/my-res/x.lpy searches the project root (a shared
-        # root, sorted first) before src, where `lpy` with src installed
-        # never searches the project root at all.
+        # run (`python -m pkg.m` from src) resolves src/utils.py; or a
+        # script (src/pkg/my-res/x.lpy, scripts/x.lpy, top.lpy) makes its
+        # import root (the project root) a shared root, or scripts/x.lpy
+        # searches it as its own, so a script searches the project root
+        # before src, where `lpy` with src installed never searches the
+        # project root at all; or an environment searches the project root
+        # last though none of its runs does.
         project, root = tmp_path / "project", tmp_path / "view"
         self.src_utils_layout(project)
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
         src, res = str(project / "src"), str(project / "src" / "pkg" / "my-res")
+        scripts = str(project / "scripts")
         view_res = str(root / "src" / "pkg" / "my-res")
+        view_scripts = str(root / "scripts")
         assert os.readlink(root / "utils.py") == str(project / "utils.py")
-        assert manifest.shared_roots == sorted([str(project), src])
+        assert manifest.shared_roots == [src]
         settings = {
             "environments": manifest.environments,
             "shared_roots": manifest.shared_roots,
@@ -1587,25 +1597,20 @@ class TestShadows:
         config = json.loads(open(path).read())
         # A module of the project root still searches it first.
         assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
-        res_env, src_env = config["executionEnvironments"]
+        res_env, scripts_env, src_env = config["executionEnvironments"]
         assert src_env["root"] == str(root / "src")
-        assert src_env["extraPaths"] == [
-            str(root / "src"),
-            str(root),
-            src,
-            str(project),
-        ]
+        assert src_env["extraPaths"] == [str(root / "src"), src]
         assert res_env["root"] == view_res
-        assert res_env["extraPaths"] == [
-            view_res,
+        assert res_env["extraPaths"] == [view_res, str(root / "src"), res, src]
+        assert scripts_env["root"] == view_scripts
+        assert scripts_env["extraPaths"] == [
+            view_scripts,
             str(root / "src"),
-            str(root),
-            res,
+            scripts,
             src,
-            str(project),
         ]
         self.pyrefly_config(project, root, **settings)
-        for env in [src_env, res_env]:
+        for env in [src_env, res_env, scripts_env]:
             with open(os.path.join(env["root"], "pyrefly.toml"), "rb") as f:
                 assert tomllib.load(f)["search-path"] == env["extraPaths"]
 
@@ -1621,6 +1626,24 @@ class TestShadows:
             reportAttributeAccessIssue="error",
         )
         assert messages == []
+
+    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
+    def test_a_root_only_module_is_missing_where_no_run_searches_the_root(
+        self, tmp_path
+    ):
+        # Defect: every environment searches the project root last, so
+        # `import rootonly` (a root rootonly.py) resolves for src/pkg/m.lpy,
+        # src/pkg/my-res/x.lpy and scripts/x.lpy, whose runs (`python -m
+        # pkg.m` from src, `lpy` of the script with src installed) raise
+        # ModuleNotFoundError; a root module (top.lpy) still resolves it.
+        project, root = tmp_path / "project", tmp_path / "view"
+        files = ["top.py", "scripts/x.py", "src/pkg/m.py", "src/pkg/my-res/x.py"]
+        self.write(project / "rootonly.py", "R = 1")
+        self.write(project / "src" / "pkg" / "__init__.py", "")
+        for name in files:
+            self.write(project / name.replace(".py", ".lpy"), "(import rootonly)")
+        messages = self.basedpyright_messages(tmp_path, project, root, files=files)
+        assert messages == ['Import "rootonly" could not be resolved'] * 3
 
     @pytest.mark.skipif(not shutil.which("pyrefly"), reason="no pyrefly")
     def test_a_shared_roots_import_resolves_there_for_pyrefly(self, tmp_path):
@@ -2165,10 +2188,8 @@ class TestShadows:
                 "extraPaths": [
                     str(root / "my-tools"),
                     str(root / "src"),
-                    str(root),
                     tools,
                     str(project / "src"),
-                    str(project),
                     str(site),
                 ],
             }

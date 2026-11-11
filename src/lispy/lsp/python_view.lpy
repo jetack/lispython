@@ -1771,11 +1771,11 @@
    follow the one run mode Python gives the file (_package-module-p): a
    module inside a regular package is that module, (import root,) only, as
    `import pkg.m` and `python -m pkg.m` see it; any other file is a script,
-   (own directory, import root), each once, as `lpy x.lpy` puts its own
-   directory on sys.path, the import root because a namespace module
-   (scripts/x.lpy, scripts.x from the project root) imports from there
-   too.  A script directory no import can name (src/pkg/my-res) is its own
-   import root, so its files search it alone."
+   (own directory,) only, as `lpy x.lpy` puts its own directory on
+   sys.path and nothing else: what else it imports comes from the shared
+   roots an editable install provides (_search-paths), never from its
+   import root as such (scripts/x.lpy does not search the project root).
+   The name, package and import root stay the namespace walk's."
   ;; A package's interior on the search path would shadow the stdlib and
   ;; top-level names for the module (src/pkg/json.py answering its `import
   ;; json`) and make one module importable under two names (helper and
@@ -1785,7 +1785,7 @@
   (= [import-root parts] (package-root directory roots))
   (= search-dirs (ife (_package-module-p directory import-root)
                       (, import-root)
-                      (tuple (dict.fromkeys [directory import-root]))))
+                      (, directory)))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (.join "." parts))
   (if (== stem "__init__")
@@ -1840,8 +1840,10 @@
    read (_search-paths, search-environments): environments,
    environment root -> the search dirs of the sources it is the first of,
    in order (merged, each once, should two sources of one root differ);
-   shared-roots, the sorted import roots of those sources that are
-   project-import-roots, which every module of the project searches."
+   shared-roots, the sorted import roots of those sources inside a regular
+   package (_package-module-p) that are project-import-roots: what an
+   editable install puts on sys.path, which every module of the project
+   searches."
   (def __init__ [self]
     (= self.sources {})
     (= self.environments {})
@@ -2101,12 +2103,14 @@
     (= env-root (sub dirs 0))
     (= (sub environments env-root)
        (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs))))
-    (if (in import-root project-roots)
+    ;; A script's import root (scripts/x.lpy's project root) is no shared
+    ;; root: no run puts it on sys.path for other modules.
+    (= directory (osp.dirname (osp.abspath lpy-path)))
+    (if (and (in import-root project-roots) (_package-module-p directory import-root))
         (.add shared-roots import-root))
     ;; module-dirs: every import root with a shadow, whose other modules
     ;; are linked in (_mirror-py-files).
     (.add module-dirs import-root)
-    (= directory (osp.dirname (osp.abspath lpy-path)))
     (if (!= directory import-root)
         (.add packages (_top-package project-root import-root directory))))
   (= manifest.environments (dict (sorted (.items environments))))
@@ -2232,9 +2236,12 @@
    which a module of the project root and any file in no environment of
    search-environments get), in view root root of project-root (both
    absolute).  The dirs searched are dirs, then shared-roots (the project's
-   import roots with a shadow, ShadowManifest.shared-roots: an editable
-   install puts them on sys.path for every module, so tests/x.lpy still
-   sees src/pkg) other than the project root, then the project root, each
+   import roots of regular-package modules with a shadow,
+   ShadowManifest.shared-roots: an editable install puts them on sys.path
+   for every module, so tests/x.lpy still sees src/pkg) other than the
+   project root, then the project root only when it is in dirs or
+   shared-roots (no run of src/pkg/m.lpy or scripts/x.lpy searches it, so
+   their `import rootonly` fails as Python's does), each
    once and only inside the project (an import root above it, the project lying inside a package,
    is left out).  First the view counterpart of each, so `import pkg` finds
    the shadows before any real directory of uncompiled .lpy; then each
@@ -2252,10 +2259,11 @@
   ;; installed, imports src/utils.py, never a root utils.py.  A module of
   ;; the project root still searches it first, through its own dirs.
   (= project-root (osp.abspath project-root))
-  (= shared [directory for directory in (or shared-roots [])
-              if (!= (osp.abspath directory) project-root)])
+  (= shared-roots [(osp.abspath directory) for directory in (or shared-roots [])])
+  (= shared [directory for directory in shared-roots if (!= directory project-root)])
+  (= trailing (ife (in project-root shared-roots) [project-root] []))
   (= kept [])
-  (for directory in (+ (list dirs) shared [project-root])
+  (for directory in (+ (list dirs) shared trailing)
     (= directory (osp.abspath directory))
     (if (and (not (in directory kept))
              (is-not (_view-dir project-root root directory) None))
