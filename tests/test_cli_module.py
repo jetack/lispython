@@ -1,10 +1,12 @@
 """``lpy -m mod`` resolves ``mod`` from the cwd the way ``python -m`` does.
 
 Runs the installed ``lpy`` console script: its sys.path[0] is the script's bin
-directory, so the cwd is on the path only if ``-m`` puts it there.
+directory, which every run mode replaces with the entry ``python`` gives it.
 """
 
+import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -203,6 +205,126 @@ def test_c_imports_a_module_beside_the_cwd_unless_safe_path(tmp_path: Path):
     assert "ran-helper" in r.stdout
     r = run_c(PYTHONSAFEPATH="1")
     assert "No module named 'cwdhelper'" in r.stderr
+
+
+def clean_env(**extra: str) -> dict[str, str]:
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
+    }
+    env.update(extra)
+    return env
+
+
+PRINT_PATH = "(import sys json) (print (json.dumps sys.path))"
+
+
+def lpy_path(args: list[str], cwd: Path, **extra: str) -> list[str]:
+    r = subprocess.run(
+        [str(LPY), *args],
+        cwd=cwd,
+        env=clean_env(**extra),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout.splitlines()[-1])
+
+
+def test_c_puts_an_empty_entry_first_and_no_launcher_directory(tmp_path: Path):
+    # Defect: `lpy -c` stacks the cwd in front of the console script's own
+    # directory, so .venv/bin stays on sys.path (its activate_this.py is
+    # importable) and an absolute cwd stands where python -c has ''.
+    path = lpy_path(["-c", PRINT_PATH], tmp_path)
+    assert path[0] == ""
+    assert str(LPY.parent) not in path
+
+
+def test_a_file_run_puts_its_directory_first_even_when_on_pythonpath(
+    tmp_path: Path,
+):
+    # Defect: a file run skips its directory when PYTHONPATH already has it,
+    # so a helper on an earlier PYTHONPATH entry wins over the script's
+    # sibling, which `python sub/s.py` imports.
+    sub, other = tmp_path / "sub", tmp_path / "other"
+    for directory in (sub, other):
+        directory.mkdir()
+        (directory / "pathhelper.py").write_text(f"WHERE = {directory.name!r}\n")
+    (sub / "s.lpy").write_text(
+        "(import sys json pathhelper)\n"
+        "(print (json.dumps (+ [pathhelper.WHERE] sys.path)))\n"
+    )
+    got = lpy_path([str(sub / "s.lpy")], tmp_path, PYTHONPATH=f"{other}:{sub}")
+    assert got[:2] == ["sub", str(sub)]
+    assert str(LPY.parent) not in got
+
+
+def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):
+    # Defect: a file run puts its directory first under PYTHONSAFEPATH,
+    # where python adds none.
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "s.lpy").write_text(PRINT_PATH + "\n")
+    path = lpy_path([str(sub / "s.lpy")], tmp_path, PYTHONSAFEPATH="1")
+    assert str(sub) not in path
+    assert "" not in path
+
+
+def test_the_repl_puts_an_empty_entry_first(tmp_path: Path):
+    # Defect: the REPL puts the absolute cwd first, in front of the console
+    # script's directory, where python's REPL has '' (which follows a later
+    # os.chdir) and no launcher directory.  prompt_toolkit reads a piped \r
+    # as Enter; HOME keeps its history file out of the user's.
+    # The output is mixed with prompt redraws, so the path follows a marker
+    # the echoed input never holds.
+    src = '(import sys json) (print (+ "PATH=" (json.dumps sys.path)))'
+    r = subprocess.run(
+        [str(LPY)],
+        cwd=tmp_path,
+        env=clean_env(HOME=str(tmp_path)),
+        input=src + "\r",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    [line] = [line for line in r.stdout.splitlines() if "PATH=[" in line]
+    path = json.loads(line[line.index("PATH=[") + len("PATH=") :])
+    assert path[0] == ""
+    assert str(LPY.parent) not in path
+
+
+@pytest.mark.parametrize("safe_path", [False, True])
+def test_the_nrepl_server_puts_the_cwd_first_unless_safe_path(
+    tmp_path: Path, safe_path: bool
+):
+    # Defects: the nREPL server stacks the cwd in front of the console
+    # script's directory (or skips it when present elsewhere), or adds it
+    # under PYTHONSAFEPATH, where python -m adds nothing.
+    extra = {"PYTHONSAFEPATH": "1"} if safe_path else {}
+    server = subprocess.Popen(
+        [str(LPY), "--nrepl", "0"],
+        cwd=tmp_path,
+        env=clean_env(**extra),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert server.stdout is not None
+        port = int(server.stdout.readline().rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as conn:
+            request = {"op": "eval", "id": 1, "code": PRINT_PATH}
+            conn.sendall(json.dumps(request).encode() + b"\n")
+            reply = json.loads(conn.makefile("rb").readline())
+    finally:
+        server.terminate()
+        server.wait(timeout=30)
+    path = json.loads(reply["stdout"])
+    assert str(LPY.parent) not in path
+    if safe_path:
+        assert str(tmp_path) not in path
+    else:
+        assert path[0] == str(tmp_path)
 
 
 def test_importing_tools_in_a_package_directory_leaves_sys_path_and_main(

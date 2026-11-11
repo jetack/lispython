@@ -140,9 +140,16 @@ follows [Semantic Versioning](https://semver.org/).
   file-less scope (an eval with neither `file` nor `ns`) is that same
   `__main__`, so a relative require there no longer resolves against the
   working directory's package; send `file` to eval in a file's package.
-  `lpy -c` now puts the working directory first on `sys.path` (unless
-  `-P`/`PYTHONSAFEPATH`), as `python -c` does, and the REPL honours
-  `PYTHONSAFEPATH` too.
+- Every `lpy` run mode starts with the `sys.path` `python` gives it: the
+  first entry is `''` for the REPL and `lpy -c`, the working directory for
+  `lpy -m` and `lpy --nrepl`, and the script's directory (symlinks
+  resolved) for `lpy file.lpy`, even when `PYTHONPATH` already lists it, so
+  the script's sibling wins over a `PYTHONPATH` module of the same name.
+  That entry replaces the `lpy` console script's own directory
+  (`.venv/bin`), which is no longer on `sys.path`. Under
+  `-P`/`PYTHONSAFEPATH` no entry is added, for a file run and the nREPL
+  server too. `lpy -c` used to put nothing there, so a module in the
+  working directory was not importable.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call

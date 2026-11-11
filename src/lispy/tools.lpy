@@ -62,11 +62,11 @@
 (def main-scope []
   "A new __main__ scope, in no package (__package__ None), as Python's own
    __main__ (REPL, -c) is, whatever package the working directory is in;
-   the REPL and -c put the working directory itself on sys.path, as python
-   does (prepend-cwd).  SCOPE, the one the REPL and nREPL sessions share,
-   is one; a translation that names no scope compiles in a new one, since
-   every module unit compiles in its own scope and must not reset the
-   session's macros."
+   the working directory reaches sys.path only as python puts it there
+   (set-run-path, '' for the REPL and -c).  SCOPE, the one the REPL and
+   nREPL sessions share, is one; a translation that names no scope
+   compiles in a new one, since every module unit compiles in its own
+   scope and must not reset the session's macros."
   (return {"__builtins__" __builtins__
            "__name__" "__main__"
            "__package__" None
@@ -74,11 +74,18 @@
 
 (= SCOPE (main-scope))
 
-(def prepend-cwd []
-  "Put the working directory first on sys.path, as python does for the
-   REPL, -c and -m, unless -P / PYTHONSAFEPATH is set (sys.flags.safe_path)."
+(def set-run-path [entry]
+  "Make sys.path[0] the entry python gives the run mode (run's dispatch):
+   '' for the REPL and -c, the absolute working directory for -m (and the
+   nREPL server), the script's directory for a file.  It replaces the entry
+   the launcher added, the `lpy` console script's own directory, which no
+   python run has.  Under -P / PYTHONSAFEPATH (sys.flags.safe_path) python
+   adds no entry, and the launcher added none, so nothing changes."
+  ;; Replaced, never stacked in front or skipped when present elsewhere:
+  ;; python's first entry wins over a PYTHONPATH entry of the same directory
+  ;; and leaves no launcher directory behind (.venv/bin/activate_this.py).
   (if (not sys.flags.safe-path)
-      (sys.path.insert 0 (os.getcwd))))
+      (= (sub sys.path 0) entry)))
 
 (def ast-to-python [st]
   ;; unparse writes any depth compile() takes, on a bounded stack per chunk;
@@ -404,8 +411,6 @@
   )
 
 (def repl [:translate False]
-  (prepend-cwd)
-
   (= session (make-repl-session))
   (= scope SCOPE)
   (eval-and-print "(from pprint [pprint])" scope :start UnitStart.CONTINUE)
@@ -974,8 +979,9 @@
 (= _NREPL-FILE-SCOPES-LOCK (threading.RLock))  ; RLock: _nrepl-release-window-locks
 
 ;; The search roots a file scope's namespace packages are counted up to:
-;; sys.path as nrepl-server left it once it put the working directory on it,
-;; never the live list, because nrepl-load-file puts each loaded file's own
+;; sys.path as nrepl-server found it (the working directory first unless
+;; safe_path, run's set-run-path), never the live list, because
+;; nrepl-load-file puts each loaded file's own
 ;; directory there, and the nearest-root rule (package-root) would then make
 ;; a file's package depend on which sibling was loaded first.  None until a
 ;; server starts, when the current sys.path stands in.
@@ -2006,8 +2012,6 @@
 (def nrepl-server [:host "127.0.0.1" :port 0]
   (global _NREPL-IMPORT-ROOTS)
   (= cwd (os.getcwd))
-  (if (not (in cwd sys.path))
-      (sys.path.insert 0 cwd))
   (= _NREPL-IMPORT-ROOTS (list sys.path))
   (= scope SCOPE)
   (nrepl-eval "(from pprint [pprint])" scope)
@@ -2061,12 +2065,13 @@
 
 (def _run []
   (cond (< (len sys.argv) 2)
-        (repl)
+        (do (set-run-path "")
+            (repl))
 
         (== (sub sys.argv 1) "-m")
         (do (sys.argv.pop 1)
             (= mname (sys.argv.pop 1))
-            (prepend-cwd)
+            (set-run-path (os.getcwd))
             ;; the module name is the one `import` gives (module-import-name)
             (with [(compile-errors "<command line>" mname)]
               (= modname (module-import-name
@@ -2096,21 +2101,22 @@
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)
             (= src (sys.argv.pop 1))
-            (prepend-cwd)
+            (set-run-path "")
             (eval-and-print src))
 
         (== (sub sys.argv 1) "--nrepl")
         (do (sys.argv.pop 1)
             (= port (ife (> (len sys.argv) 1) (int (sys.argv.pop 1)) 0))
+            (set-run-path (os.getcwd))
             (nrepl-server :port port))
 
         (== (sub sys.argv 1) "-t")
-        (repl True)
+        (do (set-run-path "")
+            (repl True))
 
         (do (= fpath (sys.argv.pop 1))
-            (= script-dir (osp.dirname (osp.abspath fpath)))
-            (if (not (in script-dir sys.path))
-                (sys.path.insert 0 script-dir))
+            ;; python resolves a symlinked script to its target's directory
+            (set-run-path (osp.dirname (osp.realpath fpath)))
             (runpy.run-path fpath :run-name "__main__"))))
 
 (if (== __name__ "__main__")
