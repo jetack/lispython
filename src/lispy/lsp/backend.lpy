@@ -454,6 +454,10 @@
     ;; would be the one left.  An open while it is held may be missing from
     ;; the environments that sweep writes (open-document).
     (= self._sweep-lock (asyncio.Lock))
+    ;; The sweeps waiting for _sweep-lock: each reads the open documents
+    ;; once it takes the lock, so an open meanwhile needs no sweep of its
+    ;; own (open-document).
+    (= self._sweeps-waiting 0)
     ;; lpy uri -> real path of each document open in the editor
     ;; (open-document, close-document), kept across spawns: every sweep
     ;; takes their search environments, whether or not the file is on disk
@@ -536,7 +540,7 @@
     (= path (to-fs-path lpy-uri))
     (if (is path None)
         (return None))
-    (= shadow (view-path self.project-root self.view-root (osp.realpath path)))
+    (= shadow (view-path self.project-root self.view-root (document-path path)))
     (if (is shadow None)
         (return None))
     (return (.as-uri (pathlib.Path shadow))))
@@ -670,13 +674,26 @@
   (async-def _sweep-view-root [self]
     "_prepare-view-root in a thread, holding _sweep-lock, over the open
      documents' paths, read on the loop once the lock is taken, since
-     open-document and close-document change them there."
-    (async-with [self._sweep-lock]
+     open-document and close-document change them there; its ShadowSweep,
+     or None once shutdown came first: a sweep it cancelled released the
+     lock while its thread may still write, and a closed client's view
+     root may be a new client's."
+    (+= self._sweeps-waiting 1)
+    (try
+      (await (.acquire self._sweep-lock))
+      (finally
+        (-= self._sweeps-waiting 1)))
+    (try
+      (if (== self.state "closed")
+          (return None))
       (= open-paths (list (.values self._open-paths)))
-      (return (await (asyncio.to-thread self._prepare-view-root open-paths)))))
+      (return (await (asyncio.to-thread self._prepare-view-root open-paths)))
+      (finally
+        (.release self._sweep-lock))))
 
   (async-def _spawn [self]
-    (await (._sweep-view-root self))
+    (if (is (await (._sweep-view-root self)) None)
+        (raise (RuntimeError "shut down while starting")))
     (= self._config-texts (await (asyncio.to-thread self._read-configs)))
     (= self._docs {})
     (= self._kept {})
@@ -1017,18 +1034,22 @@
 
   (def open-document [self lpy-uri]
     "Document lpy-uri opened in the editor: count it as an environment
-     source of every sweep from now on (_open-paths).  True when its search
+     source of every sweep from now on (_open-paths), at its document-path.
+     True when the backend runs or is starting and no sweep waits to read
+     the open documents (_sweeps-waiting), and the document's search
      environment is one the view's config may lack (new-environment-p), so
-     a running or starting backend must sweep again (saved) to analyse it
-     under its own search dirs: one the last finished sweep's manifest
-     lacks, or any while a sweep runs, since that sweep read the open
-     documents before this one and writes the manifest without it.  Call
-     on the loop."
+     the backend must sweep again (saved) to analyse it under its own
+     search dirs: one the last finished sweep's manifest lacks, or any
+     while a sweep runs, since that sweep read the open documents before
+     this one and writes the manifest without it.  An idle backend's start
+     sweeps with it.  Call on the loop."
     (= path (to-fs-path lpy-uri))
     (if (is path None)
         (return False))
-    (= path (osp.realpath path))
+    (= path (document-path path))
     (= (sub self._open-paths lpy-uri) path)
+    (if (or (not (or self.running self.starting)) (> self._sweeps-waiting 0))
+        (return False))
     (return (new-environment-p self.project-root
                                (ife (.locked self._sweep-lock) {} self.manifest.environments)
                                path)))
@@ -1077,6 +1098,8 @@
                     (= self._replay-due True)))
             (return)))
     (= sweep (await (._sweep-view-root self)))
+    (if (is sweep None)
+        (return))
     (= changed [(.as-uri (pathlib.Path path)) for path in sweep.written])
     (for lpy-uri in lpy-uris
       (= uri (.backend-uri self lpy-uri))
@@ -1221,6 +1244,15 @@
 ;; The LSP's backends
 ;; ---------------------------------------------------------------------------
 
+(def document-path [path]
+  "path, a document's file, with its directory resolved and the file kept:
+   a file link proj/scripts/a.lpy -> proj/lib/a.lpy is its own module
+   scripts/a.lpy, as project-sources lists it and package-root names it, so
+   its shadow (backend-uri) and search environment (open-document) are
+   that module's, and one into /elsewhere stays in proj (project-root-of).
+   The one home of that rule."
+  (return (osp.join (osp.realpath (osp.dirname (osp.abspath path))) (osp.basename path))))
+
 (def project-root-of [path folders]
   "The real path of the innermost of folders (workspace folders, objects
    with .uri) holding path, or None: path's project, the one home of that
@@ -1228,7 +1260,7 @@
    file's directory is resolved, never the file: a file link
    proj/ns/a.lpy -> /elsewhere/a.lpy is in proj, as write-shadows' walk
    and package-root see it."
-  (= real (pathlib.Path (osp.realpath (osp.dirname (osp.abspath path)))))
+  (= real (pathlib.Path (osp.dirname (document-path path))))
   (= best None)
   (for folder in folders
     (= folder-path (to-fs-path folder.uri))
@@ -1390,15 +1422,16 @@
      the backend without waiting for it (BackendClient.start-soon) when its
      diagnostics are forwarded, since they come only from a running one,
      whose start sweep takes the open.  Call on the loop."
+    (= client (.available-client self lpy-uri))
+    (if (is client None)
+        (return))
     (try
-      (= client (.available-client self lpy-uri))
-      (if (is-not client None)
-          (do (if (.open-document client lpy-uri)
-                  (._sweep-soon self client []))
-              (if self.forwards-diagnostics
-                  (.start-soon client))))
+      (if (.open-document client lpy-uri)
+          (._sweep-soon self client []))
       (except [Exception]
-        (.exception logger "lispython LSP: backend start failed for %s" lpy-uri))))
+        (.exception logger "lispython LSP: backend open failed for %s" lpy-uri)))
+    (if self.forwards-diagnostics
+        (.start-soon client)))
 
   (def document-changed [self lpy-uri source view]
     "A buffer opened or changed and view, the PythonView of its source,

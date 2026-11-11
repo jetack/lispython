@@ -1736,6 +1736,103 @@ def test_an_open_during_a_sweep_that_missed_it_is_swept_again(
     assert script_environments(client) == [view_scripts]
 
 
+def test_opens_during_a_sweep_add_one_sweep_in_all(project, tmp_path, fake_default):
+    # Defect: a sweep waiting for the running one's lock is no longer due,
+    # so each later open (its own notification, as a session restore sends
+    # them) sees the lock held and schedules one more full sweep: N opens,
+    # N serial sweeps, and a real save waits behind them all.
+    backends, script, other = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    third = (project / "scripts" / "w.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    sweep = client._prepare_view_root
+    gate = threading.Event()
+    calls = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        began = asyncio.Event()
+
+        def gated_sweep(open_paths):
+            calls.append(sorted(open_paths))
+            loop.call_soon_threadsafe(began.set)
+            gate.wait(10)
+            return sweep(open_paths)
+
+        try:
+            await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
+            client._prepare_view_root = gated_sweep
+            backends.files_changed([main])
+            await began.wait()
+            for uri in [script, other, third]:
+                backends.document_opened(uri)
+                # Each open in a loop pass of its own: scheduled sweeps begin.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+            gate.set()
+            while backends._tasks:
+                await asyncio.gather(*backends._tasks)
+        finally:
+            gate.set()
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert len(calls) == 2
+    assert len(calls[1]) == 3
+    assert script_environments(client) == [
+        os.path.join(client.view_root.path, "scripts")
+    ]
+
+
+def test_a_sweep_queued_behind_shutdown_never_runs(project, tmp_path):
+    # Defect: a save waiting for the sweep lock still sweeps once shutdown
+    # came (a cancelled sweep released the lock while its thread may still
+    # write, and a folder removed and added again gives a new client over
+    # the same view root), beside whatever writes that view root now.
+    client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    calls = []
+    client._prepare_view_root = calls.append
+
+    async def scenario():
+        await client._sweep_lock.acquire()
+        saving = asyncio.ensure_future(client.file_saved())
+        await asyncio.sleep(0)
+        client.state = "closed"
+        client._sweep_lock.release()
+        await saving
+
+    run_bounded(scenario())
+    assert calls == []
+
+
+def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path):
+    # Defect: the document's file is resolved, so a link scripts/a.lpy ->
+    # lib/a.lpy is synced at lib/a.py, where lib/a.lpy's own buffer is, not
+    # at the shadow scripts/a.py the sweep writes for it, and its search
+    # environment is lib/'s, where `lpy scripts/a.lpy` searches scripts/.
+    # The buffer does not compile, so only the open gives an environment.
+    (project / "lib").mkdir()
+    (project / "lib" / "a.lpy").write_text("(= a\n")
+    (project / "scripts").mkdir()
+    (project / "scripts" / "a.lpy").symlink_to(project / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
+    linked = (project / "scripts" / "a.lpy").as_uri()
+    assert (
+        client.backend_uri(linked)
+        == (pathlib.Path(client.view_root.path) / "scripts" / "a.py").as_uri()
+    )
+    client.open_document(linked)
+    client._prepare_view_root(list(client._open_paths.values()))
+    real = os.path.realpath(project)
+    assert list(client.manifest.environments) == [
+        real,
+        os.path.join(real, "scripts"),
+    ]
+
+
 def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
     # Defect: each open whose environment is new schedules a sweep of its
     # own, so two opens in one new directory (or a folders change, which
