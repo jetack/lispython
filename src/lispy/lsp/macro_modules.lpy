@@ -407,6 +407,10 @@
    extend."
   (if (is spec None)
       (return None))
+  ;; A built-in or frozen origin names no file: as a path it would depend
+  ;; on the working directory, which a macro may change.
+  (if (and (is-not spec.origin None) (not spec.has-location))
+      (return spec.origin))
   (if (is-not spec.origin None)
       (return (osp.realpath spec.origin)))
   (return (tuple ((osp.realpath portion)
@@ -450,7 +454,7 @@
    over the search dirs, our own observer aside.  Both sides of a
    comparison come from here, never from a loaded module's spec, which may
    be a finder's own (a module only such a finder serves compares None to
-   None).  A finder before PathFinder is never asked, so a name one serves
+   None).  Any other finder before PathFinder is never asked, so a name one serves
    while one side's search dir also holds it is imported again on each
    alternation (the epoch stays)."
   (def path-slot []
