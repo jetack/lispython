@@ -1785,6 +1785,40 @@ def test_opens_during_a_sweep_add_one_sweep_in_all(project, tmp_path, fake_defau
     ]
 
 
+def test_opens_before_a_starts_sweep_add_no_sweep(project, tmp_path, fake_default):
+    # Defect: an open while a start is in progress but before its sweep
+    # began (a session restore opening every buffer at once) is checked
+    # against the manifest of no sweep at all, so it asks for a second full
+    # sweep after the start, though the start's sweep reads it.
+    backends, script, other = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    client = backends.client_for(main)
+    sweep = client._prepare_view_root
+    calls = []
+
+    def counting_sweep(open_paths):
+        calls.append(len(open_paths))
+        return sweep(open_paths)
+
+    client._prepare_view_root = counting_sweep
+
+    async def scenario():
+        try:
+            for uri in [main, script, other]:
+                backends.document_opened(uri)
+            assert await client._starting
+            while backends._tasks or client._replays:
+                await asyncio.gather(*backends._tasks, *client._replays)
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert calls == [3]
+    assert script_environments(client) == [
+        os.path.join(client.view_root.path, "scripts")
+    ]
+
+
 def test_a_sweep_queued_behind_shutdown_never_runs(project, tmp_path):
     # Defect: a save waiting for the sweep lock still sweeps once shutdown
     # came (a cancelled sweep released the lock while its thread may still
