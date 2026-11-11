@@ -4,9 +4,11 @@ Expected positions are read off the source and generated text with
 ``locate``, so every assertion names the word it lands on.
 """
 
+import builtins
 import contextlib
 import hashlib
 import importlib
+import importlib.util
 import json
 import ntpath
 import os
@@ -1000,21 +1002,6 @@ class TestShadows:
             for name in names:
                 sys.modules.pop(name, None)
         assert view is not None and view.text.endswith("\nyy = 2 + 2")
-        assert sys.path == path
-
-    def test_import_root_stays_on_sys_path_while_any_user_holds_it(self):
-        # Two compiles overlapping on one import root, the first ending first:
-        # the root stays for the second and goes with it.
-        root = "/nonexistent/pv-overlap-root"
-        path = list(sys.path)
-        first, second = pv._on_sys_path(root), pv._on_sys_path(root)
-        first.__enter__()
-        second.__enter__()
-        try:
-            first.__exit__(None, None, None)
-            assert sys.path[0] == root
-        finally:
-            second.__exit__(None, None, None)
         assert sys.path == path
 
     def test_relative_require_in_a_src_layout(self, tmp_path, monkeypatch):
@@ -2635,6 +2622,353 @@ class TestMacroModules:
             view = cache.view_at_cursor("u", 2, src, line, col, **kwargs)
             assert len(waits) == 1
         assert view.fallback and "yy = 2 * 2 * 2 + zz" in view.text
+
+    @pytest.fixture
+    def helper(self, tmp_path, request):
+        """A top-level macro module of one name in two directories, a/ and
+        b/, whose pick expands to 1 and 2."""
+        name = "pvsd" + re.sub(r"\W", "", request.node.name).lower()
+        dirs = []
+        for number, sub in enumerate(["a", "b"], 1):
+            directory = tmp_path / sub
+            directory.mkdir()
+            (directory / f"{name}.lpy").write_text(
+                f"(defmacro pick [] (return {number}))"
+            )
+            dirs.append(str(directory))
+        sys.modules.pop(name, None)
+        yield SimpleNamespace(name=name, a=dirs[0], b=dirs[1])
+        sys.modules.pop(name, None)
+
+    def picked(self, helper, *dirs):
+        """What pick expands to in a compile searching dirs."""
+        view = pv.compile_view(
+            f"(require {helper.name} *)\n(= yy (pick))", search_dirs=dirs
+        )
+        return view.text.rpartition("yy = ")[2]
+
+    @contextlib.contextmanager
+    def held_with(self, dirs, imported, limit, monkeypatch):
+        """A compile searching dirs hung in its macros for the whole block,
+        after importing the module imported; WAIT_LIMIT set to limit."""
+        monkeypatch.setattr(mm, "WAIT_LIMIT", limit)
+        entered, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules(dirs):
+                importlib.import_module(imported)
+                entered.set()
+                release.wait(30)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(10)
+            yield
+        finally:
+            release.set()
+            holder.join(10)
+            assert not holder.is_alive()
+
+    def test_search_dirs_come_first_in_their_order(self, helper, monkeypatch):
+        # Defect: a search dir already on sys.path is left where it is while
+        # an absent one goes in front, so a module both hold comes from the
+        # second dir.
+        monkeypatch.setattr(sys, "path", [helper.a, *sys.path])
+        assert self.picked(helper, helper.a, helper.b) == "1"
+
+    def test_a_module_of_other_search_dirs_is_imported_anew(self, helper):
+        # Defect: a script's sibling module stays in sys.modules, so a script
+        # in another directory requiring the same name gets the first one's.
+        assert self.picked(helper, helper.a) == "1"
+        assert self.picked(helper, helper.b) == "2"
+
+    def test_a_switch_of_search_dirs_waits_for_running_compiles(
+        self, helper, monkeypatch
+    ):
+        # Defect: a compile under other search dirs drops (or reuses) the
+        # modules a running compile is using.
+        result = []
+        with self.held_with((helper.a,), helper.name, 30, monkeypatch):
+            other = threading.Thread(
+                target=lambda: result.append(self.picked(helper, helper.b)),
+                daemon=True,
+            )
+            other.start()
+            other.join(0.5)
+            assert other.is_alive()
+        other.join(10)
+        assert result == ["2"]
+
+    def test_compiles_arriving_while_one_waits_to_drop_wait_behind_it(
+        self, helper, monkeypatch
+    ):
+        # Defect: compiles that do not conflict keep being admitted while one
+        # waits to drop, so it waits for them too, times out, marks them hung
+        # and moves the epoch with no edit.
+        with self.held_with((helper.a,), helper.name, 30, monkeypatch):
+            switcher = threading.Thread(
+                target=lambda: self.picked(helper, helper.b), daemon=True
+            )
+            switcher.start()
+            switcher.join(0.3)
+            assert switcher.is_alive()
+
+            def arrive():
+                with mm.fresh_modules((helper.a,)):
+                    pass
+
+            arriving = threading.Thread(target=arrive, daemon=True)
+            arriving.start()
+            arriving.join(0.3)
+            assert arriving.is_alive()
+        switcher.join(10)
+        arriving.join(10)
+        assert not switcher.is_alive() and not arriving.is_alive()
+
+    def test_a_switch_past_a_hung_compile_moves_the_epoch(self, helper, monkeypatch):
+        # Defect: a switch drops the modules under a hung compile but leaves
+        # its result, which the drop may have broken, current.
+        with self.held_with((helper.a,), helper.name, 0.2, monkeypatch):
+            before = mm.current_epoch()
+            compiled = pv.compile_buffer("(= yy 1)", search_dirs=(helper.b,))
+        assert compiled.epoch == before + 1
+
+    def raced(self, helper):
+        """Two compiles admitted together, nothing tracked yet: one searching
+        a/ imports the helper, then the other, searching b/, reuses it.
+        Returns the epoch before and after the second one ended."""
+        imported, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules((helper.a,)):
+                importlib.import_module(helper.name)
+                imported.set()
+                release.wait(30)
+
+        with mm.fresh_modules((helper.b,)) as before:
+            holder = threading.Thread(target=hold, daemon=True)
+            holder.start()
+            try:
+                assert imported.wait(10)
+                assert importlib.import_module(helper.name).__file__.startswith(
+                    helper.a
+                )
+            except BaseException:
+                release.set()
+                raise
+        after = mm.current_epoch()
+        release.set()
+        holder.join(10)
+        assert not holder.is_alive()
+        return before, after
+
+    def test_a_module_reused_from_other_search_dirs_moves_the_epoch(self, helper):
+        # Defect: the compile searching b/ used a/'s helper, and its result
+        # stays current under the epoch.
+        before, after = self.raced(helper)
+        assert after == before + 1
+
+    def waits_beside(self, helper, monkeypatch):
+        """Whether a compile searching a/ waits while one searching b/ runs."""
+        monkeypatch.setattr(mm, "WAIT_LIMIT", 30)
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with mm.fresh_modules((helper.b,)):
+                held.set()
+                release.wait(30)
+
+        def enter():
+            with mm.fresh_modules((helper.a,)):
+                pass
+
+        holder = threading.Thread(target=hold, daemon=True)
+        other = threading.Thread(target=enter, daemon=True)
+        holder.start()
+        try:
+            assert held.wait(10)
+            other.start()
+            other.join(0.5)
+            waited = other.is_alive()
+        finally:
+            release.set()
+            holder.join(10)
+            if other.ident is not None:
+                other.join(10)
+        assert not other.is_alive()
+        return waited
+
+    def test_a_raced_name_keeps_the_two_compiles_apart(self, helper, monkeypatch):
+        # Defect: after the race the next compile searching b/ drops the
+        # helper, a compile searching a/ is admitted beside it and imports it
+        # again, and the race (and its recompile of every document) repeats.
+        self.raced(helper)
+        assert self.waits_beside(helper, monkeypatch)
+
+    def test_an_edit_frees_a_raced_name(self, helper, monkeypatch):
+        # Defect: a raced name keeps the two compiles apart for ever, each
+        # dropping every tracked module, after any edit.
+        self.raced(helper)
+        next_tick()
+        (pathlib.Path(helper.a) / (helper.name + ".lpy")).write_text(
+            "(defmacro pick [] (return 11))"
+        )
+        mm.epoch()
+        assert not self.waits_beside(helper, monkeypatch)
+
+    def test_a_module_another_finder_loads_conflicts_with_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: a module a meta_path finder other than PathFinder loaded
+        # (an editable install's) is found nowhere by PathFinder, so its own
+        # compile conflicts with it: every compile moves the epoch.
+        name = "pvsdfinderloaded"
+        (tmp_path / "elsewhere").mkdir()
+        source = tmp_path / "elsewhere" / f"{name}.py"
+        source.write_text("X = 1\n")
+
+        class Finder:
+            @staticmethod
+            def find_spec(fullname, path, target=None):
+                if fullname != name:
+                    return None
+                return importlib.util.spec_from_file_location(name, source)
+
+        monkeypatch.setattr(sys, "meta_path", [Finder, *sys.meta_path])
+        directory = tmp_path / "d"
+        directory.mkdir()
+        try:
+            with mm.fresh_modules((str(directory),)) as before:
+                first = importlib.import_module(name)
+            with mm.fresh_modules((str(directory),)):
+                assert importlib.import_module(name) is first
+            assert mm.current_epoch() == before
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_search_dir_spelled_two_ways_is_one(self, tmp_path, monkeypatch):
+        # Defect: a search dir that links to a sys.path entry resolves its
+        # module under two spellings, so compiles alternating with another
+        # directory drop and import it again every time.
+        name = "pvsdlinked"
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / f"{name}.py").write_text("X = 1\n")
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        (tmp_path / "other").mkdir()
+        monkeypatch.setattr(sys, "path", [*sys.path, str(tmp_path / "real")])
+        try:
+            with mm.fresh_modules((str(tmp_path / "link"),)):
+                first = importlib.import_module(name)
+            with mm.fresh_modules((str(tmp_path / "other"),)):
+                assert importlib.import_module(name) is first
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_parked_compile_moves_the_epoch_once(self, helper, monkeypatch):
+        # Defect: a hung compile's reads keep counting after a drop passed
+        # it, so every later compile searching b/ conflicts with them, drops
+        # b's helper, imports it again and moves the epoch: every open
+        # document recompiles for ever, and no edit stops it.
+        with self.held_with((helper.a,), helper.name, 0.2, monkeypatch):
+            epochs = []
+            for _ in range(3):
+                with mm.fresh_modules((helper.b,)):
+                    module = importlib.import_module(helper.name)
+                    assert module.__file__.startswith(helper.b)
+                epochs.append(mm.current_epoch())
+        assert epochs[1:] == epochs[:1] * 2
+
+    def test_a_module_an_appended_finder_serves_conflicts_with_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: a package an editable install's finder (after PathFinder)
+        # serves from src/ is found by PathFinder under (src,) only, so
+        # compiles of src/ and tests/ alternating drop it and run it again.
+        name = "pvsdeditable"
+        package = tmp_path / "src" / name
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("RUNS.append(1)\n")
+        (tmp_path / "tests").mkdir()
+        runs = []
+        monkeypatch.setattr(builtins, "RUNS", runs, raising=False)
+
+        class Finder:
+            @staticmethod
+            def find_spec(fullname, path, target=None):
+                if fullname != name:
+                    return None
+                return importlib.util.spec_from_file_location(
+                    name,
+                    package / "__init__.py",
+                    submodule_search_locations=[str(package)],
+                )
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, Finder])
+        try:
+            for dirs in [("src",), ("tests",)] * 2:
+                with mm.fresh_modules(tuple(str(tmp_path / d) for d in dirs)):
+                    importlib.import_module(name)
+        finally:
+            sys.modules.pop(name, None)
+        assert runs == [1]
+
+    def test_a_package_extending_its_path_conflicts_with_nothing(self, tmp_path):
+        # Defect: a regular package is compared by its live __path__, which
+        # its __init__ extended, so it conflicts with its own search dirs:
+        # every compile drops it and moves the epoch, and every open
+        # document recompiles for ever.
+        name = "pvsdmutpkg"
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "__init__.py").write_text(
+            "import os\n__path__.append(os.path.join(os.path.dirname(__file__), 'x'))\n"
+        )
+        try:
+            with mm.fresh_modules((str(tmp_path),)) as before:
+                first = importlib.import_module(name)
+            for _ in range(2):
+                with mm.fresh_modules((str(tmp_path),)):
+                    assert importlib.import_module(name) is first
+            assert mm.current_epoch() == before
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_module_found_only_under_other_search_dirs_is_not_reused(self, helper):
+        # Defect: y in b/ requires a helper only a/ holds, after x in a/
+        # compiled: it gets a's macros, which `lpy b/y.lpy` never finds, and
+        # creating b's own helper later moves no epoch.
+        os.remove(os.path.join(helper.b, helper.name + ".lpy"))
+        before = mm.current_epoch()
+        for _ in range(2):
+            assert self.picked(helper, helper.a) == "1"
+            assert self.picked(helper, helper.b) == "pick()"
+        # Alternating only drops and imports again: nothing to recompile.
+        assert mm.current_epoch() == before
+        next_tick()
+        (pathlib.Path(helper.b) / (helper.name + ".lpy")).write_text(
+            "(defmacro pick [] (return 2))"
+        )
+        assert self.picked(helper, helper.b) == "2"
+
+    def test_a_namespace_package_keeps_its_search_dir_portion(self, tmp_path):
+        # Defect: a namespace package with portions under a search dir and on
+        # sys.path recomputes them from sys.path alone on invalidate_caches,
+        # so its submodule under the search dir stops importing.
+        name = "pvsdns"
+        (tmp_path / "d" / name).mkdir(parents=True)
+        (tmp_path / "s" / name).mkdir(parents=True)
+        path = sys.path[:]
+        sys.path.append(str(tmp_path / "s"))
+        try:
+            with mm.fresh_modules((str(tmp_path / "d"),)):
+                importlib.import_module(name)
+                importlib.invalidate_caches()
+                portions = list(sys.modules[name].__path__)
+        finally:
+            sys.path[:] = path
+            for key in [name, name + ".sub"]:
+                sys.modules.pop(key, None)
+        assert portions == [str(tmp_path / "d" / name), str(tmp_path / "s" / name)]
 
     def test_a_missing_module_keeps_the_environment_settled(
         self, package, tmp_path, monkeypatch

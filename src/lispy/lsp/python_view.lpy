@@ -627,50 +627,6 @@
       (return None))
   (return spanning))
 
-;; Who holds each import root on sys.path: directory -> [users, the entry
-;; _on-sys-path inserted or None], under _SYS-PATH-LOCK, since threads
-;; compiling at once share one sys.path.
-(= _SYS-PATH-LOCK (threading.Lock))
-(= _SYS-PATH-USERS {})
-
-(deco contextlib.contextmanager
-  (def _on-sys-path [directory]
-    "Keep directory on sys.path for the body (nothing for None): inserted
-     first by the first user when absent, and that entry removed when the
-     last user leaves, so sys.path ends as it was."
-    (if (is directory None)
-        (do (yield)
-            (return)))
-    (with [_SYS-PATH-LOCK]
-      (= users (.get _SYS-PATH-USERS directory))
-      (if (is users None)
-          (do (= users [0 None])
-              (if (not (in directory sys.path))
-                  (do (.insert sys.path 0 directory)
-                      (= (sub users 1) directory)))
-              (= (sub _SYS-PATH-USERS directory) users)))
-      (+= (sub users 0) 1))
-    (try
-      (yield)
-      (finally
-        (with [_SYS-PATH-LOCK]
-          (-= (sub users 0) 1)
-          (if (== (sub users 0) 0)
-              (do (del (sub _SYS-PATH-USERS directory))
-                  (for [i entry] in (enumerate sys.path)
-                    (if (is entry (sub users 1))
-                        (do (del (sub sys.path i))
-                            (break)))))))))))
-
-(deco contextlib.contextmanager
-  (def _on-sys-paths [directories]
-    "Keep each of directories on sys.path for the body (_on-sys-path), the
-     first ending first in sys.path where none of them was there before."
-    (with [(contextlib.ExitStack) as stack]
-      (for directory in (reversed (list directories))
-        (.enter-context stack (_on-sys-path directory)))
-      (yield))))
-
 ;; id of each built-in macro -> its name: compile-buffer tells a built-in
 ;; macro in a buffer's macro table by identity, as the seeding and a require
 ;; of lispy.macros register the macro object itself, whatever the key.
@@ -918,10 +874,10 @@
    compile one at a time (compile-unit-forms): a form that fails is a
    failure, and its placeholders (form-placeholders) stand in the view
    where it would be, so one form being typed costs the rest of the buffer
-   neither its view nor its backend diagnostics.  Macros run with search-dirs
-   (module-names' fourth item) on sys.path (_on-sys-paths), so a relative
-   require imports its package and a script's sibling module imports, and
-   under fresh-modules, so a module a require imported is
+   neither its view nor its backend diagnostics.  Macros run under
+   fresh-modules with search-dirs (module-names' fourth item) searched
+   before sys.path, so a relative require imports its package and a
+   script's sibling module imports, and a module a require imported is
    imported anew once its file changed (macro_modules.lpy); the generated
    module is never compiled or executed.  Warnings go where the process's
    filters send them (stderr, never the LSP's stdout); a filter that makes one an error fails the stage it was
@@ -943,7 +899,7 @@
   (= failures [])
   (= placeheld False)
   (try
-    (with [(fresh-modules) as entered (_on-sys-paths search-dirs)]
+    (with [(fresh-modules search-dirs) as entered]
       (= macro-epoch entered)
       (for [form statements error] in (compile-unit-forms forms scope)
         (if (is error None)
@@ -1809,7 +1765,7 @@
    namespace packages count too, up to the nearest of project-import-roots,
    so ns/a.lpy with no ns/__init__ is ns.a from the project root.  The
    search dirs, a tuple, are the one home of the directories the module's
-   compile searches (on sys.path while its macros run, compile-buffer; the
+   compile searches (before sys.path while its macros run, compile-buffer; the
    local definition fallback), in this order, each once: the file's own
    directory, which `lpy` and the nREPL's load-file put on sys.path when
    they run the file as a script; then the script root, the root its
@@ -2074,8 +2030,8 @@
    paths.  One file that cannot be read or written is logged and left
    out of the manifest, so the next sweep tries it again; the rest go on.
    Then _sweep-orphans clears what no current source accounts for.  Each
-   source compiles with its import root on sys.path (a relative require
-   imports its package), which is left as it was.  A view root that overlaps the project is a ValueError before
+   source compiles searching its search dirs (a relative require imports
+   its package).  A view root that overlaps the project is a ValueError before
    anything is touched; the whole sweep holds the view root's lock, and
    nothing is written or removed through a link out of it.  Returns its
    ShadowSweep."

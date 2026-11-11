@@ -325,9 +325,6 @@
   (= spec.submodule-search-locations portions)
   (return spec))
 
-(= SIDE-EFFECT-FREE-FINDERS (, importlib.machinery.BuiltinImporter
-                               importlib.machinery.FrozenImporter))
-
 (def meta-path-spec [name entries parent-locations]
   "The ModuleSpec CPython's import gives the absolute import name name, one
    part of a walk (module-spec-on), or None: sys.meta-path's finders asked
@@ -338,27 +335,13 @@
    every finder after PathFinder, where an editable install appends the
    one that finds its package; one that raises finds nothing.  The one
    departure from the import system: any other finder before PathFinder
-   is skipped, because such finders are import hooks that act when asked
-   (setuptools' _distutils_hack, first on sys.meta-path, imports
-   setuptools when asked for distutils and drops modules from
-   sys.modules when asked for pip).  With no PathFinder on sys.meta-path
-   the walk still runs, last, since entries are what the module's compile
-   searches, and nothing else but the built-in and frozen importers is
-   asked."
-  (= walked False)
-  (for finder in (list sys.meta-path)
-    (cond (is finder importlib.machinery.PathFinder)
-          (do (= walked True)
-              (= spec (path-entry-spec name entries)))
-          (or walked (in finder SIDE-EFFECT-FREE-FINDERS))
-          (try
-            (= spec (.find-spec finder name parent-locations))
-            (except [Exception]
-              (= spec None)))
-          (= spec None))
-    (if (is-not spec None)
-        (return spec)))
-  (return (ife walked None (path-entry-spec name entries))))
+   is skipped, because such finders are import hooks that act when asked.
+   With no PathFinder on sys.meta-path the walk still runs, last, since
+   entries are what the module's compile searches, and nothing else but
+   the built-in and frozen importers is asked (macro_modules.meta-path-spec,
+   the one home of that rule)."
+  (return (macro-modules.meta-path-spec name parent-locations
+                                        (fn [] (path-entry-spec name entries)))))
 
 (def module-spec-on [module-name entries]
   "The ModuleSpec CPython's import gives the absolute import name
@@ -427,7 +410,7 @@
    import root alone.  With no origin, or no package, or beyond the
    top-level package, it resolves to nothing.  An absolute name is looked
    up on a search path of origin's search dirs (module-names), in the
-   order its compile puts them on sys.path, so scripts/x.lpy finds its
+   order its compile searches them, so scripts/x.lpy finds its
    sibling helper.lpy, then every workspace folder's project-import-roots,
    then sys.path (installed packages, lispython itself).  Either lookup is
    module-file-on, which imports nothing."
@@ -837,7 +820,8 @@
    the compile's late outcome is dropped."
   ;; A given-up compile's thread keeps running (a parked thread per hung
   ;; macro, capped); its fresh-modules token is marked hung by the next
-  ;; drop's wait (macro_modules), so it holds up no later drop either.  The
+  ;; compile that waits on it to drop modules (a stale drop or a search-dirs
+  ;; conflict, macro_modules), so it holds up no later drop either.  The
   ;; same WAIT-LIMIT: past it a compile counts as hung for both.
   (= future thread.future)
   (= loop (asyncio.get-running-loop))
@@ -873,7 +857,7 @@
   "The CompiledBuffer of document uri's source (python_view.compile-buffer),
    named as Python imports its file (module-names) so the prelude, its
    opt-out and the macros it defines apply as when the module compiles,
-   with its search dirs on sys.path, and its parse warnings naming the
+   with its search dirs searched first, and its parse warnings naming the
    file.  One compile per version (view-cache): a change's diagnostics,
    its backend push and every request on that version share it; fresh
    compiles again all the same and caches the result.  It runs

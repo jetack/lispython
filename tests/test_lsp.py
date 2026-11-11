@@ -923,7 +923,7 @@ class TestRequireSelection:
     ):
         # Defects: the document is named as a top-level module, so the
         # relative require fails ("no known parent package"); or only the
-        # project root is on sys.path while its macros run, so the sibling
+        # project root is searched while its macros run, so the sibling
         # require, which `lpy lspnspkg/a.lpy` imports, loads no macros.
         uri = (namespace / "a.lpy").as_uri()
         compiled = server.compile_document(uri, None, self.NS_SOURCE)
