@@ -7,6 +7,7 @@ Expected positions are read off the source and generated text with
 import contextlib
 import hashlib
 import importlib
+import importlib.util
 import json
 import ntpath
 import os
@@ -2741,11 +2742,8 @@ class TestMacroModules:
         before, after = self.raced(helper)
         assert after == before + 1
 
-    def test_a_raced_name_keeps_the_two_compiles_apart(self, helper, monkeypatch):
-        # Defect: after the race the next compile searching b/ drops the
-        # helper, a compile searching a/ is admitted beside it and imports it
-        # again, and the race (and its recompile of every document) repeats.
-        self.raced(helper)
+    def waits_beside(self, helper, monkeypatch):
+        """Whether a compile searching a/ waits while one searching b/ runs."""
         monkeypatch.setattr(mm, "WAIT_LIMIT", 30)
         held, release = threading.Event(), threading.Event()
 
@@ -2765,13 +2763,80 @@ class TestMacroModules:
             assert held.wait(10)
             other.start()
             other.join(0.5)
-            assert other.is_alive()
+            waited = other.is_alive()
         finally:
             release.set()
             holder.join(10)
             if other.ident is not None:
                 other.join(10)
         assert not other.is_alive()
+        return waited
+
+    def test_a_raced_name_keeps_the_two_compiles_apart(self, helper, monkeypatch):
+        # Defect: after the race the next compile searching b/ drops the
+        # helper, a compile searching a/ is admitted beside it and imports it
+        # again, and the race (and its recompile of every document) repeats.
+        self.raced(helper)
+        assert self.waits_beside(helper, monkeypatch)
+
+    def test_an_edit_frees_a_raced_name(self, helper, monkeypatch):
+        # Defect: a raced name keeps the two compiles apart for ever, each
+        # dropping every tracked module, after any edit.
+        self.raced(helper)
+        next_tick()
+        (pathlib.Path(helper.a) / (helper.name + ".lpy")).write_text(
+            "(defmacro pick [] (return 11))"
+        )
+        mm.epoch()
+        assert not self.waits_beside(helper, monkeypatch)
+
+    def test_a_module_another_finder_loads_conflicts_with_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: a module a meta_path finder other than PathFinder loaded
+        # (an editable install's) is found nowhere by PathFinder, so its own
+        # compile conflicts with it: every compile moves the epoch.
+        name = "pvsdfinderloaded"
+        (tmp_path / "elsewhere").mkdir()
+        source = tmp_path / "elsewhere" / f"{name}.py"
+        source.write_text("X = 1\n")
+
+        class Finder:
+            @staticmethod
+            def find_spec(fullname, path, target=None):
+                if fullname != name:
+                    return None
+                return importlib.util.spec_from_file_location(name, source)
+
+        monkeypatch.setattr(sys, "meta_path", [Finder, *sys.meta_path])
+        directory = tmp_path / "d"
+        directory.mkdir()
+        try:
+            with mm.fresh_modules((str(directory),)) as before:
+                first = importlib.import_module(name)
+            with mm.fresh_modules((str(directory),)):
+                assert importlib.import_module(name) is first
+            assert mm.current_epoch() == before
+        finally:
+            sys.modules.pop(name, None)
+
+    def test_a_search_dir_spelled_two_ways_is_one(self, tmp_path, monkeypatch):
+        # Defect: a search dir that links to a sys.path entry resolves its
+        # module under two spellings, so compiles alternating with another
+        # directory drop and import it again every time.
+        name = "pvsdlinked"
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / f"{name}.py").write_text("X = 1\n")
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        (tmp_path / "other").mkdir()
+        monkeypatch.setattr(sys, "path", [*sys.path, str(tmp_path / "real")])
+        try:
+            with mm.fresh_modules((str(tmp_path / "link"),)):
+                first = importlib.import_module(name)
+            with mm.fresh_modules((str(tmp_path / "other"),)):
+                assert importlib.import_module(name) is first
+        finally:
+            sys.modules.pop(name, None)
 
     def test_a_package_extending_its_path_conflicts_with_nothing(self, tmp_path):
         # Defect: a regular package is compared by its live __path__, which

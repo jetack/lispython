@@ -33,8 +33,8 @@
 ;; path to (st_mtime_ns, st_size), the first stamp it had when read in this
 ;; epoch (an earlier stamp can only make it stale, never missed); it is keyed
 ;; by path, never by module name, because one name may be read from two
-;; source roots in one epoch.  names holds the modules a drop pops from
-;; sys.modules.  dep-files maps each trackable file in the cache record of a
+;; source roots in one epoch.  names maps the modules a drop pops from
+;; sys.modules to the search dirs of the compile that imported them.  dep-files maps each trackable file in the cache record of a
 ;; tracked .lpy (lpy-record) to its recorded stamp: a module loaded from its
 ;; cache reads none of the files its compile read (a module a macro imported
 ;; as it expanded), so no window sees them.  dirs maps a directory searched
@@ -44,7 +44,8 @@
 ;; far), hung holds the running ones a wait timed out on: a token leaves both
 ;; when its compile ends.  switching counts the compiles waiting to drop
 ;; modules of other search dirs (_enter); contested holds the top-level names
-;; two compiles' search dirs were found to give apart.  search-dirs is the
+;; two compiles' search dirs were found to give apart, until the next stale
+;; drop.  search-dirs is the
 ;; running compile's search dirs, per thread (_SearchDirsFinder).  epoch is
 ;; the macro environment's version.
 (class _Shared []
@@ -54,7 +55,7 @@
     (= self.original-path-stats original-path-stats)
     (= self.original-namespace-exec original-namespace-exec)
     (= self.files {})
-    (= self.names (set))
+    (= self.names {})
     (= self.dep-files {})
     (= self.dirs {})
     (= self.running {})
@@ -326,6 +327,9 @@
     (.clear _SHARED.names)
     (.clear _SHARED.dep-files)
     (.clear _SHARED.dirs)
+    ;; The edit may be what set two dirs apart (or will again: the next
+    ;; race finds it anew).
+    (.clear _SHARED.contested)
     (importlib.invalidate-caches)
     (+= _SHARED.epoch 1)
     (.notify-all _SHARED.condition)
@@ -397,17 +401,23 @@
 
 (def _identity [spec]
   "What a top-level spec resolves to: its file, or a namespace package's
-   portions.  Never a regular package's portions: they are its live
-   __path__, which its own code may extend."
+   portions, as real paths (one directory may be spelled two ways, a
+   search dir and the sys.path entry it links to).  Never a regular
+   package's portions: they are its live __path__, which its own code may
+   extend."
   (if (is spec None)
       (return None))
   (if (is-not spec.origin None)
-      (return spec.origin))
-  (return (tuple (or spec.submodule-search-locations []))))
+      (return (osp.realpath spec.origin)))
+  (return (tuple ((osp.realpath portion)
+                  for portion in (or spec.submodule-search-locations [])))))
 
 (def _resolved [name search-dirs]
   "_identity of the top-level name name as a compile searching search-dirs
-   would import it, None when it finds none; PathFinder imports nothing."
+   would import it, None when it finds none; PathFinder imports nothing.
+   Both sides of a comparison come from here, never from a loaded module's
+   spec: a module another meta_path finder loaded (an editable install's)
+   is found by PathFinder under no dirs, so it compares equal."
   (try
     (return (_identity (importlib.machinery.PathFinder.find-spec
                          name (+ (list search-dirs) sys.path))))
@@ -422,20 +432,24 @@
    name, since a reuse cannot be observed.  A name sys.path gives resolves
    alike under every search dirs, so only search-dir modules conflict.
    Under _SHARED.condition."
-  (= candidates (set _SHARED.names))
-  (for [other [_ reads]] in (list (.items _SHARED.running))
+  ;; Each name with the dirs it was imported under: the module it is.
+  (= candidates (list (.items _SHARED.names)))
+  (for [other [dirs reads]] in (list (.items _SHARED.running))
     (if (is-not other token)
-        (.update candidates (_tracked-names (list reads)))))
+        (.extend candidates [(, name dirs) for name in (_tracked-names (list reads))])))
   (= found [])
-  (for name in candidates
-    (if (in "." name)
+  (for [name dirs] in candidates
+    (if (or (in "." name) (not (in name sys.modules)) (in name found))
         (continue))
-    (= spec (getattr (.get sys.modules name) "__spec__" None))
-    (if (is spec None)
-        (continue))
-    (if (!= (_identity spec) (_resolved name search-dirs))
+    (if (_apart-p name dirs search-dirs)
         (.append found name)))
   (return found))
+
+(def _apart-p [name dirs other-dirs]
+  "Whether compiles searching dirs and other-dirs import the top-level name
+   name from different places (one finding none counts)."
+  (return (and (!= dirs other-dirs)
+               (!= (_resolved name dirs) (_resolved name other-dirs)))))
 
 (def _contested-p [search-dirs]
   "Whether a running compile (less the hung ones) searches dirs that
@@ -444,7 +458,7 @@
   (for [token [dirs _]] in (list (.items _SHARED.running))
     (if (and (not (in token _SHARED.hung)) (!= dirs search-dirs))
         (for name in _SHARED.contested
-          (if (!= (_resolved name dirs) (_resolved name search-dirs))
+          (if (_apart-p name dirs search-dirs)
               (return True)))))
   (return False))
 
@@ -543,11 +557,11 @@
 
                 (is path None)
                 (if (not (_lispy-module-p name))
-                    (.add _SHARED.names name))
+                    (= (sub _SHARED.names name) search-dirs))
 
                 (_trackable-p name path)
                 (do (.setdefault _SHARED.files path stamp)
-                    (.add _SHARED.names name)
+                    (= (sub _SHARED.names name) search-dirs)
                     (if (and (is-not stamp None) (.endswith path ".lpy"))
                         (_track-record path)))))
             ;; Admitted with no conflict, this compile may still have reused
