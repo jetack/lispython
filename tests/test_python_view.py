@@ -1204,7 +1204,12 @@ class TestShadows:
         )
         config = json.loads(open(path).read())
         assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
-        assert "executionEnvironments" not in config
+        assert config["executionEnvironments"] == [
+            {
+                "root": str(root / "src"),
+                "extraPaths": [str(root / "src"), str(root), src, str(project)],
+            }
+        ]
 
         (pkg / "helper.py").unlink()
         self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py
@@ -1239,7 +1244,12 @@ class TestShadows:
         )
         config = json.loads(open(path).read())
         assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
-        assert "executionEnvironments" not in config
+        assert config["executionEnvironments"] == [
+            {
+                "root": str(root / "src"),
+                "extraPaths": [str(root / "src"), str(root), src, str(project)],
+            }
+        ]
 
     def test_a_script_directory_is_searched_only_by_its_files(self, tmp_path):
         # Defects: src/pkg/my-res (no __init__, no identifier, inside the
@@ -1278,10 +1288,13 @@ class TestShadows:
             str(project),
             str(src),
         ]
-        [env] = config["executionEnvironments"]
+        env, src_env = config["executionEnvironments"]
         assert env["root"] == str(view_res)
         assert env["extraPaths"][0] == str(view_res)
         assert str(res) in env["extraPaths"]
+        assert src_env["root"] == str(root / "src")
+        assert str(res) not in src_env["extraPaths"]
+        assert str(view_res) not in src_env["extraPaths"]
         top = self.pyrefly_config(
             project,
             root,
@@ -1527,6 +1540,54 @@ class TestShadows:
             root,
             reportMissingModuleSource="none",
             reportAttributeAccessIssue="error",
+        )
+        assert messages == []
+
+    def src_utils_layout(self, project):
+        """src/pkg/m.lpy importing utils, which both the project root and
+        src hold; a top-level .lpy gives the root a shadow, so its utils.py
+        is linked into the view root."""
+        for name, text in [
+            ("top.lpy", "(= t 1)"),
+            ("utils.py", "ROOT_ONLY = 1"),
+            ("src/utils.py", "SRC_ONLY = 1"),
+            ("src/pkg/__init__.py", ""),
+            ("src/pkg/m.lpy", "(import utils)\n(= w utils.SRC-ONLY)"),
+        ]:
+            self.write(project / name, text)
+
+    def test_a_shared_roots_modules_search_it_before_the_project_root(self, tmp_path):
+        # Defect: src (a shared root) takes the default list, which leads
+        # with the view root and the project root, so the backend resolves
+        # the `import utils` of src/pkg/m.lpy to the root utils.py, where its
+        # compile, `python -m pkg.m` from src and an editable install
+        # resolve src/utils.py.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.src_utils_layout(project)
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        src = str(project / "src")
+        assert os.readlink(root / "utils.py") == str(project / "utils.py")
+        assert manifest.shared_roots == sorted([str(project), src])
+        settings = {
+            "environments": manifest.environments,
+            "shared_roots": manifest.shared_roots,
+        }
+        path = pv.write_pyright_config(str(project), str(root), **settings)
+        config = json.loads(open(path).read())
+        [env] = config["executionEnvironments"]
+        assert env["root"] == str(root / "src")
+        assert env["extraPaths"] == [str(root / "src"), str(root), src, str(project)]
+        self.pyrefly_config(project, root, **settings)
+        with open(root / "src" / "pyrefly.toml", "rb") as f:
+            assert tomllib.load(f)["search-path"] == env["extraPaths"]
+
+    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
+    def test_a_shared_roots_import_resolves_there_for_basedpyright(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.src_utils_layout(project)
+        messages = self.basedpyright_messages(
+            tmp_path, project, root, reportAttributeAccessIssue="error"
         )
         assert messages == []
 
