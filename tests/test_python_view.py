@@ -1711,28 +1711,59 @@ class TestShadows:
         scripts = str(project / "scripts")
         assert manifest.environments[scripts] == (scripts, str(project))
 
-    def shared_layout_without_lpy(self, project):
-        """scripts/run.lpy importing a pure-.py regular package mylib at the
-        root (a flat layout) and nsp.mod from src, which holds only the
-        namespace package nsp: no .lpy module sits in either root."""
-        for name, text in [
+    def test_a_src_layout_never_shares_the_project_root(self, tmp_path):
+        # Defect: a regular package at the root (tests/__init__.py, common in
+        # a src layout) shares the project root too, so src/pkg/m.lpy
+        # searches it and `import rootonly` resolves, where an editable
+        # install of the src layout puts src alone on sys.path and
+        # `python -m pkg.m` raises ModuleNotFoundError.
+        project = tmp_path / "project"
+        self.write(project / "src" / "pkg" / "__init__.py", "")
+        self.write(project / "tests" / "__init__.py", "")
+        src = str(project / "src")
+        assert pv.shared_import_roots(str(project)) == [src]
+        names = pv.module_names(
+            str(project / "src" / "pkg" / "m.lpy"), project_root=str(project)
+        )
+        assert names[3] == (src,)
+        # With no src the root package makes it a flat layout.
+        (project / "src" / "pkg" / "__init__.py").unlink()
+        for directory in [project / "src" / "pkg", project / "src"]:
+            directory.rmdir()
+        assert pv.shared_import_roots(str(project)) == [str(project)]
+
+    # scripts/run.lpy importing a module of a shared root that holds no .lpy:
+    # a pure-.py regular package mylib at the root (the flat layout), or
+    # nsp.mod from a src holding only the namespace package nsp.
+    SHARED_LAYOUTS = {
+        "flat": [
             ("mylib/__init__.py", "M = 1"),
+            ("scripts/run.lpy", "(import mylib)\n(= v mylib.M)"),
+        ],
+        "src": [
             ("src/nsp/mod.py", "N = 1"),
-            ("scripts/run.lpy", "(import mylib nsp.mod)\n(= v (+ mylib.M nsp.mod.N))"),
-        ]:
+            ("scripts/run.lpy", "(import nsp.mod)\n(= v nsp.mod.N)"),
+        ],
+    }
+
+    def shared_layout_without_lpy(self, project, layout):
+        for name, text in self.SHARED_LAYOUTS[layout]:
             self.write(project / name, text)
 
-    def test_shared_roots_come_from_the_layout_not_the_shadows(self, tmp_path):
+    @pytest.mark.parametrize("layout", ["flat", "src"])
+    def test_shared_roots_come_from_the_layout_not_the_shadows(self, tmp_path, layout):
         # Defects: the shared roots are read off the .lpy shadows' import
-        # roots, so a pure-.py package at the root (mylib) and a src holding
-        # only namespace packages are no search path of scripts/run.lpy,
-        # where `lpy scripts/run.lpy` with the project installed imports both.
+        # roots, so a pure-.py package at the root (mylib) or a src holding
+        # only namespace packages is no search path of scripts/run.lpy,
+        # where `lpy scripts/run.lpy` with the project installed imports it.
         project, root = tmp_path / "project", tmp_path / "view"
-        self.shared_layout_without_lpy(project)
+        self.shared_layout_without_lpy(project, layout)
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
-        src, scripts = str(project / "src"), str(project / "scripts")
-        assert manifest.environments == {scripts: (scripts, src, str(project))}
+        scripts = str(project / "scripts")
+        shared = str(project / "src") if layout == "src" else str(project)
+        view_shared = str(root / "src") if layout == "src" else str(root)
+        assert manifest.environments == {scripts: (scripts, shared)}
         config = json.loads(
             open(
                 pv.write_pyright_config(
@@ -1740,21 +1771,23 @@ class TestShadows:
                 )
             ).read()
         )
-        assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
+        default = list(dict.fromkeys([str(root), view_shared, str(project), shared]))
+        assert config["extraPaths"] == default
         [env] = config["executionEnvironments"]
         assert env["extraPaths"] == [
             str(root / "scripts"),
-            str(root / "src"),
-            str(root),
+            view_shared,
             scripts,
-            src,
-            str(project),
+            shared,
         ]
 
     @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
-    def test_shared_roots_from_the_layout_resolve_for_basedpyright(self, tmp_path):
+    @pytest.mark.parametrize("layout", ["flat", "src"])
+    def test_shared_roots_from_the_layout_resolve_for_basedpyright(
+        self, tmp_path, layout
+    ):
         project, root = tmp_path / "project", tmp_path / "view"
-        self.shared_layout_without_lpy(project)
+        self.shared_layout_without_lpy(project, layout)
         messages = self.basedpyright_messages(
             tmp_path,
             project,
@@ -1765,10 +1798,11 @@ class TestShadows:
         assert messages == []
 
     @pytest.mark.skipif(not shutil.which("pyrefly"), reason="no pyrefly")
-    def test_shared_roots_from_the_layout_resolve_for_pyrefly(self, tmp_path):
+    @pytest.mark.parametrize("layout", ["flat", "src"])
+    def test_shared_roots_from_the_layout_resolve_for_pyrefly(self, tmp_path, layout):
         # A deliberate error proves pyrefly checked the file.
         project, root = tmp_path / "project", tmp_path / "view"
-        self.shared_layout_without_lpy(project)
+        self.shared_layout_without_lpy(project, layout)
         with open(project / "scripts" / "run.lpy", "a") as f:
             f.write('\n(= bad (+ 1 "a"))')
         errors = self.pyrefly_errors(tmp_path, project, root, ["scripts/run.py"])

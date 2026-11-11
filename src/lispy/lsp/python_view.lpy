@@ -1758,31 +1758,29 @@
 
 (def shared-import-roots [project-root]
   "The directories an editable install of the project puts on sys.path for
-   every module, decided by the layout alone: src when it is a directory
-   (the src layout), then the project root when a regular package sits
-   directly in it (a subdirectory holding an __init__, has-init-file: the
-   flat layout).  The one home of that rule: module-names appends them to
-   every module's search dirs, and the backends' default list
-   (default-search-dirs) holds them."
-  ;; The project root comes last: src/pkg/my-res/x.lpy, run as `lpy` with
-  ;; src installed, imports src/utils.py, never a root utils.py.  An
+   every module, decided by the layout alone: [src] when src is a
+   directory (the src layout); else [the project root] when a regular
+   package sits directly in it (a subdirectory holding an __init__,
+   has-init-file: the flat layout); else none.  The one home of that rule:
+   module-names appends them to every module's search dirs, and the
+   backends' default list (default-search-dirs) holds them."
+  ;; A src layout never shares the root, though tests/__init__.py often
+  ;; sits there: its editable install puts src alone on sys.path, so
+  ;; src/pkg/m.lpy, run as `python -m pkg.m`, imports no root module.  An
   ;; __init__ created or deleted in a root package is a renaming file
   ;; (renames_modules_p), so open documents are published again; a new or
   ;; removed src directory is no file event, so it takes effect at each
   ;; document's next compile and the next shadow sweep.
-  (= found [])
   (= src (osp.join project-root "src"))
   (if (osp.isdir src)
-      (.append found src))
+      (return [src]))
   (try
     (with [(os.scandir project-root) as entries]
       (= flat (any ((and (.is-dir entry) (has-init-file entry.path))
                     for entry in entries))))
     (except [OSError]
       (= flat False)))
-  (if flat
-      (.append found project-root))
-  (return found))
+  (return (ife flat [project-root] [])))
 
 (def default-search-dirs [project-root]
   "The search dirs of the backends' default list, which a module of the
