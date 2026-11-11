@@ -1810,7 +1810,8 @@
 
 (class _SrcLayout []
   "One project root's remembered src layout (_SrcLayouts): the witness of
-   its latest walk (None: no Python code), that walk's ticket, whether the
+   its latest walk (None: no Python code, or no walk stored yet, ticket 0
+   and recheck True), that walk's ticket, whether the
    answer must be walked again before it is used (recheck), and every
    answer handed out since the last refresh (handed)."
   (def __init__ [self]
