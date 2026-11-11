@@ -64,13 +64,12 @@
 ;; it costs one WAIT-LIMIT.
 (= WAIT-LIMIT 5.0)
 
-(= _EXCLUDED-PARTS (frozenset ["site-packages" "dist-packages"]))
+(= _LIBRARY-PARTS (frozenset ["site-packages" "dist-packages"]))
 (= _LISPY-DIR (osp.dirname (osp.realpath lispy.__file__)))
-;; lispython's own package and the interpreter's library directories.
-(= _EXCLUDED-DIRS
-   (+ (, _LISPY-DIR)
-      (tuple (sorted {, (osp.realpath (sub (sysconfig.get-paths) key))
-                        for key in ["stdlib" "platstdlib" "purelib" "platlib"]}))))
+;; The interpreter's library directories.
+(= _LIBRARY-DIRS
+   (tuple (sorted {, (osp.realpath (sub (sysconfig.get-paths) key))
+                     for key in ["stdlib" "platstdlib" "purelib" "platlib"]})))
 
 (def _stamp [path]
   "(st_mtime_ns, st_size) of path; OSError when it cannot be read."
@@ -296,15 +295,23 @@
     (except [ValueError]
       (return False))))
 
+(def library-path-p [real]
+  "Whether the file or directory at the real path real is installed code,
+   never the user's: it lies in the interpreter's library directories
+   (_LIBRARY-DIRS) or in any site-packages or dist-packages directory.  The
+   one home of that rule: tracking (_trackable-path-p) and the server's
+   module naming (renaming-file-p) read it."
+  (if (not (.isdisjoint _LIBRARY-PARTS (.split real os.sep)))
+      (return True))
+  (return (any ((_within-p real directory) for directory in _LIBRARY-DIRS))))
+
 (def _trackable-path-p [real]
   "Whether the file or directory at the real path real may be tracked: it
-   lies outside lispython's own package, the interpreter's library
-   directories (_EXCLUDED-DIRS) and every site-packages or dist-packages
-   directory.  Any other source root qualifies (a workspace member, an
-   editable install, a PYTHONPATH entry), not only the compiling file's."
-  (if (not (.isdisjoint _EXCLUDED-PARTS (.split real os.sep)))
-      (return False))
-  (return (not (any ((_within-p real directory) for directory in _EXCLUDED-DIRS)))))
+   is no library path (library-path-p) and lies outside lispython's own
+   package, which a drop never re-imports.  Any other source root qualifies
+   (a workspace member, an editable install, a PYTHONPATH entry), not only
+   the compiling file's."
+  (return (not (or (library-path-p real) (_within-p real _LISPY-DIR)))))
 
 (def _lispy-module-p [name]
   (return (or (== name "lispy") (.startswith name "lispy."))))

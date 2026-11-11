@@ -442,7 +442,8 @@
     (= self._sent-version 0)
     ;; lpy uri -> (text, origin) of the buffer's latest full view
     ;; (push-buffer), kept across spawns: a start opens each in the new
-    ;; process, and a request that synced a cursor view puts it back.
+    ;; process, and a request that synced a cursor view puts it back, or
+    ;; closes the copy it opened when there is none (_request-done).
     (= self._full {})
     ;; lpy uri -> (text, diagnostics) the backend last published for a
     ;; full view's text (_diagnostics-published).
@@ -457,10 +458,11 @@
     (= self.on-view-prepared None)
     ;; Called on the loop once the backend's input changed: with an lpy uri
     ;; once a text of that buffer was sent to it (_sync: a full view's or a
-    ;; cursor view's), with None once a start succeeded (_start: the new
-    ;; process reads the disk anew) or it was told files on disk changed
-    ;; (file-saved, saved); set by Backends.  Never raises
-    ;; (_tell-input-changed catches).
+    ;; cursor view's) or it was closed in it (_close-backend-copy: the
+    ;; backend reads that file from disk again), with None once a start
+    ;; succeeded (_start: the new process reads the disk anew) or it was
+    ;; told files on disk changed (file-saved, saved); set by Backends.
+    ;; Never raises (_tell-input-changed catches).
     (= self.on-input-changed None)
     ;; Path -> text of each of the view root's config files the running
     ;; process last read (_read-configs): at its start (_spawn) or when told
@@ -765,13 +767,22 @@
     "A request on document lpy-uri ended.  Once none is left in flight, the
      backend analyses the buffer's full view again (a cursor view's
      diagnostics are never forwarded); never while another still waits for
-     its answer over the text it synced."
+     its answer over the text it synced.  With no full view (_full) the
+     copy the requests opened is closed (_close-backend-copy): the document
+     was closed or moved to another project's backend while they ran, so
+     nobody else would ever close it here; a buffer that never compiled
+     loses only its cursor view's copy, which push-buffer opens again."
     (= left (- (.get self._in-flight lpy-uri 1) 1))
     (if (> left 0)
         (do (= (sub self._in-flight lpy-uri) left)
             (return)))
     (.pop self._in-flight lpy-uri None)
-    (._sync-full self lpy-uri))
+    (if (in lpy-uri self._full)
+        (._sync-full self lpy-uri)
+        (try
+          (._close-backend-copy self lpy-uri)
+          (except [Exception]
+            (.debug logger "python backend: cannot close %s" lpy-uri :exc-info True)))))
 
   (def push-buffer [self lpy-uri source view]
     "Make view, the full PythonView of buffer source (the one compile of
@@ -911,16 +922,27 @@
         (return None))))
 
   (def close-document [self lpy-uri]
-    "didClose for document lpy-uri if this backend process has it open."
+    "Forget document lpy-uri's full view and diagnostics, and didClose it if
+     this backend process has it open.  A request still in flight on it
+     closes the copy its sync reopens once it ends (_request-done)."
     (.pop self._full lpy-uri None)
     (.pop self._diagnostics lpy-uri None)
+    (._close-backend-copy self lpy-uri))
+
+  (def _close-backend-copy [self lpy-uri]
+    "didClose for document lpy-uri if this backend process has it open;
+     on-input-changed then hears lpy-uri, since the backend reads that file
+     from disk again, which another buffer's answer may depend on; the
+     document's own answers were computed over a text a request sends
+     again, so they stand."
     (= doc (.pop self._docs lpy-uri None))
     (if (is-not doc None)
         (._next-version self))
     (if (and (is-not doc None) self.running)
-        (.text-document-did-close self._client
-          (lsp.DidCloseTextDocumentParams
-            :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))))
+        (do (.text-document-did-close self._client
+              (lsp.DidCloseTextDocumentParams
+                :text-document (lsp.TextDocumentIdentifier :uri (sub doc 0))))
+            (._tell-input-changed self lpy-uri))))
 
   (async-def file-saved [self *lpy-uris]
     "Rewrite a running backend's shadows and config, then tell it every file
@@ -1114,8 +1136,9 @@
    buffer's diagnostics; on-view-prepared with a BackendClient once its
    start succeeded, over the view root's shadows and config file it wrote,
    or a save changed its config file; on-input-changed with an lpy uri once
-   a text of that buffer (a full or cursor view's) was sent to a backend,
-   or None once a backend started or was told files on disk changed."
+   a text of that buffer (a full or cursor view's) was sent to a backend
+   or it was closed in one, or None once a backend started or was told
+   files on disk changed."
   (def __init__ [self folders :cache-home None]
     (= self.folders folders)
     (= self.cache-home cache-home)
@@ -1126,6 +1149,9 @@
     (= self.on-input-changed None)
     (= self.clients {})
     (= self._tasks (set))
+    ;; BackendClient -> the task shutting it down, for each client dropped
+    ;; from clients whose shutdown has not ended (_retire).
+    (= self._retiring {})
     (= self._closed False)
     ;; The clients whose files-changed sweep is scheduled and not begun.
     (= self._sweeps-due (set)))
@@ -1228,11 +1254,13 @@
     (return (await (.request client method params :uri lpy-uri :text text))))
 
   (def _schedule [self coroutine]
-    "Run coroutine as a task of the running loop, its failure logged."
+    "Run coroutine as a task of the running loop, its failure logged; the
+     task."
     (= task (asyncio.ensure-future coroutine))
     (.add self._tasks task)
     (.add-done-callback task _task-done)
-    (.add-done-callback task self._tasks.discard))
+    (.add-done-callback task self._tasks.discard)
+    (return task))
 
   (def document-opened [self lpy-uri]
     "A buffer opened: start its backend without waiting for it
@@ -1341,25 +1369,35 @@
             (.add roots (osp.realpath path))))
       (for root in (list self.clients)
         (if (not-in root roots)
-            (._schedule self (.shutdown (.pop self.clients root)))))
+            (._retire self (.pop self.clients root))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot follow the workspace folders"))))
 
+  (def _retire [self client]
+    "Shut client down, a backend dropped from clients, in a task of its own;
+     kept in _retiring until that ends, so the LSP's shutdown and exit
+     reach its process too."
+    (= task (._schedule self (.shutdown client)))
+    (= (sub self._retiring client) task)
+    (.add-done-callback task (fn [_] (.pop self._retiring client None))))
+
   (async-def shutdown-all [self]
-    "Shut every backend down (the LSP's shutdown); none starts afterwards."
+    "Shut every backend down (the LSP's shutdown), those being retired
+     included; none starts afterwards."
     (= self._closed True)
     (= clients (list (.values self.clients)))
     (try
       (await (asyncio.gather *[(.shutdown client) for client in clients]
+                             *(list (.values self._retiring))
                              :return-exceptions True))
       (except [Exception]
         (.exception logger "lispython LSP: backend shutdown failed"))))
 
   (def kill-all [self]
-    "Kill every backend process now (the LSP's exit, a safety net for a
-     client that exits without shutdown)."
+    "Kill every backend process now, those being retired included (the
+     LSP's exit, a safety net for a client that exits without shutdown)."
     (= self._closed True)
-    (for client in (list (.values self.clients))
+    (for client in (+ (list (.values self.clients)) (list self._retiring))
       (try
         (.kill client)
         (except [Exception]
