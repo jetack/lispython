@@ -46,7 +46,8 @@
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
-                             pyrefly-fallback source-lines source-prefix src-python-entry-p
+                             forget-src-layouts pyrefly-fallback source-lines
+                             source-prefix src-python-entry-p
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT own-place project-root-of
@@ -1736,8 +1737,9 @@
 (def did-change-watched-files [ls params]
   "Module files created or deleted (watch-module-files): an .lpy one is
    indexed again (reindex-watched-file), and when one may rename a module
-   (renaming-file-p) every open document is published again.  A change of
-   content never matters."
+   (renaming-file-p) the remembered src layouts are dropped
+   (forget-src-layouts) and every open document is published again.  A
+   change of content never matters."
   (= renamed False)
   (for change in params.changes
     (if (not-in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
@@ -1751,7 +1753,8 @@
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
   (if renamed
-      (republish-open-documents ls))))
+      (do (forget-src-layouts)
+          (republish-open-documents ls)))))
 
 (def reindex-folders [added removed]
   "Keep the workspace index to the folders: index every file of the added
@@ -1779,6 +1782,7 @@
 ;; finds that backend.
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WORKSPACE_FOLDERS)
 (def did-change-workspace-folders [ls params]
+  (forget-src-layouts)
   (try
     (reindex-folders (or params.event.added []) (or params.event.removed []))
     (except [Exception]
@@ -1792,6 +1796,8 @@
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
   (= uri params.text_document.uri)
+  ;; A client without the file watch tells of no src layout change.
+  (forget-src-layouts)
   (index-file uri)
   (publish-diagnostics ls uri :opened True)))
 
@@ -1802,6 +1808,7 @@
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
 (def did-save [ls params]
   (= uri params.text_document.uri)
+  (forget-src-layouts)
   (index-file uri)
   (publish-diagnostics ls uri :recompile True)
   (.document-saved backends uri)))
@@ -1870,7 +1877,8 @@
   "The full view of snapshot doc's version, compiled under the macro
    environment and the naming of now (ViewCache.cached-view,
    uri-module-names, read afresh: stats of the directories up from the
-   file and a listing of the project root and src, two levels at most), or
+   file and a listing of the project root, with the src layout answer
+   remembered until a file event, open or save, forget-src-layouts), or
    None: none compiled yet, or the compile failed.  Hover and signature
    help read it, never compile: they answer locally before any backend."
   (= [name package _ search-dirs] (uri-module-names doc.uri))

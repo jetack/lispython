@@ -1756,7 +1756,7 @@
    lookup with no importing file read it."
   (return [project-root (osp.join project-root "src")]))
 
-(def src-python-entry-p [project-root path]
+(def src-python-entry-p [project-root path :suffixes None]
   "Whether path (which need not exist) is a module file by which
    project-root's src holds Python code: a file with a finder suffix
    (finder-suffixes: .py, .lpy, extension modules, __init__ files among
@@ -1765,10 +1765,11 @@
    src/acme/tool/__init__.py counts.  The one home of what makes src a src
    layout: shared-import-roots asks it of the files under src, and the
    LSP's renaming-file-p of a created or deleted file, which can flip the
-   shared roots of every module."
+   shared roots of every module.  suffixes, when given, is finder-suffixes'
+   answer, read once by a caller asking of many files."
   (= name (osp.basename path))
   (if (not (any ((and (.endswith name suffix) (> (len name) (len suffix)))
-                 for suffix in (finder-suffixes))))
+                 for suffix in (or suffixes (finder-suffixes)))))
       (return False))
   (= src (osp.normpath (osp.join project-root "src")))
   (= rel (osp.relpath (osp.dirname (osp.normpath path)) src))
@@ -1783,22 +1784,71 @@
 
 (def _src-holds-python-p [project-root]
   "Whether a src-python-entry-p file lies under project-root's src: a
-   walk that follows no directory link, enters no _pruned-p directory and
-   stops at the first hit."
+   walk that enters no _pruned-p directory and stops at the first hit.  It
+   follows directory links, as FileFinder imports a package through one
+   (src/acme -> ../shared/acme), entering each real directory once, so a
+   link back up ends."
   (= src (osp.join project-root "src"))
-  (for [dirpath dirnames filenames] in (os.walk src :followlinks False)
-    (if (any ((src-python-entry-p project-root (osp.join dirpath filename))
+  (= suffixes (tuple (finder-suffixes)))
+  (= seen (set [(osp.realpath src)]))
+  (for [dirpath dirnames filenames] in (os.walk src :followlinks True)
+    (if (any ((src-python-entry-p project-root (osp.join dirpath filename)
+                                  :suffixes suffixes)
               for filename in filenames))
         (return True))
-    (= kept (sorted (filter (fn [d] (not (_pruned-p dirpath d))) dirnames)))
+    (= kept [])
+    (for name in (sorted dirnames)
+      (if (not (_pruned-p dirpath name))
+          (do (= real (osp.realpath (osp.join dirpath name)))
+              (if (not-in real seen)
+                  (do (.add seen real)
+                      (.append kept name))))))
     (.clear dirnames)
     (.extend dirnames kept))
   (return False))
 
+(class _SrcLayouts []
+  "project root -> whether its src holds Python code (_src-holds-python-p),
+   remembered, because module-names asks it on the LSP loop per request and
+   the walk reads all of a src of other code.  forget-src-layouts drops
+   every answer where one can change; the lock guards only the dict, never
+   the walk, and an answer computed across a forget is not kept."
+  (def __init__ [self]
+    (= self.answers {})
+    (= self.generation 0)
+    (= self.lock (threading.Lock)))
+
+  (def holds-python-p [self project-root]
+    (= key (osp.normpath (osp.abspath project-root)))
+    (with [self.lock]
+      (= known (.get self.answers key))
+      (= generation self.generation))
+    (if (is-not known None)
+        (return known))
+    (= known (_src-holds-python-p project-root))
+    (with [self.lock]
+      (if (== generation self.generation)
+          (= (sub self.answers key) known)))
+    (return known))
+
+  (def forget [self]
+    (with [self.lock]
+      (+= self.generation 1)
+      (= self.answers {}))))
+
+(= _SRC-LAYOUTS (_SrcLayouts))
+
+(def forget-src-layouts []
+  "Drop every remembered src layout answer (_SrcLayouts): the LSP calls it
+   when a src-python-entry-p file was created or deleted, the workspace
+   folders changed, or a document was opened or saved (a client without
+   the file watch)."
+  (.forget _SRC-LAYOUTS))
+
 (def shared-import-roots [project-root]
   "The directories an editable install of the project puts on sys.path for
    every module, decided by the layout alone: [src] when src holds Python
-   code (_src-holds-python-p: the src layout); else [the project root] when
+   code (_src-holds-python-p, remembered by _SrcLayouts: the src layout); else [the project root] when
    a regular package sits directly in it (a subdirectory holding an
    __init__, has-init-file: the flat layout); else none.  The one home of
    that rule: module-names appends them to every module's search dirs, and
@@ -1810,7 +1860,7 @@
   ;; Every file that can flip this answer is a renaming file: an __init__
   ;; of a root package (renames_modules_p) or a src-python-entry-p file
   ;; (renaming-file-p), so open documents are published again.
-  (if (_src-holds-python-p project-root)
+  (if (.holds-python-p _SRC-LAYOUTS project-root)
       (return [(osp.join project-root "src")]))
   (try
     (with [(os.scandir project-root) as entries]

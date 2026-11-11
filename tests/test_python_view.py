@@ -1730,6 +1730,7 @@ class TestShadows:
         (project / "src" / "pkg" / "__init__.py").unlink()
         for directory in [project / "src" / "pkg", project / "src"]:
             directory.rmdir()
+        pv.forget_src_layouts()
         assert pv.shared_import_roots(str(project)) == [str(project)]
 
     # scripts/run.lpy importing a module of a shared root that holds no .lpy:
@@ -1775,6 +1776,34 @@ class TestShadows:
         # A module file at any depth makes it one: a namespace package
         # src/acme (no __init__) holding the regular package acme.tool.
         self.write(project / "src" / "acme" / "tool" / "__init__.py", "")
+        pv.forget_src_layouts()
+        assert pv.shared_import_roots(str(project)) == [str(project / "src")]
+
+    def test_a_package_linked_into_src_makes_a_src_layout(self, tmp_path):
+        # Defect: the walk follows no directory link, so src/acme ->
+        # ../shared/acme (a package FileFinder imports through the link) is
+        # no Python code and the root is shared instead, while
+        # renaming-file-p counts a file under it; a link back up must not
+        # loop.
+        project = tmp_path / "project"
+        self.write(project / "shared" / "acme" / "__init__.py", "")
+        self.write(project / "tests" / "__init__.py", "")
+        (project / "src").mkdir()
+        (project / "src" / "acme").symlink_to(project / "shared" / "acme")
+        (project / "src" / "loop").symlink_to(project / "src")
+        assert pv.shared_import_roots(str(project)) == [str(project / "src")]
+
+    def test_the_src_layout_answer_is_remembered_until_forgotten(self, tmp_path):
+        # Defect: every module-names call walks the whole src, on the LSP
+        # loop per request, though only a file event, open or save changes
+        # the answer.
+        project = tmp_path / "project"
+        self.write(project / "src" / "lib.rs", "")
+        self.write(project / "mypkg" / "__init__.py", "")
+        assert pv.shared_import_roots(str(project)) == [str(project)]
+        self.write(project / "src" / "m.py", "")
+        assert pv.shared_import_roots(str(project)) == [str(project)]
+        pv.forget_src_layouts()
         assert pv.shared_import_roots(str(project)) == [str(project / "src")]
 
     def shared_layout_without_lpy(self, project, layout):
