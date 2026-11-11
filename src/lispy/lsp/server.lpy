@@ -46,7 +46,10 @@
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
-                             pyrefly-fallback source-lines source-prefix
+                             forget-false-src-layouts module-file-path-p
+                             pruned-in-project-p pyrefly-fallback refresh-src-layout
+                             source-lines
+                             source-prefix
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT own-place project-root-of
@@ -409,11 +412,12 @@
    absolute name (importlib.util.resolve-name), looked up from origin's
    import root alone.  With no origin, or no package, or beyond the
    top-level package, it resolves to nothing.  An absolute name is looked
-   up on a search path of origin's search dirs (module-names), in the
-   order its compile searches them, so scripts/x.lpy finds its
-   sibling helper.lpy, then every workspace folder's project-import-roots,
-   then sys.path (installed packages, lispython itself).  Either lookup is
-   module-file-on, which imports nothing."
+   up on origin's search dirs (module-names, the project's
+   shared-import-roots included), in the order its compile searches them,
+   so scripts/x.lpy finds its sibling helper.lpy and never a root module
+   its run cannot import; with no origin, on every workspace folder's
+   project-import-roots; then on sys.path (installed packages, lispython
+   itself).  Either lookup is module-file-on, which imports nothing."
   (if (not (isinstance module Symbol))
       (return None))
   (try
@@ -430,11 +434,10 @@
             (except [(, ImportError ValueError)]
               (return None)))
           (return (module-file-on absolute [import-root]))))
-  (= entries (ife (is origin None)
-                  []
-                  (list (sub (document-module-names origin :folders workspace-folders) 3))))
-  (for folder in workspace-folders
-    (.extend entries (project-import-roots (uri-to-path folder.uri))))
+  (if (is origin None)
+      (= entries [root for folder in workspace-folders
+                   for root in (project-import-roots (uri-to-path folder.uri))])
+      (= entries (list (sub (document-module-names origin :folders workspace-folders) 3))))
   (.extend entries sys.path)
   (return (module-file-on module-name entries)))
 
@@ -1731,9 +1734,13 @@
 (def did-change-watched-files [ls params]
   "Module files created or deleted (watch-module-files): an .lpy one is
    indexed again (reindex-watched-file), and when one may rename a module
-   (renaming-file-p) every open document is published again.  A change of
-   content never matters."
+   (renaming-file-p), or moved the src layout answer of its project
+   (refresh-src-layout, asked once per project of a module file in the
+   batch outside a pruned directory, pruned-in-project-p: a file behind a
+   link into src included, a .venv install never), every open document is
+   published again.  A change of content never matters."
   (= renamed False)
+  (= projects (set))
   (for change in params.changes
     (if (not-in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
         (continue))
@@ -1743,8 +1750,18 @@
           (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
+      (if (module-file-path-p path)
+          (do (= project-root (project-root-of path (workspace-folders)))
+              (if (and (is-not project-root None)
+                       (not (pruned-in-project-p project-root path)))
+                  (.add projects project-root))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
+  ;; Every project is refreshed, a renaming batch too, so none keeps the
+  ;; answer from before the batch.
+  (for project-root in (sorted projects)
+    (if (refresh-src-layout project-root)
+        (= renamed True)))
   (if renamed
       (republish-open-documents ls))))
 
@@ -1787,6 +1804,9 @@
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
   (= uri params.text_document.uri)
+  ;; A src folder that arrived with no file event (mv ../pkg src/), or a
+  ;; client without the watch, is seen at the next open or save.
+  (forget-false-src-layouts)
   (index-file uri)
   (publish-diagnostics ls uri :opened True)))
 
@@ -1797,6 +1817,7 @@
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
 (def did-save [ls params]
   (= uri params.text_document.uri)
+  (forget-false-src-layouts)
   (index-file uri)
   (publish-diagnostics ls uri :recompile True)
   (.document-saved backends uri)))
@@ -1864,7 +1885,10 @@
 (def compiled-view [doc]
   "The full view of snapshot doc's version, compiled under the macro
    environment and the naming of now (ViewCache.cached-view,
-   uri-module-names: a stat of the files around it, cheap on the loop), or
+   uri-module-names, read afresh: stats of the directories up from the
+   file, a listing of the project root, and the remembered src layout
+   answer, _SrcLayouts: one stat of its witness, a walk of src only when
+   none is remembered), or
    None: none compiled yet, or the compile failed.  Hover and signature
    help read it, never compile: they answer locally before any backend."
   (= [name package _ search-dirs] (uri-module-names doc.uri))

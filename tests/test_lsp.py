@@ -681,7 +681,10 @@ class TestRequireSelection:
 
     @staticmethod
     def _definition(workspace, source, line, character):
-        document = SimpleNamespace(source=source, uri=URI)
+        # The buffer lies in the folder, beside macmod.lpy: a buffer outside
+        # it searches its own directory, which holds no macmod.
+        uri = workspace["macmod"].uri + "/buffer.lpy"
+        document = SimpleNamespace(source=source, uri=uri)
         ls = SimpleNamespace(
             workspace=SimpleNamespace(
                 get_text_document=lambda uri: document, folders=workspace
@@ -888,11 +891,11 @@ class TestRequireSelection:
         folders = [SimpleNamespace(uri=package.parent.as_uri())]
         assert server.find_import_target(node, folders, origin=origin) is None
 
-    # A module of a namespace package is also the script its directory runs
-    # (lpy lspnspkg/a.lpy), so it requires its package's module relatively
-    # and its sibling module bare.
+    # A module of a namespace package is the script its directory runs
+    # (lpy lspnspkg/a.lpy), so it requires its sibling module bare, and its
+    # relative require is refused as that run refuses it (no __package__).
     NS_SOURCE = "(require .mac *)\n(require lspnshelper *)\n(= y (twice (thrice 1)))"
-    NS_EXPANDED = "y = 1 + 1 + 1 + (1 + 1 + 1)"
+    NS_EXPANDED = "y = twice(1 + 1 + 1)"
     NS_MODULES = ["lspnspkg", "lspnspkg.mac", "lspnshelper"]
 
     @pytest.fixture
@@ -921,14 +924,27 @@ class TestRequireSelection:
     def test_a_namespace_module_compiles_its_relative_and_sibling_requires(
         self, namespace
     ):
-        # Defects: the document is named as a top-level module, so the
-        # relative require fails ("no known parent package"); or only the
-        # project root is searched while its macros run, so the sibling
-        # require, which `lpy lspnspkg/a.lpy` imports, loads no macros.
+        # Defects: only the project root is searched while its macros run,
+        # so the sibling require, which `lpy lspnspkg/a.lpy` imports, loads
+        # no macros; or the document keeps its namespace package lspnspkg,
+        # so its relative require, which that run refuses ("no known parent
+        # package"), loads lspnspkg.mac or fails silently with no diagnostic.
         uri = (namespace / "a.lpy").as_uri()
         compiled = server.compile_document(uri, None, self.NS_SOURCE)
         assert compiled.error is None
         assert compiled.view.text.endswith(self.NS_EXPANDED)
+        [diagnostic] = server.compute_diagnostics(
+            self.NS_SOURCE, uri, compiled=compiled
+        )
+        assert diagnostic.message == (
+            "Compile warning: (require ...) cannot import .mac: "
+            "attempted relative import with no known parent package"
+        )
+        # At the require's module, line 1 column 10, as the run reports it.
+        assert (diagnostic.range.start.line, diagnostic.range.start.character) == (
+            0,
+            9,
+        )
 
     def test_a_cursor_view_compiles_a_namespace_module(self, namespace):
         # Defect: the cursor view names the document by the regular-package
@@ -995,19 +1011,18 @@ class TestRequireSelection:
         assert compiled.error is None
         assert compiled.view.text.endswith(self.NS_EXPANDED)
 
-    def test_definition_through_a_relative_require_in_a_namespace_package(
+    def test_no_definition_through_a_relative_require_in_a_namespace_script(
         self, namespace
     ):
-        # Defect: the relative module resolves against an empty package,
-        # so neither the module nor its macro is found.
+        # Defect: the relative module resolves against the namespace
+        # package lspnspkg, so the definition jumps to lspnspkg/mac.lpy,
+        # where `lpy lspnspkg/a.lpy` (no __package__) refuses the import.
         source = "(require .mac)\n(mac.twice 1)"
         origin = namespace / "a.lpy"
-        [loc] = self._definition_in(source, origin.as_uri(), namespace.parent, 1, 6)
-        assert loc.uri == (namespace / "mac.lpy").as_uri()
+        assert not self._definition_in(source, origin.as_uri(), namespace.parent, 1, 6)
         [node] = parse("(from .mac [twice])")
         folders = [SimpleNamespace(uri=namespace.parent.as_uri())]
-        got = server.find_import_target(node, folders, origin=str(origin))
-        assert got == str(namespace / "mac.lpy")
+        assert server.find_import_target(node, folders, origin=str(origin)) is None
 
     def test_a_buffer_with_no_file_resolves_no_relative_module(
         self, package, monkeypatch
@@ -1103,17 +1118,35 @@ class TestRequireSelection:
     def test_a_module_that_is_no_symbol_resolves_to_nothing(self, tmp_path, form):
         assert self._target_in(tmp_path, form) is None
 
+    def test_an_absolute_module_resolves_on_the_runs_search_dirs_only(self, tmp_path):
+        # Defect: after the importing file's search dirs come every folder's
+        # project root and src, so with no backend `(import rootonly)` in
+        # scripts/x.lpy of a src layout opens the root rootonly.lpy, which
+        # `lpy scripts/x.lpy` (scripts/, then the installed src) cannot
+        # import.
+        for name in ["rootonly.lpy", "src/pkg/__init__.py"]:
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        script = str(tmp_path / "scripts" / "x.lpy")
+        assert self._target_in(tmp_path, "(import rootonly)", origin=script) is None
+        # With no importing file the folder's own modules are the answer.
+        assert self._target_in(tmp_path, "(import rootonly)") == str(
+            tmp_path / "rootonly.lpy"
+        )
+
     def test_namespace_portions_merge_across_search_dirs(self, namespace):
         # Defect: the first directory holding the namespace package ends the
-        # search, so a portion under a later one is never found.
+        # search, so a portion under a later one (the shared root src, after
+        # the script's own directory) is never found.
         project = namespace.parent
         (namespace / "lspnsmerged").mkdir()
         (namespace / "lspnsmerged" / "a.lpy").write_text("")
-        (project / "lspnsmerged").mkdir()
-        (project / "lspnsmerged" / "b.lpy").write_text("")
+        (project / "src" / "lspnsmerged").mkdir(parents=True)
+        (project / "src" / "lspnsmerged" / "b.lpy").write_text("")
         origin = str(namespace / "a.lpy")
         got = self._target_in(project, "(require lspnsmerged.b)", origin=origin)
-        assert got == str(project / "lspnsmerged" / "b.lpy")
+        assert got == str(project / "src" / "lspnsmerged" / "b.lpy")
 
     def test_the_lookup_imports_no_parent_package(self, tmp_path, monkeypatch):
         # Defect: an installed dotted name is found through
