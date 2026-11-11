@@ -4,6 +4,7 @@ Expected positions are read off the source and generated text with
 ``locate``, so every assertion names the word it lands on.
 """
 
+import builtins
 import contextlib
 import hashlib
 import importlib
@@ -2699,6 +2700,32 @@ class TestMacroModules:
         other.join(10)
         assert result == ["2"]
 
+    def test_compiles_arriving_while_one_waits_to_drop_wait_behind_it(
+        self, helper, monkeypatch
+    ):
+        # Defect: compiles that do not conflict keep being admitted while one
+        # waits to drop, so it waits for them too, times out, marks them hung
+        # and moves the epoch with no edit.
+        with self.held_with((helper.a,), helper.name, 30, monkeypatch):
+            switcher = threading.Thread(
+                target=lambda: self.picked(helper, helper.b), daemon=True
+            )
+            switcher.start()
+            switcher.join(0.3)
+            assert switcher.is_alive()
+
+            def arrive():
+                with mm.fresh_modules((helper.a,)):
+                    pass
+
+            arriving = threading.Thread(target=arrive, daemon=True)
+            arriving.start()
+            arriving.join(0.3)
+            assert arriving.is_alive()
+        switcher.join(10)
+        arriving.join(10)
+        assert not switcher.is_alive() and not arriving.is_alive()
+
     def test_a_switch_past_a_hung_compile_moves_the_epoch(self, helper, monkeypatch):
         # Defect: a switch drops the modules under a hung compile but leaves
         # its result, which the drop may have broken, current.
@@ -2837,6 +2864,54 @@ class TestMacroModules:
                 assert importlib.import_module(name) is first
         finally:
             sys.modules.pop(name, None)
+
+    def test_a_parked_compile_moves_the_epoch_once(self, helper, monkeypatch):
+        # Defect: a hung compile's reads keep counting after a drop passed
+        # it, so every later compile searching b/ conflicts with them, drops
+        # b's helper, imports it again and moves the epoch: every open
+        # document recompiles for ever, and no edit stops it.
+        with self.held_with((helper.a,), helper.name, 0.2, monkeypatch):
+            epochs = []
+            for _ in range(3):
+                with mm.fresh_modules((helper.b,)):
+                    module = importlib.import_module(helper.name)
+                    assert module.__file__.startswith(helper.b)
+                epochs.append(mm.current_epoch())
+        assert epochs[1:] == epochs[:1] * 2
+
+    def test_a_module_an_appended_finder_serves_conflicts_with_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: a package an editable install's finder (after PathFinder)
+        # serves from src/ is found by PathFinder under (src,) only, so
+        # compiles of src/ and tests/ alternating drop it and run it again.
+        name = "pvsdeditable"
+        package = tmp_path / "src" / name
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("RUNS.append(1)\n")
+        (tmp_path / "tests").mkdir()
+        runs = []
+        monkeypatch.setattr(builtins, "RUNS", runs, raising=False)
+
+        class Finder:
+            @staticmethod
+            def find_spec(fullname, path, target=None):
+                if fullname != name:
+                    return None
+                return importlib.util.spec_from_file_location(
+                    name,
+                    package / "__init__.py",
+                    submodule_search_locations=[str(package)],
+                )
+
+        monkeypatch.setattr(sys, "meta_path", [*sys.meta_path, Finder])
+        try:
+            for dirs in [("src",), ("tests",)] * 2:
+                with mm.fresh_modules(tuple(str(tmp_path / d) for d in dirs)):
+                    importlib.import_module(name)
+        finally:
+            sys.modules.pop(name, None)
+        assert runs == [1]
 
     def test_a_package_extending_its_path_conflicts_with_nothing(self, tmp_path):
         # Defect: a regular package is compared by its live __path__, which

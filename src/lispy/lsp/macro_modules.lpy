@@ -414,15 +414,32 @@
 
 (def _resolved [name search-dirs]
   "_identity of the top-level name name as a compile searching search-dirs
-   would import it, None when it finds none; PathFinder imports nothing.
-   Both sides of a comparison come from here, never from a loaded module's
-   spec: a module another meta_path finder loaded (an editable install's)
-   is found by PathFinder under no dirs, so it compares equal."
+   would import it, None when it finds none: PathFinder over the search
+   dirs, else the meta_path finders after it (where an editable install
+   appends the one that serves its package), as server.lpy's
+   meta-path-spec asks them; a finder before PathFinder is an import hook
+   that acts when asked, so it is never asked.  Both sides of a comparison
+   come from here, never from a loaded module's spec, which may be a
+   finder's own (a module only such a finder serves compares None to
+   None)."
   (try
-    (return (_identity (importlib.machinery.PathFinder.find-spec
-                         name (+ (list search-dirs) sys.path))))
+    (= spec (importlib.machinery.PathFinder.find-spec
+              name (+ (list search-dirs) sys.path)))
     (except [Exception]
-      (return None))))
+      (= spec None)))
+  (if (and (is spec None) (in importlib.machinery.PathFinder sys.meta-path))
+      (for finder in (sub (list sys.meta-path)
+                          [: (+ (.index sys.meta-path importlib.machinery.PathFinder) 1)
+                             None])
+        (if (is finder _MissingModuleObserver)
+            (continue))
+        (try
+          (= spec (.find-spec finder name None))
+          (except [Exception]
+            (= spec None)))
+        (if (is-not spec None)
+            (break))))
+  (return (_identity spec)))
 
 (def _conflicts [search-dirs token]
   "The top-level modules in sys.modules that a compile searching search-dirs
@@ -506,10 +523,14 @@
               ;; has in progress, so its result must be compiled again.
               (.update _SHARED.hung blockers)
               (+= _SHARED.epoch 1)))
-      ;; What the hung compiles imported goes too, or it would serve this one.
+      ;; What the hung compiles imported goes too, or it would serve this one,
+      ;; and their reads so far are spent (their results are outdated): left,
+      ;; they would set every later compile against modules gone from
+      ;; sys.modules.  What they import from now on still counts.
       (= dropped (list _SHARED.names))
       (for [_ old] in (list (.values _SHARED.running))
-        (.extend dropped (_tracked-names (list old))))
+        (.extend dropped (_tracked-names (list old)))
+        (.clear old))
       (for name in dropped
         (.pop sys.modules name None))
       (.clear _SHARED.names)
