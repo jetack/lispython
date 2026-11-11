@@ -2234,8 +2234,8 @@
    absolute).  The dirs searched are dirs, then shared-roots (the project's
    import roots with a shadow, ShadowManifest.shared-roots: an editable
    install puts them on sys.path for every module, so tests/x.lpy still
-   sees src/pkg), then the project root, each once and only inside the
-   project (an import root above it, the project lying inside a package,
+   sees src/pkg) other than the project root, then the project root, each
+   once and only inside the project (an import root above it, the project lying inside a package,
    is left out).  First the view counterpart of each, so `import pkg` finds
    the shadows before any real directory of uncompiled .lpy; then each
    real directory, so what the view lacks of one still resolves: its
@@ -2247,8 +2247,15 @@
    top level, or src/pkg/my-res, which no import can name) is so searched
    only by the modules that search it, as `lpy` puts it on sys.path only
    for the file it runs."
+  ;; The project root comes after the other shared roots, though it sorts
+  ;; first among them: src/pkg/my-res/x.lpy, run as `lpy` with src
+  ;; installed, imports src/utils.py, never a root utils.py.  A module of
+  ;; the project root still searches it first, through its own dirs.
+  (= project-root (osp.abspath project-root))
+  (= shared [directory for directory in (or shared-roots [])
+              if (!= (osp.abspath directory) project-root)])
   (= kept [])
-  (for directory in (+ (list dirs) (list (or shared-roots [])) [project-root])
+  (for directory in (+ (list dirs) shared [project-root])
     (= directory (osp.abspath directory))
     (if (and (not (in directory kept))
              (is-not (_view-dir project-root root directory) None))
@@ -2269,9 +2276,9 @@
    A shared root (src) gets one too, though the default list holds the same
    directories: that list leads with the project root, where pyright also
    searches its execution root (the view root) first, so a root utils.py
-   would answer the `import utils` of src/pkg/m.lpy, which
-   `python -m pkg.m` from src and an editable install resolve to
-   src/utils.py.  Deepest first, then by path, so a backend that takes the
+   would answer the `import utils` of src/pkg/m.lpy, which its run
+   (module-names: `python -m pkg.m` from src, or `import pkg.m` from
+   outside the project with src installed) resolves to src/utils.py.  Deepest first, then by path, so a backend that takes the
    first environment holding a file (pyright) finds the nearest, and a
    config's text does not change with dict order.  The one home of which
    environments the configs get (pyright's executionEnvironments,
