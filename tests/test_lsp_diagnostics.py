@@ -1826,19 +1826,26 @@ def test_a_real_backend_reports_on_the_lpy_word(
     assert (found.range.end.line, found.range.end.character) == (0, 21)
 
 
+# The buffer names published_marks opens: one per call, never on disk.
+MARKS_BUFFERS = (f"marks_{n}.lpy" for n in itertools.count(1))
+
+
 def published_marks(
     run_on_loop, real_backends, backend_project, monkeypatch, source, count
 ):
-    """(lispython's, the backend's) diagnostics of source opened as main.lpy,
-    each as (line, the .lpy text it underlines), once the backend published
-    at least count of its own (30 s at most)."""
+    """(lispython's, the backend's) diagnostics of source opened as a new
+    unsaved buffer of backend_project, each as (line, the .lpy text it
+    underlines), once the backend published at least count of its own (30
+    s at most).  Each call opens a name of its own (MARKS_BUFFERS): the
+    backend process is shared, and a late set it publishes for another
+    test's copy of one name could otherwise be taken for this one's."""
     name = real_backends.name
     monkeypatch.setattr(
         real_backends, "on_diagnostics", server.backend_diagnostics_arrived
     )
     monkeypatch.setattr(server, "backends", real_backends)
     fresh_server_state(monkeypatch)
-    editor = Editor((backend_project / "main.lpy").as_uri())
+    editor = Editor((backend_project / next(MARKS_BUFFERS)).as_uri())
 
     async def scenario():
         try:
@@ -1930,10 +1937,12 @@ def test_a_placeholder_is_unreported_in_a_strict_mode(
 ):
     # Defect: what basedpyright's recommended mode reports on a failed
     # form's placeholder (reportAny "Type of x is Any") lands on the user's
-    # x, which the placeholder's target maps onto for navigation. A project
-    # of its own, so its config reaches no other test; real_backends only
-    # puts the test on basedpyright, whose process this test's own
-    # Backends stops before it ends.
+    # x, which the placeholder's target maps onto for navigation.
+    # A project and backend of its own, beside the session's (bounded: one
+    # short-lived basedpyright, stopped in the finally): switching the
+    # session's backend to recommended and back through a save leaks the
+    # mode into the next tests, since basedpyright applies a config change
+    # only some time after it is told, with no signal to wait on.
     project = tmp_path / "strict-project"
     project.mkdir()
     (project / "main.lpy").write_text("(= y 1)\n")

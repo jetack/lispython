@@ -323,15 +323,38 @@ class TestFailedForms:
         ]
 
     def test_the_any_import_follows_the_docstring_and_future_imports(self):
-        # Defect: the import goes first, before a from __future__ import,
-        # which Python and the backends refuse anywhere but at the top.
-        lines = view_of(FAILED_FORMS).text.split("\n")
-        assert lines[:4] == [
-            '"""Doc."""',
-            "from __future__ import annotations",
-            "from typing import Any as ___lpy_any",
-            "___lpy_any_value: ___lpy_any = ...",
+        # Defects: the import or the placeholders' value goes first, before
+        # a from __future__ import, which Python and the backends refuse
+        # anywhere but at the top; or the value is declared after a
+        # placeholder reads it (unbound there).
+        body = view_of(FAILED_FORMS).tree.body
+        docstring, future = body[0], body[1]
+        assert isinstance(docstring.value.value, str)
+        assert future.module == "__future__"
+
+        def first(predicate):
+            return next(i for i, stmt in enumerate(body) if predicate(stmt))
+
+        imported = first(
+            lambda stmt: any(
+                alias.asname == pv.ANY_ALIAS for alias in getattr(stmt, "names", [])
+            )
+        )
+        declared = first(
+            lambda stmt: (
+                isinstance(stmt, pv.ast.AnnAssign) and stmt.target.id == pv.ANY_VALUE
+            )
+        )
+        read = [
+            i
+            for i, stmt in enumerate(body)
+            for node in pv.ast.walk(stmt)
+            if isinstance(node, pv.ast.Name)
+            and node.id == pv.ANY_VALUE
+            and isinstance(node.ctx, pv.ast.Load)
         ]
+        assert read
+        assert 2 <= imported < declared < min(read)
 
     def test_only_a_declared_name_maps_to_the_buffer(self):
         # Defects: the declared name has no entry (definition at it is
