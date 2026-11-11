@@ -681,7 +681,10 @@ class TestRequireSelection:
 
     @staticmethod
     def _definition(workspace, source, line, character):
-        document = SimpleNamespace(source=source, uri=URI)
+        # The buffer lies in the folder, beside macmod.lpy: a buffer outside
+        # it searches its own directory, which holds no macmod.
+        uri = workspace["macmod"].uri + "/buffer.lpy"
+        document = SimpleNamespace(source=source, uri=uri)
         ls = SimpleNamespace(
             workspace=SimpleNamespace(
                 get_text_document=lambda uri: document, folders=workspace
@@ -1115,17 +1118,44 @@ class TestRequireSelection:
     def test_a_module_that_is_no_symbol_resolves_to_nothing(self, tmp_path, form):
         assert self._target_in(tmp_path, form) is None
 
+    def test_an_absolute_module_resolves_on_the_runs_search_dirs_only(self, tmp_path):
+        # Defect: after the importing file's search dirs come every folder's
+        # project root and src, so with no backend `(import utils)` in
+        # src/pkg/m.lpy opens the root utils.lpy (root first), where
+        # `python -m pkg.m` imports src/utils.lpy, and `(import rootonly)` in
+        # scripts/x.lpy opens the root rootonly.lpy, which its run cannot
+        # import.
+        for name in [
+            "utils.lpy",
+            "rootonly.lpy",
+            "src/utils.lpy",
+            "src/pkg/__init__.py",
+        ]:
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+        module = str(tmp_path / "src" / "pkg" / "m.lpy")
+        got = self._target_in(tmp_path, "(import utils)", origin=module)
+        assert got == str(tmp_path / "src" / "utils.lpy")
+        script = str(tmp_path / "scripts" / "x.lpy")
+        assert self._target_in(tmp_path, "(import rootonly)", origin=script) is None
+        # With no importing file the folder's own modules are the answer.
+        assert self._target_in(tmp_path, "(import rootonly)") == str(
+            tmp_path / "rootonly.lpy"
+        )
+
     def test_namespace_portions_merge_across_search_dirs(self, namespace):
         # Defect: the first directory holding the namespace package ends the
-        # search, so a portion under a later one is never found.
+        # search, so a portion under a later one (the shared root src, after
+        # the script's own directory) is never found.
         project = namespace.parent
         (namespace / "lspnsmerged").mkdir()
         (namespace / "lspnsmerged" / "a.lpy").write_text("")
-        (project / "lspnsmerged").mkdir()
-        (project / "lspnsmerged" / "b.lpy").write_text("")
+        (project / "src" / "lspnsmerged").mkdir(parents=True)
+        (project / "src" / "lspnsmerged" / "b.lpy").write_text("")
         origin = str(namespace / "a.lpy")
         got = self._target_in(project, "(require lspnsmerged.b)", origin=origin)
-        assert got == str(project / "lspnsmerged" / "b.lpy")
+        assert got == str(project / "src" / "lspnsmerged" / "b.lpy")
 
     def test_the_lookup_imports_no_parent_package(self, tmp_path, monkeypatch):
         # Defect: an installed dotted name is found through

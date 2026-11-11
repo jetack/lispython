@@ -533,7 +533,6 @@
     (= sweep (write-shadows self.project-root root :manifest self.manifest))
     ((config-writer self.name) self.project-root self.view-root
                                :environments self.manifest.environments
-                               :shared-roots self.manifest.shared-roots
                                :check-types self.check-types)
     (return sweep))
 

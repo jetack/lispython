@@ -409,11 +409,12 @@
    absolute name (importlib.util.resolve-name), looked up from origin's
    import root alone.  With no origin, or no package, or beyond the
    top-level package, it resolves to nothing.  An absolute name is looked
-   up on a search path of origin's search dirs (module-names), in the
-   order its compile searches them, so scripts/x.lpy finds its
-   sibling helper.lpy, then every workspace folder's project-import-roots,
-   then sys.path (installed packages, lispython itself).  Either lookup is
-   module-file-on, which imports nothing."
+   up on origin's search dirs (module-names, the project's
+   shared-import-roots included), in the order its compile searches them,
+   so scripts/x.lpy finds its sibling helper.lpy and never a root module
+   its run cannot import; with no origin, on every workspace folder's
+   project-import-roots; then on sys.path (installed packages, lispython
+   itself).  Either lookup is module-file-on, which imports nothing."
   (if (not (isinstance module Symbol))
       (return None))
   (try
@@ -430,11 +431,10 @@
             (except [(, ImportError ValueError)]
               (return None)))
           (return (module-file-on absolute [import-root]))))
-  (= entries (ife (is origin None)
-                  []
-                  (list (sub (document-module-names origin :folders workspace-folders) 3))))
-  (for folder in workspace-folders
-    (.extend entries (project-import-roots (uri-to-path folder.uri))))
+  (if (is origin None)
+      (= entries [root for folder in workspace-folders
+                   for root in (project-import-roots (uri-to-path folder.uri))])
+      (= entries (list (sub (document-module-names origin :folders workspace-folders) 3))))
   (.extend entries sys.path)
   (return (module-file-on module-name entries)))
 

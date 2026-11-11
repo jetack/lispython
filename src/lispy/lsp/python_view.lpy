@@ -1753,8 +1753,43 @@
   "The search roots a project's modules are imported from: the project
    root and its src directory (the src layout).  The one home of that
    list: module-names' namespace packages and resolve-module-to-file's
-   absolute lookup read it."
+   lookup with no importing file read it."
   (return [project-root (osp.join project-root "src")]))
+
+(def shared-import-roots [project-root]
+  "The directories an editable install of the project puts on sys.path for
+   every module, decided by the layout alone: src when it is a directory
+   (the src layout), then the project root when a regular package sits
+   directly in it (a subdirectory holding an __init__, has-init-file: the
+   flat layout).  The one home of that rule: module-names appends them to
+   every module's search dirs, and the backends' default list
+   (default-search-dirs) holds them."
+  ;; The project root comes last: src/pkg/my-res/x.lpy, run as `lpy` with
+  ;; src installed, imports src/utils.py, never a root utils.py.  An
+  ;; __init__ created or deleted in a root package is a renaming file
+  ;; (renames_modules_p), so open documents are published again; a new or
+  ;; removed src directory is no file event, so it takes effect at each
+  ;; document's next compile and the next shadow sweep.
+  (= found [])
+  (= src (osp.join project-root "src"))
+  (if (osp.isdir src)
+      (.append found src))
+  (try
+    (with [(os.scandir project-root) as entries]
+      (= flat (any ((and (.is-dir entry) (has-init-file entry.path))
+                    for entry in entries))))
+    (except [OSError]
+      (= flat False)))
+  (if flat
+      (.append found project-root))
+  (return found))
+
+(def default-search-dirs [project-root]
+  "The search dirs of the backends' default list, which a module of the
+   project root and any file in no search environment get: the project
+   root, as a root module's own directory or import root, then the
+   shared-import-roots, each once."
+  (return (tuple (dict.fromkeys (+ [project-root] (shared-import-roots project-root))))))
 
 (def module-names [lpy-path :project-root None]
   "(__name__, __package__, import root, search dirs) of lpy-path as Python
@@ -1769,13 +1804,15 @@
    the local definition fallback, resolve-module-to-file and the backend
    (write-shadows, the first being the module's environment root).  They
    follow the one run mode Python gives the file (_package-module-p): a
-   module inside a regular package is that module, (import root,) only, as
-   `import pkg.m` and `python -m pkg.m` see it; any other file is a script,
-   (own directory,) only, as `lpy x.lpy` puts its own directory on
-   sys.path and nothing else: what else it imports comes from the shared
-   roots an editable install provides (_search-paths), never from its
-   import root as such (scripts/x.lpy does not search the project root).
-   A script's package is empty, as that run has no __package__, so its
+   module inside a regular package is that module, searching its import
+   root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
+   script, searching its own directory, as `lpy x.lpy` puts it on sys.path;
+   either then searches project-root's shared-import-roots, which an
+   editable install puts on sys.path for every run, each dir once.  Nothing
+   else: scripts/x.lpy does not search the project root unless a flat
+   package makes it a shared root.  With no project-root there are no
+   shared roots.  A script's package is empty, as that run has no
+   __package__, so its
    relative imports and requires fail as the run's do; its name and import
    root stay the namespace walk's."
   ;; A package's interior on the search path would shadow the stdlib and
@@ -1786,7 +1823,9 @@
   (= roots (ife (is project-root None) [] (project-import-roots project-root)))
   (= [import-root parts] (package-root directory roots))
   (= package-module (_package-module-p directory import-root))
-  (= search-dirs (ife package-module (, import-root) (, directory)))
+  (= shared (ife (is project-root None) [] (shared-import-roots project-root)))
+  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root directory)]
+                                          shared))))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (ife package-module (.join "." parts) ""))
   (if (== stem "__init__")
@@ -1840,15 +1879,10 @@
    the written shadows' sources (module-names), which the config writers
    read (_search-paths, search-environments): environments,
    environment root -> the search dirs of the sources it is the first of,
-   in order (merged, each once, should two sources of one root differ);
-   shared-roots, the sorted import roots of those sources inside a regular
-   package (_package-module-p) that are project-import-roots: what an
-   editable install puts on sys.path, which every module of the project
-   searches."
+   in order (merged, each once, should two sources of one root differ)."
   (def __init__ [self]
     (= self.sources {})
-    (= self.environments {})
-    (= self.shared-roots [])))
+    (= self.environments {})))
 
 (def _regular-package-p [directory]
   "Whether directory is a regular package (it holds an __init__.py or
@@ -2094,8 +2128,6 @@
       (except [OSError as e]
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
   (= environments {})
-  (= shared-roots (set))
-  (= project-roots (set (project-import-roots project-root)))
   (= packages (set))
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
@@ -2104,20 +2136,14 @@
     (= env-root (sub dirs 0))
     (= (sub environments env-root)
        (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs))))
-    ;; A script's import root (scripts/x.lpy's project root) is no shared
-    ;; root: no run puts it on sys.path for other modules.
     (= directory (osp.dirname (osp.abspath lpy-path)))
-    (if (and (in import-root project-roots) (_package-module-p directory import-root))
-        (.add shared-roots import-root))
     ;; module-dirs: every import root with a shadow, whose other modules
     ;; are linked in (_mirror-py-files).
     (.add module-dirs import-root)
     (if (!= directory import-root)
         (.add packages (_top-package project-root import-root directory))))
   (= manifest.environments (dict (sorted (.items environments))))
-  (= manifest.shared-roots (sorted shared-roots))
-  (= reserved (_view-own-files project-root root manifest.environments
-                               manifest.shared-roots))
+  (= reserved (_view-own-files project-root root manifest.environments))
   (= source-dirs (_source-dirs project-root sources))
   (= links (set))
   (for package in (sorted packages)
@@ -2231,20 +2257,14 @@
   (= (sub rules "reportInvalidStringEscapeSequence") "none")
   (return rules))
 
-(def _search-paths [project-root root dirs shared-roots]
+(def _search-paths [project-root root dirs]
   "The backend's search paths, in order, for the modules whose search dirs
-   are dirs (module-names; (project-root,) for the default list,
-   which a module of the project root and any file in no environment of
-   search-environments get), in view root root of project-root (both
-   absolute).  The dirs searched are dirs, then shared-roots (the project's
-   import roots of regular-package modules with a shadow,
-   ShadowManifest.shared-roots: an editable install puts them on sys.path
-   for every module, so tests/x.lpy still sees src/pkg) other than the
-   project root, then the project root only when it is in dirs or
-   shared-roots (no run of src/pkg/m.lpy or scripts/x.lpy searches it, so
-   their `import rootonly` fails as Python's does), each
-   once and only inside the project (an import root above it, the project lying inside a package,
-   is left out).  First the view counterpart of each, so `import pkg` finds
+   are dirs (module-names, the shared-import-roots included;
+   default-search-dirs for the default list), in view root root of
+   project-root (both absolute).  The dirs searched are dirs alone, in
+   their order, so the backend resolves what the module's compile does,
+   each once and only inside the project (an import root above it, the
+   project lying inside a package, is left out).  First the view counterpart of each, so `import pkg` finds
    the shadows before any real directory of uncompiled .lpy; then each
    real directory, so what the view lacks of one still resolves: its
    namespace packages, its extension modules and, whole, a package of it
@@ -2255,16 +2275,9 @@
    top level, or src/pkg/my-res, which no import can name) is so searched
    only by the modules that search it, as `lpy` puts it on sys.path only
    for the file it runs."
-  ;; The project root comes after the other shared roots, though it sorts
-  ;; first among them: src/pkg/my-res/x.lpy, run as `lpy` with src
-  ;; installed, imports src/utils.py, never a root utils.py.  A module of
-  ;; the project root still searches it first, through its own dirs.
   (= project-root (osp.abspath project-root))
-  (= shared-roots [(osp.abspath directory) for directory in (or shared-roots [])])
-  (= shared [directory for directory in shared-roots if (!= directory project-root)])
-  (= trailing (ife (in project-root shared-roots) [project-root] []))
   (= kept [])
-  (for directory in (+ (list dirs) shared trailing)
+  (for directory in dirs
     (= directory (osp.abspath directory))
     (if (and (not (in directory kept))
              (is-not (_view-dir project-root root directory) None))
@@ -2275,7 +2288,7 @@
                                            "site-packages")))))
   (return (list (dict.fromkeys paths))))
 
-(def search-environments [project-root root environments shared-roots]
+(def search-environments [project-root root environments]
   "The search environments of view root root besides its default list:
    (view directory, search paths) for each environment root of
    environments (ShadowManifest.environments) inside the project other
@@ -2296,11 +2309,11 @@
   (for [env-root dirs] in (.items (or environments {}))
     (= view-dir (_view-dir project-root root env-root))
     (if (and (is-not view-dir None) (!= env-root project-root))
-        (.append found (, view-dir (_search-paths project-root root dirs shared-roots)))))
+        (.append found (, view-dir (_search-paths project-root root dirs)))))
   (return (sorted found :key (fn [entry] (, (- (len (.split (sub entry 0) os.sep)))
                                             (sub entry 0))))))
 
-(def _view-own-files [project-root root environments shared-roots]
+(def _view-own-files [project-root root environments]
   "The view's own files, which no shadow writer links over or removes: the
    view root's (_ROOT-FILES) and the nested pyrefly.toml of each search
    environment (search-environments), which a project file of that name
@@ -2308,8 +2321,7 @@
   (return (frozenset (+ [(osp.join root name) for name in _ROOT-FILES]
                         [(osp.join view-dir PYREFLY-CONFIG)
                          for [view-dir _] in (search-environments project-root root
-                                                                  environments
-                                                                  shared-roots)]))))
+                                                                  environments)]))))
 
 (def config-files [view-root name]
   "Every config file named name of view-root (a backend's, CONFIG-FILES in
@@ -2327,8 +2339,7 @@
                 (.append found path)))))
   (return (sorted found)))
 
-(def write-pyright-config [project-root view-root :environments None :shared-roots None
-                          :check-types True]
+(def write-pyright-config [project-root view-root :environments None :check-types True]
   "Write view-root's pyrightconfig.json when it changed: the project's
    rule settings (_rule-settings; check-types false, as when no diagnostic
    is forwarded, turns checking off), the default search paths
@@ -2349,8 +2360,9 @@
   ;; Every server of the project shares the view root: two run with
   ;; different pythonDiagnostics, the last to write decides its checking.
   (= config (_rule-settings project-root check-types))
-  (= (sub config "extraPaths") (_search-paths project-root root [project-root] shared-roots))
-  (= envs (search-environments project-root root environments shared-roots))
+  (= (sub config "extraPaths") (_search-paths project-root root
+                                              (default-search-dirs project-root)))
+  (= envs (search-environments project-root root environments))
   (if envs
       (= (sub config "executionEnvironments")
          [{"root" view-dir "extraPaths" paths} for [view-dir paths] in envs]))
@@ -2547,8 +2559,8 @@
           (except [OSError as e]
             (.warning logger "lispython view: cannot remove %s: %s" path e))))))
 
-(def write-pyrefly-config [project-root view-root :environments None :shared-roots None
-                          :check-types True :python None :check None]
+(def write-pyrefly-config [project-root view-root :environments None :check-types True
+                          :python None :check None]
   "Write view-root's pyrefly.toml when it changed: the project's rule
    settings (_pyrefly-rule-settings; check-types false turns checking off),
    the default search paths, and python as python-interpreter-path (default
@@ -2584,9 +2596,10 @@
   ;; module the view links (most modules of an import root with a shadow,
   ;; _mirror-py-files) resolves to the link and is analysed under the view's
   ;; config, never as the real file under the project's own.
-  (= paths {"search-path" (_search-paths project-root root [project-root] shared-roots)
+  (= paths {"search-path" (_search-paths project-root root
+                                         (default-search-dirs project-root))
             "python-interpreter-path" interpreter})
-  (= envs (search-environments project-root root environments shared-roots))
+  (= envs (search-environments project-root root environments))
   (= path (osp.join root PYREFLY-CONFIG))
   ;; Every server of the project shares the view root: two run with
   ;; different pythonDiagnostics, the last to write decides its checking.
