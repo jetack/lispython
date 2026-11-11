@@ -955,16 +955,50 @@ def test_a_created_init_file_republishes_the_open_documents(outside_documents):
     run_bounded(scenario())
 
 
+@pytest.fixture
+def outside_package(outside_documents):
+    """(editor, outside, mod, folders) as outside_documents, but mod is
+    outside/diagrepub/sub/mod.lpy, inside the regular package sub in the
+    namespace directory diagrepub, and requires diagrepub.mac absolutely.
+    Its import root, the one directory its compile searches, is outside
+    only while diagrepub is a namespace package of a workspace folder
+    (`import diagrepub.sub.mod`); else it is outside/diagrepub (`python
+    -m sub.mod`), where diagrepub.mac is not found, so swallow stays a call
+    and its statement operand fails to compile."""
+    editor, outside, _, folders = outside_documents
+    pkg = outside / "diagrepub"
+    (pkg / "mac.lpy").write_text("(defmacro swallow [x] (return 1))\n")
+    sub = pkg / "sub"
+    sub.mkdir()
+    (sub / "__init__.py").write_text("")
+    mod = sub / "mod.lpy"
+    mod.write_text("(require diagrepub.mac *)\n(= yy (swallow (= a 1)))\n")
+    for key in ["sub", "sub.mod"]:
+        sys.modules.pop(key, None)
+    yield editor, outside, mod, folders
+    for key in ["sub", "sub.mod"]:
+        sys.modules.pop(key, None)
+
+
+async def published_unexpanded(editor, mod):
+    """Open mod; its require loads no macros, so one form fails."""
+    uri = editor.open(mod)
+    await until(lambda: uri in editor.published)
+    [warning] = editor.published[uri][-1]
+    assert "statement" in warning.message
+    return uri
+
+
 def test_an_added_workspace_folder_republishes_the_open_documents(
-    outside_documents,
+    outside_package,
 ):
-    # Defect: a workspace folder added around an open document makes its
-    # directory a namespace package of that project, so its relative
-    # require now resolves, but the warning published before stays.
-    editor, outside, mod, folders = outside_documents
+    # Defect: a workspace folder added around an open document makes the
+    # directory above its package a namespace package of that project, so
+    # its require now resolves, but the warning published before stays.
+    editor, outside, mod, folders = outside_package
 
     async def scenario():
-        uri = await published_as_script(editor, mod)
+        uri = await published_unexpanded(editor, mod)
         count = len(editor.published[uri])
         folder = lsp.WorkspaceFolder(uri=outside.as_uri(), name="outside")
         folders.append(folder)
@@ -993,15 +1027,13 @@ def folders_changed(ls, added=(), removed=()):
 
 
 @pytest.mark.parametrize("suffix", [".py", importlib.machinery.EXTENSION_SUFFIXES[0]])
-def test_a_module_file_ending_a_namespace_package_republishes(
-    outside_documents, suffix
-):
+def test_a_module_file_ending_a_namespace_package_republishes(outside_package, suffix):
     # Defects: only an __init__ is heard, but a module file created beside
     # a namespace directory of its name ends that package too, so the open
     # document keeps the diagnostics of its old package naming; and of the
     # importer's suffixes only .py/.lpy count, so an extension module
     # (a suffix holding dots) is never heard.
-    editor, outside, mod, folders = outside_documents
+    editor, outside, mod, folders = outside_package
     folders.append(SimpleNamespace(uri=outside.as_uri()))
 
     async def scenario():
@@ -1014,7 +1046,7 @@ def test_a_module_file_ending_a_namespace_package_republishes(
         files_changed(editor, module)
         await until(lambda: len(editor.published[uri]) > count, timeout=5)
         [warning] = editor.published[uri][-1]
-        assert "relative" in warning.message
+        assert "statement" in warning.message
 
     run_bounded(scenario())
 

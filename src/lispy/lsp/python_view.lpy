@@ -1775,7 +1775,9 @@
    sys.path and nothing else: what else it imports comes from the shared
    roots an editable install provides (_search-paths), never from its
    import root as such (scripts/x.lpy does not search the project root).
-   The name, package and import root stay the namespace walk's."
+   A script's package is empty, as that run has no __package__, so its
+   relative imports and requires fail as the run's do; its name and import
+   root stay the namespace walk's."
   ;; A package's interior on the search path would shadow the stdlib and
   ;; top-level names for the module (src/pkg/json.py answering its `import
   ;; json`) and make one module importable under two names (helper and
@@ -1783,11 +1785,10 @@
   (= directory (osp.dirname (osp.abspath lpy-path)))
   (= roots (ife (is project-root None) [] (project-import-roots project-root)))
   (= [import-root parts] (package-root directory roots))
-  (= search-dirs (ife (_package-module-p directory import-root)
-                      (, import-root)
-                      (, directory)))
+  (= package-module (_package-module-p directory import-root))
+  (= search-dirs (ife package-module (, import-root) (, directory)))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
-  (= package (.join "." parts))
+  (= package (ife package-module (.join "." parts) ""))
   (if (== stem "__init__")
       (return (, package package import-root search-dirs)))
   (return (, (.join "." (+ parts [stem])) package import-root search-dirs)))

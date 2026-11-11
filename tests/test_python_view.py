@@ -971,7 +971,9 @@ class TestShadows:
         # and `lpy ns/a.lpy` runs it as a script with ns/ on sys.path, so a
         # bare sibling stops resolving; or it also searches the import root
         # (the project root), which that run never puts on sys.path, so a
-        # root utils.py answers its `import utils` over src/utils.py.
+        # root utils.py answers its `import utils` over src/utils.py; or it
+        # gives it the package ns, though that run has no __package__, so a
+        # relative require resolves where the run refuses it.
         (tmp_path / "src" / "sns").mkdir(parents=True)
         (tmp_path / "ns").mkdir()
         got = [
@@ -980,8 +982,8 @@ class TestShadows:
         ]
         src = tmp_path / "src"
         assert got == [
-            ("ns.a", "ns", str(tmp_path), (str(tmp_path / "ns"),)),
-            ("sns.b", "sns", str(src), (str(src / "sns"),)),
+            ("ns.a", "", str(tmp_path), (str(tmp_path / "ns"),)),
+            ("sns.b", "", str(src), (str(src / "sns"),)),
         ]
 
     def test_view_at_cursor_with_a_relative_require(self, tmp_path, monkeypatch):
