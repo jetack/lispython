@@ -136,7 +136,13 @@ follows [Semantic Versioning](https://semver.org/).
 - The `lpy` REPL and CLI no longer put the working directory's package root
   on `sys.path` or set the REPL's `__package__` to the working directory's
   package when `lispy.tools` is imported: `__main__` is in no package
-  (`__package__` is `None`), as Python's own is.
+  (`__package__` is `None`), as Python's own is. The nREPL session's
+  file-less scope (an eval with neither `file` nor `ns`) is that same
+  `__main__`, so a relative require there no longer resolves against the
+  working directory's package; send `file` to eval in a file's package.
+  `lpy -c` now puts the working directory first on `sys.path` (unless
+  `-P`/`PYTHONSAFEPATH`), as `python -c` does, and the REPL honours
+  `PYTHONSAFEPATH` too.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call

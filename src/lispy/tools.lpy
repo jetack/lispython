@@ -60,18 +60,25 @@
   (return (, (.join "." parts) root)))
 
 (def main-scope []
-  "A new __main__ scope, in no package, as Python's own __main__ (REPL,
-   -c) is: the working directory decides neither its __package__ nor
-   sys.path.  SCOPE, the one the REPL and nREPL sessions share, is one; a
-   translation that names no scope compiles in a new one, since every
-   module unit compiles in its own scope and must not reset the session's
-   macros."
+  "A new __main__ scope, in no package (__package__ None), as Python's own
+   __main__ (REPL, -c) is, whatever package the working directory is in;
+   the REPL and -c put the working directory itself on sys.path, as python
+   does (prepend-cwd).  SCOPE, the one the REPL and nREPL sessions share,
+   is one; a translation that names no scope compiles in a new one, since
+   every module unit compiles in its own scope and must not reset the
+   session's macros."
   (return {"__builtins__" __builtins__
            "__name__" "__main__"
            "__package__" None
            "__macro_namespace" (MacroTable)}))
 
 (= SCOPE (main-scope))
+
+(def prepend-cwd []
+  "Put the working directory first on sys.path, as python does for the
+   REPL, -c and -m, unless -P / PYTHONSAFEPATH is set (sys.flags.safe_path)."
+  (if (not sys.flags.safe-path)
+      (sys.path.insert 0 (os.getcwd))))
 
 (def ast-to-python [st]
   ;; unparse writes any depth compile() takes, on a bounded stack per chunk;
@@ -397,10 +404,7 @@
   )
 
 (def repl [:translate False]
-  ;; Add current directory to sys.path for local imports
-  (= cwd (os.getcwd))
-  (if (not (in cwd sys.path))
-      (sys.path.insert 0 cwd))
+  (prepend-cwd)
 
   (= session (make-repl-session))
   (= scope SCOPE)
@@ -2062,9 +2066,7 @@
         (== (sub sys.argv 1) "-m")
         (do (sys.argv.pop 1)
             (= mname (sys.argv.pop 1))
-            ;; python -m prepends the cwd unless -P / PYTHONSAFEPATH is set
-            (if (not sys.flags.safe-path)
-                (sys.path.insert 0 (os.getcwd)))
+            (prepend-cwd)
             ;; the module name is the one `import` gives (module-import-name)
             (with [(compile-errors "<command line>" mname)]
               (= modname (module-import-name
@@ -2094,6 +2096,7 @@
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)
             (= src (sys.argv.pop 1))
+            (prepend-cwd)
             (eval-and-print src))
 
         (== (sub sys.argv 1) "--nrepl")

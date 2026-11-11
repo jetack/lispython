@@ -197,6 +197,7 @@ class TestEntryPoints:
                 except StopIteration:
                     raise EOFError from None
 
+        monkeypatch.setattr(sys, "path", list(sys.path))
         monkeypatch.setattr(tools, "make_repl_session", Session)
         tools.repl()
         out, err = capsys.readouterr()

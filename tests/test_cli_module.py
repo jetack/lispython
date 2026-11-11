@@ -180,6 +180,31 @@ def test_m_package_without_main_is_one_line(tmp_path: Path):
     )
 
 
+def test_c_imports_a_module_beside_the_cwd_unless_safe_path(tmp_path: Path):
+    # Defects: `lpy -c` puts nothing on sys.path, so a module in the cwd,
+    # which `python -c 'import helper'` imports, is ModuleNotFoundError; or
+    # it puts the cwd there under -P / PYTHONSAFEPATH, where python does not.
+    (tmp_path / "cwdhelper.lpy").write_text('(print "ran-helper")\n')
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
+    }
+
+    def run_c(**extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(LPY), "-c", "(import cwdhelper)"],
+            cwd=tmp_path,
+            env={**env, **extra},
+            capture_output=True,
+            text=True,
+        )
+
+    r = run_c()
+    assert r.returncode == 0, r.stderr
+    assert "ran-helper" in r.stdout
+    r = run_c(PYTHONSAFEPATH="1")
+    assert "No module named 'cwdhelper'" in r.stderr
+
+
 def test_importing_tools_in_a_package_directory_leaves_sys_path_and_main(
     tmp_path: Path,
 ):

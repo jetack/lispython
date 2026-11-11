@@ -2243,7 +2243,8 @@
    that holds a nested import root (_mirror-py-files links every other
    module of an import root into the view); then the project's .venv
    site-packages.  The one search-path list of every backend's config.  A
-   search dir that is no shared root (a script directory) is so searched
+   search dir that is no shared root (a script directory: scripts/ at the
+   top level, or src/pkg/my-res, which no import can name) is so searched
    only by the modules that search it, as `lpy` puts it on sys.path only
    for the file it runs."
   (= kept [])

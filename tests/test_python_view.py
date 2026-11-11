@@ -1179,10 +1179,10 @@ class TestShadows:
         assert (view / "bare.py").read_text().endswith("y = twice(2)")
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
-        # The package interior src/pkg is searched by the compile but is no
-        # backend search path: it would resolve the module's `import helper`
-        # (or a src/pkg/json.py its `import json`) to that package's
-        # modules, where Python imports it as pkg.m from src.
+        # The package interior src/pkg is no search path, of the compile or
+        # the backend: it would resolve the module's `import helper` (or a
+        # src/pkg/json.py its `import json`) to that package's modules,
+        # where Python imports it as pkg.m from src.
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pkg"
         self.write(pkg / "__init__.py", "from .helper import h")
