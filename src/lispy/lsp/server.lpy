@@ -46,7 +46,7 @@
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
-                             pyrefly-fallback source-lines source-prefix
+                             pyrefly-fallback source-lines source-prefix src-python-entry-p
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT own-place project-root-of
@@ -1708,13 +1708,18 @@
 
 (def renaming-file-p [path]
   "Whether a file created or deleted at path can rename a module of the
-   user's: it renames modules (renames-modules-p) and is no library path
+   user's: it renames modules (renames-modules-p) or can flip its project's
+   shared import roots (src-python-entry-p under the project of a
+   workspace folder, project-root-of), and is no library path
    (macro_modules.library-path-p: site-packages, the stdlib), so an
    install of a dependency, one event per file, republishes nothing.  An
    editable lispython checkout is the user's code like any other.  The
-   name check runs first, because the watch reports every .pyc write."
-  (return (and (renames-modules-p path)
-               (not (macro-modules.library-path-p (osp.realpath path))))))
+   name checks run first, because the watch reports every .pyc write."
+  (if (not (renames-modules-p path))
+      (do (= project-root (project-root-of path (workspace-folders)))
+          (if (or (is project-root None) (not (src-python-entry-p project-root path)))
+              (return False))))
+  (return (not (macro-modules.library-path-p (osp.realpath path)))))
 
 (def reindex-watched-file [uri path]
   "Keep the workspace index to an .lpy file created or deleted on disk:
@@ -1864,7 +1869,8 @@
 (def compiled-view [doc]
   "The full view of snapshot doc's version, compiled under the macro
    environment and the naming of now (ViewCache.cached-view,
-   uri-module-names: a stat of the files around it, cheap on the loop), or
+   uri-module-names, read afresh: stats of the directories up from the
+   file and a listing of the project root and src, two levels at most), or
    None: none compiled yet, or the compile failed.  Hover and signature
    help read it, never compile: they answer locally before any backend."
   (= [name package _ search-dirs] (uri-module-names doc.uri))

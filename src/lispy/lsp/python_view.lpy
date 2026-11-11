@@ -51,7 +51,7 @@
                                    symbol-name])
 (from lispy.core.utils [trampoline])
 (from lispy.core.unparse [unparse])
-(from lispy.core.importer [has-init-file package-root])
+(from lispy.core.importer [finder-suffixes has-init-file package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
 (from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
 
@@ -1756,24 +1756,60 @@
    lookup with no importing file read it."
   (return [project-root (osp.join project-root "src")]))
 
+(def src-python-entry-p [project-root path]
+  "Whether path (which need not exist) is a module file by which
+   project-root's src holds Python code: a file with a finder suffix
+   (finder-suffixes: .py, .lpy, extension modules, __init__ files among
+   them) directly in src, or directly in a direct subdirectory of it other
+   than __pycache__.  The one home of what makes src a src layout:
+   shared-import-roots asks it of src's entries, and the LSP's
+   renaming-file-p of a created or deleted file, which can flip the shared
+   roots of every module."
+  (= name (osp.basename path))
+  (if (not (any ((and (.endswith name suffix) (> (len name) (len suffix)))
+                 for suffix in (finder-suffixes))))
+      (return False))
+  (= src (osp.normpath (osp.join project-root "src")))
+  (= parent (osp.dirname (osp.normpath path)))
+  (return (or (== parent src)
+              (and (== (osp.dirname parent) src)
+                   (!= (osp.basename parent) "__pycache__")))))
+
+(def _src-holds-python-p [project-root]
+  "Whether project-root's src directory holds a src-python-entry-p file,
+   read two levels deep at most."
+  (= src (osp.join project-root "src"))
+  (try
+    (with [(os.scandir src) as entries]
+      (for entry in entries
+        (if (.is-dir entry)
+            (with [(os.scandir entry.path) as inner]
+              (if (any ((and (.is-file sub) (src-python-entry-p project-root sub.path))
+                        for sub in inner))
+                  (return True)))
+            (if (src-python-entry-p project-root entry.path)
+                (return True)))))
+    (except [OSError]
+      (return False)))
+  (return False))
+
 (def shared-import-roots [project-root]
   "The directories an editable install of the project puts on sys.path for
-   every module, decided by the layout alone: [src] when src is a
-   directory (the src layout); else [the project root] when a regular
-   package sits directly in it (a subdirectory holding an __init__,
-   has-init-file: the flat layout); else none.  The one home of that rule:
-   module-names appends them to every module's search dirs, and the
-   backends' default list (default-search-dirs) holds them."
+   every module, decided by the layout alone: [src] when src holds Python
+   code (_src-holds-python-p: the src layout); else [the project root] when
+   a regular package sits directly in it (a subdirectory holding an
+   __init__, has-init-file: the flat layout); else none.  The one home of
+   that rule: module-names appends them to every module's search dirs, and
+   the backends' default list (default-search-dirs) holds them."
   ;; A src layout never shares the root, though tests/__init__.py often
   ;; sits there: its editable install puts src alone on sys.path, so
-  ;; src/pkg/m.lpy, run as `python -m pkg.m`, imports no root module.  An
-  ;; __init__ created or deleted in a root package is a renaming file
-  ;; (renames_modules_p), so open documents are published again; a new or
-  ;; removed src directory is no file event, so it takes effect at each
-  ;; document's next compile and the next shadow sweep.
-  (= src (osp.join project-root "src"))
-  (if (osp.isdir src)
-      (return [src]))
+  ;; src/pkg/m.lpy, run as `python -m pkg.m`, imports no root module.  A
+  ;; src of no Python (src/lib.rs beside a root mypkg) is no src layout.
+  ;; Every file that can flip this answer is a renaming file: an __init__
+  ;; of a root package (renames_modules_p) or a src-python-entry-p file
+  ;; (renaming-file-p), so open documents are published again.
+  (if (_src-holds-python-p project-root)
+      (return [(osp.join project-root "src")]))
   (try
     (with [(os.scandir project-root) as entries]
       (= flat (any ((and (.is-dir entry) (has-init-file entry.path))

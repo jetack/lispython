@@ -1077,6 +1077,21 @@ def test_only_a_file_that_can_rename_a_users_module_republishes(
     run_bounded(scenario())
 
 
+def test_a_file_that_flips_a_src_layout_renames_modules(tmp_path, monkeypatch):
+    # Defect: only __init__ files and namespace-ending module files are
+    # heard, so creating src/newpkg/mod.lpy or src/x.py in a flat project
+    # (or deleting the last of them) flips every module's shared roots
+    # while open documents keep the diagnostics of the old search dirs.
+    folders = [SimpleNamespace(uri=tmp_path.as_uri())]
+    monkeypatch.setattr(server, "workspace_folders", lambda: list(folders))
+    for rel in ["src/newpkg/mod.lpy", "src/x.py"]:
+        assert server.renaming_file_p(str(tmp_path / rel)), rel
+    for rel in ["src/__pycache__/x.cpython-315.pyc", "src/a/b/c.py", "scripts/x.py"]:
+        assert not server.renaming_file_p(str(tmp_path / rel)), rel
+    # Outside every folder no project's shared roots can flip.
+    assert not server.renaming_file_p(str(tmp_path.parent / "src" / "x.py"))
+
+
 def test_an_init_file_in_lispythons_own_package_renames_modules():
     # Defect: naming borrowed the tracking exclusions, which leave out
     # lispython's own package, so an __init__ created in an editable

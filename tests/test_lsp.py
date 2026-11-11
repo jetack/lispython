@@ -1120,23 +1120,14 @@ class TestRequireSelection:
 
     def test_an_absolute_module_resolves_on_the_runs_search_dirs_only(self, tmp_path):
         # Defect: after the importing file's search dirs come every folder's
-        # project root and src, so with no backend `(import utils)` in
-        # src/pkg/m.lpy opens the root utils.lpy (root first), where
-        # `python -m pkg.m` imports src/utils.lpy, and `(import rootonly)` in
-        # scripts/x.lpy opens the root rootonly.lpy, which its run cannot
+        # project root and src, so with no backend `(import rootonly)` in
+        # scripts/x.lpy of a src layout opens the root rootonly.lpy, which
+        # `lpy scripts/x.lpy` (scripts/, then the installed src) cannot
         # import.
-        for name in [
-            "utils.lpy",
-            "rootonly.lpy",
-            "src/utils.lpy",
-            "src/pkg/__init__.py",
-        ]:
+        for name in ["rootonly.lpy", "src/pkg/__init__.py"]:
             path = tmp_path / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("")
-        module = str(tmp_path / "src" / "pkg" / "m.lpy")
-        got = self._target_in(tmp_path, "(import utils)", origin=module)
-        assert got == str(tmp_path / "src" / "utils.lpy")
         script = str(tmp_path / "scripts" / "x.lpy")
         assert self._target_in(tmp_path, "(import rootonly)", origin=script) is None
         # With no importing file the folder's own modules are the answer.

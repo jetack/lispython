@@ -975,7 +975,7 @@ class TestShadows:
         # gives it the package ns, though that run has no __package__, so a
         # relative require resolves where the run refuses it; or it leaves
         # out src, which an editable install puts on sys.path for every run.
-        (tmp_path / "src" / "sns").mkdir(parents=True)
+        self.write(tmp_path / "src" / "sns" / "b.lpy", "")
         (tmp_path / "ns").mkdir()
         got = [
             pv.module_names(str(tmp_path.joinpath(*parts)), project_root=str(tmp_path))
@@ -1746,6 +1746,56 @@ class TestShadows:
         ],
     }
 
+    def test_a_src_of_no_python_is_no_src_layout(self, tmp_path, monkeypatch):
+        # Defect: any src directory makes a src layout, so a mixed repo
+        # (src/lib.rs beside the root package mypkg) never shares the root
+        # and (require mypkg.mac *) in scripts/x.lpy loads no macros, where
+        # its run with the project installed imports mypkg.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "src" / "lib.rs", "")
+        self.write(project / "src" / "core" / "mod.rs", "")
+        self.write(project / "src" / "__pycache__" / "x.cpython-315.pyc", "")
+        self.write(project / "mypkg" / "__init__.py", "")
+        self.write(
+            project / "mypkg" / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))"
+        )
+        self.write(
+            project / "scripts" / "x.lpy", "(require mypkg.mac *)\n(= y (twice 2))"
+        )
+        assert pv.shared_import_roots(str(project)) == [str(project)]
+        names = ["mypkg", "mypkg.mac"]
+        for name in names:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        try:
+            pv.write_shadows(str(project), str(root))
+        finally:
+            for name in names:
+                sys.modules.pop(name, None)
+        assert (root / "scripts" / "x.py").read_text().endswith("y = 2 + 2")
+        # One module file directly in src, or in a package of it, makes it one.
+        self.write(project / "src" / "core" / "mod.py", "")
+        assert pv.shared_import_roots(str(project)) == [str(project / "src")]
+
+    def test_src_python_entries_are_the_files_that_make_a_src_layout(self, tmp_path):
+        # Defect: the rule that decides a src layout and the one telling the
+        # LSP which created or deleted file can flip it differ, so a file
+        # that flips the shared roots republishes nothing, or a .pyc write
+        # under src/__pycache__ republishes everything.
+        project = str(tmp_path)
+        src = tmp_path / "src"
+        for rel, expected in [
+            ("x.py", True),
+            ("newpkg/mod.lpy", True),
+            ("newpkg/__init__.py", True),
+            ("pkg/ext.abi3.so", True),
+            ("lib.rs", False),
+            ("pkg/deep/m.py", False),
+            ("__pycache__/x.cpython-315.pyc", False),
+            (".py", False),
+        ]:
+            assert pv.src_python_entry_p(project, str(src / rel)) is expected, rel
+        assert not pv.src_python_entry_p(project, str(tmp_path / "x.py"))
+
     def shared_layout_without_lpy(self, project, layout):
         for name, text in self.SHARED_LAYOUTS[layout]:
             self.write(project / name, text)
@@ -2325,7 +2375,7 @@ class TestShadows:
         # pyright searches first as its execution root and pyrefly only
         # after search-path.
         project, root = tmp_path / "project", tmp_path / "view"
-        (project / "src" / "pkg").mkdir(parents=True)
+        self.write(project / "src" / "pkg" / "__init__.py", "")
         site = project / ".venv" / "lib" / "python3.99" / "site-packages"
         site.mkdir(parents=True)
         tools = str(project / "my-tools")
