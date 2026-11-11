@@ -270,34 +270,235 @@ def test_a_reopened_document_never_reuses_a_version(tmp_path):
     assert client.diagnostics_for(uri, text_b) == [(diagnostic, [])]
 
 
-def test_related_locations_are_placed_when_published(tmp_path):
-    # Defect: a related location is placed (locate) only when the server
-    # maps the set, after a later sync (a request's cursor view) has
-    # replaced the origin of the text the backend analysed, so it maps
-    # through the wrong view.
+class _SyncingProcess:
+    """A running backend's client that records the documents synced to it:
+    sent holds (kind, backend uri, version) per didOpen/didChange."""
+
+    def __init__(self):
+        self.sent = []
+        self.closed = []
+
+    def text_document_did_open(self, params):
+        doc = params.text_document
+        self.sent.append(("open", doc.uri, doc.version))
+
+    def text_document_did_change(self, params):
+        doc = params.text_document
+        self.sent.append(("change", doc.uri, doc.version))
+
+    def text_document_did_close(self, params):
+        self.closed.append(params.text_document.uri)
+
+    def version(self, uri):
+        """The version last sent for backend document uri."""
+        return [version for _, sent, version in self.sent if sent == uri][-1]
+
+
+def _syncing_client(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     client = backend.BackendClient(
         pv.view_root_for(str(project), cache_home=str(tmp_path / "cache")), None
     )
-    process = object()
+    process = _SyncingProcess()
     client._client = process
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
     uri = (project / "main.lpy").as_uri()
+    heard = []
+    client.on_diagnostics = heard.append
+    return client, process, uri, heard
+
+
+_DIAGNOSTIC = lsp.Diagnostic(
+    range=lsp.Range(
+        start=lsp.Position(line=0, character=6), end=lsp.Position(line=0, character=20)
+    ),
+    message="m",
+)
+
+
+def test_a_publish_for_a_text_that_becomes_the_full_view_is_kept(tmp_path):
+    # Defect: a request synced text T, the backend published for T before
+    # push-buffer made T the full view, so the publish was dropped; the
+    # push then sent nothing (the backend already held T), the backend
+    # never published again, and the buffer had no backend diagnostics
+    # until its next edit.
+    client, process, uri, heard = _syncing_client(tmp_path)
+    text = "print(undefined_name)"
     shadow = client.backend_uri(uri)
-    full, full_origin = "x = 1", ("(= x 1)", object())
-    client._full[uri] = (full, full_origin)
-    client._docs[uri] = [shadow, 2, full, full_origin]
+    client._sync(uri, text, origin=("src", None))
+    client._diagnostics_published(
+        process, published(shadow, process.version(shadow), [_DIAGNOSTIC])
+    )
+    assert heard == []
+    view = SimpleNamespace(text=text)
+    assert client.push_buffer(uri, "src", view)
+    assert len(process.sent) == 1  # the push sent nothing
+    assert client.diagnostics_for(uri, text) == [(_DIAGNOSTIC, [])]
+    assert heard == [uri]
+
+
+def test_a_kept_publish_is_dropped_once_another_text_is_sent(tmp_path):
+    # Defects: a publish kept for a request's cursor view is accepted when
+    # the full view of another text is sent; one kept for a text the backend
+    # has since replaced is accepted once that text comes back as a newer
+    # version, which the backend will publish for itself.
+    client, process, uri, heard = _syncing_client(tmp_path)
+    shadow = client.backend_uri(uri)
+    cursor, full = "print(cursor)", "print(full)"
+
+    def publish():
+        version = process.version(shadow)
+        client._diagnostics_published(
+            process, published(shadow, version, [_DIAGNOSTIC])
+        )
+
+    client._sync(uri, cursor, origin=("src", None))
+    publish()
+    assert client.push_buffer(uri, "src", SimpleNamespace(text=full))
+    assert client.diagnostics_for(uri, full) is None
+    assert client.diagnostics_for(uri, cursor) is None
+    # The cursor text again, published for; then another text and the
+    # cursor text once more as a newer version, which the full view takes.
+    client._sync(uri, cursor, origin=("src", None))
+    publish()
+    client._sync(uri, "print(other)", origin=("src", None))
+    sent = len(process.sent)
+    client._sync(uri, cursor, origin=("src", None))
+    assert len(process.sent) == sent + 1
+    assert client.push_buffer(uri, "src", SimpleNamespace(text=cursor))
+    assert client.diagnostics_for(uri, cursor) is None
+    assert heard == []
+
+
+def test_a_kept_publish_is_dropped_once_its_copy_is_closed(tmp_path):
+    # Defect: a publish kept for a copy later closed (the document closed or
+    # moved while a request ran) is accepted once the document reopens with
+    # the same text, as the new copy's diagnostics, though the backend
+    # analysed only the closed one and publishes the new one itself.
+    client, process, uri, heard = _syncing_client(tmp_path)
+    shadow = client.backend_uri(uri)
+    text = "print(undefined_name)"
+    client._sync(uri, text, origin=("src", None))  # a request's view
+    client._diagnostics_published(
+        process, published(shadow, process.version(shadow), [_DIAGNOSTIC])
+    )
+    client.close_document(uri)
+    assert process.closed == [shadow]
+    assert client.push_buffer(uri, "src", SimpleNamespace(text=text))
+    assert process.sent[-1][0] == "open"
+    assert client.diagnostics_for(uri, text) is None
+    assert heard == []
+
+
+def test_a_kept_publishs_related_locations_are_placed_when_published(tmp_path):
+    # Defect: a publish kept until its text became the full view placed its
+    # related locations only then, so a location in another open document
+    # mapped through that document's newer view, not the one analysed.
+    client, process, uri, heard = _syncing_client(tmp_path)
+    other = uri.replace("main.lpy", "other.lpy")
+    other_shadow = client.backend_uri(other)
+    analysed = ("(= y 1)", object())
+    client._sync(other, "y = 1", origin=analysed)
+    text = "x = 1"
+    client._sync(uri, text, origin=("(= x 1)", object()))
+    shadow = client.backend_uri(uri)
     here = lsp.Range(
         start=lsp.Position(line=0, character=0), end=lsp.Position(line=0, character=1)
+    )
+    related = lsp.DiagnosticRelatedInformation(
+        location=lsp.Location(uri=other_shadow, range=here), message="see"
+    )
+    diagnostic = lsp.Diagnostic(range=here, message="m", related_information=[related])
+    client._diagnostics_published(
+        process, published(shadow, process.version(shadow), [diagnostic])
+    )
+    client._sync(other, "y = 2", origin=("(= y 2)", object()))  # an edit of other
+    assert client.push_buffer(uri, "(= x 1)", SimpleNamespace(text=text))
+    [(_, places)] = client.diagnostics_for(uri, text)
+    assert places == [("lpy", other, analysed)]
+
+
+@pytest.mark.parametrize("order", ["published-first", "in-flight", "kept"])
+def test_own_related_locations_map_through_the_runs_view(tmp_path, monkeypatch, order):
+    # Defect: the document's own related locations were placed at the origin
+    # of one source of the text the backend analysed (an earlier full view,
+    # a request's cursor view), while the run maps the ranges through the
+    # buffer's latest source: after an edit that leaves the text alone (a
+    # comment), they missed by its lines.
+    client, process, uri, heard = _syncing_client(tmp_path)
+    shadow = client.backend_uri(uri)
+    older, latest = "(= x 1)", "; comment\n(= x 1)"
+    older_view, latest_view = pv.compile_view(older), pv.compile_view(latest)
+    text = latest_view.text
+    assert older_view.text == text
+    (line, col), (end_line, end_col) = span(text, "x")
+    here = lsp.Range(
+        start=lsp.Position(line=line - 1, character=col),
+        end=lsp.Position(line=end_line - 1, character=end_col),
     )
     related = lsp.DiagnosticRelatedInformation(
         location=lsp.Location(uri=shadow, range=here), message="see"
     )
     diagnostic = lsp.Diagnostic(range=here, message="m", related_information=[related])
-    client._diagnostics_published(process, published(shadow, 2, [diagnostic]))
-    client._docs[uri][3] = ("(= x 1)", object())  # a later cursor sync
+
+    def publish():
+        version = process.version(shadow)
+        client._diagnostics_published(process, published(shadow, version, [diagnostic]))
+
+    if order == "published-first":
+        client.push_buffer(uri, older, older_view)
+        publish()
+        client.push_buffer(uri, latest, latest_view)  # sends nothing
+    else:
+        if order == "in-flight":
+            client.push_buffer(uri, older, older_view)
+        client._in_flight[uri] = 1
+        client._sync(uri, text, origin=(older, older_view))  # a request's view
+        if order == "kept":
+            publish()
+        client.push_buffer(uri, latest, latest_view)
+        if order == "in-flight":
+            publish()
+        client._request_done(uri)
+    assert [kind for kind, _, _ in process.sent] == ["open"]
+    stub = SimpleNamespace(name="pyrefly", backend_diagnostics=client.diagnostics_for)
+    monkeypatch.setattr(server, "backends", stub)
+    run = server.DiagnosticRun(None, TextDocument(uri, latest, version=2))
+    run.view = latest_view
+    [found] = asyncio.run(server.mapped_backend_diagnostics(run))
+    [info] = found.related_information
+    assert found.range.start.line == 1
+    assert (info.location.uri, info.location.range) == (uri, found.range)
+    assert heard == [uri]
+
+
+def test_related_locations_are_placed_when_published(tmp_path):
+    # Defect: a related location is placed (locate) only when the server
+    # maps the set, after a later sync of the document it lies in has
+    # replaced the origin of the text the backend analysed, so it maps
+    # through the wrong view.
+    client, process, uri, heard = _syncing_client(tmp_path)
+    other = uri.replace("main.lpy", "other.lpy")
+    analysed = ("(= y 1)", object())
+    client._sync(other, "y = 1", origin=analysed)
+    full = "x = 1"
+    client.push_buffer(uri, "(= x 1)", SimpleNamespace(text=full))
+    shadow = client.backend_uri(uri)
+    here = lsp.Range(
+        start=lsp.Position(line=0, character=0), end=lsp.Position(line=0, character=1)
+    )
+    related = lsp.DiagnosticRelatedInformation(
+        location=lsp.Location(uri=client.backend_uri(other), range=here), message="see"
+    )
+    diagnostic = lsp.Diagnostic(range=here, message="m", related_information=[related])
+    client._diagnostics_published(
+        process, published(shadow, process.version(shadow), [diagnostic])
+    )
+    client._sync(other, "y = 2", origin=("(= y 2)", object()))  # an edit of other
     [(_, places)] = client.diagnostics_for(uri, full)
-    assert places == [("lpy", uri, full_origin)]
+    assert places == [("lpy", other, analysed)]
 
 
 # ---------------------------------------------------------------------------
