@@ -178,3 +178,31 @@ def test_m_package_without_main_is_one_line(tmp_path: Path):
     assert r.stderr.strip().endswith(
         "'cwdmod' is a package and cannot be directly executed"
     )
+
+
+def test_importing_tools_in_a_package_directory_leaves_sys_path_and_main(
+    tmp_path: Path,
+):
+    # Defect: importing lispy.tools from a working directory inside a
+    # package puts that package's root on sys.path and gives the REPL's
+    # __main__ scope the package as __package__, which Python's own
+    # __main__ never has: the REPL then resolves imports and relative
+    # requires no `python` run there would.
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    code = (
+        "import sys\n"
+        "before = list(sys.path)\n"
+        "import lispy.tools as t\n"
+        "print(sys.path == before)\n"
+        "print(t.main_scope()['__package__'] == __package__, repr(__package__))\n"
+    )
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
+    }
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=pkg, env=env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[:2] == ["True", "True None"]

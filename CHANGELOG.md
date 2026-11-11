@@ -121,13 +121,22 @@ follows [Semantic Versioning](https://semver.org/).
   (`scripts/tool.lpy` is `scripts.tool`, imported from the folder), so its
   `__name__`/`__package__` at compile time differ from before. It also
   stays the script `lpy scripts/tool.lpy` runs: its own directory (as `lpy`
-  runs it) and its script root (`scripts/`, or `tools/` for
-  `tools/mypkg/a.lpy` in a regular package) are on `sys.path` while its
-  macros run and searched first by go-to-definition's local fallback (used
-  only when the backend gives no answer), so a bare require or import of a
-  sibling still resolves. The backend searches the import root, and the own
-  directory and script root only when each is no regular package and inside
-  none.
+  runs it) and its import root are searched by its compile, the local
+  definition fallback and the backend alike, so a bare require or import of
+  a sibling still resolves.
+- LSP: a module inside a regular package (`src/pkg/m.lpy`, or
+  `tools/mypkg/a.lpy` in a namespace directory) is analysed as
+  `import pkg.m` sees it, with its import root alone: its own directory is
+  no longer on `sys.path` while its macros run, so a bare sibling
+  `(require helper)` there loads no macros (a "module not found" warning),
+  as `import pkg.m` finds no `helper` either; write `(require pkg.helper)`
+  or `(require .helper)`. The
+  compile, go-to-definition and the backend now search the same
+  directories.
+- The `lpy` REPL and CLI no longer put the working directory's package root
+  on `sys.path` or set the REPL's `__package__` to the working directory's
+  package when `lispy.tools` is imported: `__main__` is in no package
+  (`__package__` is `None`), as Python's own is.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call
