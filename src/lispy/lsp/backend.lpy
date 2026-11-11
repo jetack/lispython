@@ -31,7 +31,7 @@
 (from pygls.uris [to-fs-path])
 
 (from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest config-files
-                             read-quietly view-path view-root-for
+                             new-environment-p read-quietly view-path view-root-for
                              write-pyrefly-config write-pyright-config write-shadows])
 
 (= logger (logging.getLogger __name__))
@@ -416,7 +416,9 @@
    that becomes the full view only later included (_accept-kept).  A save
    while a start
    is in progress is recorded and replayed once it runs (_replay-saves),
-   since the start's sweep may have read the disk before the save.
+   since the start's sweep may have read the disk before the save.  The
+   documents open in the editor (open-document) are environment sources
+   of every sweep (write-shadows' open-paths), saved or not.
    definition-walks-up is True for a backend in DEFINITION-WALKS-UP."
   (def __init__ [self view-root argv :name None :manifest None
                  :check-types True :definition-walks-up False]
@@ -442,6 +444,15 @@
     ;; sweep may have missed: replayed once it runs; the next start clears
     ;; them before its own sweep (_start).
     (= self._saved-while-starting (set))
+    ;; Whether a save or an open with a new search environment came while a
+    ;; start was in progress (file-saved): _replay-saves then sweeps again,
+    ;; with those saves, or with none when only an open came.
+    (= self._sweep-due False)
+    ;; lpy uri -> real path of each document open in the editor
+    ;; (open-document, close-document), kept across spawns: every sweep
+    ;; takes their search environments, whether or not the file is on disk
+    ;; or compiled (write-shadows' open-paths).
+    (= self._open-paths {})
     ;; The replays of those saves still running (_replay-saves); kept here
     ;; because the loop holds tasks only weakly.
     (= self._replays (set))
@@ -524,13 +535,18 @@
         (return None))
     (return (.as-uri (pathlib.Path shadow))))
 
-  (def _prepare-view-root [self]
+  (def _prepare-view-root [self :open-paths None]
     "Write the view root's shadows and the backend's config file, and return
      the shadows' ShadowSweep.  They compile every .lpy of the project (its
-     macros run), so callers run this in a thread, off the event loop."
+     macros run), so callers run this in a thread, off the event loop,
+     passing open-paths (default: the open documents' now) read on the
+     loop, since open-document and close-document change them there."
+    (if (is open-paths None)
+        (= open-paths (list (.values self._open-paths))))
     (= root (os.fspath self.view-root))
     (os.makedirs root :exist-ok True)
-    (= sweep (write-shadows self.project-root root :manifest self.manifest))
+    (= sweep (write-shadows self.project-root root :manifest self.manifest
+                            :open-paths open-paths))
     ((config-writer self.name) self.project-root self.view-root
                                :environments self.manifest.environments
                                :check-types self.check-types)
@@ -584,6 +600,7 @@
     ;; Before the first await: this start's own sweep covers every save
     ;; recorded so far, a failed start's included.
     (.clear self._saved-while-starting)
+    (= self._sweep-due False)
     (try
       (if (is-not self._client None)
           ;; the dead process's client: its tasks end, its pipes close
@@ -621,10 +638,11 @@
     "Replay the saves recorded while the start that just succeeded was in
      progress, all at once (saved: one sweep), as a task of its own: a
      request awaits the start, and the sweep compiles the project."
-    (if (not self._saved-while-starting)
+    (if (not self._sweep-due)
         (return))
     (= lpy-uris (sorted self._saved-while-starting))
     (.clear self._saved-while-starting)
+    (= self._sweep-due False)
     (= replay (asyncio.create-task (.saved self *lpy-uris)))
     (.add self._replays replay)
     (.add-done-callback replay _task-done)
@@ -646,7 +664,8 @@
              for path in (config-files self.view-root (config-file self.name))}))
 
   (async-def _spawn [self]
-    (await (asyncio.to-thread self._prepare-view-root))
+    (await (asyncio.to-thread self._prepare-view-root
+                              :open-paths (list (.values self._open-paths))))
     (= self._config-texts (await (asyncio.to-thread self._read-configs)))
     (= self._docs {})
     (= self._kept {})
@@ -985,10 +1004,29 @@
         (.debug logger "python backend: cannot locate %s" uri :exc-info True)
         (return None))))
 
+  (def open-document [self lpy-uri]
+    "Document lpy-uri opened in the editor: count it as an environment
+     source of every sweep from now on (_open-paths).  True when its search
+     environment is one the view's config lacks (new-environment-p), so a
+     running or starting backend must sweep again (saved) to analyse it
+     under its own search dirs.  Call on the loop."
+    (= path (to-fs-path lpy-uri))
+    (if (is path None)
+        (return False))
+    (= path (osp.realpath path))
+    (= (sub self._open-paths lpy-uri) path)
+    (return (new-environment-p self.project-root self.manifest.environments path)))
+
   (def close-document [self lpy-uri]
     "Forget document lpy-uri's full view and diagnostics, and didClose it if
      this backend process has it open.  A request still in flight on it
-     closes the copy its sync reopens once it ends (_request-done)."
+     closes the copy its sync reopens once it ends (_request-done).  It
+     stops being an environment source, but the environment it alone gave
+     stays in the config until the next sweep (a save, a module file
+     created or deleted, a start): a stale environment only names the
+     search dirs that document's run had, and sweeping on every close
+     would compile the project each time."
+    (.pop self._open-paths lpy-uri None)
     (.pop self._full lpy-uri None)
     (.pop self._diagnostics lpy-uri None)
     (._close-backend-copy self lpy-uri))
@@ -1019,9 +1057,11 @@
      no-op, since the next start sweeps."
     (if (not self.running)
         (do (if self.starting
-                (.update self._saved-while-starting lpy-uris))
+                (do (.update self._saved-while-starting lpy-uris)
+                    (= self._sweep-due True)))
             (return)))
-    (= sweep (await (asyncio.to-thread self._prepare-view-root)))
+    (= sweep (await (asyncio.to-thread self._prepare-view-root
+                                       :open-paths (list (.values self._open-paths)))))
     (= changed [(.as-uri (pathlib.Path path)) for path in sweep.written])
     (for lpy-uri in lpy-uris
       (= uri (.backend-uri self lpy-uri))
@@ -1328,13 +1368,20 @@
     (return task))
 
   (def document-opened [self lpy-uri]
-    "A buffer opened: start its backend without waiting for it
-     (BackendClient.start-soon) when its diagnostics are forwarded, since
-     they come only from a running one.  Call on the loop."
+    "A buffer opened: its backend counts it as an environment source
+     (BackendClient.open-document), and one running or starting sweeps
+     again (saved, replayed after a start in progress) when its search
+     environment is new, since that backend's config lacks it; then start
+     the backend without waiting for it (BackendClient.start-soon) when its
+     diagnostics are forwarded, since they come only from a running one,
+     whose start sweep takes the open.  Call on the loop."
     (try
-      (if self.forwards-diagnostics
-          (do (= client (.available-client self lpy-uri))
-              (if (is-not client None)
+      (= client (.available-client self lpy-uri))
+      (if (is-not client None)
+          (do (if (and (.open-document client lpy-uri)
+                       (or client.running client.starting))
+                  (._schedule self (.saved client)))
+              (if self.forwards-diagnostics
                   (.start-soon client))))
       (except [Exception]
         (.exception logger "lispython LSP: backend start failed for %s" lpy-uri))))

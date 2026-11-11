@@ -1112,6 +1112,56 @@ class TestShadows:
             str(root / "pyrefly.toml")
         ]
 
+    def test_an_open_document_not_on_disk_gets_its_search_environment(self, tmp_path):
+        # Defect: environments come only from sources with a shadow, so a
+        # buffer of scripts/y.lpy not yet saved (no .lpy in scripts/ on disk)
+        # is analysed under the default list, and its (import sibling) of
+        # scripts/sibling.py, which `python scripts/y.py` resolves, stays
+        # unresolved until the first save.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.write(project / "main.lpy", "(= y 1)")
+        self.write(project / "scripts" / "sibling.py", "X = 1")
+        scripts = str(project / "scripts")
+        view_scripts = root / "scripts"
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(
+            str(project),
+            str(root),
+            manifest=manifest,
+            open_paths=[os.path.join(scripts, "y.lpy")],
+        )
+        assert manifest.environments[scripts] == (scripts,)
+        config = json.loads(
+            open(
+                pv.write_pyright_config(
+                    str(project), str(root), environments=manifest.environments
+                )
+            ).read()
+        )
+        [env] = config["executionEnvironments"]
+        assert env == {
+            "root": str(view_scripts),
+            "extraPaths": [str(view_scripts), scripts],
+        }
+        self.pyrefly_config(project, root, environments=manifest.environments)
+        with open(view_scripts / "pyrefly.toml", "rb") as f:
+            assert tomllib.load(f)["search-path"] == env["extraPaths"]
+        # A later sweep keeps it while the document is open, and the
+        # directory holding only that config is no orphan.
+        pv.write_shadows(
+            str(project),
+            str(root),
+            manifest=manifest,
+            open_paths=[os.path.join(scripts, "y.lpy")],
+        )
+        assert (view_scripts / "pyrefly.toml").is_file()
+        assert pv.new_environment_p(str(project), {}, os.path.join(scripts, "y.lpy"))
+        assert not pv.new_environment_p(
+            str(project), manifest.environments, os.path.join(scripts, "z.lpy")
+        )
+        # A root module takes the default list: never a new environment.
+        assert not pv.new_environment_p(str(project), {}, str(project / "new.lpy"))
+
     def test_a_regular_package_in_a_namespace_directory_is_its_package_module(
         self, tmp_path, monkeypatch
     ):
