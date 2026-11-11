@@ -49,7 +49,8 @@
                              pyrefly-fallback source-lines source-prefix
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
-(from lispy.lsp.backend [Backends REQUEST-TIMEOUT project-root-of suppression-tool])
+(from lispy.lsp.backend [Backends REQUEST-TIMEOUT own-place project-root-of
+                         suppression-tool])
 ;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
 (import lispy.lsp.macro-modules as macro-modules)
 
@@ -3499,9 +3500,10 @@
    document doc (a snapshot of origin's source, split as lines), or None
    to drop it: its range by lpy-diagnostic-range, its message in the
    buffer's spelling (message-to-buffer), each related location from its
-   place (located when the backend published, BackendClient.locate) as a
-   definition's is (editor-location; one that maps nowhere is dropped), its
-   source the backend's name.  Severity, code, its description and tags are
+   place (located when the backend published, BackendClient.locate; one in
+   doc itself mapped through origin, own-place) as a definition's is
+   (editor-location; one that maps nowhere is dropped), its source the
+   backend's name.  Severity, code, its description and tags are
    kept; data is never passed on, since it describes generated code."
   (= tagged (bool (& (set (or diagnostic.tags (list))) HINT-TAGS)))
   (= span (origin-span origin diagnostic.range
@@ -3513,7 +3515,8 @@
   (if diagnostic.related-information
       (do (= related [])
           (for [info place] in (zip diagnostic.related-information places)
-            (= location (await (editor-location doc place info.location.uri
+            (= location (await (editor-location doc (own-place place origin)
+                                                info.location.uri
                                                 info.location.range origins deadline)))
             (if (is-not location None)
                 (.append related

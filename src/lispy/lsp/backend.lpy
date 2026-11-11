@@ -376,6 +376,21 @@
                    :did-change-watched-files (lsp.DidChangeWatchedFilesClientCapabilities
                                                :dynamic-registration True)))))
 
+;; The origin a published diagnostic's place gives a location in the very
+;; document it was published for (BackendClient._diagnostics-published):
+;; that document's origin is the one its reader maps the set's ranges
+;; through, which own-place puts in.  Never None, which names the disk
+;; shadow.
+(= _OWN-DOCUMENT (object))
+
+(def own-place [place origin]
+  "place, a published diagnostic's related-location place (diagnostics-for),
+   with origin ((source, view)) for the document the set was published for,
+   the origin its ranges are mapped through."
+  (if (and (is-not place None) (== (sub place 0) "lpy") (is (sub place 2) _OWN-DOCUMENT))
+      (return (, "lpy" (sub place 1) origin)))
+  (return place))
+
 (def _kill [process]
   (if (and (is-not process None) (is process.returncode None))
       (try
@@ -397,7 +412,9 @@
    .lpy uri, as the view-path shadow's uri: a buffer's full view
    (push-buffer), or a request's cursor view, after whose answer the full
    view is synced back.  Its diagnostics are kept only for a full view's
-   text (_diagnostics-published, diagnostics-for).  A save while a start
+   text (_diagnostics-published, diagnostics-for), a publish for a text
+   that becomes the full view only later included (_accept-kept).  A save
+   while a start
    is in progress is recorded and replayed once it runs (_replay-saves),
    since the start's sweep may have read the disk before the save.
    definition-walks-up is True for a backend in DEFINITION-WALKS-UP."
@@ -448,6 +465,14 @@
     ;; lpy uri -> (text, diagnostics) the backend last published for a
     ;; full view's text (_diagnostics-published).
     (= self._diagnostics {})
+    ;; lpy uri -> (text, diagnostics), as _diagnostics, of a publish for the
+    ;; text the backend holds that was not (yet) the full view's, for this
+    ;; spawn; dropped once another text is sent (_sync) or the copy is
+    ;; closed (_close-backend-copy): a request may sync
+    ;; a text before push-buffer makes it the full view, and that push then
+    ;; sends nothing, so the backend never publishes for it again;
+    ;; _sync-full accepts it then (_accept-kept).
+    (= self._kept {})
     ;; Called with an lpy uri on the loop when its diagnostics arrive; set by
     ;; Backends.
     (= self.on-diagnostics None)
@@ -625,6 +650,7 @@
     (await (asyncio.to-thread self._prepare-view-root))
     (= self._config-texts (await (asyncio.to-thread self._read-configs)))
     (= self._docs {})
+    (= self._kept {})
     (= root (os.fspath self.view-root))
     (= root-uri (.as-uri (pathlib.Path root)))
     (= client (_Client self))
@@ -670,6 +696,7 @@
     (= self.process None)
     (= self._stderr-task None)
     (= self._docs {})
+    (= self._kept {})
     (_kill process)
     ;; A task of its own, awaited shielded: shutdown may cancel a _start
     ;; that is discarding, and the client this call took off self would then
@@ -714,6 +741,7 @@
     (if (!= (sub doc 2) text)
         (do (= (sub doc 1) (._next-version self))
             (= (sub doc 2) text)
+            (.pop self._kept lpy-uri None)
             (.text-document-did-change client
               (lsp.DidChangeTextDocumentParams
                 :text-document (lsp.VersionedTextDocumentIdentifier :uri (sub doc 0)
@@ -802,7 +830,9 @@
 
   (def _sync-full [self lpy-uri]
     "Sync lpy-uri's latest full view (_full) to a running backend; True when
-     the backend has it.  Never raises."
+     the backend has it.  A publish kept for the text it now holds is
+     accepted (_accept-kept), since a sync that sent nothing brings no new
+     one.  Never raises."
     (= full (.get self._full lpy-uri))
     (if (or (is full None) (not self.running))
         (return False))
@@ -811,7 +841,31 @@
       (except [Exception]
         (.debug logger "python backend: cannot sync %s" lpy-uri :exc-info True)
         (return False)))
+    (if synced
+        (._accept-kept self lpy-uri))
     (return synced))
+
+  (def _accept-kept [self lpy-uri]
+    "Accept the publish kept for document lpy-uri (_kept), if any, as its
+     diagnostics, once _sync made the backend's copy the full view.  It
+     needs no check of its own: it was kept for the text the backend then
+     held, any other text sent (_sync) or a close of the copy
+     (_close-backend-copy) drops it, and this sync sent the full view's
+     text or found that text already there.  Never raises."
+    (= kept (.pop self._kept lpy-uri None))
+    (if (is-not kept None)
+        (try
+          (._keep-diagnostics self lpy-uri kept)
+          (except [Exception]
+            (.exception logger "lispython LSP: backend diagnostics failed for %s"
+                        lpy-uri)))))
+
+  (def _keep-diagnostics [self lpy-uri known]
+    "Make known, a (text, placed diagnostics) pair (_diagnostics), document
+     lpy-uri's diagnostics and tell on-diagnostics."
+    (= (sub self._diagnostics lpy-uri) known)
+    (if (is-not self.on-diagnostics None)
+        (self.on-diagnostics lpy-uri)))
 
   (def _tell-input-changed [self lpy-uri]
     "Call on-input-changed with lpy-uri, if set.  Never raises."
@@ -827,7 +881,10 @@
      document must be one this process has open, at the version published,
      and its text then the buffer's latest full view (_full), never a
      request's cursor view, whose text the user does not see.  on-diagnostics
-     then hears of it.  Call on the loop.  Never raises."
+     then hears of it.  A publish for the current version whose text is not
+     the full view's is kept (_kept), accepted if that text becomes the
+     full view's before another is sent (_sync-full).  Call on the loop.
+     Never raises."
     (try
       (if (is-not client self._client)
           (return))
@@ -838,20 +895,25 @@
         (if (not (or (== (sub doc 0) params.uri)
                      (and path synced (== (osp.normpath synced) path))))
             (continue))
-        (= full (.get self._full lpy-uri))
-        (if (or (is params.version None) (!= params.version (sub doc 1))
-                (is full None) (!= (sub full 0) (sub doc 2)))
+        (if (or (is params.version None) (!= params.version (sub doc 1)))
             (return))
-        ;; Related locations are placed now, as locate requires, through
-        ;; the origin of the text the backend analysed.
-        (= origins {lpy-uri (sub full 1)})
-        (= (sub self._diagnostics lpy-uri)
-           (, (sub doc 2)
-              [(, diagnostic [(.locate self info.location.uri :origins origins)
-                              for info in (or diagnostic.related-information [])])
-               for diagnostic in params.diagnostics]))
-        (if (is-not self.on-diagnostics None)
-            (self.on-diagnostics lpy-uri))
+        ;; Related locations are placed now, as locate requires, since a
+        ;; later sync replaces another document's origin in _docs.  The
+        ;; document's own are placed at _OWN-DOCUMENT, never at an origin:
+        ;; one text has many sources (a comment-only edit sends nothing),
+        ;; so only the reader knows the origin it maps the ranges through
+        ;; (own-place).
+        (= known (, (sub doc 2)
+                    [(, diagnostic [(.locate self info.location.uri
+                                             :origins {lpy-uri _OWN-DOCUMENT})
+                                    for info in (or diagnostic.related-information [])])
+                     for diagnostic in params.diagnostics]))
+        (= full (.get self._full lpy-uri))
+        (if (or (is full None) (!= (sub full 0) (sub doc 2)))
+            (do (= (sub self._kept lpy-uri) known)
+                (return)))
+        (.pop self._kept lpy-uri None)
+        (._keep-diagnostics self lpy-uri known)
         (return))
       (except [Exception]
         (.exception logger "lispython LSP: backend diagnostics failed for %s" params.uri))))
@@ -860,7 +922,10 @@
     "The backend's diagnostics for document lpy-uri when they were published
      for text, the text of its full view, else None: a list of (diagnostic,
      places), an lsprotocol Diagnostic over text in UTF-16 units and the
-     locate answer for each of its related locations."
+     locate answer for each of its related locations, placed when the
+     backend published; a location in lpy-uri itself is placed at no origin
+     of its own, so the reader gives it the origin it maps text's ranges
+     through (own-place)."
     (= known (.get self._diagnostics lpy-uri))
     (if (or (is known None) (!= (sub known 0) text))
         (return None))
@@ -930,11 +995,12 @@
     (._close-backend-copy self lpy-uri))
 
   (def _close-backend-copy [self lpy-uri]
-    "didClose for document lpy-uri if this backend process has it open;
-     on-input-changed then hears lpy-uri, since the backend reads that file
-     from disk again, which another buffer's answer may depend on; the
-     document's own answers were computed over a text a request sends
-     again, so they stand."
+    "didClose for document lpy-uri if this backend process has it open, its
+     kept publish (_kept) dropped with it; on-input-changed then hears
+     lpy-uri, since the backend reads that file from disk again, which
+     another buffer's answer may depend on; the document's own answers were
+     computed over a text a request sends again, so they stand."
+    (.pop self._kept lpy-uri None)
     (= doc (.pop self._docs lpy-uri None))
     (if (is-not doc None)
         (._next-version self))
@@ -1291,8 +1357,9 @@
 
   (def backend-diagnostics [self lpy-uri text]
     "The backend's diagnostics published for text, the full view of buffer
-     lpy-uri (BackendClient.diagnostics-for: (diagnostic, places) pairs);
-     None when they are not forwarded or not known for text."
+     lpy-uri (BackendClient.diagnostics-for: (diagnostic, places) pairs,
+     each place passed through own-place by the reader); None when they are
+     not forwarded or not known for text."
     (if (not self.forwards-diagnostics)
         (return None))
     (= client (._existing self lpy-uri))
