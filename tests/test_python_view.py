@@ -1730,7 +1730,6 @@ class TestShadows:
         (project / "src" / "pkg" / "__init__.py").unlink()
         for directory in [project / "src" / "pkg", project / "src"]:
             directory.rmdir()
-        pv.forget_src_layouts()
         assert pv.shared_import_roots(str(project)) == [str(project)]
 
     # scripts/run.lpy importing a module of a shared root that holds no .lpy:
@@ -1776,7 +1775,7 @@ class TestShadows:
         # A module file at any depth makes it one: a namespace package
         # src/acme (no __init__) holding the regular package acme.tool.
         self.write(project / "src" / "acme" / "tool" / "__init__.py", "")
-        pv.forget_src_layouts()
+        assert pv.refresh_src_layout(str(project))
         assert pv.shared_import_roots(str(project)) == [str(project / "src")]
 
     def test_a_package_linked_into_src_makes_a_src_layout(self, tmp_path):
@@ -1793,18 +1792,33 @@ class TestShadows:
         (project / "src" / "loop").symlink_to(project / "src")
         assert pv.shared_import_roots(str(project)) == [str(project / "src")]
 
-    def test_the_src_layout_answer_is_remembered_until_forgotten(self, tmp_path):
-        # Defect: every module-names call walks the whole src, on the LSP
-        # loop per request, though only a file event, open or save changes
-        # the answer.
-        project = tmp_path / "project"
-        self.write(project / "src" / "lib.rs", "")
-        self.write(project / "mypkg" / "__init__.py", "")
-        assert pv.shared_import_roots(str(project)) == [str(project)]
-        self.write(project / "src" / "m.py", "")
-        assert pv.shared_import_roots(str(project)) == [str(project)]
-        pv.forget_src_layouts()
-        assert pv.shared_import_roots(str(project)) == [str(project / "src")]
+    def test_the_src_layout_walks_only_when_its_answer_can_have_moved(
+        self, tmp_path, monkeypatch
+    ):
+        # Defects: every module-names call walks the whole src, on the LSP
+        # loop per request (11 ms on a src of 4,800 .tsx files); or a
+        # remembered src layout outlives the file that made it one (a
+        # deleted src/pkg), so the root is never shared again.
+        walks = []
+        real_walk = os.walk
+
+        def counted_walk(top, *args, **kwargs):
+            walks.append(top)
+            return real_walk(top, *args, **kwargs)
+
+        monkeypatch.setattr(pv.os, "walk", counted_walk)
+        other, python = tmp_path / "other", tmp_path / "python"
+        for project in [other, python]:
+            self.write(project / "mypkg" / "__init__.py", "")
+        self.write(other / "src" / "lib.rs", "")
+        self.write(python / "src" / "pkg" / "m.py", "")
+        for _ in range(2):
+            assert pv.shared_import_roots(str(other)) == [str(other)]
+            assert pv.shared_import_roots(str(python)) == [str(python / "src")]
+        assert len(walks) == 2
+        (python / "src" / "pkg" / "m.py").unlink()
+        assert pv.shared_import_roots(str(python)) == [str(python)]
+        assert len(walks) == 3
 
     def shared_layout_without_lpy(self, project, layout):
         for name, text in self.SHARED_LAYOUTS[layout]:

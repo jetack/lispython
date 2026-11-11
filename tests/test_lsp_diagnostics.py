@@ -1077,25 +1077,37 @@ def test_only_a_file_that_can_rename_a_users_module_republishes(
     run_bounded(scenario())
 
 
-def test_a_file_that_flips_a_src_layout_renames_modules(tmp_path, monkeypatch):
+@pytest.mark.parametrize("created", ["src/x.py", "shared/acme/m.py"])
+def test_a_module_file_flipping_the_src_layout_republishes(outside_documents, created):
     # Defect: only __init__ files and namespace-ending module files are
-    # heard, so creating src/newpkg/mod.lpy or src/x.py in a flat project
-    # (or deleting the last of them) flips every module's shared roots
-    # while open documents keep the diagnostics of the old search dirs.
-    folders = [SimpleNamespace(uri=tmp_path.as_uri())]
-    monkeypatch.setattr(server, "workspace_folders", lambda: list(folders))
-    for rel in ["src/newpkg/mod.lpy", "src/x.py", "src/acme/tool/m.py"]:
-        assert server.renaming_file_p(str(tmp_path / rel)), rel
-    for rel in [
-        "src/__pycache__/x.cpython-315.pyc",
-        "src/acme/tool/__pycache__/m.cpython-315.pyc",
-        "src/.hidden/m.py",
-        "src/lib.rs",
-        "scripts/x.py",
-    ]:
-        assert not server.renaming_file_p(str(tmp_path / rel)), rel
-    # Outside every folder no project's shared roots can flip.
-    assert not server.renaming_file_p(str(tmp_path.parent / "src" / "x.py"))
+    # heard, so a module file that makes src a src layout (src/x.py in a
+    # flat project, or shared/acme/m.py behind the link src/acme ->
+    # ../shared/acme) leaves the remembered layout and the open documents'
+    # search dirs as they were.
+    editor, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    (outside / "mypkg").mkdir()
+    (outside / "mypkg" / "__init__.py").write_text("")
+    (outside / "shared" / "acme").mkdir(parents=True)
+    (outside / "src").mkdir()
+    (outside / "src" / "acme").symlink_to(outside / "shared" / "acme")
+    scripts = outside / "scripts"
+    scripts.mkdir()
+    script = scripts / "x.lpy"
+    script.write_text("(= x 1)\n")
+
+    async def scenario():
+        uri = editor.open(script)
+        await until(lambda: uri in editor.published)
+        assert server.uri_module_names(uri)[3] == (str(scripts), str(outside))
+        count = len(editor.published[uri])
+        path = outside / created
+        path.write_text("")
+        files_changed(editor, path)
+        await until(lambda: len(editor.published[uri]) > count, timeout=5)
+        assert server.uri_module_names(uri)[3] == (str(scripts), str(outside / "src"))
+
+    run_bounded(scenario())
 
 
 def test_an_init_file_in_lispythons_own_package_renames_modules():

@@ -46,8 +46,9 @@
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
-                             forget-src-layouts pyrefly-fallback source-lines
-                             source-prefix src-python-entry-p
+                             forget-false-src-layouts module-file-path-p
+                             pyrefly-fallback refresh-src-layout source-lines
+                             source-prefix
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT own-place project-root-of
@@ -1709,18 +1710,13 @@
 
 (def renaming-file-p [path]
   "Whether a file created or deleted at path can rename a module of the
-   user's: it renames modules (renames-modules-p) or can flip its project's
-   shared import roots (src-python-entry-p under the project of a
-   workspace folder, project-root-of), and is no library path
+   user's: it renames modules (renames-modules-p) and is no library path
    (macro_modules.library-path-p: site-packages, the stdlib), so an
    install of a dependency, one event per file, republishes nothing.  An
    editable lispython checkout is the user's code like any other.  The
-   name checks run first, because the watch reports every .pyc write."
-  (if (not (renames-modules-p path))
-      (do (= project-root (project-root-of path (workspace-folders)))
-          (if (or (is project-root None) (not (src-python-entry-p project-root path)))
-              (return False))))
-  (return (not (macro-modules.library-path-p (osp.realpath path)))))
+   name check runs first, because the watch reports every .pyc write."
+  (return (and (renames-modules-p path)
+               (not (macro-modules.library-path-p (osp.realpath path))))))
 
 (def reindex-watched-file [uri path]
   "Keep the workspace index to an .lpy file created or deleted on disk:
@@ -1737,10 +1733,12 @@
 (def did-change-watched-files [ls params]
   "Module files created or deleted (watch-module-files): an .lpy one is
    indexed again (reindex-watched-file), and when one may rename a module
-   (renaming-file-p) the remembered src layouts are dropped
-   (forget-src-layouts) and every open document is published again.  A
-   change of content never matters."
+   (renaming-file-p), or moved the src layout answer of its project
+   (refresh-src-layout, asked once per project of a module file in the
+   batch, a file behind a link into src included), every open document is
+   published again.  A change of content never matters."
   (= renamed False)
+  (= projects (set))
   (for change in params.changes
     (if (not-in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
         (continue))
@@ -1750,11 +1748,19 @@
           (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
+      (if (module-file-path-p path)
+          (do (= project-root (project-root-of path (workspace-folders)))
+              (if (is-not project-root None)
+                  (.add projects project-root))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
+  ;; Every project is refreshed, a renaming batch too, so none keeps the
+  ;; answer from before the batch.
+  (for project-root in (sorted projects)
+    (if (refresh-src-layout project-root)
+        (= renamed True)))
   (if renamed
-      (do (forget-src-layouts)
-          (republish-open-documents ls)))))
+      (republish-open-documents ls))))
 
 (def reindex-folders [added removed]
   "Keep the workspace index to the folders: index every file of the added
@@ -1782,7 +1788,6 @@
 ;; finds that backend.
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WORKSPACE_FOLDERS)
 (def did-change-workspace-folders [ls params]
-  (forget-src-layouts)
   (try
     (reindex-folders (or params.event.added []) (or params.event.removed []))
     (except [Exception]
@@ -1796,8 +1801,9 @@
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_OPEN)
 (def did-open [ls params]
   (= uri params.text_document.uri)
-  ;; A client without the file watch tells of no src layout change.
-  (forget-src-layouts)
+  ;; A src folder that arrived with no file event (mv ../pkg src/), or a
+  ;; client without the watch, is seen at the next open or save.
+  (forget-false-src-layouts)
   (index-file uri)
   (publish-diagnostics ls uri :opened True)))
 
@@ -1808,7 +1814,7 @@
 (deco (server.feature lsp.TEXT_DOCUMENT_DID_SAVE)
 (def did-save [ls params]
   (= uri params.text_document.uri)
-  (forget-src-layouts)
+  (forget-false-src-layouts)
   (index-file uri)
   (publish-diagnostics ls uri :recompile True)
   (.document-saved backends uri)))
@@ -1877,8 +1883,9 @@
   "The full view of snapshot doc's version, compiled under the macro
    environment and the naming of now (ViewCache.cached-view,
    uri-module-names, read afresh: stats of the directories up from the
-   file and a listing of the project root, with the src layout answer
-   remembered until a file event, open or save, forget-src-layouts), or
+   file, a listing of the project root, and the remembered src layout
+   answer, _SrcLayouts: one stat of its witness, a walk of src only when
+   none is remembered), or
    None: none compiled yet, or the compile failed.  Hover and signature
    help read it, never compile: they answer locally before any backend."
   (= [name package _ search-dirs] (uri-module-names doc.uri))
