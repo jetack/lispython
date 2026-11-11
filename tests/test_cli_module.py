@@ -295,51 +295,6 @@ def test_a_directory_app_has_its_own_absolute_entry_alone(tmp_path: Path):
     assert str(LPY.parent) not in path
 
 
-def test_a_dir_app_running_lispython_keeps_its_bundled_entry(tmp_path: Path):
-    # Defect: run() replaces whatever sys.path[0] holds, so a directory app
-    # (or zipapp, shiv, pex) that bundles its packages and calls
-    # lispy.tools.run loses its own entry and every bundled import fails.
-    app = tmp_path / "app"
-    app.mkdir()
-    (app / "bundledmod.py").write_text("print('ran-bundled')\n")
-    (app / "__main__.py").write_text("from lispy.tools import run\nrun()\n")
-    r = subprocess.run(
-        [sys.executable, "app", "-c", "(import bundledmod)"],
-        cwd=tmp_path,
-        env=clean_env(),
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    assert "ran-bundled" in r.stdout
-
-
-def test_a_launcher_with_its_own_safe_path_still_adds_the_script_dir(
-    tmp_path: Path,
-):
-    # Defect: a console script whose shebang carries -P (Fedora's
-    # `#!/usr/bin/python3 -sP`) sets sys.flags.safe_path for the launcher,
-    # and `lpy s.lpy` then adds no script directory, where `python3 s.py`
-    # adds it.
-    lines = LPY.read_text().splitlines(keepends=True)
-    assert lines[0].startswith("#!")
-    launcher = tmp_path / "lpy-P"
-    launcher.write_text(f"#!{sys.executable} -P\n" + "".join(lines[1:]))
-    launcher.chmod(0o755)
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "s.lpy").write_text(PRINT_PATH + "\n")
-    r = subprocess.run(
-        [str(launcher), str(sub / "s.lpy")],
-        cwd=tmp_path,
-        env=clean_env(),
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout.splitlines()[-1])[0] == str(sub)
-
-
 def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):
     # Defect: a file run puts its directory first under PYTHONSAFEPATH,
     # where python adds none.

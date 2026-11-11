@@ -146,15 +146,12 @@ follows [Semantic Versioning](https://semver.org/).
   resolved) for `lpy file.lpy`, even when `PYTHONPATH` already lists it, so
   the script's sibling wins over a `PYTHONPATH` module of the same name,
   and the app's own absolute path alone for a directory or zip app
-  (`lpy app`, a directory with `__main__.lpy`). The `lpy` console script's
-  own directory (`.venv/bin`) is no longer on `sys.path`; any other first
-  entry, such as the bundled packages of a zipapp or directory app that
-  calls `lispy.tools.run`, is kept behind the new one. With the
-  `PYTHONSAFEPATH` environment variable set no entry is added, for a file
-  run and the nREPL server too; a `-P` in the console script's own shebang
-  (Fedora's `#!/usr/bin/python3 -sP`) does not count, since
-  `lpy file.lpy` stands for `python3 file.py`. `lpy -c` used to put
-  nothing there, so a module in the working directory was not importable.
+  (`lpy app`, a directory with `__main__.lpy`). That entry replaces the
+  `lpy` console script's own directory (`.venv/bin`), which is no longer on
+  `sys.path`. In safe-path mode (`PYTHONSAFEPATH`, or `python -P` running
+  the console script; `lpy` has no `-P` flag of its own) no entry is added,
+  for a file run and the nREPL server too. `lpy -c` used to put nothing
+  there, so a module in the working directory was not importable.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call

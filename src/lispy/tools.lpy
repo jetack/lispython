@@ -76,39 +76,21 @@
 (= SCOPE (main-scope))
 
 (def set-run-path [entry]
-  "Give sys.path the first entry python gives the run mode (run's dispatch):
+  "Make sys.path[0] the entry python gives the run mode (run's dispatch):
    '' for the REPL and -c, the absolute working directory for -m (and the
-   nREPL server), the script's directory for a file; None adds none (a
-   directory or zip app, whose own entry runpy.run_path adds).  The entry
-   python added for the launcher script (_launcher-entry-p), which no run
-   of the user's code has, is dropped; anything else at sys.path[0] (a
-   zipapp's or wrapper's bundled packages) stays, after the new entry.
-   With PYTHONSAFEPATH set (_safe-path-p) no entry is added."
-  ;; Put in front, never skipped when present elsewhere: python's first
-  ;; entry wins over a PYTHONPATH entry of the same directory.
-  (if (_launcher-entry-p)
-      (sys.path.pop 0))
-  (if (and (is-not entry None) (not (_safe-path-p)))
-      (sys.path.insert 0 entry)))
-
-(def _launcher-entry-p []
-  "Whether sys.path[0] is the entry python put there for the launcher
-   script: the directory of sys.argv[0], a regular file, symlinks resolved,
-   as python computes a script's entry (the `lpy` console script's
-   .venv/bin).  A directory or zip app's argv[0] is its own entry, never
-   this one."
-  (= launcher (sub sys.argv 0))
-  (return (and (> (len sys.path) 0)
-               (osp.isfile launcher)
-               (== (sub sys.path 0) (osp.dirname (osp.realpath launcher))))))
-
-(def _safe-path-p []
-  "Whether the user asked for a safe path: PYTHONSAFEPATH set and
-   non-empty, as `python file.py` would honour it.  Not sys.flags.safe_path,
-   because a launcher's own -P (Fedora's `#!/usr/bin/python3 -sP` console
-   scripts) sets it to protect the launcher, and `lpy file.lpy` stands for
-   `python3 file.py`, which that flag never reached."
-  (return (bool (os.environ.get "PYTHONSAFEPATH"))))
+   nREPL server), the script's directory for a file; None drops it and
+   adds none (a directory or zip app, whose own entry runpy.run_path
+   adds).  It replaces the entry the launcher added, the `lpy` console
+   script's own directory, which no python run has.  Under python -P /
+   PYTHONSAFEPATH (sys.flags.safe_path) python adds no entry, and the
+   launcher added none, so nothing changes."
+  ;; Replaced, never stacked in front or skipped when present elsewhere:
+  ;; python's first entry wins over a PYTHONPATH entry of the same directory
+  ;; and leaves no launcher directory behind (.venv/bin/activate_this.py).
+  (if (not sys.flags.safe-path)
+      (if (is entry None)
+          (sys.path.pop 0)
+          (= (sub sys.path 0) entry))))
 
 (def ast-to-python [st]
   ;; unparse writes any depth compile() takes, on a bounded stack per chunk;
@@ -1003,7 +985,7 @@
 
 ;; The search roots a file scope's namespace packages are counted up to:
 ;; sys.path as nrepl-server found it (the working directory first unless
-;; PYTHONSAFEPATH, run's set-run-path), never the live list, because
+;; safe_path, run's set-run-path), never the live list, because
 ;; nrepl-load-file puts each loaded file's own
 ;; directory there, and the nearest-root rule (package-root) would then make
 ;; a file's package depend on which sibling was loaded first.  None until a
