@@ -2,6 +2,7 @@
 
 (import argparse)
 (import ast)
+(import builtins)
 (import collections.abc)
 (import ctypes)
 (import functools)
@@ -2118,11 +2119,13 @@
 
         (do (= fpath (sys.argv.pop 1))
             ;; A directory or zip app (an importer can read it, the test
-            ;; runpy.run_path makes) runs as python runs it: its path,
-            ;; absolute as python spells it (joined, never normalised), is
-            ;; sys.path[0] even under safe_path, argv[0] stays as typed, and
-            ;; its __main__ runs as a module in a fresh __main__ (the one
-            ;; python starts with, never the console script's, whose
+            ;; runpy.run_path makes; a zip runs only with a __main__.py,
+            ;; since zipimport reads no .lpy) runs as python runs it: its
+            ;; path, absolute as python spells it (joined, never
+            ;; normalised), is sys.path[0] even under safe_path, argv[0]
+            ;; stays as typed, and its __main__ runs as a module in a fresh
+            ;; __main__ (the one python starts with: __builtins__ the
+            ;; builtins module, never the console script's module, whose
             ;; globals hold its own imports).  run_path would put the typed
             ;; path on sys.path and in argv[0] instead.
             (if (is-not (pkgutil.get-importer fpath) None)
@@ -2131,7 +2134,9 @@
                         (sys.path.insert 0 app)
                         (set-run-path app))
                     (= (sub sys.argv 0) fpath)
-                    (= (sub sys.modules "__main__") (types.ModuleType "__main__"))
+                    (= main (types.ModuleType "__main__"))
+                    (= main.__builtins__ builtins)
+                    (= (sub sys.modules "__main__") main)
                     (runpy._run-module-as-main "__main__" False))
                 ;; python resolves a symlinked script to its target's directory
                 (do (set-run-path (osp.dirname (osp.realpath fpath)))

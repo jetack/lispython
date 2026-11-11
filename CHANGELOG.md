@@ -146,7 +146,8 @@ follows [Semantic Versioning](https://semver.org/).
   resolved) for `lpy file.lpy`, even when `PYTHONPATH` already lists it, so
   the script's sibling wins over a `PYTHONPATH` module of the same name,
   and the app's own absolute path alone for a directory or zip app
-  (`lpy app`, a directory with `__main__.lpy`). That entry replaces the
+  (`lpy app`, a directory with `__main__.lpy`; a zip app runs only with a
+  `__main__.py`, since zipimport reads no `.lpy`). That entry replaces the
   `lpy` console script's own directory (`.venv/bin`), which is no longer on
   `sys.path`. In safe-path mode (`PYTHONSAFEPATH`, or `python -P` running
   the console script; `lpy` has no `-P` flag of its own) no entry is added,
