@@ -1204,7 +1204,12 @@ class TestShadows:
         )
         config = json.loads(open(path).read())
         assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
-        assert "executionEnvironments" not in config
+        assert config["executionEnvironments"] == [
+            {
+                "root": str(root / "src"),
+                "extraPaths": [str(root / "src"), str(root), src, str(project)],
+            }
+        ]
 
         (pkg / "helper.py").unlink()
         self.write(pkg / "__init__.lpy", "(= i 1)")  # replaces the linked .py
@@ -1239,7 +1244,12 @@ class TestShadows:
         )
         config = json.loads(open(path).read())
         assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
-        assert "executionEnvironments" not in config
+        assert config["executionEnvironments"] == [
+            {
+                "root": str(root / "src"),
+                "extraPaths": [str(root / "src"), str(root), src, str(project)],
+            }
+        ]
 
     def test_a_script_directory_is_searched_only_by_its_files(self, tmp_path):
         # Defects: src/pkg/my-res (no __init__, no identifier, inside the
@@ -1278,10 +1288,13 @@ class TestShadows:
             str(project),
             str(src),
         ]
-        [env] = config["executionEnvironments"]
+        env, src_env = config["executionEnvironments"]
         assert env["root"] == str(view_res)
         assert env["extraPaths"][0] == str(view_res)
         assert str(res) in env["extraPaths"]
+        assert src_env["root"] == str(root / "src")
+        assert str(res) not in src_env["extraPaths"]
+        assert str(view_res) not in src_env["extraPaths"]
         top = self.pyrefly_config(
             project,
             root,
@@ -1458,9 +1471,11 @@ class TestShadows:
         assert sorted(os.listdir(pkg / "util")) == ["__init__.py", "x.py"]
         assert (pkg / "sub" / "other.py").exists()
 
-    def basedpyright_messages(self, tmp_path, project, root, **settings):
-        """basedpyright's diagnostics on the view's src/pkg/m.py, under the
-        view root's config as written plus settings."""
+    def basedpyright_messages(
+        self, tmp_path, project, root, files=("src/pkg/m.py",), **settings
+    ):
+        """basedpyright's diagnostics on files of the view (src/pkg/m.py),
+        under the view root's config as written plus settings."""
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
         path = pv.write_pyright_config(
@@ -1475,13 +1490,13 @@ class TestShadows:
         self.write(check, json.dumps(config))
         out = subprocess.run(
             ["basedpyright", "--outputjson", "-p", str(check)]
-            + [str(root / "src" / "pkg" / "m.py")],
+            + [str(root / name) for name in files],
             capture_output=True,
             text=True,
             timeout=60,
         )
         report = json.loads(out.stdout)
-        assert report["summary"]["filesAnalyzed"] == 1
+        assert report["summary"]["filesAnalyzed"] == len(files)
         return [d["message"] for d in report["generalDiagnostics"]]
 
     @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
@@ -1529,6 +1544,114 @@ class TestShadows:
             reportAttributeAccessIssue="error",
         )
         assert messages == []
+
+    UTILS_FILES = ("src/pkg/m.py", "src/pkg/my-res/x.py")
+
+    def src_utils_layout(self, project):
+        """src/pkg/m.lpy and the script src/pkg/my-res/x.lpy importing
+        utils, which both the project root and src hold; a top-level .lpy
+        gives the root a shadow, so its utils.py is linked into the view
+        root."""
+        uses = "(import utils)\n(= w utils.SRC-ONLY)"
+        for name, text in [
+            ("top.lpy", "(= t 1)"),
+            ("utils.py", "ROOT_ONLY = 1"),
+            ("src/utils.py", "SRC_ONLY = 1"),
+            ("src/pkg/__init__.py", ""),
+            ("src/pkg/m.lpy", uses),
+            ("src/pkg/my-res/x.lpy", uses),
+        ]:
+            self.write(project / name, text)
+
+    def test_a_shared_roots_modules_search_it_before_the_project_root(self, tmp_path):
+        # Defects: src (a shared root) takes the default list, which leads
+        # with the view root and the project root, so the backend resolves
+        # the `import utils` of src/pkg/m.lpy to the root utils.py, where its
+        # run (`python -m pkg.m` from src) resolves src/utils.py; and the
+        # script src/pkg/my-res/x.lpy searches the project root (a shared
+        # root, sorted first) before src, where `lpy` with src installed
+        # never searches the project root at all.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.src_utils_layout(project)
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        src, res = str(project / "src"), str(project / "src" / "pkg" / "my-res")
+        view_res = str(root / "src" / "pkg" / "my-res")
+        assert os.readlink(root / "utils.py") == str(project / "utils.py")
+        assert manifest.shared_roots == sorted([str(project), src])
+        settings = {
+            "environments": manifest.environments,
+            "shared_roots": manifest.shared_roots,
+        }
+        path = pv.write_pyright_config(str(project), str(root), **settings)
+        config = json.loads(open(path).read())
+        # A module of the project root still searches it first.
+        assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
+        res_env, src_env = config["executionEnvironments"]
+        assert src_env["root"] == str(root / "src")
+        assert src_env["extraPaths"] == [
+            str(root / "src"),
+            str(root),
+            src,
+            str(project),
+        ]
+        assert res_env["root"] == view_res
+        assert res_env["extraPaths"] == [
+            view_res,
+            str(root / "src"),
+            str(root),
+            res,
+            src,
+            str(project),
+        ]
+        self.pyrefly_config(project, root, **settings)
+        for env in [src_env, res_env]:
+            with open(os.path.join(env["root"], "pyrefly.toml"), "rb") as f:
+                assert tomllib.load(f)["search-path"] == env["extraPaths"]
+
+    @pytest.mark.skipif(not shutil.which("basedpyright"), reason="no basedpyright")
+    def test_a_shared_roots_import_resolves_there_for_basedpyright(self, tmp_path):
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.src_utils_layout(project)
+        messages = self.basedpyright_messages(
+            tmp_path,
+            project,
+            root,
+            files=self.UTILS_FILES,
+            reportAttributeAccessIssue="error",
+        )
+        assert messages == []
+
+    @pytest.mark.skipif(not shutil.which("pyrefly"), reason="no pyrefly")
+    def test_a_shared_roots_import_resolves_there_for_pyrefly(self, tmp_path):
+        # Each file is checked under its nearest pyrefly.toml, as the
+        # language server takes it.  A deliberate error in each file must be
+        # reported, so a file pyrefly never checked cannot pass as clean.
+        project, root = tmp_path / "project", tmp_path / "view"
+        self.src_utils_layout(project)
+        for name in self.UTILS_FILES:
+            with open(project / name.replace(".py", ".lpy"), "a") as f:
+                f.write('\n(= bad (+ 1 "a"))')
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        pv.write_pyrefly_config(
+            str(project),
+            str(root),
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
+        )
+        out = subprocess.run(
+            ["pyrefly", "check", "--output-format", "json"]
+            + [str(root / name) for name in self.UTILS_FILES],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=tmp_path,
+        )
+        errors = json.loads(out.stdout)["errors"]
+        assert sorted(
+            (os.path.relpath(tmp_path / e["path"], root), e["name"]) for e in errors
+        ) == [(name, "unsupported-operation") for name in self.UTILS_FILES]
 
     def snapshot(self, top):
         """Every entry under top, links unfollowed: kind and content."""
