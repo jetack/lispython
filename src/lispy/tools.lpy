@@ -2,7 +2,6 @@
 
 (import argparse)
 (import ast)
-(import builtins)
 (import collections.abc)
 (import ctypes)
 (import functools)
@@ -2124,9 +2123,12 @@
             ;; path, absolute as python spells it (joined, never
             ;; normalised), is sys.path[0] even under safe_path, argv[0]
             ;; stays as typed, and its __main__ runs as a module in a fresh
-            ;; __main__ (the one python starts with: __builtins__ the
-            ;; builtins module, never the console script's module, whose
-            ;; globals hold its own imports).  run_path would put the typed
+            ;; __main__ shaped as the one python starts with, never the
+            ;; console script's module, whose globals hold its own imports.
+            ;; That module began as CPython's initial __main__, so the fresh
+            ;; one takes its __builtins__ (the builtins module) and an empty
+            ;; __annotations__ exactly when it has one (3.11-3.13); runpy
+            ;; sets the other dunders itself.  run_path would put the typed
             ;; path on sys.path and in argv[0] instead.
             (if (is-not (pkgutil.get-importer fpath) None)
                 (do (= app (osp.join (os.getcwd) fpath))
@@ -2134,8 +2136,11 @@
                         (sys.path.insert 0 app)
                         (set-run-path app))
                     (= (sub sys.argv 0) fpath)
+                    (= launcher (vars (sub sys.modules "__main__")))
                     (= main (types.ModuleType "__main__"))
-                    (= main.__builtins__ builtins)
+                    (= main.__builtins__ (sub launcher "__builtins__"))
+                    (if (in "__annotations__" launcher)
+                        (= main.__annotations__ {}))
                     (= (sub sys.modules "__main__") main)
                     (runpy._run-module-as-main "__main__" False))
                 ;; python resolves a symlinked script to its target's directory

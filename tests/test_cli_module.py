@@ -308,22 +308,41 @@ def test_a_directory_app_runs_in_a_fresh_main(tmp_path: Path):
     # fresh __main__ and a bare `sys` is a NameError; or the fresh __main__
     # has no __builtins__, so exec puts the builtins dict there, where
     # python's has the builtins module and (getattr __builtins__ "open")
-    # works.
-    app = tmp_path / "app"
-    app.mkdir()
-    (app / "__main__.lpy").write_text(
-        "(print (sorted (globals)))\n(print (. (type __builtins__) __name__))\n"
+    # works; or it lacks the empty __annotations__ python's initial
+    # __main__ has on some versions (3.11-3.13).  The expected globals are
+    # the running interpreter's own `python app`, never a version table.
+    def app_globals(
+        cmd: list[str], name: str, main: tuple[str, str]
+    ) -> tuple[list, str]:
+        app = tmp_path / name
+        app.mkdir()
+        (app / main[0]).write_text(main[1])
+        r = subprocess.run(
+            [*cmd, name], cwd=tmp_path, env=clean_env(), capture_output=True, text=True
+        )
+        assert r.returncode == 0, r.stderr
+        *_, line, builtins_type = r.stdout.splitlines()
+        return ast.literal_eval(line), builtins_type
+
+    expected = app_globals(
+        [sys.executable],
+        "pyapp",
+        (
+            "__main__.py",
+            "print(sorted(globals()))\nprint(type(__builtins__).__name__)\n",
+        ),
     )
-    r = subprocess.run(
-        [str(LPY), "app"], cwd=tmp_path, env=clean_env(), capture_output=True, text=True
+    got = app_globals(
+        [str(LPY)],
+        "lpyapp",
+        (
+            "__main__.lpy",
+            "(print (sorted (globals)))\n(print (. (type __builtins__) __name__))\n",
+        ),
     )
-    assert r.returncode == 0, r.stderr
-    *_, line, builtins_type = r.stdout.splitlines()
-    names = ast.literal_eval(line)
-    assert builtins_type == "module"
-    assert "__file__" in names
-    assert "sys" not in names
-    assert "run" not in names
+    assert got == expected
+    assert expected[1] == "module"
+    assert "sys" not in got[0] and "run" not in got[0]
 
 
 def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):
