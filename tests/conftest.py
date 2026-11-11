@@ -77,16 +77,18 @@ def run_on_loop():
 
 @pytest.fixture(scope="session")
 def backend_project(tmp_path_factory):
-    """The workspace folder of the backend tests; its main.lpy is the file
-    every buffer is opened as. helpers.py is a user .py module beside it and
-    other.lpy a .lpy module (its shadow is the backend's other.py),
-    lpy_macs.lpy a macro module (required as lpy-macs) and macmod.lpy a macro
-    module of a hyphenated macro and one defined with an underscore (its
+    """The workspace folder of the backend tests.  Its main.lpy is the file
+    lsp_buffer and lsp_document open by default (backend_requests wraps its
+    client); a test that needs another buffer opens its own name (marks_N.lpy),
+    lsp_document's path, or one of the modules below.  helpers.py is a user .py
+    module beside main.lpy, other.lpy a .lpy module (its shadow is the backend's
+    other.py), lpy_macs.lpy a macro module (required as lpy-macs), macmod.lpy a
+    macro module of a hyphenated macro and one defined with an underscore (its
     shadow is macmod.py), and broken_mod.lpy a module none of whose forms
-    compiles (its shadow holds their placeholders), all written
-    before any backend starts (the view root mirrors and compiles them then);
-    no buffer names them unless it imports them, so they change no other
-    answer."""
+    compiles (its shadow holds their placeholders).  All are written before any
+    backend starts (the view root mirrors and compiles them then).  Backend
+    diagnostics are kept per uri, so none published for a module reaches
+    another buffer."""
     root = tmp_path_factory.mktemp("backend-project")
     (root / "main.lpy").write_text("(= y 1)\n")
     (root / "helpers.py").write_text("def my_helper(alpha, beta):\n    return alpha\n")
