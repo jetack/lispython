@@ -325,9 +325,6 @@
   (= spec.submodule-search-locations portions)
   (return spec))
 
-(= SIDE-EFFECT-FREE-FINDERS (, importlib.machinery.BuiltinImporter
-                               importlib.machinery.FrozenImporter))
-
 (def meta-path-spec [name entries parent-locations]
   "The ModuleSpec CPython's import gives the absolute import name name, one
    part of a walk (module-spec-on), or None: sys.meta-path's finders asked
@@ -338,27 +335,13 @@
    every finder after PathFinder, where an editable install appends the
    one that finds its package; one that raises finds nothing.  The one
    departure from the import system: any other finder before PathFinder
-   is skipped, because such finders are import hooks that act when asked
-   (setuptools' _distutils_hack, first on sys.meta-path, imports
-   setuptools when asked for distutils and drops modules from
-   sys.modules when asked for pip).  With no PathFinder on sys.meta-path
-   the walk still runs, last, since entries are what the module's compile
-   searches, and nothing else but the built-in and frozen importers is
-   asked."
-  (= walked False)
-  (for finder in (list sys.meta-path)
-    (cond (is finder importlib.machinery.PathFinder)
-          (do (= walked True)
-              (= spec (path-entry-spec name entries)))
-          (or walked (in finder SIDE-EFFECT-FREE-FINDERS))
-          (try
-            (= spec (.find-spec finder name parent-locations))
-            (except [Exception]
-              (= spec None)))
-          (= spec None))
-    (if (is-not spec None)
-        (return spec)))
-  (return (ife walked None (path-entry-spec name entries))))
+   is skipped, because such finders are import hooks that act when asked.
+   With no PathFinder on sys.meta-path the walk still runs, last, since
+   entries are what the module's compile searches, and nothing else but
+   the built-in and frozen importers is asked (macro_modules.meta-path-spec,
+   the one home of that rule)."
+  (return (macro-modules.meta-path-spec name parent-locations
+                                        (fn [] (path-entry-spec name entries)))))
 
 (def module-spec-on [module-name entries]
   "The ModuleSpec CPython's import gives the absolute import name

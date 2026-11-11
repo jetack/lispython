@@ -412,34 +412,55 @@
   (return (tuple ((osp.realpath portion)
                   for portion in (or spec.submodule-search-locations [])))))
 
+(= SIDE-EFFECT-FREE-FINDERS (, importlib.machinery.BuiltinImporter
+                               importlib.machinery.FrozenImporter))
+
+(def meta-path-spec [name parent-locations path-slot :skip (,)]
+  "The ModuleSpec name gets from one snapshot of sys.meta-path, asked in
+   its order as the import system asks it, (find-spec name
+   parent-locations), with PathFinder's slot standing for (path-slot), or
+   None.  The built-in and frozen importers are asked, and so is every
+   finder after PathFinder (where an editable install appends the one that
+   serves its package) but those in skip; one that raises finds nothing.
+   Every other finder before PathFinder is skipped, because such finders
+   are import hooks that act when asked (setuptools' _distutils_hack,
+   first on sys.meta-path, imports setuptools when asked for distutils and
+   drops modules from sys.modules when asked for pip).  With no PathFinder
+   on sys.meta-path, path-slot still runs, last.  The one home of which
+   finders the LSP may ask (server.lpy's module lookup, _resolved)."
+  (= walked False)
+  (for finder in (list sys.meta-path)
+    (cond (is finder importlib.machinery.PathFinder)
+          (do (= walked True)
+              (= spec (path-slot)))
+          (and (or walked (in finder SIDE-EFFECT-FREE-FINDERS))
+               (not (in finder skip)))
+          (try
+            (= spec (.find-spec finder name parent-locations))
+            (except [Exception]
+              (= spec None)))
+          (= spec None))
+    (if (is-not spec None)
+        (return spec)))
+  (return (ife walked None (path-slot))))
+
 (def _resolved [name search-dirs]
   "_identity of the top-level name name as a compile searching search-dirs
-   would import it, None when it finds none: PathFinder over the search
-   dirs, else the meta_path finders after it (where an editable install
-   appends the one that serves its package), as server.lpy's
-   meta-path-spec asks them; a finder before PathFinder is an import hook
-   that acts when asked, so it is never asked.  Both sides of a comparison
-   come from here, never from a loaded module's spec, which may be a
-   finder's own (a module only such a finder serves compares None to
-   None)."
-  (try
-    (= spec (importlib.machinery.PathFinder.find-spec
-              name (+ (list search-dirs) sys.path)))
-    (except [Exception]
-      (= spec None)))
-  (if (and (is spec None) (in importlib.machinery.PathFinder sys.meta-path))
-      (for finder in (sub (list sys.meta-path)
-                          [: (+ (.index sys.meta-path importlib.machinery.PathFinder) 1)
-                             None])
-        (if (is finder _MissingModuleObserver)
-            (continue))
-        (try
-          (= spec (.find-spec finder name None))
-          (except [Exception]
-            (= spec None)))
-        (if (is-not spec None)
-            (break))))
-  (return (_identity spec)))
+   would import it, None when it finds none: meta-path-spec with PathFinder
+   over the search dirs, our own observer aside.  Both sides of a
+   comparison come from here, never from a loaded module's spec, which may
+   be a finder's own (a module only such a finder serves compares None to
+   None).  A finder before PathFinder is never asked, so a name one serves
+   while one side's search dir also holds it is imported again on each
+   alternation (the epoch stays)."
+  (def path-slot []
+    (try
+      (return (importlib.machinery.PathFinder.find-spec
+                name (+ (list search-dirs) sys.path)))
+      (except [Exception]
+        (return None))))
+  (return (_identity (meta-path-spec name None path-slot
+                                     :skip (, _MissingModuleObserver)))))
 
 (def _conflicts [search-dirs token]
   "The top-level modules in sys.modules that a compile searching search-dirs
