@@ -1839,21 +1839,24 @@
     (return (osp.normpath (osp.abspath project-root))))
 
   (def _walk [self key project-root]
-    "Walk project-root's src, store the answer unless a later walk did, and
-     hand it out.  A walk that crossed a forget-false is stored for a
-     recheck."
+    "Walk project-root's src and hand out the answer of the latest walk to
+     finish storing: its own unless a later-started walk already stored
+     one, which it then hands out instead of its own older reading.  The
+     entry exists from the walk's start, so refresh counts the root as
+     asked while a first walk is in flight.  A walk that crossed a
+     forget-false is stored for a recheck."
     (with [self.lock]
       (+= self.tickets 1)
       (= ticket self.tickets)
-      (= generation self.generation))
+      (= generation self.generation)
+      (= entry (.setdefault self.answers key (_SrcLayout))))
     (= witness (_src-python-witness project-root))
-    (= answer (is-not witness None))
     (with [self.lock]
-      (= entry (.setdefault self.answers key (_SrcLayout)))
       (if (> ticket entry.ticket)
           (do (= entry.witness witness)
               (= entry.ticket ticket)
               (= entry.recheck (!= generation self.generation))))
+      (= answer (is-not entry.witness None))
       (.add entry.handed answer))
     (return answer))
 
@@ -1875,13 +1878,12 @@
 
   (def refresh [self project-root]
     "Walk project-root's src again; whether the answer differs from any
-     handed out since the last refresh.  A root never asked (no entry, or
-     none handed out) is not walked: no document compiled under an answer
-     of it, and its next ask walks anyway."
+     handed out since the last refresh.  A root never asked (no entry: no
+     walk of it ever started) is not walked, since no document compiled
+     under an answer of it and its first ask walks anyway."
     (= key (._key self project-root))
     (with [self.lock]
-      (= entry (.get self.answers key))
-      (if (or (is entry None) (not entry.handed))
+      (if (not-in key self.answers)
           (return False)))
     (= answer (._walk self key project-root))
     (with [self.lock]

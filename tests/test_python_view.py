@@ -1838,6 +1838,77 @@ class TestShadows:
         assert pv.refresh_src_layout(str(b))
         assert pv.shared_import_roots(str(b)) == [str(b / "src")]
 
+    def held_first_walk(self, monkeypatch):
+        """Make the next src walk read src at once but finish only when the
+        returned release event is set; started is set once it has read."""
+        started, release = threading.Event(), threading.Event()
+        real = pv._src_python_witness
+        held = []
+
+        def walk(project_root):
+            witness = real(project_root)
+            if not held:
+                held.append(project_root)
+                started.set()
+                assert release.wait(10)
+            return witness
+
+        monkeypatch.setattr(pv, "_src_python_witness", walk)
+        return started, release
+
+    def flat_project_with_rust_src(self, project):
+        self.write(project / "mypkg" / "__init__.py", "")
+        self.write(project / "src" / "lib.rs", "")
+
+    def ask_in_thread(self, project):
+        got = []
+        thread = threading.Thread(
+            target=lambda: got.append(pv.shared_import_roots(str(project)))
+        )
+        thread.start()
+        return thread, got
+
+    def test_a_flip_during_a_roots_first_walk_is_seen(self, tmp_path, monkeypatch):
+        # Defect: the root's entry exists only once its first walk finishes,
+        # so a refresh for a src/pkg/m.py created meanwhile counts the root
+        # as never asked and walks nothing, and the first walk then stores
+        # its no-Python reading for good.
+        project = tmp_path / "project"
+        self.flat_project_with_rust_src(project)
+        started, release = self.held_first_walk(monkeypatch)
+        thread, got = self.ask_in_thread(project)
+        try:
+            assert started.wait(10)
+            self.write(project / "src" / "pkg" / "m.py", "")
+            pv.refresh_src_layout(str(project))
+        finally:
+            release.set()
+            thread.join(10)
+        assert got == [[str(project / "src")]]
+        assert pv.shared_import_roots(str(project)) == [str(project / "src")]
+
+    def test_a_walk_overtaken_by_a_refresh_hands_out_the_newer_answer(
+        self, tmp_path, monkeypatch
+    ):
+        # Defect: a recheck walk that read src before src/pkg/m.py was
+        # created and finishes after refresh stored the newer answer hands
+        # out its own stale one, after refresh compared and reset, so the
+        # document compiled under it is never published again.
+        project = tmp_path / "project"
+        self.flat_project_with_rust_src(project)
+        assert pv.shared_import_roots(str(project)) == [str(project)]
+        pv.forget_false_src_layouts()
+        started, release = self.held_first_walk(monkeypatch)
+        thread, got = self.ask_in_thread(project)
+        try:
+            assert started.wait(10)
+            self.write(project / "src" / "pkg" / "m.py", "")
+            assert pv.refresh_src_layout(str(project))
+        finally:
+            release.set()
+            thread.join(10)
+        assert got == [[str(project / "src")]]
+
     def shared_layout_without_lpy(self, project, layout):
         for name, text in self.SHARED_LAYOUTS[layout]:
             self.write(project / name, text)
