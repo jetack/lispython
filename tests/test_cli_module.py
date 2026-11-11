@@ -6,6 +6,7 @@ directory, which every run mode replaces with the entry ``python`` gives it.
 
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -258,6 +259,87 @@ def test_a_file_run_puts_its_directory_first_even_when_on_pythonpath(
     assert str(LPY.parent) not in got
 
 
+def test_a_symlinked_script_runs_with_its_targets_directory(tmp_path: Path):
+    # Defect: a file run puts the link's own directory first, where python
+    # resolves the link and puts the target's directory (os.path.realpath).
+    real, links = tmp_path / "real", tmp_path / "links"
+    real.mkdir()
+    links.mkdir()
+    (real / "s.lpy").write_text(PRINT_PATH + "\n")
+    (links / "s.lpy").symlink_to(real / "s.lpy")
+    path = lpy_path([str(links / "s.lpy")], tmp_path)
+    assert path[0] == str(real)
+    assert str(links) not in path
+
+
+def test_m_puts_the_absolute_cwd_first_and_no_launcher_directory(tmp_path: Path):
+    # Defect: -m stacks its entry in front of the console script's
+    # directory, or puts '' where python -m puts the absolute cwd.
+    (tmp_path / "pathmod.lpy").write_text(PRINT_PATH + "\n")
+    path = lpy_path(["-m", "pathmod"], tmp_path)
+    assert path[0] == str(tmp_path)
+    assert str(LPY.parent) not in path
+
+
+def test_a_directory_app_has_its_own_absolute_entry_alone(tmp_path: Path):
+    # Defect: `lpy app` (a directory with __main__.lpy) gets runpy's
+    # relative "app" in front of the script-style absolute parent directory,
+    # where `python app` has the absolute app directory alone.
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "__main__.lpy").write_text(PRINT_PATH + "\n")
+    path = lpy_path(["app"], tmp_path)
+    assert path[0] == str(app)
+    assert "app" not in path
+    assert str(tmp_path) not in path
+    assert str(LPY.parent) not in path
+
+
+def test_a_dir_app_running_lispython_keeps_its_bundled_entry(tmp_path: Path):
+    # Defect: run() replaces whatever sys.path[0] holds, so a directory app
+    # (or zipapp, shiv, pex) that bundles its packages and calls
+    # lispy.tools.run loses its own entry and every bundled import fails.
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "bundledmod.py").write_text("print('ran-bundled')\n")
+    (app / "__main__.py").write_text("from lispy.tools import run\nrun()\n")
+    r = subprocess.run(
+        [sys.executable, "app", "-c", "(import bundledmod)"],
+        cwd=tmp_path,
+        env=clean_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "ran-bundled" in r.stdout
+
+
+def test_a_launcher_with_its_own_safe_path_still_adds_the_script_dir(
+    tmp_path: Path,
+):
+    # Defect: a console script whose shebang carries -P (Fedora's
+    # `#!/usr/bin/python3 -sP`) sets sys.flags.safe_path for the launcher,
+    # and `lpy s.lpy` then adds no script directory, where `python3 s.py`
+    # adds it.
+    lines = LPY.read_text().splitlines(keepends=True)
+    assert lines[0].startswith("#!")
+    launcher = tmp_path / "lpy-P"
+    launcher.write_text(f"#!{sys.executable} -P\n" + "".join(lines[1:]))
+    launcher.chmod(0o755)
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "s.lpy").write_text(PRINT_PATH + "\n")
+    r = subprocess.run(
+        [str(launcher), str(sub / "s.lpy")],
+        cwd=tmp_path,
+        env=clean_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout.splitlines()[-1])[0] == str(sub)
+
+
 def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):
     # Defect: a file run puts its directory first under PYTHONSAFEPATH,
     # where python adds none.
@@ -269,16 +351,17 @@ def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):
     assert "" not in path
 
 
-def test_the_repl_puts_an_empty_entry_first(tmp_path: Path):
-    # Defect: the REPL puts the absolute cwd first, in front of the console
-    # script's directory, where python's REPL has '' (which follows a later
-    # os.chdir) and no launcher directory.  prompt_toolkit reads a piped \r
-    # as Enter; HOME keeps its history file out of the user's.
-    # The output is mixed with prompt redraws, so the path follows a marker
-    # the echoed input never holds.
+@pytest.mark.parametrize("args", [[], ["-t"]])
+def test_the_repl_puts_an_empty_entry_first(tmp_path: Path, args: list[str]):
+    # Defect: the REPL (or -t, the translating REPL) puts the absolute cwd
+    # first, in front of the console script's directory, where python's
+    # REPL has '' (which follows a later os.chdir) and no launcher directory.
+    # prompt_toolkit reads a piped \r as Enter; HOME keeps its history file
+    # out of the user's.  The output is mixed with prompt redraws (and -t's
+    # translation), so the path follows a marker the echoed input never holds.
     src = '(import sys json) (print (+ "PATH=" (json.dumps sys.path)))'
     r = subprocess.run(
-        [str(LPY)],
+        [str(LPY), *args],
         cwd=tmp_path,
         env=clean_env(HOME=str(tmp_path)),
         input=src + "\r",
@@ -311,13 +394,16 @@ def test_the_nrepl_server_puts_the_cwd_first_unless_safe_path(
     )
     try:
         assert server.stdout is not None
+        # Bounded: a server that never starts fails the test, never hangs it.
+        ready, _, _ = select.select([server.stdout], [], [], 30)
+        assert ready, "the nREPL server printed no port"
         port = int(server.stdout.readline().rsplit(":", 1)[1])
         with socket.create_connection(("127.0.0.1", port), timeout=30) as conn:
             request = {"op": "eval", "id": 1, "code": PRINT_PATH}
             conn.sendall(json.dumps(request).encode() + b"\n")
             reply = json.loads(conn.makefile("rb").readline())
     finally:
-        server.terminate()
+        server.kill()
         server.wait(timeout=30)
     path = json.loads(reply["stdout"])
     assert str(LPY.parent) not in path

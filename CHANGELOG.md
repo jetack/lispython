@@ -141,15 +141,20 @@ follows [Semantic Versioning](https://semver.org/).
   `__main__`, so a relative require there no longer resolves against the
   working directory's package; send `file` to eval in a file's package.
 - Every `lpy` run mode starts with the `sys.path` `python` gives it: the
-  first entry is `''` for the REPL and `lpy -c`, the working directory for
-  `lpy -m` and `lpy --nrepl`, and the script's directory (symlinks
+  first entry is `''` for the REPL, `lpy -t` and `lpy -c`, the working
+  directory for `lpy -m` and `lpy --nrepl`, the script's directory (symlinks
   resolved) for `lpy file.lpy`, even when `PYTHONPATH` already lists it, so
-  the script's sibling wins over a `PYTHONPATH` module of the same name.
-  That entry replaces the `lpy` console script's own directory
-  (`.venv/bin`), which is no longer on `sys.path`. Under
-  `-P`/`PYTHONSAFEPATH` no entry is added, for a file run and the nREPL
-  server too. `lpy -c` used to put nothing there, so a module in the
-  working directory was not importable.
+  the script's sibling wins over a `PYTHONPATH` module of the same name,
+  and the app's own absolute path alone for a directory or zip app
+  (`lpy app`, a directory with `__main__.lpy`). The `lpy` console script's
+  own directory (`.venv/bin`) is no longer on `sys.path`; any other first
+  entry, such as the bundled packages of a zipapp or directory app that
+  calls `lispy.tools.run`, is kept behind the new one. With the
+  `PYTHONSAFEPATH` environment variable set no entry is added, for a file
+  run and the nREPL server too; a `-P` in the console script's own shebang
+  (Fedora's `#!/usr/bin/python3 -sP`) does not count, since
+  `lpy file.lpy` stands for `python3 file.py`. `lpy -c` used to put
+  nothing there, so a module in the working directory was not importable.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call
