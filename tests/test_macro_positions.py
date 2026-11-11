@@ -718,11 +718,13 @@ def _include_escape_in_fstring():
 def test_escape_warning_from_parsing_other_text_names_the_call_line():
     # Defect: the invalid-escape warning of an f-string literal the macro
     # parses took that text's line (4) and named it in m.lpy; then line 0.
+    # Selected by message: CPython's category passes through, and 3.11 warns an
+    # invalid escape with DeprecationWarning where 3.12+ uses SyntaxWarning.
     scope = {"__macro_namespace": {"inc": _include_escape_in_fstring}}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         _compile_m("(x)\n(inc)\n(x)\n(x)\n(x)", scope)
-    [warning] = [w for w in caught if issubclass(w.category, SyntaxWarning)]
+    [warning] = [w for w in caught if "invalid escape sequence" in str(w.message)]
     assert (warning.filename, warning.lineno) == ("m.lpy", 2)
 
 
