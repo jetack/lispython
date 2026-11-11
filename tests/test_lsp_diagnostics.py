@@ -1150,7 +1150,7 @@ def test_a_module_file_in_a_pruned_directory_walks_no_src(
         ".venv/lib/site-packages/dep/m.py",
         "venv/lib/site-packages/dep/m.py",
         "node_modules/x/m.py",
-        "src/__pycache__/m.cpython-315.pyc",
+        "src/site-packages/m.py",
     ]:
         files_changed(SimpleNamespace(), outside / rel)
     assert asked == []

@@ -1875,9 +1875,14 @@
 
   (def refresh [self project-root]
     "Walk project-root's src again; whether the answer differs from any
-     handed out since the last refresh.  A root with none handed out has
-     none to change."
+     handed out since the last refresh.  A root never asked (no entry, or
+     none handed out) is not walked: no document compiled under an answer
+     of it, and its next ask walks anyway."
     (= key (._key self project-root))
+    (with [self.lock]
+      (= entry (.get self.answers key))
+      (if (or (is entry None) (not entry.handed))
+          (return False)))
     (= answer (._walk self key project-root))
     (with [self.lock]
       (= entry (sub self.answers key))

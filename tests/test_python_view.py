@@ -1819,6 +1819,9 @@ class TestShadows:
         (python / "src" / "pkg" / "m.py").unlink()
         assert pv.shared_import_roots(str(python)) == [str(python)]
         assert len(walks) == 3
+        # A file event for a root no one asked walks nothing.
+        assert not pv.refresh_src_layout(str(tmp_path / "unasked"))
+        assert len(walks) == 3
 
     def test_a_rechecked_no_python_answer_still_reports_its_flip(self, tmp_path):
         # Defect: an open or save in one project drops every project's
