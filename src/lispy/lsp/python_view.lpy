@@ -1756,6 +1756,20 @@
    lookup with no importing file read it."
   (return [project-root (osp.join project-root "src")]))
 
+(def pruned-in-project-p [project-root path]
+  "Whether path lies in a _pruned-p directory below project-root (a
+   virtualenv, node_modules, a dot-directory, __pycache__), whose module
+   files no import of the project's own reads."
+  (= rel (osp.relpath (osp.dirname (osp.normpath path)) (osp.normpath project-root)))
+  (if (or (== rel os.curdir) (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))
+      (return False))
+  (= parent (osp.normpath project-root))
+  (for part in (.split rel os.sep)
+    (if (_pruned-p parent part)
+        (return True))
+    (= parent (osp.join parent part)))
+  (return False))
+
 (def module-file-path-p [path :suffixes None]
   "Whether path (which need not exist) names a module file: a finder suffix
    (finder-suffixes: .py, .lpy, extension modules, __init__ files among
@@ -1794,57 +1808,91 @@
     (.extend dirnames kept))
   (return None))
 
+(class _SrcLayout []
+  "One project root's remembered src layout (_SrcLayouts): the witness of
+   its latest walk (None: no Python code), that walk's ticket, whether the
+   answer must be walked again before it is used (recheck), and every
+   answer handed out since the last refresh (handed)."
+  (def __init__ [self]
+    (= self.witness None)
+    (= self.ticket 0)
+    (= self.recheck True)
+    (= self.handed (set))))
+
 (class _SrcLayouts []
-  "project root -> its src's witness (_src-python-witness), or False for a
-   src of no Python code, remembered, because module-names asks it on the
-   LSP loop per request and the walk reads all of a src of other code.  A
-   witness is trusted while that file exists (one stat), so every flip to
-   no Python, a deleted folder included, is seen at the next ask; a False
-   answer lasts until forgotten (refresh, forget-false).  The lock guards
-   only the dict, never the walk, and an answer computed across a forget is
-   not kept."
+  "project root -> _SrcLayout, remembered, because module-names asks it on
+   the LSP loop per request and the walk (_src-python-witness) reads all of
+   a src of other code.  A witness is trusted while that file exists (one
+   stat), so a flip to no Python is seen at the next ask; a no-Python answer
+   lasts until refresh walks again or forget-false marks it for a recheck.
+   Each walk stores its answer unless a later one already did, and every
+   answer handed out is kept until refresh compares against them, so no
+   answer a document compiled under is lost, whatever walks cross.  The
+   lock guards only the dict and its entries, never the walk."
   (def __init__ [self]
     (= self.answers {})
     (= self.generation 0)
+    (= self.tickets 0)
     (= self.lock (threading.Lock)))
 
   (def _key [self project-root]
     (return (osp.normpath (osp.abspath project-root))))
 
+  (def _walk [self key project-root]
+    "Walk project-root's src, store the answer unless a later walk did, and
+     hand it out.  A walk that crossed a forget-false is stored for a
+     recheck."
+    (with [self.lock]
+      (+= self.tickets 1)
+      (= ticket self.tickets)
+      (= generation self.generation))
+    (= witness (_src-python-witness project-root))
+    (= answer (is-not witness None))
+    (with [self.lock]
+      (= entry (.setdefault self.answers key (_SrcLayout)))
+      (if (> ticket entry.ticket)
+          (do (= entry.witness witness)
+              (= entry.ticket ticket)
+              (= entry.recheck (!= generation self.generation))))
+      (.add entry.handed answer))
+    (return answer))
+
   (def holds-python-p [self project-root]
     (= key (._key self project-root))
+    (= witness None)
     (with [self.lock]
-      (= known (.get self.answers key))
-      (= generation self.generation))
-    (if (is known False)
-        (return False))
-    (if (and (is-not known None) (osp.isfile known))
-        (return True))
-    (= witness (_src-python-witness project-root))
-    (with [self.lock]
-      (if (== generation self.generation)
-          (= (sub self.answers key) (or witness False))))
-    (return (is-not witness None)))
+      (= entry (.get self.answers key))
+      (if (and (is-not entry None) (not entry.recheck))
+          (if (is entry.witness None)
+              (do (.add entry.handed False)
+                  (return False))
+              (= witness entry.witness))))
+    (if (and (is-not witness None) (osp.isfile witness))
+        (with [self.lock]
+          (.add entry.handed True)
+          (return True)))
+    (return (._walk self key project-root)))
 
   (def refresh [self project-root]
-    "Forget project-root's answer and ask again; whether it changed.  A
-     root with no remembered answer has none to change."
+    "Walk project-root's src again; whether the answer differs from any
+     handed out since the last refresh.  A root with none handed out has
+     none to change."
     (= key (._key self project-root))
+    (= answer (._walk self key project-root))
     (with [self.lock]
-      (= known (.get self.answers key)))
-    (if (is known None)
-        (return False))
-    (= before (.holds-python-p self project-root))
-    (with [self.lock]
-      (+= self.generation 1)
-      (.pop self.answers key None))
-    (return (!= before (.holds-python-p self project-root))))
+      (= entry (sub self.answers key))
+      (= changed (any ((!= handed answer) for handed in entry.handed)))
+      (= entry.handed (set [answer])))
+    (return changed))
 
   (def forget-false [self]
+    "Mark every no-Python answer for a recheck at its next ask, keeping it
+     as the answer refresh compares against."
     (with [self.lock]
       (+= self.generation 1)
-      (= self.answers {key known for [key known] in (.items self.answers)
-                       if (is-not known False)}))))
+      (for entry in (.values self.answers)
+        (if (is entry.witness None)
+            (= entry.recheck True))))))
 
 (= _SRC-LAYOUTS (_SrcLayouts))
 
@@ -1855,9 +1903,9 @@
   (return (.refresh _SRC-LAYOUTS project-root)))
 
 (def forget-false-src-layouts []
-  "Drop every remembered no-Python answer (_SrcLayouts.forget-false): the
-   LSP calls it when a document is opened or saved, for a folder that
-   arrived with no file event (mv ../pkg src/)."
+  "Mark every remembered no-Python answer for a recheck
+   (_SrcLayouts.forget-false): the LSP calls it when a document is opened
+   or saved, for a folder that arrived with no file event (mv ../pkg src/)."
   (.forget-false _SRC-LAYOUTS))
 
 (def shared-import-roots [project-root]

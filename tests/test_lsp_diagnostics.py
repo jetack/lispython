@@ -1110,6 +1110,54 @@ def test_a_module_file_flipping_the_src_layout_republishes(outside_documents, cr
     run_bounded(scenario())
 
 
+def test_a_save_sees_a_src_package_that_came_with_no_file_event(outside_documents):
+    # Defect: a src package moved in whole (mv ../pkg src/) sends no event
+    # for its files, and a save keeps the remembered no-Python answer, so
+    # the open document never searches src.
+    editor, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    (outside / "mypkg").mkdir()
+    (outside / "mypkg" / "__init__.py").write_text("")
+    scripts = outside / "scripts"
+    scripts.mkdir()
+    script = scripts / "x.lpy"
+    script.write_text("(= x 1)\n")
+
+    async def scenario():
+        uri = editor.open(script)
+        await until(lambda: uri in editor.published)
+        assert server.uri_module_names(uri)[3] == (str(scripts), str(outside))
+        (outside / "src" / "pkg").mkdir(parents=True)
+        (outside / "src" / "pkg" / "m.py").write_text("")
+        editor.save(script)
+        assert server.uri_module_names(uri)[3] == (str(scripts), str(outside / "src"))
+
+    run_bounded(scenario())
+
+
+def test_a_module_file_in_a_pruned_directory_walks_no_src(
+    outside_documents, monkeypatch
+):
+    # Defect: an install into the project's virtualenv (one event per file)
+    # asks the project's src layout again for every batch.
+    _, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    (outside / "venv").mkdir()
+    (outside / "venv" / "pyvenv.cfg").write_text("")
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    for rel in [
+        ".venv/lib/site-packages/dep/m.py",
+        "venv/lib/site-packages/dep/m.py",
+        "node_modules/x/m.py",
+        "src/__pycache__/m.cpython-315.pyc",
+    ]:
+        files_changed(SimpleNamespace(), outside / rel)
+    assert asked == []
+    files_changed(SimpleNamespace(), outside / "src" / "m.py")  # the control
+    assert asked == [str(outside)]
+
+
 def test_an_init_file_in_lispythons_own_package_renames_modules():
     # Defect: naming borrowed the tracking exclusions, which leave out
     # lispython's own package, so an __init__ created in an editable

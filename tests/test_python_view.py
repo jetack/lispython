@@ -1820,6 +1820,21 @@ class TestShadows:
         assert pv.shared_import_roots(str(python)) == [str(python)]
         assert len(walks) == 3
 
+    def test_a_rechecked_no_python_answer_still_reports_its_flip(self, tmp_path):
+        # Defect: an open or save in one project drops every project's
+        # no-Python answer, so when b/src/x.py is created afterwards,
+        # refresh has nothing to compare and reports no change, and b's
+        # open documents keep searching b's root.
+        a, b = tmp_path / "a", tmp_path / "b"
+        for project in [a, b]:
+            self.write(project / "mypkg" / "__init__.py", "")
+            self.write(project / "src" / "lib.rs", "")
+            assert pv.shared_import_roots(str(project)) == [str(project)]
+        pv.forget_false_src_layouts()
+        self.write(b / "src" / "x.py", "")
+        assert pv.refresh_src_layout(str(b))
+        assert pv.shared_import_roots(str(b)) == [str(b / "src")]
+
     def shared_layout_without_lpy(self, project, layout):
         for name, text in self.SHARED_LAYOUTS[layout]:
             self.write(project / name, text)

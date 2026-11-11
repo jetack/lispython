@@ -47,7 +47,8 @@
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
                              forget-false-src-layouts module-file-path-p
-                             pyrefly-fallback refresh-src-layout source-lines
+                             pruned-in-project-p pyrefly-fallback refresh-src-layout
+                             source-lines
                              source-prefix
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
@@ -1735,7 +1736,8 @@
    indexed again (reindex-watched-file), and when one may rename a module
    (renaming-file-p), or moved the src layout answer of its project
    (refresh-src-layout, asked once per project of a module file in the
-   batch, a file behind a link into src included), every open document is
+   batch outside a pruned directory, pruned-in-project-p: a file behind a
+   link into src included, a .venv install never), every open document is
    published again.  A change of content never matters."
   (= renamed False)
   (= projects (set))
@@ -1750,7 +1752,8 @@
           (= renamed True))
       (if (module-file-path-p path)
           (do (= project-root (project-root-of path (workspace-folders)))
-              (if (is-not project-root None)
+              (if (and (is-not project-root None)
+                       (not (pruned-in-project-p project-root path)))
                   (.add projects project-root))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
