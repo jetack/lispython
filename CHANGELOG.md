@@ -121,13 +121,39 @@ follows [Semantic Versioning](https://semver.org/).
   (`scripts/tool.lpy` is `scripts.tool`, imported from the folder), so its
   `__name__`/`__package__` at compile time differ from before. It also
   stays the script `lpy scripts/tool.lpy` runs: its own directory (as `lpy`
-  runs it) and its script root (`scripts/`, or `tools/` for
-  `tools/mypkg/a.lpy` in a regular package) are on `sys.path` while its
-  macros run and searched first by go-to-definition's local fallback (used
-  only when the backend gives no answer), so a bare require or import of a
-  sibling still resolves. The backend searches the import root, and the own
-  directory and script root only when each is no regular package and inside
-  none.
+  runs it) and its import root are searched by its compile, the local
+  definition fallback and the backend alike, so a bare require or import of
+  a sibling still resolves.
+- LSP: a module inside a regular package (`src/pkg/m.lpy`, or
+  `tools/mypkg/a.lpy` in a namespace directory) is analysed as
+  `import pkg.m` sees it, with its import root alone: its own directory is
+  no longer on `sys.path` while its macros run, so a bare sibling
+  `(require helper)` there loads no macros (a "module not found" warning),
+  as `import pkg.m` finds no `helper` either; write `(require pkg.helper)`
+  or `(require .helper)`. The
+  compile, go-to-definition and the backend now search the same
+  directories.
+- The `lpy` REPL and CLI no longer put the working directory's package root
+  on `sys.path` or set the REPL's `__package__` to the working directory's
+  package when `lispy.tools` is imported: `__main__` is in no package
+  (`__package__` is `None`), as Python's own is. The nREPL session's
+  file-less scope (an eval with neither `file` nor `ns`) is that same
+  `__main__`, so a relative require there no longer resolves against the
+  working directory's package; send `file` to eval in a file's package.
+- Every `lpy` run mode starts with the `sys.path` `python` gives it: the
+  first entry is `''` for the REPL, `lpy -t` and `lpy -c`, the working
+  directory for `lpy -m` and `lpy --nrepl`, the script's directory (symlinks
+  resolved) for `lpy file.lpy`, even when `PYTHONPATH` already lists it, so
+  the script's sibling wins over a `PYTHONPATH` module of the same name,
+  and the app's own absolute path alone for a directory or zip app
+  (`lpy app`, a directory with `__main__.lpy`; a zip app runs only with a
+  `__main__.py`, since zipimport reads no `.lpy`). That entry replaces the
+  `lpy` console script's own directory (`.venv/bin`), which is no longer on
+  `sys.path`. In safe-path mode (`PYTHONSAFEPATH`, or `python -P` running
+  the console script; `lpy` has no `-P` flag of its own) no entry is added,
+  for a file run and the nREPL server too, except that a directory or zip
+  app still gets its own path, as under `python -P`. `lpy -c` used to put
+  nothing there, so a module in the working directory was not importable.
 - A relative `(require .mac)` (or `(require ..pkg.mac)`) registers its macros
   as `mac.name`, the name `from . import mac` binds, instead of `.mac.name`,
   which no code could spell. Code calling `(.mac.name ...)` must call

@@ -14,6 +14,7 @@
 (import linecache)
 (import os)
 (import os.path as osp)
+(import pkgutil)
 (import queue)
 (import runpy)
 (import socket)
@@ -50,31 +51,43 @@
   (print (format-compile-error (attach-source err filename source))
          :file sys.stderr))
 
-(def detect-package-name [:path None]
-  "(package name, import root) of path's directory (default the working
-   directory), by __init__.py or __init__.lpy (package-root): a directory that
-   is no package is its own import root, with an empty name.  Pure."
-  (= dir-path (ife (is path None)
-                   (os.getcwd)
-                   (osp.dirname (osp.abspath path))))
+(def detect-package-name [path]
+  "(package name, import root) of path's directory, by __init__.py or
+   __init__.lpy (package-root): the name `python -m <name>` run from the
+   import root gives, l2py's rule for the file it translates.  A directory
+   that is no package is its own import root, with an empty name.  Pure."
+  (= dir-path (osp.dirname (osp.abspath path)))
   (= [root parts] (package-root dir-path))
   (return (, (.join "." parts) root)))
 
-(= [MAIN-PACKAGE _main-root] (detect-package-name))
-(if (and MAIN-PACKAGE (not (in _main-root sys.path)))
-    (sys.path.insert 0 _main-root))
-
 (def main-scope []
-  "A new __main__ scope in the working directory's package.  SCOPE, the one
-   the REPL and nREPL sessions share, is one; a translation that names no
-   scope compiles in a new one, since every module unit compiles in its own
+  "A new __main__ scope, in no package (__package__ None), as Python's own
+   __main__ (REPL, -c) is, whatever package the working directory is in;
+   the working directory reaches sys.path only as python puts it there
+   (set-run-path, '' for the REPL and -c).  SCOPE, the one the REPL and
+   nREPL sessions share, is one; a translation that names no scope
+   compiles in a new one, since every module unit compiles in its own
    scope and must not reset the session's macros."
   (return {"__builtins__" __builtins__
            "__name__" "__main__"
-           "__package__" MAIN-PACKAGE
+           "__package__" None
            "__macro_namespace" (MacroTable)}))
 
 (= SCOPE (main-scope))
+
+(def set-run-path [entry]
+  "Make sys.path[0] the entry python gives the run mode (run's dispatch):
+   '' for the REPL and -c, the absolute working directory for -m (and the
+   nREPL server), the script's directory for a file, the app's own path
+   for a directory or zip app.  It replaces the entry the launcher added,
+   the `lpy` console script's own directory, which no python run has.
+   Under python -P / PYTHONSAFEPATH (sys.flags.safe_path) python adds no
+   entry, and the launcher added none, so nothing changes."
+  ;; Replaced, never stacked in front or skipped when present elsewhere:
+  ;; python's first entry wins over a PYTHONPATH entry of the same directory
+  ;; and leaves no launcher directory behind (.venv/bin/activate_this.py).
+  (if (not sys.flags.safe-path)
+      (= (sub sys.path 0) entry)))
 
 (def ast-to-python [st]
   ;; unparse writes any depth compile() takes, on a bounded stack per chunk;
@@ -153,7 +166,7 @@
   ;; lispython's own .lpy modules splits the process into two copies of them
   ;; (macro_modules is the one home of dropping modules), and its import root
   ;; is on sys.path only while it runs.
-  (= [pkg root] (detect-package-name :path file-path))
+  (= [pkg root] (detect-package-name file-path))
   (= added-dir None)
   (if (not (in root sys.path))
       (do (sys.path.insert 0 root)
@@ -400,11 +413,6 @@
   )
 
 (def repl [:translate False]
-  ;; Add current directory to sys.path for local imports
-  (= cwd (os.getcwd))
-  (if (not (in cwd sys.path))
-      (sys.path.insert 0 cwd))
-
   (= session (make-repl-session))
   (= scope SCOPE)
   (eval-and-print "(from pprint [pprint])" scope :start UnitStart.CONTINUE)
@@ -973,8 +981,9 @@
 (= _NREPL-FILE-SCOPES-LOCK (threading.RLock))  ; RLock: _nrepl-release-window-locks
 
 ;; The search roots a file scope's namespace packages are counted up to:
-;; sys.path as nrepl-server left it once it put the working directory on it,
-;; never the live list, because nrepl-load-file puts each loaded file's own
+;; sys.path as nrepl-server found it (the working directory first unless
+;; safe_path, run's set-run-path), never the live list, because
+;; nrepl-load-file puts each loaded file's own
 ;; directory there, and the nearest-root rule (package-root) would then make
 ;; a file's package depend on which sibling was loaded first.  None until a
 ;; server starts, when the current sys.path stands in.
@@ -2005,8 +2014,6 @@
 (def nrepl-server [:host "127.0.0.1" :port 0]
   (global _NREPL-IMPORT-ROOTS)
   (= cwd (os.getcwd))
-  (if (not (in cwd sys.path))
-      (sys.path.insert 0 cwd))
   (= _NREPL-IMPORT-ROOTS (list sys.path))
   (= scope SCOPE)
   (nrepl-eval "(from pprint [pprint])" scope)
@@ -2060,14 +2067,13 @@
 
 (def _run []
   (cond (< (len sys.argv) 2)
-        (repl)
+        (do (set-run-path "")
+            (repl))
 
         (== (sub sys.argv 1) "-m")
         (do (sys.argv.pop 1)
             (= mname (sys.argv.pop 1))
-            ;; python -m prepends the cwd unless -P / PYTHONSAFEPATH is set
-            (if (not sys.flags.safe-path)
-                (sys.path.insert 0 (os.getcwd)))
+            (set-run-path (os.getcwd))
             ;; the module name is the one `import` gives (module-import-name)
             (with [(compile-errors "<command line>" mname)]
               (= modname (module-import-name
@@ -2097,21 +2103,49 @@
         (== (sub sys.argv 1) "-c")
         (do (sys.argv.pop 1)
             (= src (sys.argv.pop 1))
+            (set-run-path "")
             (eval-and-print src))
 
         (== (sub sys.argv 1) "--nrepl")
         (do (sys.argv.pop 1)
             (= port (ife (> (len sys.argv) 1) (int (sys.argv.pop 1)) 0))
+            (set-run-path (os.getcwd))
             (nrepl-server :port port))
 
         (== (sub sys.argv 1) "-t")
-        (repl True)
+        (do (set-run-path "")
+            (repl True))
 
         (do (= fpath (sys.argv.pop 1))
-            (= script-dir (osp.dirname (osp.abspath fpath)))
-            (if (not (in script-dir sys.path))
-                (sys.path.insert 0 script-dir))
-            (runpy.run-path fpath :run-name "__main__"))))
+            ;; A directory or zip app (an importer can read it, the test
+            ;; runpy.run_path makes; a zip runs only with a __main__.py,
+            ;; since zipimport reads no .lpy) runs as python runs it: its
+            ;; path, absolute as python spells it (joined, never
+            ;; normalised), is sys.path[0] even under safe_path, argv[0]
+            ;; stays as typed, and its __main__ runs as a module in a fresh
+            ;; __main__ shaped as the one python starts with, never the
+            ;; console script's module, whose globals hold its own imports.
+            ;; That module began as CPython's initial __main__, so the fresh
+            ;; one takes its __builtins__ (the builtins module) and an empty
+            ;; __annotations__ exactly when it has one (3.11-3.13); runpy
+            ;; sets the other dunders itself.  run_path would put the typed
+            ;; path on sys.path and in argv[0] instead.
+            (if (is-not (pkgutil.get-importer fpath) None)
+                (do (= app (osp.join (os.getcwd) fpath))
+                    (if sys.flags.safe-path
+                        (sys.path.insert 0 app)
+                        (set-run-path app))
+                    (= (sub sys.argv 0) fpath)
+                    (= launcher (vars (sub sys.modules "__main__")))
+                    (= main (types.ModuleType "__main__"))
+                    (= main.__builtins__ (sub launcher "__builtins__"))
+                    (if (in "__annotations__" launcher)
+                        (= main.__annotations__ {}))
+                    (= (sub sys.modules "__main__") main)
+                    (runpy._run-module-as-main "__main__" False))
+                ;; python resolves a symlinked script to its target's directory
+                (do (set-run-path (osp.dirname (osp.realpath fpath)))
+                    (runpy.run-path fpath :run-name "__main__"))))))
 
 (if (== __name__ "__main__")
     (run))

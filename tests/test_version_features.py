@@ -127,6 +127,8 @@ def lpy_file(tmp_path, monkeypatch):
 
 def run_cli(entry, argv, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", argv)
+    # tools.run sets sys.path[0] as python does; pytest's is restored after
+    monkeypatch.setattr(sys, "path", list(sys.path))
     with pytest.raises(SystemExit) as info:
         entry()
     out, err = capsys.readouterr()
@@ -152,7 +154,7 @@ class TestEntryPoints:
         assert "Traceback" not in out + err
 
     def test_lpy_module(self, lpy_file, monkeypatch, capsys):
-        sys.path.insert(0, str(lpy_file.parent))
+        monkeypatch.chdir(lpy_file.parent)  # lpy -m imports from the cwd
         sys.modules.pop("gated_mod", None)
         code, out, err = run_cli(
             tools.run, ["lpy", "-m", "gated-mod"], monkeypatch, capsys
@@ -956,6 +958,7 @@ class TestCompilerSyntaxErrors:
     def test_runtime_syntax_error_is_the_programs_own(self, monkeypatch):
         src = '(compile "x = (" "<user>" "exec")'
         monkeypatch.setattr(sys, "argv", ["lpy", "-c", src])
+        monkeypatch.setattr(sys, "path", list(sys.path))
         with pytest.raises(SyntaxError) as info:
             tools.run()
         assert type(info.value) is SyntaxError

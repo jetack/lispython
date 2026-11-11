@@ -878,6 +878,9 @@ class TestShadows:
 
     def test_module_names_follow_packages_not_the_project_root(self, tmp_path):
         # src layout: src is no package, so it is the import root of pkg.
+        # Defect: a module inside a regular package also searches its own
+        # directory (src/pkg), which `import pkg.mod` never searches, so its
+        # compile resolves a bare sibling that fails at run time.
         src = tmp_path / "src"
         for parts in [("pkg", "__init__.py"), ("pkg", "a", "__init__.lpy")]:
             self.write(src.joinpath(*parts), "")
@@ -892,9 +895,9 @@ class TestShadows:
         ]
         assert names == [
             ("top", "", str(tmp_path), (str(tmp_path),)),
-            ("pkg.mod", "pkg", str(src), (str(src / "pkg"), str(src))),
-            ("pkg.a", "pkg.a", str(src), (str(src / "pkg" / "a"), str(src))),
-            ("pkg.a.m", "pkg.a", str(src), (str(src / "pkg" / "a"), str(src))),
+            ("pkg.mod", "pkg", str(src), (str(src),)),
+            ("pkg.a", "pkg.a", str(src), (str(src),)),
+            ("pkg.a.m", "pkg.a", str(src), (str(src),)),
         ]
 
     def test_a_namespace_package_counts_up_to_a_root_above(self, tmp_path):
@@ -963,8 +966,10 @@ class TestShadows:
         )
 
     def test_module_names_count_namespace_packages_under_the_project(self, tmp_path):
-        # Defect: the LSP names ns/a.lpy as the top-level module a, so its
-        # relative requires fail to compile.
+        # Defects: the LSP names ns/a.lpy as the top-level module a, so its
+        # relative requires fail to compile; or it drops ns/ from the search
+        # dirs, though no regular package holds it and `lpy ns/a.lpy` runs it
+        # as a script with ns/ on sys.path, so a bare sibling stops resolving.
         (tmp_path / "src" / "sns").mkdir(parents=True)
         (tmp_path / "ns").mkdir()
         got = [
@@ -1103,25 +1108,26 @@ class TestShadows:
             str(root / "pyrefly.toml")
         ]
 
-    def test_a_regular_package_in_a_plain_directory_keeps_its_script_root(
+    def test_a_regular_package_in_a_namespace_directory_is_its_package_module(
         self, tmp_path, monkeypatch
     ):
-        # Defect: the search dirs lack the script root, so for
-        # pvtools/pvmypkg/a.lpy (a regular package in a namespace directory)
-        # pvtools/ (the l2py rule) is neither on sys.path while its macros
-        # run nor a backend search path: (require pvmypkg.mac *) loads no
-        # macros.
+        # Defect: pvtools/pvmypkg/a.lpy (a regular package in a namespace
+        # directory) also searches pvtools/ (a root no run of the file has:
+        # `import pvtools.pvmypkg.a` searches the project root alone), so
+        # (require pvmypkg.mac *) loads macros there and the backend has an
+        # environment for pvtools/, where the run fails.
         project, root = tmp_path / "project", tmp_path / "view"
         tools = project / "pvtools"
         pkg = tools / "pvmypkg"
         self.write(pkg / "__init__.py", "")
         self.write(pkg / "mac.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
-        self.write(pkg / "a.lpy", "(require pvmypkg.mac *)\n(= y (twice 2))")
+        self.write(pkg / "a.lpy", "(require pvtools.pvmypkg.mac *)\n(= y (twice 2))")
+        self.write(pkg / "b.lpy", "(require pvmypkg.mac *)\n(= y (twice 2))")
         assert pv.module_names(str(pkg / "a.lpy"), project_root=str(project)) == (
             "pvtools.pvmypkg.a",
             "pvtools.pvmypkg",
             str(project),
-            (str(pkg), str(tools), str(project)),
+            (str(project),),
         )
         names = ["pvmypkg", "pvmypkg.mac", "pvtools", "pvtools.pvmypkg"]
         names.append("pvtools.pvmypkg.mac")
@@ -1133,32 +1139,34 @@ class TestShadows:
         finally:
             for name in names:
                 sys.modules.pop(name, None)
-        assert (root / "pvtools" / "pvmypkg" / "a.py").read_text().endswith("y = 2 + 2")
+        view = root / "pvtools" / "pvmypkg"
+        assert (view / "a.py").read_text().endswith("y = 2 + 2")
+        assert (view / "b.py").read_text().endswith("y = twice(2)")
+        assert manifest.environments == {str(project): (str(project),)}
         path = pv.write_pyright_config(
             str(project),
             str(root),
             environments=manifest.environments,
             shared_roots=manifest.shared_roots,
         )
-        [env] = json.loads(open(path).read())["executionEnvironments"]
-        assert env["root"] == str(root / "pvtools")
-        assert env["extraPaths"][0] == str(root / "pvtools")
+        assert "executionEnvironments" not in json.loads(open(path).read())
 
-    def test_a_bare_sibling_require_resolves_from_the_files_own_directory(
+    def test_a_package_module_never_searches_its_own_directory(
         self, tmp_path, monkeypatch
     ):
-        # Defect: the file's own directory is neither the script root nor the
-        # import root, so for pvowntools/pvownpkg/a.lpy a bare sibling
-        # (require pvownhelper *), which `lpy a.lpy` resolves from the file's
-        # directory, loads no macros.
+        # Defect: src/pkg/m.lpy also searches src/pkg, so a bare sibling
+        # (require pvbarehelper *) loads its macros while `import pkg.m`
+        # raises ModuleNotFoundError for it, and the compile and the backend
+        # disagree on what the module imports.
         project, root = tmp_path / "project", tmp_path / "view"
-        pkg = project / "pvowntools" / "pvownpkg"
+        pkg = project / "src" / "pvbarepkg"
         self.write(pkg / "__init__.py", "")
-        self.write(pkg / "pvownhelper.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
-        self.write(pkg / "a.lpy", "(require pvownhelper *)\n(= y (twice 2))")
-        names = ["pvownhelper", "pvownpkg", "pvownpkg.pvownhelper", "pvowntools"]
-        names.append("pvowntools.pvownpkg")
-        names.append("pvowntools.pvownpkg.pvownhelper")
+        self.write(pkg / "pvbarehelper.lpy", "(defmacro twice [x] (return `(+ ~x ~x)))")
+        self.write(pkg / "bare.lpy", "(require pvbarehelper *)\n(= y (twice 2))")
+        self.write(
+            pkg / "qualified.lpy", "(require pvbarepkg.pvbarehelper *)\n(= y (twice 2))"
+        )
+        names = ["pvbarehelper", "pvbarepkg", "pvbarepkg.pvbarehelper"]
         for name in names:
             monkeypatch.delitem(sys.modules, name, raising=False)
         try:
@@ -1166,14 +1174,15 @@ class TestShadows:
         finally:
             for name in names:
                 sys.modules.pop(name, None)
-        shadow = root / "pvowntools" / "pvownpkg" / "a.py"
-        assert shadow.read_text().endswith("y = 2 + 2")
+        view = root / "src" / "pvbarepkg"
+        assert (view / "qualified.py").read_text().endswith("y = 2 + 2")
+        assert (view / "bare.py").read_text().endswith("y = twice(2)")
 
     def test_src_layout_config_and_mirrored_py(self, tmp_path):
-        # The package interior src/pkg is searched by the compile but is no
-        # backend search path: it would resolve the module's `import helper`
-        # (or a src/pkg/json.py its `import json`) to that package's
-        # modules, where Python imports it as pkg.m from src.
+        # The package interior src/pkg is no search path, of the compile or
+        # the backend: it would resolve the module's `import helper` (or a
+        # src/pkg/json.py its `import json`) to that package's modules,
+        # where Python imports it as pkg.m from src.
         project, root = tmp_path / "project", tmp_path / "view"
         pkg = project / "src" / "pkg"
         self.write(pkg / "__init__.py", "from .helper import h")
@@ -1209,10 +1218,10 @@ class TestShadows:
         self, tmp_path
     ):
         # Defect: src/pkg/res (no __init__ of its own, inside the regular
-        # package src/pkg) is its own script root, so keeping every own
-        # directory that is its own script root made it a project-wide
-        # backend search path: src/pkg/res/json.py would answer every file's
-        # `import json`.  Likewise src/pkg/res/sub one level deeper.
+        # package src/pkg, so pkg.res from src) is searched as a script's
+        # own directory, a backend search path: src/pkg/res/json.py would
+        # answer `import json`, which `import pkg.res.x` never searches
+        # there.  Likewise src/pkg/res/sub one level deeper.
         project, root = tmp_path / "project", tmp_path / "view"
         res = project / "src" / "pkg" / "res"
         self.write(project / "src" / "pkg" / "__init__.py", "")
@@ -1231,6 +1240,58 @@ class TestShadows:
         config = json.loads(open(path).read())
         assert config["extraPaths"] == [str(root), str(root / "src"), str(project), src]
         assert "executionEnvironments" not in config
+
+    def test_a_script_directory_is_searched_only_by_its_files(self, tmp_path):
+        # Defects: src/pkg/my-res (no __init__, no identifier, inside the
+        # regular package src/pkg) can be named by no import, so x.lpy is
+        # the script `python src/pkg/my-res/x.py` runs, with my-res alone on
+        # sys.path: sharing its environment with every file makes
+        # src/pkg/my-res/json.py answer every file's `import json`; searching
+        # src or src/pkg for it, or dropping my-res, mis-resolves its imports.
+        project, root = tmp_path / "project", tmp_path / "view"
+        src, res = project / "src", project / "src" / "pkg" / "my-res"
+        self.write(src / "pkg" / "__init__.py", "")
+        self.write(src / "pkg" / "m.lpy", "(= m 1)")
+        self.write(res / "x.lpy", "(= x 1)")
+        self.write(res / "json.py", "X = 1")
+        assert pv.module_names(str(res / "x.lpy"), project_root=str(project)) == (
+            "x",
+            "",
+            str(res),
+            (str(res),),
+        )
+        manifest = pv.ShadowManifest()
+        pv.write_shadows(str(project), str(root), manifest=manifest)
+        assert manifest.shared_roots == [str(src)]
+        assert manifest.environments[str(res)] == (str(res),)
+        view_res = root / "src" / "pkg" / "my-res"
+        path = pv.write_pyright_config(
+            str(project),
+            str(root),
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
+        )
+        config = json.loads(open(path).read())
+        assert config["extraPaths"] == [
+            str(root),
+            str(root / "src"),
+            str(project),
+            str(src),
+        ]
+        [env] = config["executionEnvironments"]
+        assert env["root"] == str(view_res)
+        assert env["extraPaths"][0] == str(view_res)
+        assert str(res) in env["extraPaths"]
+        top = self.pyrefly_config(
+            project,
+            root,
+            environments=manifest.environments,
+            shared_roots=manifest.shared_roots,
+        )
+        assert str(res) not in top["search-path"]
+        assert str(view_res) not in top["search-path"]
+        with open(view_res / "pyrefly.toml", "rb") as f:
+            assert tomllib.load(f)["search-path"] == env["extraPaths"]
 
     def test_an_import_roots_modules_are_linked_beside_its_packages(self, tmp_path):
         # Defect: an import root holding only shadowed packages has none of

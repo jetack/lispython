@@ -1,10 +1,14 @@
 """``lpy -m mod`` resolves ``mod`` from the cwd the way ``python -m`` does.
 
 Runs the installed ``lpy`` console script: its sys.path[0] is the script's bin
-directory, so the cwd is on the path only if ``-m`` puts it there.
+directory, which every run mode replaces with the entry ``python`` gives it.
 """
 
+import ast
+import json
 import os
+import select
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -178,3 +182,265 @@ def test_m_package_without_main_is_one_line(tmp_path: Path):
     assert r.stderr.strip().endswith(
         "'cwdmod' is a package and cannot be directly executed"
     )
+
+
+def test_c_imports_a_module_beside_the_cwd_unless_safe_path(tmp_path: Path):
+    # Defects: `lpy -c` puts nothing on sys.path, so a module in the cwd,
+    # which `python -c 'import helper'` imports, is ModuleNotFoundError; or
+    # it puts the cwd there under -P / PYTHONSAFEPATH, where python does not.
+    (tmp_path / "cwdhelper.lpy").write_text('(print "ran-helper")\n')
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
+    }
+
+    def run_c(**extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(LPY), "-c", "(import cwdhelper)"],
+            cwd=tmp_path,
+            env={**env, **extra},
+            capture_output=True,
+            text=True,
+        )
+
+    r = run_c()
+    assert r.returncode == 0, r.stderr
+    assert "ran-helper" in r.stdout
+    r = run_c(PYTHONSAFEPATH="1")
+    assert "No module named 'cwdhelper'" in r.stderr
+
+
+def clean_env(**extra: str) -> dict[str, str]:
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
+    }
+    env.update(extra)
+    return env
+
+
+PRINT_PATH = "(import sys json) (print (json.dumps sys.path))"
+
+
+def lpy_path(args: list[str], cwd: Path, **extra: str) -> list[str]:
+    r = subprocess.run(
+        [str(LPY), *args],
+        cwd=cwd,
+        env=clean_env(**extra),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout.splitlines()[-1])
+
+
+def test_c_puts_an_empty_entry_first_and_no_launcher_directory(tmp_path: Path):
+    # Defect: `lpy -c` stacks the cwd in front of the console script's own
+    # directory, so .venv/bin stays on sys.path (its activate_this.py is
+    # importable) and an absolute cwd stands where python -c has ''.
+    path = lpy_path(["-c", PRINT_PATH], tmp_path)
+    assert path[0] == ""
+    assert str(LPY.parent) not in path
+
+
+def test_a_file_run_puts_its_directory_first_even_when_on_pythonpath(
+    tmp_path: Path,
+):
+    # Defect: a file run skips its directory when PYTHONPATH already has it,
+    # so a helper on an earlier PYTHONPATH entry wins over the script's
+    # sibling, which `python sub/s.py` imports.
+    sub, other = tmp_path / "sub", tmp_path / "other"
+    for directory in (sub, other):
+        directory.mkdir()
+        (directory / "pathhelper.py").write_text(f"WHERE = {directory.name!r}\n")
+    (sub / "s.lpy").write_text(
+        "(import sys json pathhelper)\n"
+        "(print (json.dumps (+ [pathhelper.WHERE] sys.path)))\n"
+    )
+    got = lpy_path([str(sub / "s.lpy")], tmp_path, PYTHONPATH=f"{other}:{sub}")
+    assert got[:2] == ["sub", str(sub)]
+    assert str(LPY.parent) not in got
+
+
+def test_a_symlinked_script_runs_with_its_targets_directory(tmp_path: Path):
+    # Defect: a file run puts the link's own directory first, where python
+    # resolves the link and puts the target's directory (os.path.realpath).
+    real, links = tmp_path / "real", tmp_path / "links"
+    real.mkdir()
+    links.mkdir()
+    (real / "s.lpy").write_text(PRINT_PATH + "\n")
+    (links / "s.lpy").symlink_to(real / "s.lpy")
+    path = lpy_path([str(links / "s.lpy")], tmp_path)
+    assert path[0] == str(real)
+    assert str(links) not in path
+
+
+def test_m_puts_the_absolute_cwd_first_and_no_launcher_directory(tmp_path: Path):
+    # Defect: -m stacks its entry in front of the console script's
+    # directory, or puts '' where python -m puts the absolute cwd.
+    (tmp_path / "pathmod.lpy").write_text(PRINT_PATH + "\n")
+    path = lpy_path(["-m", "pathmod"], tmp_path)
+    assert path[0] == str(tmp_path)
+    assert str(LPY.parent) not in path
+
+
+@pytest.mark.parametrize("typed", ["app", "./app/"])
+def test_a_directory_app_has_its_own_absolute_entry_alone(tmp_path: Path, typed: str):
+    # Defects: `lpy app` (a directory with __main__.lpy) gets runpy's
+    # relative "app" in front of the script-style absolute parent directory,
+    # where `python app` has the absolute app directory alone, joined onto
+    # the cwd as typed; or argv[0] becomes that absolute path, where
+    # `python app` keeps it as typed.
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "__main__.lpy").write_text(
+        "(import sys json) (print (json.dumps (+ [(sub sys.argv 0)] sys.path)))\n"
+    )
+    [argv0, *path] = lpy_path([typed], tmp_path)
+    assert argv0 == typed
+    assert path[0] == os.path.join(str(tmp_path), typed)
+    assert typed not in path
+    assert str(tmp_path) not in path
+    assert str(LPY.parent) not in path
+
+
+def test_a_directory_app_runs_in_a_fresh_main(tmp_path: Path):
+    # Defects: the app runs in the console script's __main__, so its globals
+    # hold the launcher's `sys` and `run`, where `python app` gives it a
+    # fresh __main__ and a bare `sys` is a NameError; or the fresh __main__
+    # has no __builtins__, so exec puts the builtins dict there, where
+    # python's has the builtins module and (getattr __builtins__ "open")
+    # works; or it lacks the empty __annotations__ python's initial
+    # __main__ has on some versions (3.11-3.13).  The expected globals are
+    # the running interpreter's own `python app`, never a version table.
+    def app_globals(
+        cmd: list[str], name: str, main: tuple[str, str]
+    ) -> tuple[list, str]:
+        app = tmp_path / name
+        app.mkdir()
+        (app / main[0]).write_text(main[1])
+        r = subprocess.run(
+            [*cmd, name], cwd=tmp_path, env=clean_env(), capture_output=True, text=True
+        )
+        assert r.returncode == 0, r.stderr
+        *_, line, builtins_type = r.stdout.splitlines()
+        return ast.literal_eval(line), builtins_type
+
+    expected = app_globals(
+        [sys.executable],
+        "pyapp",
+        (
+            "__main__.py",
+            "print(sorted(globals()))\nprint(type(__builtins__).__name__)\n",
+        ),
+    )
+    got = app_globals(
+        [str(LPY)],
+        "lpyapp",
+        (
+            "__main__.lpy",
+            "(print (sorted (globals)))\n(print (. (type __builtins__) __name__))\n",
+        ),
+    )
+    assert got == expected
+    assert expected[1] == "module"
+    assert "sys" not in got[0] and "run" not in got[0]
+
+
+def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):
+    # Defect: a file run puts its directory first under PYTHONSAFEPATH,
+    # where python adds none.
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "s.lpy").write_text(PRINT_PATH + "\n")
+    path = lpy_path([str(sub / "s.lpy")], tmp_path, PYTHONSAFEPATH="1")
+    assert str(sub) not in path
+    assert "" not in path
+
+
+@pytest.mark.parametrize("args", [[], ["-t"]])
+def test_the_repl_puts_an_empty_entry_first(tmp_path: Path, args: list[str]):
+    # Defect: the REPL (or -t, the translating REPL) puts the absolute cwd
+    # first, in front of the console script's directory, where python's
+    # REPL has '' (which follows a later os.chdir) and no launcher directory.
+    # prompt_toolkit reads a piped \r as Enter; HOME keeps its history file
+    # out of the user's.  The output is mixed with prompt redraws (and -t's
+    # translation), so the path follows a marker the echoed input never holds.
+    src = '(import sys json) (print (+ "PATH=" (json.dumps sys.path)))'
+    r = subprocess.run(
+        [str(LPY), *args],
+        cwd=tmp_path,
+        env=clean_env(HOME=str(tmp_path)),
+        input=src + "\r",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    [line] = [line for line in r.stdout.splitlines() if "PATH=[" in line]
+    path = json.loads(line[line.index("PATH=[") + len("PATH=") :])
+    assert path[0] == ""
+    assert str(LPY.parent) not in path
+
+
+@pytest.mark.parametrize("safe_path", [False, True])
+def test_the_nrepl_server_puts_the_cwd_first_unless_safe_path(
+    tmp_path: Path, safe_path: bool
+):
+    # Defects: the nREPL server stacks the cwd in front of the console
+    # script's directory (or skips it when present elsewhere), or adds it
+    # under PYTHONSAFEPATH, where python -m adds nothing.
+    extra = {"PYTHONSAFEPATH": "1"} if safe_path else {}
+    server = subprocess.Popen(
+        [str(LPY), "--nrepl", "0"],
+        cwd=tmp_path,
+        env=clean_env(**extra),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert server.stdout is not None
+        # Bounded: a server that never starts fails the test, never hangs it.
+        ready, _, _ = select.select([server.stdout], [], [], 30)
+        assert ready, "the nREPL server printed no port"
+        port = int(server.stdout.readline().rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", port), timeout=30) as conn:
+            request = {"op": "eval", "id": 1, "code": PRINT_PATH}
+            conn.sendall(json.dumps(request).encode() + b"\n")
+            reply = json.loads(conn.makefile("rb").readline())
+    finally:
+        server.kill()
+        server.wait(timeout=30)
+    path = json.loads(reply["stdout"])
+    assert str(LPY.parent) not in path
+    if safe_path:
+        assert str(tmp_path) not in path
+    else:
+        assert path[0] == str(tmp_path)
+
+
+def test_importing_tools_in_a_package_directory_leaves_sys_path_and_main(
+    tmp_path: Path,
+):
+    # Defect: importing lispy.tools from a working directory inside a
+    # package puts that package's root on sys.path and gives the REPL's
+    # __main__ scope the package as __package__, which Python's own
+    # __main__ never has: the REPL then resolves imports and relative
+    # requires no `python` run there would.
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    code = (
+        "import sys\n"
+        "before = list(sys.path)\n"
+        "import lispy.tools as t\n"
+        "print(sys.path == before)\n"
+        "print(t.main_scope()['__package__'] == __package__, repr(__package__))\n"
+    )
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")
+    }
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=pkg, env=env, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[:2] == ["True", "True None"]

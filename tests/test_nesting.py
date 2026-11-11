@@ -216,6 +216,8 @@ needs_bound_compile = pytest.mark.skipif(
 
 def run_cli(argv, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", argv)
+    # tools.run sets sys.path[0] as python does; pytest's is restored after
+    monkeypatch.setattr(sys, "path", list(sys.path))
     with pytest.raises(SystemExit) as info:
         tools.run()
     out, err = capsys.readouterr()
@@ -336,6 +338,7 @@ def test_a_macro_s_runaway_recursion_keeps_its_recursion_error():
 @pytest.mark.usefixtures("time_bound")
 def test_lpy_reports_a_macro_s_runaway_recursion_as_its_own(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["lpy", "-c", RUNAWAY_MACRO])
+    monkeypatch.setattr(sys, "path", list(sys.path))
     with pytest.raises(RecursionError) as info:
         tools.run()
     assert not isinstance(info.value, LispyCompileError)
