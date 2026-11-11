@@ -1760,37 +1760,39 @@
   "Whether path (which need not exist) is a module file by which
    project-root's src holds Python code: a file with a finder suffix
    (finder-suffixes: .py, .lpy, extension modules, __init__ files among
-   them) directly in src, or directly in a direct subdirectory of it other
-   than __pycache__.  The one home of what makes src a src layout:
-   shared-import-roots asks it of src's entries, and the LSP's
-   renaming-file-p of a created or deleted file, which can flip the shared
-   roots of every module."
+   them) at any depth under src, in no _pruned-p directory (__pycache__,
+   dot-directories, virtualenvs), so a namespace package's
+   src/acme/tool/__init__.py counts.  The one home of what makes src a src
+   layout: shared-import-roots asks it of the files under src, and the
+   LSP's renaming-file-p of a created or deleted file, which can flip the
+   shared roots of every module."
   (= name (osp.basename path))
   (if (not (any ((and (.endswith name suffix) (> (len name) (len suffix)))
                  for suffix in (finder-suffixes))))
       (return False))
   (= src (osp.normpath (osp.join project-root "src")))
-  (= parent (osp.dirname (osp.normpath path)))
-  (return (or (== parent src)
-              (and (== (osp.dirname parent) src)
-                   (!= (osp.basename parent) "__pycache__")))))
+  (= rel (osp.relpath (osp.dirname (osp.normpath path)) src))
+  (if (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))
+      (return False))
+  (= parent src)
+  (for part in (ife (== rel os.curdir) [] (.split rel os.sep))
+    (if (_pruned-p parent part)
+        (return False))
+    (= parent (osp.join parent part)))
+  (return True))
 
 (def _src-holds-python-p [project-root]
-  "Whether project-root's src directory holds a src-python-entry-p file,
-   read two levels deep at most."
+  "Whether a src-python-entry-p file lies under project-root's src: a
+   walk that follows no directory link, enters no _pruned-p directory and
+   stops at the first hit."
   (= src (osp.join project-root "src"))
-  (try
-    (with [(os.scandir src) as entries]
-      (for entry in entries
-        (if (.is-dir entry)
-            (with [(os.scandir entry.path) as inner]
-              (if (any ((and (.is-file sub) (src-python-entry-p project-root sub.path))
-                        for sub in inner))
-                  (return True)))
-            (if (src-python-entry-p project-root entry.path)
-                (return True)))))
-    (except [OSError]
-      (return False)))
+  (for [dirpath dirnames filenames] in (os.walk src :followlinks False)
+    (if (any ((src-python-entry-p project-root (osp.join dirpath filename))
+              for filename in filenames))
+        (return True))
+    (= kept (sorted (filter (fn [d] (not (_pruned-p dirpath d))) dirnames)))
+    (.clear dirnames)
+    (.extend dirnames kept))
   (return False))
 
 (def shared-import-roots [project-root]

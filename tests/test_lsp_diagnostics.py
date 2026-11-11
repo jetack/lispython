@@ -1084,9 +1084,15 @@ def test_a_file_that_flips_a_src_layout_renames_modules(tmp_path, monkeypatch):
     # while open documents keep the diagnostics of the old search dirs.
     folders = [SimpleNamespace(uri=tmp_path.as_uri())]
     monkeypatch.setattr(server, "workspace_folders", lambda: list(folders))
-    for rel in ["src/newpkg/mod.lpy", "src/x.py"]:
+    for rel in ["src/newpkg/mod.lpy", "src/x.py", "src/acme/tool/m.py"]:
         assert server.renaming_file_p(str(tmp_path / rel)), rel
-    for rel in ["src/__pycache__/x.cpython-315.pyc", "src/a/b/c.py", "scripts/x.py"]:
+    for rel in [
+        "src/__pycache__/x.cpython-315.pyc",
+        "src/acme/tool/__pycache__/m.cpython-315.pyc",
+        "src/.hidden/m.py",
+        "src/lib.rs",
+        "scripts/x.py",
+    ]:
         assert not server.renaming_file_p(str(tmp_path / rel)), rel
     # Outside every folder no project's shared roots can flip.
     assert not server.renaming_file_p(str(tmp_path.parent / "src" / "x.py"))

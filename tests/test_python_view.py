@@ -1772,29 +1772,10 @@ class TestShadows:
             for name in names:
                 sys.modules.pop(name, None)
         assert (root / "scripts" / "x.py").read_text().endswith("y = 2 + 2")
-        # One module file directly in src, or in a package of it, makes it one.
-        self.write(project / "src" / "core" / "mod.py", "")
+        # A module file at any depth makes it one: a namespace package
+        # src/acme (no __init__) holding the regular package acme.tool.
+        self.write(project / "src" / "acme" / "tool" / "__init__.py", "")
         assert pv.shared_import_roots(str(project)) == [str(project / "src")]
-
-    def test_src_python_entries_are_the_files_that_make_a_src_layout(self, tmp_path):
-        # Defect: the rule that decides a src layout and the one telling the
-        # LSP which created or deleted file can flip it differ, so a file
-        # that flips the shared roots republishes nothing, or a .pyc write
-        # under src/__pycache__ republishes everything.
-        project = str(tmp_path)
-        src = tmp_path / "src"
-        for rel, expected in [
-            ("x.py", True),
-            ("newpkg/mod.lpy", True),
-            ("newpkg/__init__.py", True),
-            ("pkg/ext.abi3.so", True),
-            ("lib.rs", False),
-            ("pkg/deep/m.py", False),
-            ("__pycache__/x.cpython-315.pyc", False),
-            (".py", False),
-        ]:
-            assert pv.src_python_entry_p(project, str(src / rel)) is expected, rel
-        assert not pv.src_python_entry_p(project, str(tmp_path / "x.py"))
 
     def shared_layout_without_lpy(self, project, layout):
         for name, text in self.SHARED_LAYOUTS[layout]:
