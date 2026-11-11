@@ -4,6 +4,7 @@ Runs the installed ``lpy`` console script: its sys.path[0] is the script's bin
 directory, which every run mode replaces with the entry ``python`` gives it.
 """
 
+import ast
 import json
 import os
 import select
@@ -299,6 +300,23 @@ def test_a_directory_app_has_its_own_absolute_entry_alone(tmp_path: Path, typed:
     assert typed not in path
     assert str(tmp_path) not in path
     assert str(LPY.parent) not in path
+
+
+def test_a_directory_app_runs_in_a_fresh_main(tmp_path: Path):
+    # Defect: the app runs in the console script's __main__, so its globals
+    # hold the launcher's `sys` and `run`, where `python app` gives it a
+    # fresh __main__ and a bare `sys` is a NameError.
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "__main__.lpy").write_text("(print (sorted (globals)))\n")
+    r = subprocess.run(
+        [str(LPY), "app"], cwd=tmp_path, env=clean_env(), capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr
+    names = ast.literal_eval(r.stdout.splitlines()[-1])
+    assert "__file__" in names
+    assert "sys" not in names
+    assert "run" not in names
 
 
 def test_a_file_run_under_safe_path_adds_no_directory(tmp_path: Path):

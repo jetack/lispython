@@ -2121,7 +2121,9 @@
             ;; runpy.run_path makes) runs as python runs it: its path,
             ;; absolute as python spells it (joined, never normalised), is
             ;; sys.path[0] even under safe_path, argv[0] stays as typed, and
-            ;; its __main__ runs as a module.  run_path would put the typed
+            ;; its __main__ runs as a module in a fresh __main__ (the one
+            ;; python starts with, never the console script's, whose
+            ;; globals hold its own imports).  run_path would put the typed
             ;; path on sys.path and in argv[0] instead.
             (if (is-not (pkgutil.get-importer fpath) None)
                 (do (= app (osp.join (os.getcwd) fpath))
@@ -2129,6 +2131,7 @@
                         (sys.path.insert 0 app)
                         (set-run-path app))
                     (= (sub sys.argv 0) fpath)
+                    (= (sub sys.modules "__main__") (types.ModuleType "__main__"))
                     (runpy._run-module-as-main "__main__" False))
                 ;; python resolves a symlinked script to its target's directory
                 (do (set-run-path (osp.dirname (osp.realpath fpath)))
