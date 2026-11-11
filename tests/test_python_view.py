@@ -1625,9 +1625,13 @@ class TestShadows:
     @pytest.mark.skipif(not shutil.which("pyrefly"), reason="no pyrefly")
     def test_a_shared_roots_import_resolves_there_for_pyrefly(self, tmp_path):
         # Each file is checked under its nearest pyrefly.toml, as the
-        # language server takes it.
+        # language server takes it.  A deliberate error in each file must be
+        # reported, so a file pyrefly never checked cannot pass as clean.
         project, root = tmp_path / "project", tmp_path / "view"
         self.src_utils_layout(project)
+        for name in self.UTILS_FILES:
+            with open(project / name.replace(".py", ".lpy"), "a") as f:
+                f.write('\n(= bad (+ 1 "a"))')
         manifest = pv.ShadowManifest()
         pv.write_shadows(str(project), str(root), manifest=manifest)
         pv.write_pyrefly_config(
@@ -1642,9 +1646,12 @@ class TestShadows:
             capture_output=True,
             text=True,
             timeout=60,
+            cwd=tmp_path,
         )
         errors = json.loads(out.stdout)["errors"]
-        assert [(e["path"], e["concise_description"]) for e in errors] == []
+        assert sorted(
+            (os.path.relpath(tmp_path / e["path"], root), e["name"]) for e in errors
+        ) == [(name, "unsupported-operation") for name in self.UTILS_FILES]
 
     def snapshot(self, top):
         """Every entry under top, links unfollowed: kind and content."""
