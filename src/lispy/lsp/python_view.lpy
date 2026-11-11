@@ -2034,10 +2034,11 @@
    module-names, whether its shadow is written, the macro environment it
    compiled in (macro_modules.epoch)), so a file unchanged since, under the
    same macro environment, is not compiled again.  And the search dirs of
-   the written shadows' sources (module-names), which the config writers
-   read (_search-paths, search-environments): environments,
-   environment root -> the search dirs of the sources it is the first of,
-   in order (merged, each once, should two sources of one root differ)."
+   the written shadows' sources and of the documents open in the backend
+   (module-names), which the config writers read (_search-paths,
+   search-environments): environments, environment root -> the search dirs
+   of the modules it is the first of, in order (merged, each once, should
+   two modules of one root differ; _environments)."
   (def __init__ [self]
     (= self.sources {})
     (= self.environments {})))
@@ -2196,11 +2197,14 @@
             (pass)))))
   (return removed))
 
-(def write-shadows [project-root view-root :manifest None]
+(def write-shadows [project-root view-root :manifest None :open-paths (,)]
   "Write a compiled shadow .py into view-root for every .lpy under
    project-root (project-sources), mirroring the project's layout, so
-   imports between .lpy modules resolve for the backend.  A shadow is
-   written only when its text changed; a file that is gone or does not
+   imports between .lpy modules resolve for the backend.  The manifest's
+   environments come from the sources with a shadow and from open-paths,
+   the absolute paths of the documents open in the backend, on disk or
+   not, compiled or not (_environments).  A shadow is written only when
+   its text changed; a file that is gone or does not
    compile has none, and one that cannot be read keeps the shadow it has.
    Every package holding a shadow is overlaid whole beside the shadows
    (_overlay-package), and the other modules of every import root with a
@@ -2221,7 +2225,42 @@
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
   (with [(_view-root-lock root)]
-    (return (_write-shadows project-root root manifest))))
+    (return (_write-shadows project-root root manifest open-paths))))
+
+(def _module-environment [names]
+  "(environment root, search dirs) of a module of module-names names: the
+   root is its first search dir, the directory search-environments makes
+   its environment's root."
+  (= dirs (sub names 3))
+  (return (, (sub dirs 0) dirs)))
+
+(def _environments [all-names]
+  "ShadowManifest.environments of the modules of module-names all-names, in
+   order: environment root (_module-environment) -> the search dirs of the
+   modules it is the root of, merged in order, each once, sorted by root.
+   The modules are every source with a shadow and every document open in
+   the backend (write-shadows' open-paths): a buffer not yet saved has no
+   shadow but is synced to the backend at its view path, and analysing it
+   under the default list instead of its own search dirs leaves a sibling
+   import its run (`python scripts/y.py`) resolves unresolved until the
+   first save."
+  (= environments {})
+  (for names in all-names
+    (= [env-root dirs] (_module-environment names))
+    (= (sub environments env-root)
+       (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs)))))
+  (return (dict (sorted (.items environments)))))
+
+(def new-environment-p [project-root environments lpy-path]
+  "Whether lpy-path, the absolute path of a document open in project-root's
+   backend, has a search environment (search-environments) that
+   environments (ShadowManifest.environments) lacks: its environment root
+   (_module-environment) is no key of environments and search-environments
+   gives it one (the view root standing in for project-root's: only
+   whether an environment exists is asked)."
+  (= [env-root dirs] (_module-environment (module-names lpy-path :project-root project-root)))
+  (return (and (not-in env-root environments)
+               (bool (search-environments project-root project-root {env-root dirs})))))
 
 (class ShadowSweep []
   "What one write-shadows sweep did: shadows, the sorted shadow paths;
@@ -2233,7 +2272,7 @@
     (= self.written written)
     (= self.removed removed)))
 
-(def _write-shadows [project-root root manifest]
+(def _write-shadows [project-root root manifest open-paths]
   "write-shadows' sweep, under the view root's lock."
   (= sources (project-sources project-root))
   (= current (set sources))
@@ -2285,22 +2324,22 @@
       (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
       (except [OSError as e]
         (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
-  (= environments {})
+  (for lpy-path in open-paths
+    (if (not-in lpy-path names-of)
+        (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root))))
+  (= manifest.environments
+     (_environments (+ [(sub names-of lpy-path) for lpy-path in (.values shadows)]
+                       [(sub names-of lpy-path) for lpy-path in (sorted open-paths)])))
   (= packages (set))
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
     (= import-root (sub (sub names-of lpy-path) 2))
-    (= dirs (sub (sub names-of lpy-path) 3))
-    (= env-root (sub dirs 0))
-    (= (sub environments env-root)
-       (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs))))
     (= directory (osp.dirname (osp.abspath lpy-path)))
     ;; module-dirs: every import root with a shadow, whose other modules
     ;; are linked in (_mirror-py-files).
     (.add module-dirs import-root)
     (if (!= directory import-root)
         (.add packages (_top-package project-root import-root directory))))
-  (= manifest.environments (dict (sorted (.items environments))))
   (= reserved (_view-own-files project-root root manifest.environments))
   (= source-dirs (_source-dirs project-root sources))
   (= links (set))

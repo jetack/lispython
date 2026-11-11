@@ -31,7 +31,7 @@
 (from pygls.uris [to-fs-path])
 
 (from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest config-files
-                             read-quietly view-path view-root-for
+                             new-environment-p read-quietly view-path view-root-for
                              write-pyrefly-config write-pyright-config write-shadows])
 
 (= logger (logging.getLogger __name__))
@@ -416,7 +416,9 @@
    that becomes the full view only later included (_accept-kept).  A save
    while a start
    is in progress is recorded and replayed once it runs (_replay-saves),
-   since the start's sweep may have read the disk before the save.
+   since the start's sweep may have read the disk before the save.  The
+   documents open in the editor (open-document) are environment sources
+   of every sweep (write-shadows' open-paths), saved or not.
    definition-walks-up is True for a backend in DEFINITION-WALKS-UP."
   (def __init__ [self view-root argv :name None :manifest None
                  :check-types True :definition-walks-up False]
@@ -442,6 +444,31 @@
     ;; sweep may have missed: replayed once it runs; the next start clears
     ;; them before its own sweep (_start).
     (= self._saved-while-starting (set))
+    ;; Whether a save or an open with a new search environment came while a
+    ;; start was in progress (file-saved): _replay-saves then sweeps again,
+    ;; with those saves, or with none when only an open came.
+    (= self._replay-due False)
+    ;; Held by the one sweep that runs (_sweep-view-root): sweeps run one at
+    ;; a time, each over the open documents when it begins, because two at
+    ;; once may finish out of order and the older open documents' config
+    ;; would be the one left.  An open while it is held may be missing from
+    ;; the environments that sweep writes (open-document).
+    (= self._sweep-lock (asyncio.Lock))
+    ;; The sweeps waiting for _sweep-lock: each reads the open documents
+    ;; once it takes the lock, so an open meanwhile needs no sweep of its
+    ;; own (open-document).
+    (= self._sweeps-waiting 0)
+    ;; True from a start task's creation (_start-task) until its sweep takes
+    ;; _sweep-lock (_spawn): that sweep reads the open documents then, so
+    ;; an open meanwhile needs no sweep of its own (open-document).  Only
+    ;; read while a start is in progress, and set again by each start, so
+    ;; a start that ends before its sweep leaves nothing stale.
+    (= self._start-unswept False)
+    ;; lpy uri -> real path of each document open in the editor
+    ;; (open-document, close-document), kept across spawns: every sweep
+    ;; takes their search environments, whether or not the file is on disk
+    ;; or compiled (write-shadows' open-paths).
+    (= self._open-paths {})
     ;; The replays of those saves still running (_replay-saves); kept here
     ;; because the loop holds tasks only weakly.
     (= self._replays (set))
@@ -519,18 +546,21 @@
     (= path (to-fs-path lpy-uri))
     (if (is path None)
         (return None))
-    (= shadow (view-path self.project-root self.view-root (osp.realpath path)))
+    (= shadow (view-path self.project-root self.view-root (document-path path)))
     (if (is shadow None)
         (return None))
     (return (.as-uri (pathlib.Path shadow))))
 
-  (def _prepare-view-root [self]
+  (def _prepare-view-root [self open-paths]
     "Write the view root's shadows and the backend's config file, and return
-     the shadows' ShadowSweep.  They compile every .lpy of the project (its
-     macros run), so callers run this in a thread, off the event loop."
+     the shadows' ShadowSweep, open-paths being the open documents' paths
+     (write-shadows).  They compile every .lpy of the project (its macros
+     run), so callers run this in a thread, off the event loop
+     (_sweep-view-root)."
     (= root (os.fspath self.view-root))
     (os.makedirs root :exist-ok True)
-    (= sweep (write-shadows self.project-root root :manifest self.manifest))
+    (= sweep (write-shadows self.project-root root :manifest self.manifest
+                            :open-paths open-paths))
     ((config-writer self.name) self.project-root self.view-root
                                :environments self.manifest.environments
                                :check-types self.check-types)
@@ -553,6 +583,7 @@
               (= self.state OFF)
               (return None)))
     (+= self.spawns 1)
+    (= self._start-unswept True)
     (= self._starting (asyncio.create-task (._start self)))
     (return self._starting))
 
@@ -584,6 +615,7 @@
     ;; Before the first await: this start's own sweep covers every save
     ;; recorded so far, a failed start's included.
     (.clear self._saved-while-starting)
+    (= self._replay-due False)
     (try
       (if (is-not self._client None)
           ;; the dead process's client: its tasks end, its pipes close
@@ -621,10 +653,11 @@
     "Replay the saves recorded while the start that just succeeded was in
      progress, all at once (saved: one sweep), as a task of its own: a
      request awaits the start, and the sweep compiles the project."
-    (if (not self._saved-while-starting)
+    (if (not self._replay-due)
         (return))
     (= lpy-uris (sorted self._saved-while-starting))
     (.clear self._saved-while-starting)
+    (= self._replay-due False)
     (= replay (asyncio.create-task (.saved self *lpy-uris)))
     (.add self._replays replay)
     (.add-done-callback replay _task-done)
@@ -645,8 +678,32 @@
     (return {path (read-quietly path)
              for path in (config-files self.view-root (config-file self.name))}))
 
+  (async-def _sweep-view-root [self :start False]
+    "_prepare-view-root in a thread, holding _sweep-lock, over the open
+     documents' paths, read on the loop once the lock is taken, since
+     open-document and close-document change them there; its ShadowSweep,
+     or None once shutdown came first: a sweep it cancelled released the
+     lock while its thread may still write, and a closed client's view
+     root may be a new client's.  start: the start's own sweep, which
+     clears _start-unswept once it holds the lock."
+    (+= self._sweeps-waiting 1)
+    (try
+      (await (.acquire self._sweep-lock))
+      (finally
+        (-= self._sweeps-waiting 1)))
+    (if start
+        (= self._start-unswept False))
+    (try
+      (if (== self.state "closed")
+          (return None))
+      (= open-paths (list (.values self._open-paths)))
+      (return (await (asyncio.to-thread self._prepare-view-root open-paths)))
+      (finally
+        (.release self._sweep-lock))))
+
   (async-def _spawn [self]
-    (await (asyncio.to-thread self._prepare-view-root))
+    (if (is (await (._sweep-view-root self :start True)) None)
+        (raise (RuntimeError "shut down while starting")))
     (= self._config-texts (await (asyncio.to-thread self._read-configs)))
     (= self._docs {})
     (= self._kept {})
@@ -985,10 +1042,40 @@
         (.debug logger "python backend: cannot locate %s" uri :exc-info True)
         (return None))))
 
+  (def open-document [self lpy-uri]
+    "Document lpy-uri opened in the editor: count it as an environment
+     source of every sweep from now on (_open-paths), at its document-path.
+     True when the backend runs or is starting and no sweep waits to read
+     the open documents (_sweeps-waiting, _start-unswept), and the
+     document's search
+     environment is one the view's config may lack (new-environment-p), so
+     the backend must sweep again (saved) to analyse it under its own
+     search dirs: one the last finished sweep's manifest lacks, or any
+     while a sweep runs, since that sweep read the open documents before
+     this one and writes the manifest without it.  An idle backend's start
+     sweeps with it.  Call on the loop."
+    (= path (to-fs-path lpy-uri))
+    (if (is path None)
+        (return False))
+    (= path (document-path path))
+    (= (sub self._open-paths lpy-uri) path)
+    (if (or (not (or self.running self.starting)) (> self._sweeps-waiting 0)
+            (and self.starting self._start-unswept))
+        (return False))
+    (return (new-environment-p self.project-root
+                               (ife (.locked self._sweep-lock) {} self.manifest.environments)
+                               path)))
+
   (def close-document [self lpy-uri]
     "Forget document lpy-uri's full view and diagnostics, and didClose it if
      this backend process has it open.  A request still in flight on it
-     closes the copy its sync reopens once it ends (_request-done)."
+     closes the copy its sync reopens once it ends (_request-done).  It
+     stops being an environment source, but the environment it alone gave
+     stays in the config until the next sweep (a save, a module file
+     created or deleted, a start): a stale environment only names the
+     search dirs that document's run had, and sweeping on every close
+     would compile the project each time."
+    (.pop self._open-paths lpy-uri None)
     (.pop self._full lpy-uri None)
     (.pop self._diagnostics lpy-uri None)
     (._close-backend-copy self lpy-uri))
@@ -1019,9 +1106,12 @@
      no-op, since the next start sweeps."
     (if (not self.running)
         (do (if self.starting
-                (.update self._saved-while-starting lpy-uris))
+                (do (.update self._saved-while-starting lpy-uris)
+                    (= self._replay-due True)))
             (return)))
-    (= sweep (await (asyncio.to-thread self._prepare-view-root)))
+    (= sweep (await (._sweep-view-root self)))
+    (if (is sweep None)
+        (return))
     (= changed [(.as-uri (pathlib.Path path)) for path in sweep.written])
     (for lpy-uri in lpy-uris
       (= uri (.backend-uri self lpy-uri))
@@ -1166,6 +1256,15 @@
 ;; The LSP's backends
 ;; ---------------------------------------------------------------------------
 
+(def document-path [path]
+  "path, a document's file, with its directory resolved and the file kept:
+   a file link proj/scripts/a.lpy -> proj/lib/a.lpy is its own module
+   scripts/a.lpy, as project-sources lists it and package-root names it, so
+   its shadow (backend-uri) and search environment (open-document) are
+   that module's, and one into /elsewhere stays in proj (project-root-of).
+   The one home of that rule."
+  (return (osp.join (osp.realpath (osp.dirname (osp.abspath path))) (osp.basename path))))
+
 (def project-root-of [path folders]
   "The real path of the innermost of folders (workspace folders, objects
    with .uri) holding path, or None: path's project, the one home of that
@@ -1173,7 +1272,7 @@
    file's directory is resolved, never the file: a file link
    proj/ns/a.lpy -> /elsewhere/a.lpy is in proj, as write-shadows' walk
    and package-root see it."
-  (= real (pathlib.Path (osp.realpath (osp.dirname (osp.abspath path)))))
+  (= real (pathlib.Path (osp.dirname (document-path path))))
   (= best None)
   (for folder in folders
     (= folder-path (to-fs-path folder.uri))
@@ -1328,16 +1427,23 @@
     (return task))
 
   (def document-opened [self lpy-uri]
-    "A buffer opened: start its backend without waiting for it
-     (BackendClient.start-soon) when its diagnostics are forwarded, since
-     they come only from a running one.  Call on the loop."
+    "A buffer opened: its backend counts it as an environment source
+     (BackendClient.open-document), and one running or starting sweeps
+     again (_sweep-soon) when its search environment is new, since that
+     backend's config lacks it; then start
+     the backend without waiting for it (BackendClient.start-soon) when its
+     diagnostics are forwarded, since they come only from a running one,
+     whose start sweep takes the open.  Call on the loop."
+    (= client (.available-client self lpy-uri))
+    (if (is client None)
+        (return))
     (try
-      (if self.forwards-diagnostics
-          (do (= client (.available-client self lpy-uri))
-              (if (is-not client None)
-                  (.start-soon client))))
+      (if (.open-document client lpy-uri)
+          (._sweep-soon self client []))
       (except [Exception]
-        (.exception logger "lispython LSP: backend start failed for %s" lpy-uri))))
+        (.exception logger "lispython LSP: backend open failed for %s" lpy-uri)))
+    (if self.forwards-diagnostics
+        (.start-soon client)))
 
   (def document-changed [self lpy-uri source view]
     "A buffer opened or changed and view, the PythonView of its source,
@@ -1397,19 +1503,28 @@
     (for lpy-uri in lpy-uris
       (try
         (= client (._existing self lpy-uri))
-        (if (and (is-not client None) (or client.running client.starting)
-                 (not-in client self._sweeps-due))
+        (if (is-not client None)
             (.append (.setdefault by-client client (list)) lpy-uri))
         (except [Exception]
           (.exception logger "lispython LSP: no Python backend for %s" lpy-uri))))
     (for [client uris] in (.items by-client)
-      (try
-        (.add self._sweeps-due client)
-        (._schedule self (._sweep self client uris))
-        (except [Exception]
-          (.discard self._sweeps-due client)
-          (.exception logger "lispython LSP: backend sweep failed for %s"
-                      client.project-root)))))
+      (._sweep-soon self client uris)))
+
+  (def _sweep-soon [self client uris]
+    "Have client, when it runs or is starting, sweep its view root once as
+     a save of documents uris (BackendClient.saved), in a task of its own,
+     unless its sweep is due already (_sweeps-due): that sweep reads the
+     disk and the open documents when it begins, so one covers every
+     request made before it (files-changed, document-opened)."
+    (if (or (not (or client.running client.starting)) (in client self._sweeps-due))
+        (return))
+    (try
+      (.add self._sweeps-due client)
+      (._schedule self (._sweep self client uris))
+      (except [Exception]
+        (.discard self._sweeps-due client)
+        (.exception logger "lispython LSP: backend sweep failed for %s"
+                    client.project-root))))
 
   (async-def _sweep [self client uris]
     (.discard self._sweeps-due client)

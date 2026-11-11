@@ -348,7 +348,7 @@ def test_the_view_root_gets_the_chosen_backends_config(
     backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
     backends.configure({"backend": name})
     client = backends.client_for((project / "main.lpy").as_uri())
-    client._prepare_view_root()
+    client._prepare_view_root([])
     root = pathlib.Path(client.view_root.path)
     assert (root / written).is_file()
     assert not (root / absent).exists()
@@ -386,7 +386,7 @@ def test_only_an_open_with_diagnostics_starts_a_backend(
     run_bounded(scenario())
     assert len(spawned) == (1 if python_diagnostics else 0)
     # Nobody reads its diagnostics: the backend checks nothing.
-    client._prepare_view_root()
+    client._prepare_view_root([])
     config = json.loads(
         (pathlib.Path(client.view_root.path) / "pyrightconfig.json").read_text()
     )
@@ -432,7 +432,7 @@ def test_a_save_tells_the_backend_of_every_shadow_it_rewrote(
     client.process = SimpleNamespace(returncode=None)
     client._client = SimpleNamespace(workspace_did_change_watched_files=sent.append)
     try:
-        client._prepare_view_root()
+        client._prepare_view_root([])
         shadow = pathlib.Path(client.view_root.path) / name / "mod.py"
         assert "yy = 2 + 2" in shadow.read_text()
         (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(* ~x ~x ~x)))")
@@ -481,8 +481,8 @@ def test_a_save_while_the_backend_starts_reaches_it(
         loop = asyncio.get_running_loop()
         swept = asyncio.Event()
 
-        def signalling_sweep():
-            result = sweep()
+        def signalling_sweep(open_paths):
+            result = sweep(open_paths)
             loop.call_soon_threadsafe(swept.set)
             return result
 
@@ -1580,6 +1580,396 @@ def test_a_save_that_adds_or_drops_a_search_environment_tells_the_backend(
     run_bounded(client.saved((project / "main.lpy").as_uri()))
     assert not nested.exists()
     assert config_events() == {(nested.as_uri(), lsp.FileChangeType.Deleted)}
+
+
+def unsaved_script_backends(project, tmp_path):
+    """Backends over project (the fake backend), with scripts/sibling.py
+    and the uris of scripts/y.lpy and scripts/z.lpy, neither on disk."""
+    scripts = project / "scripts"
+    scripts.mkdir()
+    (scripts / "sibling.py").write_text("X = 1\n")
+    folder = SimpleNamespace(uri=project.as_uri())
+    backends = backend.Backends(lambda: [folder], cache_home=str(tmp_path / "cache"))
+    return backends, (scripts / "y.lpy").as_uri(), (scripts / "z.lpy").as_uri()
+
+
+def script_environments(client):
+    config = json.loads(
+        (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).read_text()
+    )
+    return [env["root"] for env in config.get("executionEnvironments", [])]
+
+
+def test_opening_an_unsaved_script_gives_the_running_backend_its_environment(
+    project, tmp_path, fake_default
+):
+    # Defects: a buffer opened before its file exists (scripts/y.lpy, no
+    # other .lpy in scripts/) gets no search environment, since only
+    # shadowed sources make one, so the backend analyses it under the
+    # default list and its (import sibling) stays unresolved until the
+    # first save; or the running backend is never told the config changed;
+    # or every open sweeps the project again, its environment known.
+    backends, script, other = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    config_uri = (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).as_uri()
+    view_scripts = os.path.join(client.view_root.path, "scripts")
+
+    async def watched():
+        answer = await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params)
+        return fake_hover(answer)["watched"]
+
+    async def scenario():
+        try:
+            await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
+            assert client.running
+            assert script_environments(client) == []
+            backends.document_opened(script)
+            await asyncio.gather(*backends._tasks)
+            first = await watched()
+            backends.document_opened(other)
+            scheduled = len(backends._tasks)
+            await asyncio.gather(*backends._tasks)
+            return first, scheduled, await watched()
+        finally:
+            await backends.shutdown_all()
+
+    first, scheduled, second = run_bounded(scenario())
+    assert script_environments(client) == [view_scripts]
+    assert first.count(config_uri) == 1
+    assert scheduled == 0
+    assert second == first
+
+
+def test_an_unsaved_script_opened_while_the_backend_starts_gets_its_environment(
+    project, tmp_path, fake_default
+):
+    # Defect: an open landing while the backend starts, after the start's
+    # sweep read the open documents, is never swept: the backend runs on a
+    # config with no environment for the script until the next save.
+    backends, script, _ = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    config_uri = (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).as_uri()
+    sweep = client._prepare_view_root
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        swept = asyncio.Event()
+
+        def signalling_sweep(open_paths):
+            result = sweep(open_paths)
+            loop.call_soon_threadsafe(swept.set)
+            return result
+
+        client._prepare_view_root = signalling_sweep
+        try:
+            backends.document_opened(main)
+            await swept.wait()
+            # The window: the start's sweep is done, the process not running.
+            assert client.starting and not client.running
+            backends.document_opened(script)
+            assert await client._starting
+            await asyncio.gather(*backends._tasks)
+            deadline = loop.time() + 10
+            while True:
+                answer = await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params)
+                watched = fake_hover(answer)["watched"]
+                if config_uri in watched or loop.time() > deadline:
+                    return watched
+                await asyncio.sleep(0.05)
+        finally:
+            await backends.shutdown_all()
+
+    watched = run_bounded(scenario())
+    assert config_uri in watched
+    assert script_environments(client) == [
+        os.path.join(client.view_root.path, "scripts")
+    ]
+
+
+def test_an_open_during_a_sweep_that_missed_it_is_swept_again(
+    project, tmp_path, fake_default
+):
+    # Defect: an open checks for a new environment against the manifest of
+    # the last finished sweep, which still has scripts/ (scripts/x.lpy, just
+    # deleted), while the sweep in flight read the open documents before
+    # scripts/y.lpy was opened: nothing sweeps again, and the config loses
+    # scripts/ though y.lpy, unsaved, needs it.
+    backends, script, _ = unsaved_script_backends(project, tmp_path)
+    (project / "scripts" / "x.lpy").write_text("(= x 1)\n")
+    main = (project / "main.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    view_scripts = os.path.join(client.view_root.path, "scripts")
+    sweep = client._prepare_view_root
+    gate = threading.Event()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        began = asyncio.Event()
+
+        def gated_sweep(open_paths):
+            loop.call_soon_threadsafe(began.set)
+            gate.wait(10)
+            return sweep(open_paths)
+
+        try:
+            await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
+            assert script_environments(client) == [view_scripts]
+            client._prepare_view_root = gated_sweep
+            (project / "scripts" / "x.lpy").unlink()
+            backends.files_changed([(project / "scripts" / "x.lpy").as_uri()])
+            await began.wait()
+            # The sweep in flight read no open scripts/ document.
+            backends.document_opened(script)
+            gate.set()
+            while backends._tasks:
+                await asyncio.gather(*backends._tasks)
+        finally:
+            gate.set()
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert script_environments(client) == [view_scripts]
+
+
+def test_opens_during_a_sweep_add_one_sweep_in_all(project, tmp_path, fake_default):
+    # Defect: a sweep waiting for the running one's lock is no longer due,
+    # so each later open (its own notification, as a session restore sends
+    # them) sees the lock held and schedules one more full sweep: N opens,
+    # N serial sweeps, and a real save waits behind them all.
+    backends, script, other = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    third = (project / "scripts" / "w.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    sweep = client._prepare_view_root
+    gate = threading.Event()
+    calls = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        began = asyncio.Event()
+
+        def gated_sweep(open_paths):
+            calls.append(sorted(open_paths))
+            loop.call_soon_threadsafe(began.set)
+            gate.wait(10)
+            return sweep(open_paths)
+
+        try:
+            await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
+            client._prepare_view_root = gated_sweep
+            backends.files_changed([main])
+            await began.wait()
+            for uri in [script, other, third]:
+                backends.document_opened(uri)
+                # Each open in a loop pass of its own: scheduled sweeps begin.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+            gate.set()
+            while backends._tasks:
+                await asyncio.gather(*backends._tasks)
+        finally:
+            gate.set()
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert len(calls) == 2
+    assert len(calls[1]) == 3
+    assert script_environments(client) == [
+        os.path.join(client.view_root.path, "scripts")
+    ]
+
+
+def test_opens_before_a_starts_sweep_add_no_sweep(project, tmp_path, fake_default):
+    # Defect: an open while a start is in progress but before its sweep
+    # began (a session restore opening every buffer at once) is checked
+    # against the manifest of no sweep at all, so it asks for a second full
+    # sweep after the start, though the start's sweep reads it.
+    backends, script, other = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    client = backends.client_for(main)
+    sweep = client._prepare_view_root
+    calls = []
+
+    def counting_sweep(open_paths):
+        calls.append(len(open_paths))
+        return sweep(open_paths)
+
+    client._prepare_view_root = counting_sweep
+
+    async def scenario():
+        try:
+            for uri in [main, script, other]:
+                backends.document_opened(uri)
+            assert await client._starting
+            while backends._tasks or client._replays:
+                await asyncio.gather(*backends._tasks, *client._replays)
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert calls == [3]
+    assert script_environments(client) == [
+        os.path.join(client.view_root.path, "scripts")
+    ]
+
+
+def test_a_sweep_queued_behind_shutdown_never_runs(project, tmp_path):
+    # Defect: a save waiting for the sweep lock still sweeps once shutdown
+    # came (a cancelled sweep released the lock while its thread may still
+    # write, and a folder removed and added again gives a new client over
+    # the same view root), beside whatever writes that view root now.
+    client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    calls = []
+    client._prepare_view_root = calls.append
+
+    async def scenario():
+        await client._sweep_lock.acquire()
+        saving = asyncio.ensure_future(client.file_saved())
+        await asyncio.sleep(0)
+        client.state = "closed"
+        client._sweep_lock.release()
+        await saving
+
+    run_bounded(scenario())
+    assert calls == []
+
+
+def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path):
+    # Defect: the document's file is resolved, so a link scripts/a.lpy ->
+    # lib/a.lpy is synced at lib/a.py, where lib/a.lpy's own buffer is, not
+    # at the shadow scripts/a.py the sweep writes for it, and its search
+    # environment is lib/'s, where `lpy scripts/a.lpy` searches scripts/.
+    # The buffer does not compile, so only the open gives an environment.
+    (project / "lib").mkdir()
+    (project / "lib" / "a.lpy").write_text("(= a\n")
+    (project / "scripts").mkdir()
+    (project / "scripts" / "a.lpy").symlink_to(project / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
+    linked = (project / "scripts" / "a.lpy").as_uri()
+    assert (
+        client.backend_uri(linked)
+        == (pathlib.Path(client.view_root.path) / "scripts" / "a.py").as_uri()
+    )
+    client.open_document(linked)
+    client._prepare_view_root(list(client._open_paths.values()))
+    real = os.path.realpath(project)
+    assert list(client.manifest.environments) == [
+        real,
+        os.path.join(real, "scripts"),
+    ]
+
+
+def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
+    # Defect: each open whose environment is new schedules a sweep of its
+    # own, so two opens in one new directory (or a folders change, which
+    # reopens every document) compile the whole project once per document.
+    backends, script, other = unsaved_script_backends(project, tmp_path)
+    main = (project / "main.lpy").as_uri()
+    client = backends.client_for(main)
+    params = hover_params(client.backend_uri(main))
+    sweeps = []
+    saved = client.saved
+
+    async def counting_saved(*uris):
+        sweeps.append(uris)
+        await saved(*uris)
+
+    async def scenario():
+        try:
+            await backends.request(main, lsp.TEXT_DOCUMENT_HOVER, params, text="t")
+            client.saved = counting_saved
+            backends.document_opened(script)
+            backends.document_opened(other)
+            while backends._tasks:
+                await asyncio.gather(*backends._tasks)
+        finally:
+            await backends.shutdown_all()
+
+    run_bounded(scenario())
+    assert sweeps == [()]
+    assert script_environments(client) == [
+        os.path.join(client.view_root.path, "scripts")
+    ]
+
+
+@pytest.mark.parametrize("name", list(REAL_BACKENDS))
+def test_real_backend_resolves_a_sibling_of_a_script_opened_unsaved(
+    project, tmp_path, name
+):
+    # Defects: a buffer of scripts/y.lpy not yet on disk, opened while the
+    # backend runs, is analysed under the default search list, so its
+    # (import sibling) of scripts/sibling.py, which `python scripts/y.py`
+    # resolves, is reported unresolved until the first save; or the
+    # running backend does not take the config the open's sweep wrote (a
+    # new nested pyrefly.toml, a new executionEnvironments entry).
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    scripts = project / "scripts"
+    scripts.mkdir()
+    (scripts / "sibling.py").write_text("X = 1\n")
+    source = "(import sibling)\n(import no-such-module-anywhere)\n(print sibling.X)\n"
+    view = pv.compile_view(source)
+    main_source = "(= y 1)\n"
+    main_view = pv.compile_view(main_source)
+    client = backend.BackendClient(view_root(project, tmp_path), argv, name=name)
+    main = (project / "main.lpy").as_uri()
+    script = (scripts / "y.lpy").as_uri()
+
+    def messages(uri, text):
+        found = client.diagnostics_for(uri, text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def wait_for(done):
+        deadline = asyncio.get_running_loop().time() + 30
+        while not done():
+            heard.clear()
+            left = deadline - asyncio.get_running_loop().time()
+            if left <= 0:
+                return
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(heard.wait(), left)
+
+    def settled():
+        # Positive control: the module no directory holds is reported.
+        found = messages(script, view.text) or []
+        return any("no_such_module" in m for m in found) and not any(
+            "sibling" in m for m in found
+        )
+
+    async def scenario():
+        try:
+            client.open_document(main)
+            client.push_buffer(main, main_source, main_view)
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(main))
+            )
+            await wait_for(lambda: messages(main, main_view.text) is not None)
+            assert client.running and messages(main, main_view.text) is not None
+            # As Backends.document_opened then the open's compile: the sweep
+            # runs while the buffer reaches the backend.
+            assert client.open_document(script)
+            sweep = asyncio.create_task(client.saved())
+            client.push_buffer(script, source, view)
+            await sweep
+            await wait_for(settled)
+            return messages(script, view.text)
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("no_such_module" in m for m in found)
+    assert not any("sibling" in m for m in found)
 
 
 # Runs lispython's LSP with its real backends, and one extra request,
