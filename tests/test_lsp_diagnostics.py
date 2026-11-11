@@ -212,6 +212,63 @@ def test_only_the_full_views_current_version_is_kept(tmp_path):
     assert heard == [uri]
 
 
+def test_a_reopened_document_never_reuses_a_version(tmp_path):
+    # Defect: a reopen sends didOpen at a version already used, so a late
+    # publish for the previous open (its version, or pyrefly's empty publish
+    # at a closed document's last version + 1) is kept as the diagnostics of
+    # the new text and mapped onto it.
+    project = tmp_path / "project"
+    project.mkdir()
+    client = backend.BackendClient(
+        pv.view_root_for(str(project), cache_home=str(tmp_path / "cache")), None
+    )
+
+    class Process:
+        def __init__(self):
+            self.sent = []
+
+        def text_document_did_open(self, params):
+            self.sent.append(params.text_document.version)
+
+        def text_document_did_change(self, params):
+            self.sent.append(params.text_document.version)
+
+        def text_document_did_close(self, params):
+            self.closed.append(params.text_document.uri)
+
+        returncode = None
+
+    process = Process()
+    process.closed = []
+    client._client = process
+    client.process = process
+    client.state = "running"
+    uri = (project / "main.lpy").as_uri()
+    shadow = client.backend_uri(uri)
+    diagnostic = lsp.Diagnostic(
+        range=lsp.Range(
+            start=lsp.Position(line=0, character=0),
+            end=lsp.Position(line=0, character=1),
+        ),
+        message="m",
+    )
+    text_a, text_b = "a", "b"
+    client._sync(uri, text_a, origin=("src", None))
+    client._full[uri] = (text_a, ("src", None))
+    version_a = process.sent[-1]
+    client.close_document(uri)
+    assert process.closed == [shadow]
+    client._sync(uri, text_b, origin=("src", None))
+    client._full[uri] = (text_b, ("src", None))
+    version_b = process.sent[-1]
+    client._diagnostics_published(process, published(shadow, version_a, [diagnostic]))
+    assert client.diagnostics_for(uri, text_b) is None
+    client._diagnostics_published(process, published(shadow, version_a + 1, []))
+    assert client.diagnostics_for(uri, text_b) is None
+    client._diagnostics_published(process, published(shadow, version_b, [diagnostic]))
+    assert client.diagnostics_for(uri, text_b) == [(diagnostic, [])]
+
+
 def test_related_locations_are_placed_when_published(tmp_path):
     # Defect: a related location is placed (locate) only when the server
     # maps the set, after a later sync (a request's cursor view) has
