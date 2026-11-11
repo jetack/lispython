@@ -268,7 +268,8 @@ FAILED_FORMS = """"Doc."
 
 def module_bindings(view):
     """(kind, name) of each module-level statement of view's tree that binds
-    a name, the defmacro's generated scaffolding aside."""
+    a name, the defmacro's and the placeholders' generated scaffolding
+    aside."""
     found = []
     for stmt in view.tree.body:
         if isinstance(stmt, (pv.ast.FunctionDef, pv.ast.AsyncFunctionDef)):
@@ -277,7 +278,8 @@ def module_bindings(view):
         elif isinstance(stmt, pv.ast.ClassDef):
             found.append(("ClassDef", stmt.name))
         elif isinstance(stmt, pv.ast.AnnAssign):
-            found.append(("AnnAssign", stmt.target.id))
+            if not stmt.target.id.startswith(pv.GENERATED_PREFIX):
+                found.append(("AnnAssign", stmt.target.id))
         elif isinstance(stmt, pv.ast.Assign):
             found += [("Assign", t.id) for t in stmt.targets if hasattr(t, "id")]
     return found
@@ -295,10 +297,10 @@ class TestFailedForms:
             ("FunctionDef", "f"),
             ("AsyncFunctionDef", "af"),
             ("ClassDef", "C"),
-            ("AnnAssign", "h"),
+            ("Assign", "h"),
             ("FunctionDef", "g"),
-            ("AnnAssign", "bad_params"),
-            ("AnnAssign", "v"),
+            ("Assign", "bad_params"),
+            ("Assign", "v"),
             ("Assign", "ok"),
         ]
         [f] = [s for s in view.tree.body if getattr(s, "name", None) == "f"]
@@ -315,30 +317,55 @@ class TestFailedForms:
         # annotation is no target.
         view = view_of("(= a b (while))\n(= t ^int (while))\n(print a b t)")
         assert module_bindings(view) == [
-            ("AnnAssign", "a"),
-            ("AnnAssign", "b"),
-            ("AnnAssign", "t"),
+            ("Assign", "a"),
+            ("Assign", "b"),
+            ("Assign", "t"),
         ]
 
     def test_the_any_import_follows_the_docstring_and_future_imports(self):
-        # Defect: the import goes first, before a from __future__ import,
-        # which Python and the backends refuse anywhere but at the top.
-        lines = view_of(FAILED_FORMS).text.split("\n")
-        assert lines[:3] == [
-            '"""Doc."""',
-            "from __future__ import annotations",
-            "from typing import Any as ___lpy_any",
+        # Defects: the import or the placeholders' value goes first, before
+        # a from __future__ import, which Python and the backends refuse
+        # anywhere but at the top; or the value is declared after a
+        # placeholder reads it (unbound there).
+        body = view_of(FAILED_FORMS).tree.body
+        docstring, future = body[0], body[1]
+        assert isinstance(docstring.value.value, str)
+        assert future.module == "__future__"
+
+        def first(predicate):
+            return next(i for i, stmt in enumerate(body) if predicate(stmt))
+
+        imported = first(
+            lambda stmt: any(
+                alias.asname == pv.ANY_ALIAS for alias in getattr(stmt, "names", [])
+            )
+        )
+        declared = first(
+            lambda stmt: (
+                isinstance(stmt, pv.ast.AnnAssign) and stmt.target.id == pv.ANY_VALUE
+            )
+        )
+        read = [
+            i
+            for i, stmt in enumerate(body)
+            for node in pv.ast.walk(stmt)
+            if isinstance(node, pv.ast.Name)
+            and node.id == pv.ANY_VALUE
+            and isinstance(node.ctx, pv.ast.Load)
         ]
+        assert read
+        assert 2 <= imported < declared < min(read)
 
     def test_only_a_declared_name_maps_to_the_buffer(self):
-        # Defects: the declared name has no entry (definition and
-        # diagnostics at it are lost), or a diagnostic on the placeholder
-        # plumbing (basedpyright's reportExplicitAny on the annotation or the
-        # class base, reportAny or an unused-parameter hint on a stub's
-        # parameter, anything on the import) lands on the user's code.
+        # Defects: the declared name has no entry (definition at it is
+        # lost), or a diagnostic on the placeholder plumbing (basedpyright's
+        # reportExplicitAny on the annotation or the class base, reportAny
+        # or an unused-parameter hint on a stub's parameter, anything on the
+        # import) or on the declared name itself (reportAny on lispython's
+        # own binding) lands on the user's code.
         src = FAILED_FORMS
         view = view_of(src)
-        start = locate(view.text, "v: ___lpy_any")
+        start = locate(view.text, "v = ___lpy_any_value")
         assert pv.lpy_range(view, src, start, plus(start, 1)) == (
             locate(src, "v (while)"),
             plus(locate(src, "v (while)"), 1),
@@ -348,11 +375,13 @@ class TestFailedForms:
             for nth in range(view.text.count("___lpy_any"))
         ] + [
             gen_range(view.text, "from typing import Any as ___lpy_any"),
+            gen_range(view.text, "___lpy_any_value: ___lpy_any = ..."),
+            (start, plus(start, 1)),
             gen_range(view.text, "class C(___lpy_any):"),
             gen_range(view.text, "x: ___lpy_any"),
             gen_range(view.text, "kw: ___lpy_any"),
             gen_range(view.text, "async def af"),
-            gen_range(view.text, "h: ___lpy_any = ..."),
+            gen_range(view.text, "h = ___lpy_any_value"),
         ]
         for start, end in plumbing:
             for tagged in (False, True):
