@@ -78,19 +78,16 @@
 (def set-run-path [entry]
   "Make sys.path[0] the entry python gives the run mode (run's dispatch):
    '' for the REPL and -c, the absolute working directory for -m (and the
-   nREPL server), the script's directory for a file; None drops it and
-   adds none (a directory or zip app, whose own entry runpy.run_path
-   adds).  It replaces the entry the launcher added, the `lpy` console
-   script's own directory, which no python run has.  Under python -P /
-   PYTHONSAFEPATH (sys.flags.safe_path) python adds no entry, and the
-   launcher added none, so nothing changes."
+   nREPL server), the script's directory for a file, the app's own path
+   for a directory or zip app.  It replaces the entry the launcher added,
+   the `lpy` console script's own directory, which no python run has.
+   Under python -P / PYTHONSAFEPATH (sys.flags.safe_path) python adds no
+   entry, and the launcher added none, so nothing changes."
   ;; Replaced, never stacked in front or skipped when present elsewhere:
   ;; python's first entry wins over a PYTHONPATH entry of the same directory
   ;; and leaves no launcher directory behind (.venv/bin/activate_this.py).
   (if (not sys.flags.safe-path)
-      (if (is entry None)
-          (sys.path.pop 0)
-          (= (sub sys.path 0) entry))))
+      (= (sub sys.path 0) entry)))
 
 (def ast-to-python [st]
   ;; unparse writes any depth compile() takes, on a bounded stack per chunk;
@@ -2121,14 +2118,21 @@
 
         (do (= fpath (sys.argv.pop 1))
             ;; A directory or zip app (an importer can read it, the test
-            ;; runpy.run_path makes) is its own entry, absolute as python
-            ;; spells it (joined, never normalised), which run_path adds;
-            ;; python resolves a symlinked script to its target's directory.
+            ;; runpy.run_path makes) runs as python runs it: its path,
+            ;; absolute as python spells it (joined, never normalised), is
+            ;; sys.path[0] even under safe_path, argv[0] stays as typed, and
+            ;; its __main__ runs as a module.  run_path would put the typed
+            ;; path on sys.path and in argv[0] instead.
             (if (is-not (pkgutil.get-importer fpath) None)
-                (do (= fpath (osp.join (os.getcwd) fpath))
-                    (set-run-path None))
-                (set-run-path (osp.dirname (osp.realpath fpath))))
-            (runpy.run-path fpath :run-name "__main__"))))
+                (do (= app (osp.join (os.getcwd) fpath))
+                    (if sys.flags.safe-path
+                        (sys.path.insert 0 app)
+                        (set-run-path app))
+                    (= (sub sys.argv 0) fpath)
+                    (runpy._run-module-as-main "__main__" False))
+                ;; python resolves a symlinked script to its target's directory
+                (do (set-run-path (osp.dirname (osp.realpath fpath)))
+                    (runpy.run-path fpath :run-name "__main__"))))))
 
 (if (== __name__ "__main__")
     (run))

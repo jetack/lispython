@@ -281,16 +281,22 @@ def test_m_puts_the_absolute_cwd_first_and_no_launcher_directory(tmp_path: Path)
     assert str(LPY.parent) not in path
 
 
-def test_a_directory_app_has_its_own_absolute_entry_alone(tmp_path: Path):
-    # Defect: `lpy app` (a directory with __main__.lpy) gets runpy's
+@pytest.mark.parametrize("typed", ["app", "./app/"])
+def test_a_directory_app_has_its_own_absolute_entry_alone(tmp_path: Path, typed: str):
+    # Defects: `lpy app` (a directory with __main__.lpy) gets runpy's
     # relative "app" in front of the script-style absolute parent directory,
-    # where `python app` has the absolute app directory alone.
+    # where `python app` has the absolute app directory alone, joined onto
+    # the cwd as typed; or argv[0] becomes that absolute path, where
+    # `python app` keeps it as typed.
     app = tmp_path / "app"
     app.mkdir()
-    (app / "__main__.lpy").write_text(PRINT_PATH + "\n")
-    path = lpy_path(["app"], tmp_path)
-    assert path[0] == str(app)
-    assert "app" not in path
+    (app / "__main__.lpy").write_text(
+        "(import sys json) (print (json.dumps (+ [(sub sys.argv 0)] sys.path)))\n"
+    )
+    [argv0, *path] = lpy_path([typed], tmp_path)
+    assert argv0 == typed
+    assert path[0] == os.path.join(str(tmp_path), typed)
+    assert typed not in path
     assert str(tmp_path) not in path
     assert str(LPY.parent) not in path
 
