@@ -2477,17 +2477,18 @@ def test_a_file_link_out_searches_a_project_spelling_of_its_directory(
     # Defect: the in-project spelling of a script's real directory is found
     # only where the link text passes through it, so an absolute link
     # proj/scripts/a.lpy -> /out/lib/a.lpy (with proj/lib -> /out/lib), or a
-    # relative one in a linked directory (proj/s2 -> /out/scripts holding
-    # a.lpy -> ../lib/a.lpy), searches /out/lib as itself, which holds no
-    # shadow, and the backend leaves the (import sib) of lib/sib.lpy
-    # unresolved.
+    # relative one in a linked directory (proj/scripts -> /out/scripts
+    # holding a.lpy -> ../lib/a.lpy, with proj/vendor/lib -> /out/lib, where
+    # the text reads proj/lib), searches /out/lib as itself, which holds no
+    # shadow, and the backend leaves the (import sib) of sib.lpy unresolved.
     out = tmp_path / "out"
     (out / "lib").mkdir(parents=True)
     (out / "lib" / "a.lpy").write_text("(import sib)\n")
     (out / "lib" / "sib.lpy").write_text("(= s 1)\n")
     proj = tmp_path / "proj"
-    proj.mkdir()
-    (proj / "lib").symlink_to(out / "lib")
+    spelled = proj / "lib" if absolute else proj / "vendor" / "lib"
+    spelled.parent.mkdir(parents=True)
+    spelled.symlink_to(out / "lib")
     if absolute:
         (proj / "scripts").mkdir()
         (proj / "scripts" / "a.lpy").symlink_to(out / "lib" / "a.lpy")
@@ -2498,8 +2499,9 @@ def test_a_file_link_out_searches_a_project_spelling_of_its_directory(
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
-    assert (view / "lib" / "sib.py").read_text() == "s = 1"
-    lib = [str(view / "lib"), str(proj / "lib")]
+    view_lib = view / spelled.relative_to(proj)
+    assert (view_lib / "sib.py").read_text() == "s = 1"
+    lib = [str(view_lib), str(spelled)]
     assert environment_search_paths(client)[str(view / "scripts" / "a.py")] == lib
 
 
