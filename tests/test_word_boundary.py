@@ -204,8 +204,9 @@ SPANS = [
     ('f"{x!}"\nf"""{a}\n{b|!r}"""', (1, 1, 2)),
     # On the error's own line, after it, in the literal it stood in.
     ('f"{z!} {y|!r}"', (8, 8, 9)),
-    # A string after a conversion's ! is refused at its opening, whatever
-    # holds the caret; the reader resumes after that opening.
+    # A string after a conversion's ! is refused at its first quote,
+    # whatever holds the caret; the reader resumes after that quote, in the
+    # f-literal, which the next " closes, and ":" is a closed string.
     ('f"{!""":"|', (9, 9, 9)),
     # A debug = followed only by blanks to the line's end: the field's
     # delimiter comes on a later line.
