@@ -129,13 +129,8 @@ CASE_INPUTS = (
     'f"{x|!r}"',
     'f"{x|:>10}"',
     'f"{x!|r}"',
-    # An invalid conversion name is refused (the line then read alone); a
-    # valid one, blanks and a continuation after it included, is text.
-    'f"{x!z} (fo|',
-    'f"{x!} (fo|',
-    'f"{x! r} (fo|',
-    'f"{x!r x} (fo|',
-    'f"{x!r"a"} (fo|',
+    # A valid conversion name, blanks and a continuation after it included,
+    # ends at its } (an invalid one is refused, and no case is refused text).
     'f"{x!r} (fo|',
     'f"{x!r \\\n} (fo|',
     'f"{x:>1|0}"',
@@ -346,7 +341,11 @@ def rule():
             "right after the ! (characters str.isalnum holds, or _), then only "
             "blanks (whitespace characters and fieldContinuation matches) up "
             "to that character: a name not in conversionNames (an empty one "
-            "included), or anything else there, is a refusal of the text. "
+            "included), or anything else there, is a refusal of the text, "
+            "so the check decides where the reading goes on: a valid "
+            "conversion resumes field mode at that character, while past a "
+            "refusal the reader recovers (context step) in the field's "
+            "literal, never in the field. "
             "Any other token: a string "
             "opening reads its prefix (stringPrefix) lower-cased: the first "
             "kindLetters entry whose letter it holds makes it an f/t-string, "
