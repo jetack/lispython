@@ -1807,7 +1807,12 @@
   (= renamed False)
   (= projects (set))
   (= suffixes (tuple (finder-suffixes)))
+  ;; One pass per (type, uri): a client matching a file by two watch
+  ;; patterns (**/*.py and **/src/**) may send its event once per pattern.
+  (= changes {})
   (for change in params.changes
+    (.setdefault changes (, change.type change.uri) change))
+  (for change in (.values changes)
     (if (not-in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
         (continue))
     (= path (uri-to-path change.uri))

@@ -1262,6 +1262,28 @@ def test_an_init_file_in_lispythons_own_package_renames_modules():
     assert server.renaming_file_p(str(created))
 
 
+def test_a_file_event_sent_once_per_watch_pattern_is_handled_once(
+    outside_documents, monkeypatch
+):
+    # Defect: src/m.lpy matches both **/*.lpy and **/src/**, and VS Code
+    # sends its event once per matching pattern, so the batch reindexes
+    # and judges the file twice.
+    _, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    seen = []
+    monkeypatch.setattr(
+        server, "reindex_watched_file", lambda uri, path: seen.append(uri)
+    )
+    path = outside / "src" / "m.lpy"
+    change = lsp.FileEvent(uri=path.as_uri(), type=lsp.FileChangeType.Created)
+    deleted = lsp.FileEvent(uri=path.as_uri(), type=lsp.FileChangeType.Deleted)
+    server.did_change_watched_files(
+        SimpleNamespace(),
+        lsp.DidChangeWatchedFilesParams(changes=[change, change, deleted]),
+    )
+    assert seen == [path.as_uri(), path.as_uri()]
+
+
 def test_an_lpy_file_created_or_deleted_on_disk_is_indexed(outside_documents):
     # Defect: the index hears of an .lpy file only when the editor opens or
     # saves it, so a file another tool wrote offers none of its
