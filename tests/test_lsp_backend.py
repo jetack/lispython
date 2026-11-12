@@ -2094,9 +2094,9 @@ def test_the_sweep_bounds_a_dag_of_links(tmp_path, time_bound):
         for name in ["a", "b"]:
             (proj / f"d{i}" / name).symlink_to(proj / f"d{i + 1}")
     sources = pv.project_sources(str(proj))
-    # Each directory by its own spelling and both its links from there,
-    # then at most _MAX_NESTED_LINKS more.
-    assert len(sources) <= 3 * count + pv._MAX_NESTED_LINKS
+    # Each directory holds one source: entered by its own spelling, through
+    # both links met there, then at most _MAX_NESTED_LINK_DIRS more.
+    assert len(sources) <= 3 * count + pv._MAX_NESTED_LINK_DIRS
 
 
 def environment_search_paths(client):

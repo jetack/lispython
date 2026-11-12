@@ -2125,12 +2125,14 @@
               (in name _PRUNED-DIRS)
               (osp.exists (osp.join parent name "pyvenv.cfg")))))
 
-;; How many links a project-sources walk follows inside trees it entered
-;; through a link, all told.  Each such link is a spelling an import can
-;; take, so none is skipped for leading where another went; only a DAG of
-;; links (each directory linking twice to the next) has exponentially many,
-;; and this bounds that walk.
-(= _MAX-NESTED-LINKS 1000)
+;; How many directories a project-sources walk enters below a link met
+;; inside a tree it entered through a link, all told.  Each such directory
+;; is a spelling an import can take, so none is skipped for leading where
+;; another went; only a DAG of links (each directory linking twice to the
+;; next) has exponentially many.  The rest of the walk enters each real
+;; directory once by its own spelling and once more per link met in such a
+;; directory, so this bounds the directories it lists, a DAG's included.
+(= _MAX-NESTED-LINK-DIRS 1000)
 
 (def project-sources [project-root]
   "The .lpy files under project-root, sorted, each spelled by the way the
@@ -2142,9 +2144,10 @@
    -> .. would walk the whole parent tree), so a loop ends.  Every other
    link is followed, since each spelling is a name an import can take
    (src/a_sub and src/acme/sub -> shared/sub are the modules a_sub.m and
-   acme.sub.m, whichever the walk meets first), except past
-   _MAX-NESTED-LINKS links inside trees entered through a link, which
-   bounds a DAG of links.  Each path is its own module, so two paths to
+   acme.sub.m, whichever the walk meets first), except that it enters at
+   most _MAX-NESTED-LINK-DIRS directories below a link met inside a tree
+   entered through a link, which bounds the directories a DAG of links
+   makes it list.  Each path is its own module, so two paths to
    one file (a file symlink beside it) are both listed."
   (= found [])
   (= real-root (osp.realpath project-root))
@@ -2153,11 +2156,12 @@
     (= real-root (osp.dirname real-root))
     (.add root-above real-root))
   ;; dirpath -> (the real paths of it and the directories above it on the
-  ;; way down, whose links would loop; whether a link is on the way).
-  (= ancestors {project-root (, (frozenset root-above) False)})
-  (= nested-links 0)
+  ;; way down, whose links would loop; whether a link is on the way;
+  ;; whether a link met below a link is).
+  (= ancestors {project-root (, (frozenset root-above) False False)})
+  (= nested-dirs 0)
   (for [dirpath dirnames filenames] in (os.walk project-root :followlinks True)
-    (= [above via-link] (.pop ancestors dirpath))
+    (= [above via-link nested] (.pop ancestors dirpath))
     (= kept [])
     (for name in (sorted dirnames)
       (= path (osp.join dirpath name))
@@ -2167,11 +2171,12 @@
       (if (in real above)
           (continue))
       (= link (osp.islink path))
-      (if (and link via-link)
-          (do (if (>= nested-links _MAX-NESTED-LINKS)
+      (= below-nested (or nested (and link via-link)))
+      (if below-nested
+          (do (if (>= nested-dirs _MAX-NESTED-LINK-DIRS)
                   (continue))
-              (+= nested-links 1)))
-      (= (sub ancestors path) (, (.union above [real]) (or via-link link)))
+              (+= nested-dirs 1)))
+      (= (sub ancestors path) (, (.union above [real]) (or via-link link) below-nested))
       (.append kept name))
     (.clear dirnames)
     (.extend dirnames kept)
