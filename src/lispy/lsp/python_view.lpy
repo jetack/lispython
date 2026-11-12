@@ -43,8 +43,8 @@
 (from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
                          MetaIndicator Paren Starred Symbol Wrapper atom-text
                          wrapper-form-keys])
-(from lispy.core.parser [caret-symbol-p completion-word-span parse source-offset
-                          split-lines tokenize word-parts])
+(from lispy.core.parser [caret-symbol-p completion-word-span drop-states parse
+                          source-offset split-lines tokenize word-parts])
 (from lispy.core.parser [caret-forms as caret-forms-of caret-tokens as caret-tokens-of])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
@@ -111,16 +111,10 @@
         (do (del (sub stack [: index None]))
             (return)))))
 
-(def _drop-states [stack kept]
-  "Drop the entries of stack from its (kept + 1)th field or literal on,
-   every bracket opened inside them included: what the lexer dropped on
-   resuming past an error (a recovered token's kept, _recovered_lexer)."
-  (for index in (range (len stack))
-    (if (in (sub (sub stack index) 0) "fq")
-        (do (if (== kept 0)
-                (do (del (sub stack [: index None]))
-                    (return)))
-            (-= kept 1)))))
+(def _state-entry-p [entry]
+  "Whether an open-forms entry stands for a lexer state: a field or a
+   literal (a format spec has no entry of its own)."
+  (return (in (sub entry 0) "fq")))
 
 (def open-forms [prefix :literals False :tokens None]
   "The forms still open at the end of prefix, outermost first, or None
@@ -131,11 +125,12 @@
    (its prefix included) and of the token after it (None when there is
    none), index the opening's index in prefix and token its index in the
    tokens, all four None for a field or literal.  literals: keep an open
-   f/t-string too (open-form-closers).  tokens: prefix's tokens when the
-   caller has them (caret-tokens, for a prefix ending at a caret, read on
-   past each lexer error: a recovered token drops the fields and literals
-   the lexer dropped there, and the brackets opened inside them), else
-   prefix is lexed here."
+   f/t-string too, for a reader of the forms inside a field
+   (attribute-context-p).  tokens: prefix's tokens when the caller has
+   them (caret-tokens, for a prefix ending at a caret, read on past each
+   lexer error: a recovered token drops the fields and literals the lexer
+   dropped there, and the brackets opened inside them, by drop-states),
+   else prefix is lexed here."
   (if (is tokens None)
       (try
         (= tokens (list (tokenize prefix)))
@@ -158,7 +153,7 @@
       (return None)
 
       (== tktype "recovered")
-      (do (_drop-states stack (sub extra 1))
+      (do (drop-states stack (sub extra 1) _state-entry-p)
           (= open-literals (len [entry for entry in stack if (== (sub entry 0) "q")])))
 
       (== tktype "interpolated-start")
@@ -190,14 +185,12 @@
       (return None))
   (return stack))
 
-(def open-form-closers [prefix :literals False :tokens None]
-  "The closers of the forms still open at the end of prefix (open-forms),
-   innermost first, or None when open-forms is.  Appended to prefix, they
-   make a mid-edit buffer parse up to the cursor.  literals: close an open
-   f/t-string too (its fields' }, its quote), for a reader of the forms
-   inside a field; the cursor view never asks for it, its text must
-   compile to the Python the buffer means.  tokens: as open-forms."
-  (= stack (open-forms prefix :literals literals :tokens tokens))
+(def open-form-closers [prefix]
+  "The closers of the brackets still open at the end of prefix (open-forms),
+   innermost first, or None when open-forms is (prefix ends inside an
+   f/t-string, whose text must compile to the Python the buffer means).
+   Appended to prefix, they make a mid-edit buffer parse up to the cursor."
+  (= stack (open-forms prefix))
   (if (is stack None)
       (return None))
   (return (.join "" (reversed [(sub entry 1) for entry in stack]))))

@@ -499,7 +499,7 @@ class _Lexer:
         self.stop = stop
         self.comments = comments  # emit top-level "comment" tokens
         # A pass resuming another over the same src takes its locator
-        # (_recovered_context), which found the line starts once.
+        # (_recovered_lexer), which found the line starts once.
         self.locate = _source_locator(src) if locate is None else locate
         self.tokens = []
         self.stack = []  # _LiteralState / _FieldState, innermost last
@@ -1245,14 +1245,18 @@ def _parse_into(src, rst):
 def _parse_tokens(src, tokens, stack, rst, states=0):
     """The loop of ``_parse_into``. A "recovered" token (caret_forms' tokens
     only, ``states`` the literals and fields open outside them) drops the
-    entries of what the lexer dropped there (_drop_states)."""
+    entries of what the lexer dropped there (drop_states)."""
     while tokens:
         [t, tktype, position_info, extra] = tokens.popleft()
         if tktype in _LEXER_ONLY_TOKENS:
             if tktype == "error":
                 raise extra
             if tktype == "recovered":
-                _drop_states(stack, extra[1] - states, extra[0])
+                kept = extra[1] - states
+                if kept < 0:
+                    # A state open outside the parsed tokens was dropped.
+                    raise extra[0]
+                drop_states(stack, kept, _state_entry_p)
                 continue
             if tktype == "deprecated":
                 if not _PARTIAL.get():
@@ -1366,22 +1370,27 @@ def _parse_tokens(src, tokens, stack, rst, states=0):
     return rst
 
 
-def _drop_states(stack, kept, error):
-    """Drop the entries of ``stack`` from its (``kept`` + 1)th literal or
-    field on (a format spec counts as its field's), every form opened inside
-    them included, as the lexer dropped those states on resuming past
-    ``error``; a negative ``kept`` (a state open outside the parsed tokens
-    dropped) raises it."""
-    if kept < 0:
-        raise error
+def drop_states(stack, kept, state_p):
+    """Drop the entries of ``stack`` from its (``kept`` + 1)th entry that
+    ``state_p`` says stands for a lexer state (a literal or a field) on,
+    every entry opened inside it included: what the lexer dropped on
+    resuming past an error, ``kept`` being a "recovered" token's count
+    (_recovered_lexer). The one home of that cut, for the parser's stack
+    (_state_entry_p) and open-forms' (python_view)."""
     for at, entry in enumerate(stack):
-        if isinstance(entry, _Field) or (
-            isinstance(entry, _Interpolated) and not entry.spec
-        ):
+        if state_p(entry):
             if kept == 0:
                 del stack[at:]
                 return
             kept -= 1
+
+
+def _state_entry_p(entry):
+    """Whether a parser stack entry stands for a lexer state: a field, or a
+    literal, never a format spec, which is its field's own state."""
+    return isinstance(entry, _Field) or (
+        isinstance(entry, _Interpolated) and not entry.spec
+    )
 
 
 def _split_bad_prefix(token):
@@ -1526,8 +1535,9 @@ _FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
 # The stop pass over text up to a caret, kept with its tokens. One is kept,
 # since the tokens of a long buffer are large: a request reads one caret's
 # text. Past a lexer error the last resumed pass is kept the same way
-# (_recovered_lexer), with its own copy of the tokens, so at most two token
-# lists of one caret's text are alive.
+# (_recovered_lexer), with its own copy of the tokens. The two caches evict
+# apart, so they may hold two carets' texts, but at most two token lists
+# are alive.
 @functools.lru_cache(maxsize=1)
 def _caret_lexer(text, offset):
     lexer = _Lexer(text, stop=offset)
@@ -1574,7 +1584,7 @@ def _recovered_lexer(text, offset):
     fields (interpolated-start and field-start tokens not yet ended) still
     open where lexing resumed, the innermost of them a literal (none:
     top-level code). Every reader of the recovered tokens drops what the
-    lexer dropped by that count (open-forms, _drop_states), never by a rule
+    lexer dropped by that count (drop_states), never by a rule
     of its own. ``resumed_at`` is where the last pass resumed (0 when none).
 
     The stack kept is the stopped pass's up to its innermost literal (the
@@ -1698,9 +1708,12 @@ def caret_forms(line, col, before, start, states, closer):
     refuses them. The tokens are caret_tokens' with the same arguments,
     never lexed again, so each keeps the context it was lexed in (a field's
     continuation line, a \\" string in a field); only the code token
-    holding or ending at the caret is lexed again, alone, as its text cut at
-    the caret (``_Lexer.stop_cut``), so it reads as the text before the caret
-    does (``~|"`` the invert symbol, ``""|"`` an empty string)."""
+    holding or ending at the caret (``_Lexer.stop_cut``) is lexed again: its
+    text cut at the caret, alone, as top-level code, so it never reads the
+    text past the caret (``~|"`` the invert symbol, ``""|"`` an empty
+    string). Inside a field's brackets top-level code reads that text the
+    same, but for a trailing ``\\``, which then reads as the whole text's
+    reader reads it anyway."""
     text = before + line
     offset = len(before) + col
     lexer = _recovered_lexer(text, offset)[0]

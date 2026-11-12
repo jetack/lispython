@@ -1431,9 +1431,6 @@ def test_attribute_context_p_reads_past_a_lexer_error_as_the_reader_resumes(
     source, line, col = _marked_caret(marked)
     assert server.attribute_context_p(source, line, col) is expected
 
-    source, line, col = _marked_caret(marked)
-    assert server.attribute_context_p(source, line, col) is expected
-
 
 @pytest.mark.parametrize(
     ("marked", "expected"),
@@ -1448,6 +1445,14 @@ def test_attribute_context_p_reads_past_a_lexer_error_as_the_reader_resumes(
         ('(. obj f"{=}"\n me|', True),
         ('(. (g f"{=}") me|', True),
         ('(. obj (g f"{=}") me|', True),
+        # A format spec is its field's: the error drops the inner literal's
+        # field, never the literal holding the spec.
+        ('(. obj f"{x:{f"{=}"}}" me|', True),
+        # The error inside the form counts the literal open outside it.
+        ('f"{(. obj f"{=}" me|', True),
+        # Past an error before the form, the bracket opened in the field it
+        # dropped is no longer open.
+        ('f"""{(. a \\"x" y\n{(. obj f"{=}" me|', True),
     ],
 )
 def test_attribute_context_p_reads_the_cursors_form_as_the_reader_lexed_it(
@@ -1484,14 +1489,19 @@ def test_open_forms_drop_the_forms_the_lexer_dropped_past_an_error():
     # Defect: past a lexer error the forms open in the field the reader
     # dropped stay open, so the closers misalign: a stale field's } and,
     # after a bracket opened in the dropped field, its ) too.
-    source, line, col = _marked_caret('f"""a{=}\n{(. obj me|')
-    prefix = pv.source_prefix(source, line, col)
-    tokens = pv.caret_tokens(source, line, col)
-    assert pv.open_form_closers(prefix, literals=True, tokens=tokens) == ')}"""'
-    source, line, col = _marked_caret('f"""{(. obj \\"x" y\n{me|')
-    prefix = pv.source_prefix(source, line, col)
-    tokens = pv.caret_tokens(source, line, col)
-    assert pv.open_form_closers(prefix, literals=True, tokens=tokens) == '}"""'
+    def open_kinds(marked):
+        source, line, col = _marked_caret(marked)
+        prefix = pv.source_prefix(source, line, col)
+        tokens = pv.caret_tokens(source, line, col)
+        stack = pv.open_forms(prefix, literals=True, tokens=tokens)
+        return [(entry[0], entry[1]) for entry in stack]
+
+    assert open_kinds('f"""a{=}\n{(. obj me|') == [
+        ("q", '"""'),
+        ("f", "}"),
+        ("b", ")"),
+    ]
+    assert open_kinds('f"""{(. obj \\"x" y\n{me|') == [("q", '"""'), ("f", "}")]
 
 
 @pytest.mark.parametrize(
@@ -1510,7 +1520,7 @@ def test_a_completion_lexes_the_text_before_the_caret_once(
     # Defect: a completion lexes the whole text before the caret twice, once
     # for the word's context (caret_context) and again for the qualified
     # base's code check (at mod.|) or for the forms open at the caret
-    # (attribute-context-p's open-form-closers, at any word), doubling the
+    # (attribute-context-p's open-forms, at any word), doubling the
     # per-keystroke cost of a long buffer. Every lexer pass over that text
     # is counted, the caret caches emptied first so their one pass is this
     # request's; reader is the second reader of that text, which the request
