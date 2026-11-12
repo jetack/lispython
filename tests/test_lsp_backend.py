@@ -2034,30 +2034,135 @@ def test_the_sweep_walks_a_dag_of_links_in_linear_time(tmp_path, time_bound):
     assert len(pv.project_sources(str(proj))) == 2 * count - 1
 
 
+def environment_search_paths(client):
+    """{view directory: extraPaths} of the view's pyright config, what the
+    backend searches for a module in each search environment."""
+    config = json.loads(
+        (pathlib.Path(client.view_root) / pv.PYRIGHT_CONFIG).read_text()
+    )
+    return {
+        env["root"]: env.get("extraPaths", [])
+        for env in config.get("executionEnvironments", [])
+    }
+
+
 def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path):
-    # Defect: the document's file is resolved, so a link scripts/a.lpy ->
+    # Defects: the document's file is resolved, so a link scripts/a.lpy ->
     # lib/a.lpy is synced at lib/a.py, where lib/a.lpy's own buffer is, not
-    # at the shadow scripts/a.py the sweep writes for it.  Its search
-    # environment is lib/'s, the directory of its real path, which `lpy
-    # scripts/a.lpy` and `python scripts/a.py` put on sys.path[0].  The
-    # buffer does not compile, so only the open gives an environment.
+    # at the shadow scripts/a.py the sweep writes for it; or its search
+    # environment is rooted at lib/, its first search dir, which does not
+    # hold view/scripts/a.py, so the backend analyses it under the default
+    # list and misses lib/helper, which `python scripts/a.py` imports from
+    # sys.path[0], the real path's directory.  The buffer does not compile,
+    # so only the open gives an environment.
     (project / "lib").mkdir()
     (project / "lib" / "a.lpy").write_text("(= a\n")
+    (project / "lib" / "helper.py").write_text("h = 1\n")
     (project / "scripts").mkdir()
     (project / "scripts" / "a.lpy").symlink_to(project / "lib" / "a.lpy")
     client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
     linked = (project / "scripts" / "a.lpy").as_uri()
-    assert (
-        client.backend_uri(linked)
-        == (pathlib.Path(client.view_root.path) / "scripts" / "a.py").as_uri()
-    )
+    view = pathlib.Path(client.view_root.path)
+    assert client.backend_uri(linked) == (view / "scripts" / "a.py").as_uri()
     client.open_document(linked)
     client._prepare_view_root(list(client._open_paths.values()))
     real = os.path.realpath(project)
-    assert list(client.manifest.environments) == [
-        real,
+    assert client.manifest.environments[os.path.join(real, "scripts")] == (
         os.path.join(real, "lib"),
-    ]
+    )
+    assert environment_search_paths(client) == {
+        str(view / "scripts"): [str(view / "lib"), os.path.join(real, "lib")]
+    }
+
+
+def test_a_script_directory_linked_out_searches_its_view(tmp_path):
+    # Defect: the environment root is the script's first search dir, its
+    # real directory /out/scripts, which has no view directory, so the
+    # backend never searches view/scripts and reports the (import sib)
+    # that python and the LSP's compile resolve.
+    out = tmp_path / "out" / "scripts"
+    out.mkdir(parents=True)
+    (out / "x.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "scripts").symlink_to(out)
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert (view / "scripts" / "sib.py").read_text() == "s = 1"
+    assert environment_search_paths(client) == {
+        str(view / "scripts"): [str(view / "scripts"), str(proj / "scripts")]
+    }
+
+
+@pytest.mark.parametrize("name", list(REAL_BACKENDS))
+def test_real_backend_resolves_a_sibling_in_a_script_directory_linked_out(
+    tmp_path, name
+):
+    # Defect: the environment of proj/scripts -> /out/scripts is rooted at
+    # /out/scripts, which has no view directory, so the backend searches no
+    # view/scripts and reports the (import sib) its run resolves.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    out = tmp_path / "out" / "scripts"
+    out.mkdir(parents=True)
+    source = "(import sib)\n(print sib.s sib.nowhere)\n"
+    (out / "x.lpy").write_text(source)
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "scripts").symlink_to(out)
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "scripts" / "x.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: sib resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("sib" in m and "nowhere" not in m for m in found), found
+
+
+def test_a_script_file_linked_out_searches_its_real_directory(tmp_path):
+    # Defect: a search dir outside the project is dropped, so the backend
+    # analyses proj/scripts/t.lpy -> /out/t.lpy without /out, where its run
+    # imports helper from (sys.path[0] is the real script's directory).
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "helper.py").write_text("h = 1\n")
+    (out / "t.lpy").write_text("(import helper)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert environment_search_paths(client) == {str(view / "scripts"): [str(out)]}
 
 
 def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
