@@ -2155,8 +2155,8 @@ class TestShadows:
         real_sources, real_dir = pv.project_sources, pv._real_view_dir
         paused = threading.Event()
 
-        def sources(project_root):
-            found = real_sources(project_root)
+        def sources(project_root, **kwargs):
+            found = real_sources(project_root, **kwargs)
             if threading.current_thread().name == "stale":
                 found = [p for p in found if not p.endswith("y.lpy")]
             return found
