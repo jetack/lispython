@@ -2329,14 +2329,22 @@
 (def new-environment-p [project-root environments lpy-path]
   "Whether lpy-path, the absolute path of a document open in project-root's
    backend, has a search environment (search-environments) that
-   environments (ShadowManifest.environments) lacks: its environment root
-   (_module-environment) is no key of environments and search-environments
+   environments (ShadowManifest.environments) lacks: search-environments
    gives it one (the view root standing in for project-root's: only
-   whether an environment exists is asked)."
+   whether an environment exists is asked) and its environment root
+   (_module-environment) is no key of environments, or the module is plain
+   (its first search dir is the root) while the root's list does not start
+   with the root, having come from a file-link script alone (_environments),
+   which the plain module's sweep replaces.  No loop: after that sweep the
+   open plain module makes the list start with the root."
   (= [env-root dirs] (_module-environment lpy-path
                                           (module-names lpy-path :project-root project-root)))
-  (return (and (not-in env-root environments)
-               (bool (search-environments project-root project-root {env-root dirs})))))
+  (if (not (search-environments project-root project-root {env-root dirs}))
+      (return False))
+  (if (not-in env-root environments)
+      (return True))
+  (return (and (== (sub dirs 0) env-root)
+               (!= (sub (sub environments env-root) [: 1]) (, env-root)))))
 
 (class ShadowSweep []
   "What one write-shadows sweep did: shadows, the sorted shadow paths;

@@ -2136,6 +2136,36 @@ def test_a_file_link_script_leaves_its_neighbours_search_list(tmp_path):
     assert run.returncode != 0 and "No module named 'helper'" in run.stderr
 
 
+def test_a_plain_script_opened_beside_a_lone_file_link_sweeps_again(project, tmp_path):
+    # Defect: an open asks only whether its environment root is missing, so
+    # an unsaved scripts/b.lpy opened where only the link scripts/a.lpy ->
+    # lib/a.lpy rooted scripts/ sweeps nothing, and the backend resolves
+    # b's (import helper) from lib/ until a save.
+    (project / "lib").mkdir()
+    (project / "lib" / "a.lpy").write_text("(= a 1)\n")
+    (project / "lib" / "helper.py").write_text("h = 1\n")
+    (project / "scripts").mkdir()
+    (project / "scripts" / "a.lpy").symlink_to(project / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(project, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    real = os.path.realpath(project)
+    assert environment_search_paths(client)[str(view / "scripts")][0] == str(
+        view / "lib"
+    )
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    plain = (project / "scripts" / "b.lpy").as_uri()
+    assert client.open_document(plain)
+    client._prepare_view_root(list(client._open_paths.values()))
+    assert environment_search_paths(client)[str(view / "scripts")] == [
+        str(view / "scripts"),
+        os.path.join(real, "scripts"),
+    ]
+    # Its list now starts with its root: opening it again sweeps nothing.
+    assert not client.open_document(plain)
+
+
 def test_a_script_directory_linked_out_searches_its_view(tmp_path):
     # Defect: the environment root is the script's first search dir, its
     # real directory /out/scripts, which has no view directory, so the
