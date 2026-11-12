@@ -1271,6 +1271,8 @@
 ;; dot-directory, where the import does neither.  A file link stays where
 ;; it is spelled too: proj/scripts/a.lpy -> proj/lib/a.lpy is its own
 ;; module scripts/a.lpy, and proj/ns/a.lpy -> /elsewhere/a.lpy is in proj.
+;; Only a script's own search dir is taken at its real path (module-names),
+;; as python and lpy put the real script's directory on sys.path[0].
 (def project-place [path folders]
   "(real project root, spelled relative path) of path in the innermost of
    folders (workspace folders, objects with .uri) holding it, each matched

@@ -997,16 +997,24 @@ class TestRequireSelection:
         # Defect: the project is found from the link's target, which lies
         # outside every folder, so the document compiles as the top-level
         # a and its relative require fails, while the shadow sweep (which
-        # walks the link where it is) names it lspnspkg.a.
+        # walks the link where it is) names it lspnspkg.a.  As a script it
+        # searches the directory of its real path, as `lpy lspnspkg/a.lpy`
+        # puts elsewhere/ on sys.path, so its sibling require is found there.
         elsewhere = tmp_path / "elsewhere" / "a.lpy"
         elsewhere.parent.mkdir()
         elsewhere.write_text(self.NS_SOURCE)
+        (elsewhere.parent / "lspnshelper.lpy").write_text(
+            (namespace / "lspnshelper.lpy").read_text()
+        )
         link = namespace / "a.lpy"
         link.symlink_to(elsewhere)
         folders = server.workspace_folders()
         assert server.project_root_of(str(link), folders) == str(
             namespace.parent.resolve()
         )
+        names = server.uri_module_names(link.as_uri())
+        assert names[0] == "lspnspkg.a"
+        assert names[3][0] == str(elsewhere.parent)
         compiled = server.compile_document(link.as_uri(), None, self.NS_SOURCE)
         assert compiled.error is None
         assert compiled.view.text.endswith(self.NS_EXPANDED)

@@ -1903,6 +1903,34 @@ def test_a_linked_package_is_named_as_python_imports_it(tmp_path, init):
     assert src in search_dirs
 
 
+def test_a_linked_scripts_search_dir_is_its_runs_sys_path_0(tmp_path):
+    # Defect: a script's search dir is its spelled directory, so proj/t.lpy
+    # -> <tmp>/out/t.lpy searches proj and its `import helper` of
+    # out/helper.py fails in the LSP's compile, where the run (python and
+    # lpy put the real script's directory on sys.path[0]) imports it.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "helper.py").write_text("h = 1\n")
+    (out / "t.lpy").write_text("(import helper)\n")
+    (out / "t.py").write_text(
+        "import json, sys, helper; print(json.dumps(sys.path[0]))\n"
+    )
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    (proj / "t.py").symlink_to(out / "t.py")
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    # Not -I: isolated mode puts no script directory on sys.path.
+    run = subprocess.run(
+        [sys.executable, "-E", "-s", str(proj / "t.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    search_dirs = server.document_module_names(str(proj / "t.lpy"), folders=folders)[3]
+    assert search_dirs[0] == json.loads(run.stdout) == str(out)
+
+
 def test_a_document_through_a_folder_link_is_named_under_the_real_root(tmp_path):
     # Defect: the document keeps the folder link's spelling, so its import
     # root is link/src while the project root and the shadow sweep's
@@ -1988,9 +2016,10 @@ def test_the_sweep_walks_a_dag_of_links_in_linear_time(tmp_path, time_bound):
 def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path):
     # Defect: the document's file is resolved, so a link scripts/a.lpy ->
     # lib/a.lpy is synced at lib/a.py, where lib/a.lpy's own buffer is, not
-    # at the shadow scripts/a.py the sweep writes for it, and its search
-    # environment is lib/'s, where `lpy scripts/a.lpy` searches scripts/.
-    # The buffer does not compile, so only the open gives an environment.
+    # at the shadow scripts/a.py the sweep writes for it.  Its search
+    # environment is lib/'s, the directory of its real path, which `lpy
+    # scripts/a.lpy` and `python scripts/a.py` put on sys.path[0].  The
+    # buffer does not compile, so only the open gives an environment.
     (project / "lib").mkdir()
     (project / "lib" / "a.lpy").write_text("(= a\n")
     (project / "scripts").mkdir()
@@ -2006,7 +2035,7 @@ def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path
     real = os.path.realpath(project)
     assert list(client.manifest.environments) == [
         real,
-        os.path.join(real, "scripts"),
+        os.path.join(real, "lib"),
     ]
 
 

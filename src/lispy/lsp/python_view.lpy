@@ -1992,7 +1992,9 @@
    follow the one run mode Python gives the file (package-module-p): a
    module inside a regular package is that module, searching its import
    root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
-   script, searching its own directory, as `lpy x.lpy` puts it on sys.path;
+   script, searching the directory of its real path, as `lpy x.lpy` and
+   `python x.py` put it on sys.path (a link scripts/a.lpy -> lib/a.lpy
+   searches lib/, a link out of the project the directory it reaches);
    either then searches project-root's shared-import-roots, which an
    editable install puts on sys.path for every run, each dir once.  Nothing
    else: scripts/x.lpy does not search the project root unless a flat
@@ -2010,7 +2012,12 @@
   (= [import-root parts] (package-root directory roots))
   (= package-module (package-module-p directory import-root))
   (= shared (ife (is project-root None) [] (shared-import-roots project-root)))
-  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root directory)]
+  ;; A package module's import root keeps its spelling, as FileFinder
+  ;; imports by it; a script's directory is its real path's, as the run's
+  ;; sys.path[0] is.
+  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module
+                                               import-root
+                                               (osp.dirname (osp.realpath lpy-path)))]
                                           shared))))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (ife package-module (.join "." parts) ""))
