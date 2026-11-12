@@ -317,7 +317,9 @@ def rule():
             "literal, field or conversion) the reader resumes just after the "
             "error, in the innermost f/t literal open there (top level when "
             "none, resume then the error's end at the earliest), repeating on "
-            "each further error until it reaches the caret; the cases hold no "
+            "each further error until it reaches the caret (an error not ending "
+            "past where its scan resumed also drops the innermost literal "
+            "kept); the cases hold no "
             "such text, and a client need not agree on a text the reader "
             "refuses",
             "code, field and bracket mode: find the next token with the mode's "
