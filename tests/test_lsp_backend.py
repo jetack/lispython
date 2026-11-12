@@ -1916,10 +1916,10 @@ def test_a_document_through_a_folder_link_is_named_under_the_real_root(tmp_path)
     folders = [SimpleNamespace(uri=link.as_uri())]
     spelled = str(link / "src" / "pkg" / "m.lpy")
     real = str(proj / "src" / "pkg" / "m.lpy")
-    assert backend.document_path(spelled, folders) == real
     names = server.document_module_names(spelled, folders=folders)
     assert names == server.document_module_names(real, folders=folders)
     assert names[2] == str(proj / "src")
+    assert backend.document_path(spelled, folders) == real
 
 
 def test_the_sweep_shadows_a_package_linked_into_src(tmp_path):
