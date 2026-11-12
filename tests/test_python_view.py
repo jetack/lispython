@@ -27,7 +27,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy.core import nodes, parser
-from lispy.core.importer import lpy_cache_path, package_root
+from lispy.core.importer import lpy_cache_path, package_root, renames_modules_p
 
 pv = importlib.import_module("lispy.lsp.python_view")
 server = importlib.import_module("lispy.lsp.server")
@@ -1781,6 +1781,73 @@ class TestShadows:
         for directory in [project / "src" / "pkg", project / "src"]:
             directory.rmdir()
         assert pv.shared_import_roots(str(project)) == [str(project)]
+
+    def test_a_package_is_a_directory_with_an_init_file_as_filefinder_sees_it(
+        self, tmp_path
+    ):
+        # Defects: the init rule took any existing __init__.py, a directory
+        # included, which FileFinder refuses (dirinit is a namespace
+        # portion), and knew only .py/.lpy, so __init__.pyc alone, which
+        # FileFinder imports as a regular package, made none.
+        project = tmp_path / "project"
+        (project / "dirinit" / "__init__.py").mkdir(parents=True)
+        self.write(project / "pyconly" / "__init__.pyc", "")
+        dirinit, pyconly = str(project / "dirinit"), str(project / "pyconly")
+        assert package_root(dirinit) == (dirinit, [])
+        assert package_root(pyconly) == (str(project), ["pyconly"])
+        names = pv.module_names(
+            str(project / "dirinit" / "m.lpy"), project_root=str(project)
+        )
+        assert names[:2] == ("dirinit.m", "")
+        assert renames_modules_p(str(project / "pyconly" / "__init__.pyc"))
+
+    @pytest.fixture
+    def unlistable(self):
+        """chmod 0o311 (searchable, not listable) each directory given,
+        restoring every one at teardown; the test skips where that does not
+        stop listing (root, or a filesystem ignoring modes)."""
+        made = []
+
+        def make(directory):
+            directory.chmod(0o311)
+            made.append(directory)
+            try:
+                os.listdir(directory)
+            except PermissionError:
+                return
+            pytest.skip("chmod does not stop listing a directory here")
+
+        yield make
+        for directory in made:
+            directory.chmod(0o755)
+
+    def test_an_unlistable_src_package_is_python_as_its_imports_see_it(
+        self, tmp_path, unlistable
+    ):
+        # Defects: the walk skipped a directory it cannot list, so a
+        # regular package src/pkg that Python imports (FileFinder lists src
+        # and stats pkg/__init__.py) was no src layout; and a broken link
+        # src/x.py, which FileFinder refuses, was one.
+        project = tmp_path / "project"
+        src = project / "src"
+        self.write(src / "pkg" / "__init__.py", "")
+        self.write(src / "pkg" / "m.py", "")
+        unlistable(src / "pkg")
+        assert pv.shared_import_roots(str(project)) == [str(src)]
+        # An unlistable namespace directory imports nothing below it.
+        other = tmp_path / "other"
+        self.write(other / "src" / "acme" / "tool" / "__init__.py", "")
+        unlistable(other / "src" / "acme")
+        assert pv.shared_import_roots(str(other)) == []
+        # FileFinder takes an __init__.py only as a file.
+        dirinit = tmp_path / "dirinit"
+        (dirinit / "src" / "pkg" / "__init__.py").mkdir(parents=True)
+        unlistable(dirinit / "src" / "pkg")
+        assert pv.shared_import_roots(str(dirinit)) == []
+        broken = tmp_path / "broken"
+        (broken / "src").mkdir(parents=True)
+        (broken / "src" / "x.py").symlink_to(broken / "missing.py")
+        assert pv.shared_import_roots(str(broken)) == []
 
     # scripts/run.lpy importing a module of a shared root that holds no .lpy:
     # a pure-.py regular package mylib at the root (the flat layout), or

@@ -31,7 +31,7 @@
 (= HAS_RUFF (shutil.which "ruff"))
 
 (from lispy.core.nodes *)
-(from lispy.core.importer [package-root])
+(from lispy.core.importer [package-module-p package-root])
 (from lispy.core.parser [parse])
 (from lispy.core.compiler.literal [completion-label completion-prefix
                                    hyphen-spelling module-import-name name-key
@@ -52,8 +52,8 @@
          :file sys.stderr))
 
 (def detect-package-name [path]
-  "(package name, import root) of path's directory, by __init__.py or
-   __init__.lpy (package-root): the name `python -m <name>` run from the
+  "(package name, import root) of path's directory, by its init files
+   (package-root): the name `python -m <name>` run from the
    import root gives, l2py's rule for the file it translates.  A directory
    that is no package is its own import root, with an empty name.  Pure."
   (= dir-path (osp.dirname (osp.abspath path)))
@@ -1000,16 +1000,22 @@
   "The scope of the file at path, created (with the built-in macros) on first
    use.  Its __name__ is __main__, so a load-file runs the main guard; its
    __package__ is the package Python imports the file in from
-   nrepl-import-roots (package-root, namespace packages included)."
+   nrepl-import-roots (package-root, namespace packages included) when the
+   file lies inside a regular package (package-module-p), else empty, as
+   `lpy file.lpy` runs a script."
   (= path (osp.abspath path))
   (= key (osp.normcase path))
   (with [_NREPL-FILE-SCOPES-LOCK]
     (= scope (.get _NREPL-FILE-SCOPES key))
     (if (is scope None)
-        (do (= [_ parts] (package-root (osp.dirname path) (nrepl-import-roots)))
+        (do (= directory (osp.dirname path))
+            (= [import-root parts] (package-root directory (nrepl-import-roots)))
+            (= package (ife (package-module-p directory import-root)
+                            (.join "." parts)
+                            ""))
             (= scope {"__builtins__" __builtins__
                       "__name__" "__main__"
-                      "__package__" (.join "." parts)
+                      "__package__" package
                       "__file__" path
                       "__macro_namespace" (MacroTable)})
             (seed-prelude scope)

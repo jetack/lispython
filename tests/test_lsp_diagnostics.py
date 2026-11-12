@@ -16,6 +16,7 @@ import importlib.machinery
 import itertools
 import pathlib
 import re
+import shutil
 import sys
 import threading
 import time
@@ -1110,6 +1111,38 @@ def test_a_module_file_flipping_the_src_layout_republishes(outside_documents, cr
     run_bounded(scenario())
 
 
+@pytest.mark.parametrize("linked", [False, True])
+def test_a_deleted_src_package_folder_republishes(outside_documents, linked):
+    # Defects: rm -r src/pkg sends one event, for the folder, which names no
+    # module file, so the src layout is never asked again and the open
+    # document keeps searching a src that holds no Python; and with src a
+    # directory link out of the project (src -> ../shared-src), the folder's
+    # resolved path lies in no project, so its event is dropped.
+    editor, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    real_src = outside.parent / "shared-src" if linked else outside / "src"
+    (real_src / "pkg").mkdir(parents=True)
+    (real_src / "pkg" / "__init__.py").write_text("")
+    if linked:
+        (outside / "src").symlink_to(real_src)
+    scripts = outside / "scripts"
+    scripts.mkdir()
+    script = scripts / "x.lpy"
+    script.write_text("(= x 1)\n")
+
+    async def scenario():
+        uri = editor.open(script)
+        await until(lambda: uri in editor.published)
+        assert server.uri_module_names(uri)[3] == (str(scripts), str(outside / "src"))
+        count = len(editor.published[uri])
+        shutil.rmtree(real_src / "pkg")
+        files_changed(editor, outside / "src" / "pkg", lsp.FileChangeType.Deleted)
+        await until(lambda: len(editor.published[uri]) > count, timeout=5)
+        assert server.uri_module_names(uri)[3] == (str(scripts),)
+
+    run_bounded(scenario())
+
+
 def test_a_save_sees_a_src_package_that_came_with_no_file_event(outside_documents):
     # Defect: a src package moved in whole (mv ../pkg src/) sends no event
     # for its files, and a save keeps the remembered no-Python answer, so
@@ -1158,6 +1191,83 @@ def test_a_module_file_in_a_pruned_directory_walks_no_src(
     assert asked == [str(outside)]
 
 
+def test_a_linked_workspace_folders_pruned_files_walk_no_src(
+    outside_documents, monkeypatch
+):
+    # Defect: the pruned check measured the event's path, spelled through
+    # the linked workspace folder, against the folder's real root, so every
+    # file of a .venv install under the link asked the src layout again.
+    _, outside, _, folders = outside_documents
+    link = outside.parent / "outside-link"
+    link.symlink_to(outside)
+    folders.append(SimpleNamespace(uri=link.as_uri()))
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    for rel in [".venv/lib/site-packages/dep/m.py", "node_modules/x/m.py"]:
+        files_changed(SimpleNamespace(), link / rel)
+    assert asked == []
+    files_changed(SimpleNamespace(), link / "src" / "m.py")  # the control
+    assert asked == [str(outside)]
+
+
+def test_an_inner_linked_folder_owns_its_files(outside_documents, monkeypatch):
+    # Defect: the innermost folder was ranked by its real path's length, so
+    # with folders outside and outside/p (a link to a shorter real path) a
+    # file spelled outside/p/src/m.py was outside's, which refreshed the
+    # wrong project.
+    _, outside, _, folders = outside_documents
+    real = outside.parent / "r"
+    real.mkdir()
+    (outside / "p").symlink_to(real)
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    folders.append(SimpleNamespace(uri=(outside / "p").as_uri()))
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    files_changed(SimpleNamespace(), outside / "p" / "src" / "m.py")
+    assert asked == [str(real)]
+
+
+@pytest.mark.parametrize("outside_project", [False, True])
+def test_a_module_file_behind_a_src_package_link_walks_src(
+    outside_documents, monkeypatch, outside_project
+):
+    # Defect: the event's path was resolved below the workspace folder, so
+    # behind src/acme -> .shared/acme a module file was in a pruned
+    # dot-directory, and behind src/acme -> ../shared/acme in no project,
+    # and its deletion asked nothing, where the src walk and FileFinder
+    # import through the link by its spelled name.
+    _, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    base = outside.parent / "shared" if outside_project else outside / ".shared"
+    shared = base / "acme"
+    shared.mkdir(parents=True)
+    (outside / "src").mkdir()
+    (outside / "src" / "acme").symlink_to(shared)
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    files_changed(
+        SimpleNamespace(),
+        outside / "src" / "acme" / "tool.py",
+        lsp.FileChangeType.Deleted,
+    )
+    assert asked == [str(outside)]
+
+
+def test_a_module_file_linked_to_a_library_file_renames_modules(tmp_path):
+    # Defect: the library check resolved the file itself, so a link
+    # proj/x.py -> a site-packages file, which ends the namespace package
+    # proj/x beside it, counted as installed code and renamed nothing.
+    library = tmp_path / "venv" / "lib" / "site-packages" / "x.py"
+    (library.parent / "x").mkdir(parents=True)
+    library.write_text("")
+    project = tmp_path / "proj"
+    (project / "x").mkdir(parents=True)
+    link = project / "x.py"
+    link.symlink_to(library)
+    assert server.renaming_file_p(str(link))
+    assert not server.renaming_file_p(str(library))  # the control
+
+
 def test_an_init_file_in_lispythons_own_package_renames_modules():
     # Defect: naming borrowed the tracking exclusions, which leave out
     # lispython's own package, so an __init__ created in an editable
@@ -1167,6 +1277,28 @@ def test_an_init_file_in_lispythons_own_package_renames_modules():
     checkout = pathlib.Path(__file__).resolve().parents[1]
     created = checkout / "src" / "lispy" / "newpkg" / "__init__.py"
     assert server.renaming_file_p(str(created))
+
+
+def test_a_file_event_sent_once_per_watch_pattern_is_handled_once(
+    outside_documents, monkeypatch
+):
+    # Defect: src/m.lpy matches both **/*.lpy and **/src/**, and VS Code
+    # sends its event once per matching pattern, so the batch reindexes
+    # and judges the file twice.
+    _, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    seen = []
+    monkeypatch.setattr(
+        server, "reindex_watched_file", lambda uri, path: seen.append(uri)
+    )
+    path = outside / "src" / "m.lpy"
+    change = lsp.FileEvent(uri=path.as_uri(), type=lsp.FileChangeType.Created)
+    deleted = lsp.FileEvent(uri=path.as_uri(), type=lsp.FileChangeType.Deleted)
+    server.did_change_watched_files(
+        SimpleNamespace(),
+        lsp.DidChangeWatchedFilesParams(changes=[change, change, deleted]),
+    )
+    assert seen == [path.as_uri(), path.as_uri()]
 
 
 def test_an_lpy_file_created_or_deleted_on_disk_is_indexed(outside_documents):
@@ -1393,6 +1525,9 @@ def test_module_files_are_watched_only_where_the_client_can_register(caplog):
     globs = [w.glob_pattern for w in registration.register_options.watchers]
     for suffix in finder_suffixes():  # every file FileFinder imports
         assert any(fnmatch.fnmatch("ns" + suffix, g.removeprefix("**/")) for g in globs)
+    # A src folder or a package folder in one, deleted or moved in whole.
+    for folder in ["proj/src", "proj/src/pkg"]:
+        assert any(fnmatch.fnmatch(folder, g) for g in globs)
     assert "refused" in caplog.text
 
 

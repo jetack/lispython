@@ -24,13 +24,29 @@ def _is_lpy_file(filename):
     return osp.isfile(filename) and osp.splitext(filename)[1] == ".lpy"
 
 
-INIT_FILE_NAMES = ("__init__.py", "__init__.lpy")
+def init_file_names():
+    """The names of a package's init file, in FileFinder's order: __init__
+    plus each finder suffix (finder_suffixes), so __init__.pyc alone or an
+    extension module __init__ makes a regular package too."""
+    return ["__init__" + suffix for suffix in finder_suffixes()]
+
+
+def init_file(dir_path):
+    """The init file of the package directory dir_path, or None: the first
+    of init_file_names that is a file, as FileFinder takes one only through
+    its isfile check (a directory named __init__.py leaves dir_path a
+    namespace portion).  The one home of the init rule: has_init_file, the
+    LSP's src layout witness and renames_modules_p's names read it."""
+    for name in init_file_names():
+        path = osp.join(dir_path, name)
+        if osp.isfile(path):
+            return path
+    return None
 
 
 def has_init_file(dir_path):
-    """Whether dir_path is a package directory: it holds one of
-    INIT_FILE_NAMES."""
-    return any(osp.exists(osp.join(dir_path, name)) for name in INIT_FILE_NAMES)
+    """Whether dir_path is a regular package directory (init_file)."""
+    return init_file(dir_path) is not None
 
 
 def finder_loader_details():
@@ -78,12 +94,12 @@ def _namespace_portion_p(dir_path):
 
 def renames_modules_p(path):
     """Whether creating or deleting the file at path can change what
-    package_root gives: it is an __init__ file (has_init_file), or a module
+    package_root gives: it is an init file (init_file_names), or a module
     file (a finder suffix) of a directory's name beside that directory,
     which it stops or lets be a namespace portion (_namespace_portion_p).
     The file need not exist (a deletion)."""
     name = osp.basename(path)
-    if name in INIT_FILE_NAMES:
+    if name in init_file_names():
         return True
     parent = osp.dirname(path)
     return any(
@@ -97,8 +113,8 @@ def package_root(dir_path, roots=()):
     """(import root, package parts) of a module in dir_path: the directory
     the module is imported from and the package names from the top one down.
 
-    Walking up while each directory is a regular package (it holds
-    __init__.py or __init__.lpy) gives the parts; with no roots, the
+    Walking up while each directory is a regular package (it holds an init
+    file, has_init_file) gives the parts; with no roots, the
     directory the walk stops at is the import root, so a dir_path that is
     no package is its own import root, with no parts.
 
@@ -140,6 +156,28 @@ def package_root(dir_path, roots=()):
     if not all(_namespace_portion_p(d) for d in between):
         return current, parts
     return parent, [osp.basename(d) for d in between] + parts
+
+
+def package_module_p(dir_path, import_root):
+    """Whether a module in dir_path, imported from import_root (package_root's
+    import root, in dir_path's spelling), lies inside a regular package:
+    dir_path or a directory above it, up to but not including import_root,
+    holds an __init__ (has_init_file).
+
+    The one home of a file's run mode: such a module runs as that module
+    (``python -m pkg.m``), with package_root's parts as its __package__;
+    any other file is a script, run as ``lpy file.lpy`` with __package__
+    empty, though package_root may name it inside namespace packages.  The
+    LSP's module_names and the nREPL's file scopes read it."""
+    current = dir_path
+    while current != import_root:
+        if has_init_file(current):
+            return True
+        parent = osp.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return False
 
 
 def _lpy_code(source, path, compile_module, scope):
