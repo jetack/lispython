@@ -510,6 +510,9 @@ class _Lexer:
         self.stop_context = None
         # The end of the last string or literal closed before the stop.
         self.closed_string_end = 0
+        # Whether the token of code ending at or holding the stop offset is
+        # a symbol: the text before the offset then ends in that symbol.
+        self.stop_symbol = False
 
     def run(self):
         while not self.done:
@@ -584,6 +587,7 @@ class _Lexer:
             # A token holding the stop: a comment's text (its end included),
             # else code.
             mode = "code" if field is None else "bracket" if field.brackets else "field"
+            self.stop_symbol = tktype == "symbol"
             self._reached("text" if tktype == "comment" else mode)
             return
         if tktype == "string":
@@ -596,6 +600,9 @@ class _Lexer:
             previous = context.previous
             kept = previous is not None and previous[1] == "opening"
             tktype = "symbol" if kept and previous[0][-1] in "({" else "spaces"
+        if end == self.stop:
+            # The last token before the stop, which lexing reaches next.
+            self.stop_symbol = tktype == "symbol"
         if field is not None:
             if tktype == "opening" or (tktype == "bad-prefix" and tk[-1] in "([{"):
                 field.brackets.append(tk[-1])
@@ -1481,8 +1488,8 @@ _FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
 # ranges, base, cursor view): the buffer is lexed once.
 @functools.lru_cache(maxsize=8)
 def caret_context(text, offset):
-    """``(context, resume)`` at code-point ``offset`` of ``text`` (a caret),
-    as the reader reads it: ``_Lexer`` over ``text`` up to the offset, one
+    """``(context, resume, symbol)`` at code-point ``offset`` of ``text`` (a
+    caret), as the reader reads it: ``_Lexer`` over ``text`` up to the offset, one
     pass that stops where it would read past it; None where the reader
     refuses the text before the offset (a lexer error there).
 
@@ -1492,12 +1499,27 @@ def caret_context(text, offset):
     a literal's or format spec's text, a conversion, a comment), what the
     offset lies in. ``resume`` is where the last string or literal closed
     before it ends (0 when none), from which a word may start: a string's
-    text never lexes as code again (``'''a-b'''``)."""
+    text never lexes as code again (``'''a-b'''``). ``symbol`` is whether the
+    token of code ending at or holding the offset is a symbol
+    (caret_symbol_p)."""
     lexer = _Lexer(text, stop=offset)
     lexer.run()
     if lexer.stop_context is None:
         return None
-    return lexer.stop_context, lexer.closed_string_end
+    return lexer.stop_context, lexer.closed_string_end, lexer.stop_symbol
+
+
+def caret_symbol_p(line, col, before):
+    """Whether the text ``before`` ``line`` (its line breaks included) ends,
+    at code-point column ``col`` of ``line``, in a symbol the reader reads
+    there: the token of code ending at or holding the caret is a symbol
+    (``mod.|``, ``mod.ma|cro``), a field of an f/t-string being code, and
+    never in a string's or comment's text, which holds no symbol. False
+    where the reader refuses the text before the caret (a lexer error
+    there). It reads the caret_context completion_word_span reads with the
+    same ``before``, so a request asking both lexes the text once."""
+    found = caret_context(before + line, len(before) + col)
+    return found is not None and found[2]
 
 
 def _debug_equals_p(line, end):
@@ -1541,7 +1563,8 @@ def _line_context(line, col, before):
     found = caret_context(before + line, len(before) + col)
     if found is not None:
         return found[0], max(found[1] - len(before), 0)
-    return caret_context(line, col) or ("code", 0)
+    found = caret_context(line, col)
+    return ("code", 0) if found is None else found[:2]
 
 
 def completion_word_span(line, col, before=""):

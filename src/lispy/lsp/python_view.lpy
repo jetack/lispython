@@ -43,8 +43,8 @@
 (from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
                          MetaIndicator Paren Starred Symbol Wrapper atom-text
                          wrapper-form-keys])
-(from lispy.core.parser [completion-word-span parse source-offset split-lines tokenize
-                          word-parts])
+(from lispy.core.parser [caret-symbol-p completion-word-span parse source-offset
+                          split-lines tokenize word-parts])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.literal [hyphen-spelling name-key python-name python-name-p
@@ -218,18 +218,40 @@
 ;; word spelling a Python name) is the reader's (completion-word-span,
 ;; word-parts in core/parser.py), never a character table of its own.
 
+(def _caret-line [source line col]
+  "(text, col, before) of the caret at the 1-based line and code-point col
+   of source: the line's text, col clamped to it, and the source before the
+   line; None for a line past source.  The one home of the arguments of a
+   caret read (word-span, code-symbol-p), so both ask caret_context the same
+   question and a request lexes the text before the caret once."
+  (= lines (split-lines source))
+  (if (not (<= 1 line (len lines)))
+      (return None))
+  (= text (sub lines (- line 1)))
+  (= line-start ((source-offset source) line 0))
+  (return (, text (min col (len text)) (sub source [: line-start]))))
+
 (def word-span [source line col]
   "completion-word-span's (start, replace-start, end) at the 1-based line and
    code-point col of source (clamped to the line), the caret's context read
    from the start of source; None in a string's or comment's text, where no
    word is typed.  The one LSP caller of completion-word-span for a caret
    (a node's position, _lpy-name-span, is read with no scan)."
-  (= lines (split-lines source))
-  (if (not (<= 1 line (len lines)))
+  (= caret (_caret-line source line col))
+  (if (is caret None)
       (return (completion-word-span "" 0 source)))
-  (= text (sub lines (- line 1)))
-  (= line-start ((source-offset source) line 0))
-  (return (completion-word-span text (min col (len text)) (sub source [: line-start]))))
+  (return (completion-word-span *caret)))
+
+(def code-symbol-p [source line col]
+  "Whether the text of source before the 1-based line and code-point col
+   ends in a symbol the reader reads there (caret-symbol-p: the token of
+   code ending at or holding the cursor is a symbol): code, never a string
+   literal or comment, whose text the reader gives no symbol.  A field of
+   an f/t string is code, read as such; a text the lexer refuses before the
+   cursor (an unterminated f/t-string there) holds none.  It shares
+   word-span's lexer pass (_caret-line)."
+  (= caret (_caret-line source line col))
+  (return (and (is-not caret None) (caret-symbol-p *caret))))
 
 (def partial-span [source line col]
   "The partial word at the 1-based line and code-point col of source, as

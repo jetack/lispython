@@ -42,7 +42,8 @@
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
                              FROM-HEADS GENERATED-PREFIX IMPORT-HEADS IMPORT-ONLY-HEADS
-                             PARSE-STAGE ViewCache compile-buffer glued-base
+                             PARSE-STAGE ViewCache code-symbol-p compile-buffer
+                             glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
@@ -2695,24 +2696,6 @@
             (.append merged item))))
   (return merged))
 
-(def code-symbol-p [source line col]
-  "Whether the text of source before the 1-based line and code-point col
-   ends in a symbol the reader reads there (its last token, comments
-   included, a symbol ending at the cursor): code, never a string literal
-   or comment, whose text the reader gives no symbol.  A field of an f/t
-   string is code, read as such; a prefix the lexer stops on (an
-   unterminated f/t-string before the cursor) is none."
-  (try
-    (= tokens (tokenize (source-prefix source line col) :comments True))
-    (except [Exception]
-      (return False)))
-  (if (not tokens)
-      (return False))
-  (= [_ tktype position _] (sub tokens -1))
-  (return (and (== tktype "symbol")
-               (== (sub position "end_lineno") line)
-               (== (sub position "end_col_offset") col))))
-
 (def qualified-base [doc line col]
   "The base of a qualified macro call being typed at the 1-based line and
    code-point col of doc: the dotted name glued to the dot before the word
@@ -2767,7 +2750,7 @@
    table, and no backend knows them: it never binds mod at runtime, so
    they are offered with no backend too (backend-completion over a cursor
    view, local-completion over the cached full view).  The completion
-   handler computes base once, since qualified-base lexes the whole text
+   handler computes base once, since qualified-base reads the whole text
    before the cursor."
   (if (is base None)
       (return []))
@@ -3353,7 +3336,8 @@
   (if (is (word-span doc.source line col) None)
       (return (lsp.CompletionList :is-incomplete True :items [])))
   (= insert-replace (insert-replace-support ls))
-  ;; Once per completion: it lexes the whole text before the cursor.
+  ;; Once per completion: it reads the whole text before the cursor, in the
+  ;; lexer pass word-span just made (code-symbol-p).
   (try
     (= base (qualified-base doc line col))
     (except [Exception]

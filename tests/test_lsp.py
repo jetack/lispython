@@ -20,11 +20,11 @@ from lsprotocol import types as lsp
 
 import lispy.macros
 from lispy import form_docs
-from lispy.core import nodes
+from lispy.core import nodes, parser
 from lispy.core.compiler import features, literal
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
 from lispy.core.macro import macroexpand_then_compile
-from lispy.core.parser import parse
+from lispy.core.parser import parse, tokenize
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
@@ -1354,6 +1354,78 @@ def test_completion_offers_nothing_in_a_strings_or_comments_text(marked):
     assert answer.is_incomplete and answer.items == []
     code = run_completion(ls_with("(print fo"), position(0, 9))
     assert "format" in {item.label for item in code.items}
+
+
+def _marked_caret(marked):
+    """(source, 1-based line, col) of the | in marked."""
+    at = marked.index("|")
+    line = marked[:at].count("\n") + 1
+    return marked[:at] + marked[at + 1 :], line, at - (marked.rfind("\n", 0, at) + 1)
+
+
+@pytest.mark.parametrize(
+    ("marked", "expected"),
+    [
+        ("(mod.|", True),
+        ("(mod.ma|cro x)", True),
+        ('(mod.|"x")', True),
+        ("(mod.| ; a comment", True),
+        ('"mod.|"', False),
+        ("; mod.|", False),
+        ("(print 1) ; mod.|", False),
+        ('f"{mod.|}"', True),
+        ('t"{(g mod.|)}"', True),
+        ('f"{x:{mod.|}}"', True),
+        ('f"""\n{mod.|\n}"""', True),
+        ('f"text mod.|', False),
+        ('(= s f"{=}")\n(mod.|)', False),
+    ],
+)
+def test_code_symbol_p_reads_the_caret_as_the_text_before_it_lexes(marked, expected):
+    # Defects: the caret's symbol is read from the caret_context pass, so a
+    # token holding the caret (mod.ma|cro) or ending at it is missed, a
+    # string's or comment's text counts as code, a field is not code, or the
+    # line-alone reading after an earlier lexer error lets mod.| through.
+    # Each answer is the one the text before the caret, lexed alone with its
+    # comments, gives (its last token a symbol ending at the caret).
+    source, line, col = _marked_caret(marked)
+    assert pv.code_symbol_p(source, line, col) is expected
+    tokens = tokenize(pv.source_prefix(source, line, col), comments=True)
+    [_, tktype, end, _] = tokens[-1]
+    lexed_alone = tktype == "symbol" and (end["end_lineno"], end["end_col_offset"])
+    assert (lexed_alone == (line, col)) is expected
+
+
+def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch):
+    # Defect: a completion at mod.| lexes the whole text before the caret
+    # twice, once for the word's context (caret_context) and again for the
+    # qualified base's code check, doubling the per-keystroke cost of a long
+    # buffer. Every lexer pass over that text is counted, the caret_context
+    # cache emptied first so its one pass is this request's.
+    marked = "(import os)\n(os.pa|)\n(print 1)\n"
+    source, line, col = _marked_caret(marked)
+    prefix = pv.source_prefix(source, line, col)
+    passes = []
+    run = parser._Lexer.run
+
+    def counted(lexer):
+        if lexer.stop is not None or lexer.src == prefix:
+            passes.append(lexer.stop)
+        return run(lexer)
+
+    checked = []
+    code_symbol_p = server.code_symbol_p
+
+    def checked_code_symbol_p(*args):
+        checked.append(args)
+        return code_symbol_p(*args)
+
+    monkeypatch.setattr(parser._Lexer, "run", counted)
+    monkeypatch.setattr(server, "code_symbol_p", checked_code_symbol_p)
+    parser.caret_context.cache_clear()
+    run_completion(ls_with(source), position(line - 1, col))
+    assert checked, "the request never read the qualified base"
+    assert passes == [len(prefix)]
 
 
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
