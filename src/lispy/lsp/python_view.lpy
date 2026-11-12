@@ -2033,24 +2033,42 @@
    walk reached it.  The walk follows directory links by their spelled
    name, as FileFinder imports a package through one (src/acme ->
    /outside/shared/acme lists src/acme/m.lpy, the module acme.m), and
-   skips _pruned-p directories.  A link back to a directory above it on
-   the way is not entered, so a loop ends; any other directory reached by
-   two spellings is walked under each.  Each path is its own module, so
-   two paths to one file (a file symlink beside it, a package linked into
-   src from elsewhere in the project) are both listed."
+   skips _pruned-p directories.  It never enters a link to a directory
+   above it on the way, the project root's own ancestors included (proj/up
+   -> .. would walk the whole parent tree), and enters each real directory
+   through a link at most once, so a loop ends and a DAG of links stays
+   linear: of two links to one package only the first is listed, while a
+   directory's own spelling is walked whether or not a link reached it
+   too (shared/acme beside src/acme -> shared/acme lists both).  Each path
+   is its own module, so two paths to one file (a file symlink beside it)
+   are both listed."
   (= found [])
+  (= real-root (osp.realpath project-root))
+  (= root-above (set [real-root]))
+  (while (!= (osp.dirname real-root) real-root)
+    (= real-root (osp.dirname real-root))
+    (.add root-above real-root))
   ;; dirpath -> the real paths of it and the directories above it on the
   ;; way down, whose links would loop.
-  (= ancestors {project-root (frozenset [(osp.realpath project-root)])})
+  (= ancestors {project-root (frozenset root-above)})
+  ;; The real directories already entered through a link.
+  (= linked (set))
   (for [dirpath dirnames filenames] in (os.walk project-root :followlinks True)
     (= above (.pop ancestors dirpath))
     (= kept [])
     (for name in (sorted dirnames)
-      (if (not (_pruned-p dirpath name))
-          (do (= real (osp.realpath (osp.join dirpath name)))
-              (if (not-in real above)
-                  (do (= (sub ancestors (osp.join dirpath name)) (.union above [real]))
-                      (.append kept name))))))
+      (= path (osp.join dirpath name))
+      (if (_pruned-p dirpath name)
+          (continue))
+      (= real (osp.realpath path))
+      (if (in real above)
+          (continue))
+      (if (osp.islink path)
+          (do (if (in real linked)
+                  (continue))
+              (.add linked real)))
+      (= (sub ancestors path) (.union above [real]))
+      (.append kept name))
     (.clear dirnames)
     (.extend dirnames kept)
     (for filename in filenames

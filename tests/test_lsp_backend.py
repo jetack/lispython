@@ -1938,22 +1938,51 @@ def test_the_sweep_shadows_a_package_linked_into_src(tmp_path):
     assert os.readlink(init) == str(proj / "src" / "acme" / "__init__.py")
 
 
-def test_a_package_linked_within_the_project_is_listed_under_each_spelling(
-    tmp_path,
-):
-    # Defect: a walk entering each real directory once enters shared/acme
-    # (sorted first) and skips src/acme, so the spelling Python imports as
-    # acme.m gets no shadow; only a link back up (a loop) is skipped.
+def test_a_package_linked_within_the_project_is_listed_by_its_link_too(tmp_path):
+    # Defect: a walk entering each real directory once, its real spelling
+    # included, enters shared/acme (sorted first) and skips src/acme, so the
+    # spelling Python imports as acme.m gets no shadow.  A second link to
+    # the same package (src/zeta) is entered no more, and the loop up ends.
     proj = tmp_path / "proj"
     (proj / "shared" / "acme").mkdir(parents=True)
     (proj / "shared" / "acme" / "m.lpy").write_text("")
     (proj / "src").mkdir()
     (proj / "src" / "acme").symlink_to(proj / "shared" / "acme")
+    (proj / "src" / "zeta").symlink_to(proj / "shared" / "acme")
     (proj / "src" / "acme" / "up").symlink_to(proj / "src")
     assert pv.project_sources(str(proj)) == [
         str(proj / "shared" / "acme" / "m.lpy"),
         str(proj / "src" / "acme" / "m.lpy"),
     ]
+
+
+def test_the_sweep_never_walks_up_out_of_the_project(tmp_path, time_bound):
+    # Defect: the loop guard holds only the directories below the project
+    # root, so proj/up -> .. (or a link to ~ or /) walks the whole parent
+    # tree and lists every .lpy in it.
+    ws = tmp_path / "ws"
+    (ws / "other").mkdir(parents=True)
+    (ws / "other" / "x.lpy").write_text("")
+    proj = ws / "proj"
+    proj.mkdir()
+    (proj / "a.lpy").write_text("")
+    (proj / "up").symlink_to(ws)
+    assert pv.project_sources(str(proj)) == [str(proj / "a.lpy")]
+
+
+def test_the_sweep_walks_a_dag_of_links_in_linear_time(tmp_path, time_bound):
+    # Defect: a directory reached by two links is walked under each, so a
+    # chain of directories each linking twice to the next lists 2**n paths.
+    proj = tmp_path / "proj"
+    count = 8
+    for i in range(count):
+        (proj / f"d{i}").mkdir(parents=True)
+        (proj / f"d{i}" / "m.lpy").write_text("")
+    for i in range(count - 1):
+        for name in ["a", "b"]:
+            (proj / f"d{i}" / name).symlink_to(proj / f"d{i + 1}")
+    # Each directory by its own spelling, and each but d0 once through a link.
+    assert len(pv.project_sources(str(proj))) == 2 * count - 1
 
 
 def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path):
