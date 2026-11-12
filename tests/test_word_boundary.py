@@ -940,11 +940,11 @@ def test_the_published_rule_agrees_with_the_reader_everywhere(
 
 def reader_error_span(text):
     """(start, end) of the first error the reader's scan to the end of
-    ``text`` meets (caret_tokens' last token, an error token or a string
-    carrying its error), or None."""
+    ``text`` meets (caret_tokens' first "recovered" token, standing where
+    that error was met), or None."""
     tokens = caret_tokens(text, len(text), "")
-    error = tokens[-1][3] if tokens else None
-    if not isinstance(error, SyntaxError):
+    error = next((t[3][0] for t in tokens if t[1] == "recovered"), None)
+    if error is None:
         return None
     offset_of = source_offset(text)
     return (
