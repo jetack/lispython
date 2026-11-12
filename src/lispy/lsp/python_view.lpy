@@ -3029,7 +3029,8 @@
    default list, a link beside plain scripts takes theirs, a directory of
    only link scripts takes the first link's, which is wrong for any link
    that searches elsewhere; each is a false unresolved import under pyrefly
-   only. No config shape fixes it (a directory has one list, and a union of
+   only (the backend's analysis alone: the link script's own lispython
+   compile still searches its own directories). No config shape fixes it (a directory has one list, and a union of
    runs is forbidden). When
    test_pyrefly_takes_search_path_from_a_directory_config_only fails, write
    file-environments as [[sub-config]] search-path entries.  A view root

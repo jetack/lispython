@@ -2554,6 +2554,12 @@ def test_pyrefly_takes_search_path_from_a_directory_config_only(tmp_path):
         "bad-assignment",
         "unsupported-operation",
     ]
+    # Control: with no search-path at all the import is unresolved, which
+    # proves missing-import is pyrefly's name for it.
+    assert _pyrefly_error_names(tmp_path / "none", "") == [
+        "bad-assignment",
+        "missing-import",
+    ]
     # The sub-config matches a.py (its other key turns bad-assignment off)
     # yet its search-path is dropped: the import stays unresolved.
     names = _pyrefly_error_names(
