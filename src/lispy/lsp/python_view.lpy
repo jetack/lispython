@@ -51,7 +51,7 @@
                                    symbol-name])
 (from lispy.core.utils [trampoline])
 (from lispy.core.unparse [unparse])
-(from lispy.core.importer [INIT-FILE-NAMES finder-suffixes has-init-file package-module-p
+(from lispy.core.importer [finder-suffixes has-init-file init-file package-module-p
                            package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
 (from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
@@ -1827,16 +1827,13 @@
   (return (_unlisted-init-file unlisted)))
 
 (def _unlisted-init-file [unlisted]
-  "The init file of the first directory in unlisted (directories the walk
-   could not list, emptied as read) that holds one, or None.  An init name
-   counts only as a file (osp.isfile, FileFinder's own check), so a
-   directory named __init__.py is no witness."
+  "The init file (init-file, the importer's rule) of the first directory
+   in unlisted (directories the walk could not list, emptied as read) that
+   holds one, or None."
   (while unlisted
-    (= directory (.pop unlisted 0))
-    (for name in INIT-FILE-NAMES
-      (= path (osp.join directory name))
-      (if (osp.isfile path)
-          (return path))))
+    (= path (init-file (.pop unlisted 0)))
+    (if (is-not path None)
+        (return path)))
   (return None))
 
 (class _SrcLayout []
@@ -1983,7 +1980,7 @@
 (def module-names [lpy-path :project-root None]
   "(__name__, __package__, import root, search dirs) of lpy-path as Python
    imports it (package-root): the packages are the directories up from its
-   own that hold __init__.py or __init__.lpy, and the import root is where
+   own that hold an init file (has-init-file), and the import root is where
    that walk stops, so src/pkg/m.lpy is pkg.m from src.  Under project-root
    (the document's workspace folder), namespace packages count too, up to
    the nearest of project-import-roots, so ns/a.lpy with no ns/__init__ is

@@ -27,7 +27,7 @@ import pytest
 
 import lispy  # noqa: F401  (registers the .lpy importer)
 from lispy.core import nodes, parser
-from lispy.core.importer import lpy_cache_path, package_root
+from lispy.core.importer import lpy_cache_path, package_root, renames_modules_p
 
 pv = importlib.import_module("lispy.lsp.python_view")
 server = importlib.import_module("lispy.lsp.server")
@@ -1781,6 +1781,25 @@ class TestShadows:
         for directory in [project / "src" / "pkg", project / "src"]:
             directory.rmdir()
         assert pv.shared_import_roots(str(project)) == [str(project)]
+
+    def test_a_package_is_a_directory_with_an_init_file_as_filefinder_sees_it(
+        self, tmp_path
+    ):
+        # Defects: the init rule took any existing __init__.py, a directory
+        # included, which FileFinder refuses (dirinit is a namespace
+        # portion), and knew only .py/.lpy, so __init__.pyc alone, which
+        # FileFinder imports as a regular package, made none.
+        project = tmp_path / "project"
+        (project / "dirinit" / "__init__.py").mkdir(parents=True)
+        self.write(project / "pyconly" / "__init__.pyc", "")
+        dirinit, pyconly = str(project / "dirinit"), str(project / "pyconly")
+        assert package_root(dirinit) == (dirinit, [])
+        assert package_root(pyconly) == (str(project), ["pyconly"])
+        names = pv.module_names(
+            str(project / "dirinit" / "m.lpy"), project_root=str(project)
+        )
+        assert names[:2] == ("dirinit.m", "")
+        assert renames_modules_p(str(project / "pyconly" / "__init__.pyc"))
 
     @pytest.fixture
     def unlistable(self):

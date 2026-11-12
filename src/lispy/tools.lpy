@@ -52,8 +52,8 @@
          :file sys.stderr))
 
 (def detect-package-name [path]
-  "(package name, import root) of path's directory, by __init__.py or
-   __init__.lpy (package-root): the name `python -m <name>` run from the
+  "(package name, import root) of path's directory, by its init files
+   (package-root): the name `python -m <name>` run from the
    import root gives, l2py's rule for the file it translates.  A directory
    that is no package is its own import root, with an empty name.  Pure."
   (= dir-path (osp.dirname (osp.abspath path)))
