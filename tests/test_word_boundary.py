@@ -620,13 +620,14 @@ def spec_word_span(rule):
 
         def refuse(start, end, literal=False):
             """The recovery from a refusal from start to end: keep the stack
-            up to its innermost literal (dropping that one too when literal),
-            resume at end or the last resume point, whichever is later."""
+            up to its innermost literal (dropping that one too when literal, or
+            when end is not past the last resume point), resume at end or
+            the last resume point, whichever is later."""
             if refusals is not None:
                 refusals.append((start, end))
             while stack and stack[-1][0] == "field":
                 stack.pop()
-            if literal:
+            if (literal or end <= state["resumed"]) and stack:
                 stack.pop()
                 while stack and stack[-1][0] == "field":
                     stack.pop()

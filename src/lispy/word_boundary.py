@@ -179,8 +179,9 @@ CASE_INPUTS = (
     # A continuation's backslash before a debug =.
     'f"{\\|=}"',
     'f"{\\=|}"',
-    # Past a refusal before the caret the reader reads on in place: in the
-    # innermost literal open there, from the refusal's end. A conversion's
+    # Past a refusal before the caret the reader reads on in place: from the
+    # refusal's end (or the last resume, when later), in the innermost
+    # literal the stack then holds (context step). A conversion's
     # name that is none, after a gap, missing, or followed by more.
     'f"{x!z}" (fo|',
     'f"{x! r}" fo|',
@@ -372,8 +373,14 @@ def rule():
             "goes on in place: the stack keeps its entries up to its innermost "
             "literal (the fields above it are dropped; a bareQuote refusal of "
             "an escaped literal drops that literal too, with the fields above "
-            "the next one), and the scan resumes in that literal's text at the "
-            "refusal's end, or where it last resumed when that is later",
+            "the next one), and the scan resumes at the refusal's end, or where "
+            "it last resumed when that is later, in the innermost literal "
+            "the stack then holds (the next one out when a literal was "
+            "dropped; code mode when none is left). A "
+            "refusal that ends at or before where the scan last resumed (none "
+            "does today) drops the innermost literal kept as well, with the "
+            "fields above the next one, so the scan always ends: each "
+            "resumed pass moves forward or holds fewer literals",
             "code, field and bracket mode: find the next token with the mode's "
             "patterns (a character no pattern matches is skipped); none, or "
             "one starting at or after the caret, stops the scan in the mode. "
