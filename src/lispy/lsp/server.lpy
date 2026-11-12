@@ -42,10 +42,13 @@
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
                              FROM-HEADS GENERATED-PREFIX IMPORT-HEADS IMPORT-ONLY-HEADS
-                             PARSE-STAGE ViewCache compile-buffer glued-base
+                             PARSE-STAGE ViewCache caret-tokens code-symbol-p
+                             compile-buffer
+                             glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
                              open-form-closers partial-span project-import-roots py-name
+                             word-span
                              forget-false-src-layouts module-file-path-p
                              pruned-in-project-p pyrefly-fallback refresh-src-layout
                              source-lines
@@ -2292,7 +2295,8 @@
    view restores), replace that and the rest of the name run after the
    cursor; both in client units."
   (= text (line-text doc.source line))
-  (= [start end] (partial-span text (min col (len text))))
+  (= at (min col (len text)))
+  (= [start end] (or (partial-span doc.source line col) (, at at)))
   (= start-pos (client-position doc line start))
   (return (, (lsp.Range :start start-pos :end (client-position doc line col))
              (lsp.Range :start start-pos :end (client-position doc line end))
@@ -2693,24 +2697,6 @@
             (.append merged item))))
   (return merged))
 
-(def code-symbol-p [source line col]
-  "Whether the text of source before the 1-based line and code-point col
-   ends in a symbol the reader reads there (its last token, comments
-   included, a symbol ending at the cursor): code, never a string literal
-   or comment, whose text the reader gives no symbol.  A field of an f/t
-   string is code, read as such; a prefix the lexer stops on (an
-   unterminated f/t-string before the cursor) is none."
-  (try
-    (= tokens (tokenize (source-prefix source line col) :comments True))
-    (except [Exception]
-      (return False)))
-  (if (not tokens)
-      (return False))
-  (= [_ tktype position _] (sub tokens -1))
-  (return (and (== tktype "symbol")
-               (== (sub position "end_lineno") line)
-               (== (sub position "end_col_offset") col))))
-
 (def qualified-base [doc line col]
   "The base of a qualified macro call being typed at the 1-based line and
    code-point col of doc: the dotted name glued to the dot before the word
@@ -2720,7 +2706,7 @@
    macros must not be offered there); else None."
   (= text (line-text doc.source line))
   (= col (min col (len text)))
-  (= base (glued-base text col))
+  (= base (glued-base doc.source line col))
   (if (or (is base None) (not (code-symbol-p doc.source line col)))
       (return None))
   (return base))
@@ -2765,7 +2751,7 @@
    table, and no backend knows them: it never binds mod at runtime, so
    they are offered with no backend too (backend-completion over a cursor
    view, local-completion over the cached full view).  The completion
-   handler computes base once, since qualified-base lexes the whole text
+   handler computes base once, since qualified-base reads the whole text
    before the cursor."
   (if (is base None)
       (return []))
@@ -2798,11 +2784,16 @@
    qualified macros of the cached full view."
   (= text (line-text source line))
   (= col (min col (len text)))
-  (= start (sub (partial-span text col) 0))
+  (= span (partial-span source line col))
+  (if (is span None)
+      (return False))
+  (= start (sub span 0))
   (if (and (> start 0) (== (sub text (- start 1)) "."))
       (return True))
   (= prefix (source-prefix source line col))
-  (= closers (open-form-closers prefix :literals True))
+  ;; prefix's tokens are those of partial-span's lexer pass, never lexed again.
+  (= closers (open-form-closers prefix :literals True
+                                :tokens (caret-tokens source line col)))
   (if (is closers None)
       (return False))
   (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))
@@ -2896,7 +2887,7 @@
   (= source doc.source)
   (= text (line-text source line))
   (= col (min col (len text)))
-  (= start (sub (partial-span text col) 0))
+  (= start (sub (or (partial-span source line col) (, col col)) 0))
   ;; source-prefix slices the buffer, so before and after keep its own
   ;; line breaks.
   (= before (source-prefix source line start))
@@ -3211,8 +3202,12 @@
    front of a token (the - of -x) has none: its word is the whole token,
    while the view's partial at end is the leaf, so the offset would miss it."
   (= text (line-text doc.source line))
-  (= [start end] (partial-span text (min col (len text))))
-  (if (or (== start end) (!= start (sub (partial-span text end) 0)))
+  (= span (partial-span doc.source line col))
+  (if (is span None)
+      (return None))
+  (= [start end] span)
+  (if (or (== start end)
+          (!= start (sub (or (partial-span doc.source line end) (, None None)) 0)))
       (return None))
   (return (, start end (- (len (py-name (sub text [: start end])))))))
 
@@ -3339,8 +3334,13 @@
     (except [Exception]
       (.debug logger "completion position failed" :exc-info True)
       (return (filtered-answer "" (local-completion doc)))))
+  ;; In a string's or comment's text no word is typed: nothing is offered,
+  ;; never every form, macro and builtin under an empty word.
+  (if (is (word-span doc.source line col) None)
+      (return (lsp.CompletionList :is-incomplete True :items [])))
   (= insert-replace (insert-replace-support ls))
-  ;; Once per completion: it lexes the whole text before the cursor.
+  ;; Once per completion: it reads the whole text before the cursor, in the
+  ;; lexer pass word-span just made (code-symbol-p).
   (try
     (= base (qualified-base doc line col))
     (except [Exception]

@@ -43,8 +43,9 @@
 (from lispy.core.nodes [Annotation Bracket DoubleStarred Expression GluedHead Keyword
                          MetaIndicator Paren Starred Symbol Wrapper atom-text
                          wrapper-form-keys])
-(from lispy.core.parser [completion-word-span parse source-offset split-lines tokenize
-                          word-parts])
+(from lispy.core.parser [caret-symbol-p completion-word-span parse source-offset
+                          split-lines tokenize word-parts])
+(from lispy.core.parser [caret-tokens as caret-tokens-of])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.literal [hyphen-spelling name-key python-name python-name-p
@@ -110,7 +111,7 @@
         (do (del (sub stack [: index None]))
             (return)))))
 
-(def open-forms [prefix :literals False]
+(def open-forms [prefix :literals False :tokens None]
   "The forms still open at the end of prefix, outermost first, or None
    when the lexer cannot read it or it ends inside an f/t-string, which no
    bracket can close: each a list [kind closer opening head index], kind
@@ -118,11 +119,14 @@
    head are the (1-based line, code-point column) of a bracket's token (its
    prefix included) and of the token after it (None when there is none),
    index the opening's index in prefix, all three None for a field or
-   literal.  literals: keep an open f/t-string too (open-form-closers)."
-  (try
-    (= tokens (list (tokenize prefix)))
-    (except [Exception]
-      (return None)))
+   literal.  literals: keep an open f/t-string too (open-form-closers).
+   tokens: prefix's tokens when the caller has them (caret-tokens, for a
+   prefix ending at a caret), else prefix is lexed here."
+  (if (is tokens None)
+      (try
+        (= tokens (list (tokenize prefix)))
+        (except [Exception]
+          (return None))))
   ;; A stray closer pops only a bracket; a field or literal end pops back
   ;; to its own entry, if any, so a typo never misaligns the closers or
   ;; empties the stack.
@@ -167,14 +171,14 @@
       (return None))
   (return stack))
 
-(def open-form-closers [prefix :literals False]
+(def open-form-closers [prefix :literals False :tokens None]
   "The closers of the forms still open at the end of prefix (open-forms),
    innermost first, or None when open-forms is.  Appended to prefix, they
    make a mid-edit buffer parse up to the cursor.  literals: close an open
    f/t-string too (its fields' }, its quote), for a reader of the forms
    inside a field; the cursor view never asks for it, its text must
-   compile to the Python the buffer means."
-  (= stack (open-forms prefix :literals literals))
+   compile to the Python the buffer means.  tokens: as open-forms."
+  (= stack (open-forms prefix :literals literals :tokens tokens))
   (if (is stack None)
       (return None))
   (return (.join "" (reversed [(sub entry 1) for entry in stack]))))
@@ -218,19 +222,71 @@
 ;; word spelling a Python name) is the reader's (completion-word-span,
 ;; word-parts in core/parser.py), never a character table of its own.
 
-(def partial-span [text col]
-  "The partial word at code-point column col of line text, as view-at-cursor
-   reads it: (start, end), the reader's word from after its last dot before
-   col through to the next dot after col or the token's end
-   (completion-word-span's replace-start..end)."
-  (= [_ start end] (completion-word-span text col))
+(def _caret-line [source line col]
+  "(text, col, before) of the caret at the 1-based line and code-point col
+   of source: the line's text, col clamped to it, and the source before the
+   line; None for a line past source.  The one home of the arguments of a
+   caret read (word-span, code-symbol-p), so both ask caret_context the same
+   question and a request lexes the text before the caret once."
+  (= lines (split-lines source))
+  (if (not (<= 1 line (len lines)))
+      (return None))
+  (= text (sub lines (- line 1)))
+  (= line-start ((source-offset source) line 0))
+  (return (, text (min col (len text)) (sub source [: line-start]))))
+
+(def word-span [source line col]
+  "completion-word-span's (start, replace-start, end) at the 1-based line and
+   code-point col of source (clamped to the line), the caret's context read
+   from the start of source; None in a string's or comment's text, where no
+   word is typed.  The one LSP caller of completion-word-span for a caret
+   (a node's position, _lpy-name-span, is read with no scan)."
+  (= caret (_caret-line source line col))
+  (if (is caret None)
+      (return (completion-word-span "" 0 source)))
+  (return (completion-word-span *caret)))
+
+(def caret-tokens [source line col]
+  "The tokens of the text of source before the 1-based line and code-point
+   col (caret_tokens): source-prefix's tokens, out of word-span's lexer
+   pass (_caret-line), so a reader of both lexes that text once; past the
+   last line, all of source's, read as word-span reads it there."
+  (= caret (_caret-line source line col))
+  (if (is caret None)
+      (return (caret-tokens-of "" 0 source)))
+  (return (caret-tokens-of *caret)))
+
+(def code-symbol-p [source line col]
+  "Whether the text of source before the 1-based line and code-point col
+   ends in a symbol the reader reads there (caret-symbol-p: the token of
+   code ending at or holding the cursor is a symbol): code, never a string
+   literal or comment, whose text the reader gives no symbol.  A field of
+   an f/t string is code, read as such; a text the lexer refuses before the
+   cursor (an unterminated f/t-string there) holds none.  It shares
+   word-span's lexer pass (_caret-line)."
+  (= caret (_caret-line source line col))
+  (return (and (is-not caret None) (caret-symbol-p *caret))))
+
+(def partial-span [source line col]
+  "The partial word at the 1-based line and code-point col of source, as
+   view-at-cursor reads it: (start, end), the reader's word from after its
+   last dot before col through to the next dot after col or the token's end
+   (word-span's replace-start..end); None where no word is typed."
+  (= span (word-span source line col))
+  (if (is span None)
+      (return None))
+  (= [_ start end] span)
   (return (, start end)))
 
-(def glued-base [text col]
-  "The dotted name written glued to the dot before the word at code-point
-   column col of line text (a.b for a.b.c|), or None when no dot is there
-   or no name runs into it (x .c, (.c x), a..c)."
-  (= [start replace-start _] (completion-word-span text col))
+(def glued-base [source line col]
+  "The dotted name written glued to the dot before the word at the 1-based
+   line and code-point col of source (a.b for a.b.c|), or None when no dot
+   is there, no name runs into it (x .c, (.c x), a..c) or no word is typed."
+  (= span (word-span source line col))
+  (if (is span None)
+      (return None))
+  (= [start replace-start _] span)
+  (= text (sub (split-lines source) (- line 1)))
   (= base (sub text [: start (max start (- replace-start 1))]))
   (if (or (not base) (in "" (.split base ".")))
       (return None))
@@ -390,17 +446,19 @@
    node with it, a method call (.ff x) starts it right after the dot, a
    keyword parameter after its colon, and a macro may put anything there;
    so each place is tried and the one that spells name (_spells-p) wins.  span
-   lies inside lines (_in-buffer-p)."
+   lies inside lines (_in-buffer-p).  The words are read with no context scan
+   (completion-word-span's before None): the node is code the reader read,
+   and a scan of the buffer per node would make the map quadratic."
   (= [[line col] [end-line end-col]] span)
   (= text (sub lines (- line 1)))
   (if (and (== line end-line) (_spells-p (sub text [: col end-col]) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))
-  (= start (sub (completion-word-span end-text end-col) 1))
+  (= start (sub (completion-word-span end-text end-col None) 1))
   (if (and (< start end-col) (_spells-p (sub end-text [: start end-col]) name))
       (return (, (, end-line start) (, end-line end-col))))
   (= start (ife (and (< col (len text)) (in (sub text col) ".:")) (+ col 1) col))
-  (= end (sub (completion-word-span text start) 2))
+  (= end (sub (completion-word-span text start None) 2))
   (if (and (< start end) (_spells-p (sub text [: start end]) name))
       (return (, (, line start) (, line end))))
   (return None))
@@ -969,9 +1027,10 @@
 (def marked-source [source line col]
   "(marked, word-start, start, end, partial) at 1-based line, code-point col
    of source, or None when that is outside it: marked is source with the
-   word at the cursor (completion-word-span's start..end on that line, the
-   rest of the word after the caret included) replaced by CURSOR-SENTINEL,
-   partial the word as typed up to the caret.  The one home of that
+   word at the cursor (word-span's start..end on that line, the rest of the
+   word after the caret included; none, empty at col, in a string's or
+   comment's text) replaced by CURSOR-SENTINEL, partial the word as typed up
+   to the caret.  The one home of that
    replacement: the cursor view compiles marked, and the buffer's
    definitions are read off it (buffer-definition-names in server.lpy), so
    neither takes the word being typed for a name the buffer has."
@@ -981,7 +1040,7 @@
   (= text (sub lines (- line 1)))
   (if (not (<= 0 col (len text)))
       (return None))
-  (= [word-start start end] (completion-word-span text col))
+  (= [word-start start end] (or (word-span source line col) (, col col col)))
   (= marked (+ (source-prefix source line start) CURSOR-SENTINEL
                (sub source [: (len (source-prefix source line end)) None])))
   (return (, marked word-start start end (sub text [: start col]))))

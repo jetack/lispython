@@ -105,8 +105,16 @@ follows [Semantic Versioning](https://semver.org/).
   unmatched `}`), and `x{` is an unclosed `{` (it was the symbol `x{`). A
   `{` never glues to the name before it. A number ends at `{` too: `1{2}` is
   the number `1` then `{2}`. The word boundary spec
-  (`python -m lispy.word_boundary`) is version 4: `{` is in `stopChars`, and
-  the new `numberEndChars` field is what may follow a number token.
+  (`python -m lispy.word_boundary`) has `{` in `stopChars`, and its
+  `numberEndChars` field is what may follow a number token.
+- The completion word is read in the caret's context, from the start of
+  the text: no word is typed in a string's, f-string literal's or format
+  spec's text, a conversion or a comment, and there the LSP offers no
+  completion (it offered every form, macro and builtin); in an f/t-string
+  field the word is the field's own token. The word boundary spec is
+  version 6: its input is the text before the caret's line plus that line,
+  a case may span lines (`before`), its bounds are null where there is no
+  word, and its rule publishes the reader's field and string-body pieces.
 - nREPL: an eval's output is captured per thread, no longer by swapping
   `sys.stdout` for the whole process. Output of a thread the evaluated code
   starts now goes to the server's own stdout/stderr, plain evals included,
@@ -327,6 +335,12 @@ follows [Semantic Versioning](https://semver.org/).
   (`f"ab{wi`, `f"{x:>{wi`, `f"{a}b{c`) completes the field's name: the word
   no longer runs back through the field's `{` into the text or spec before
   it, in the LSP and in every editor following the word boundary spec.
+- Completion in an f-string field before a conversion, a format spec or a
+  debug `=` (`f"{x|!r}"`, `f"{x|:>10}"`, `f"{x|=}"`, an `=` ending its line
+  included), on any line of a multi-line literal and after an error on an
+  earlier line, replaces the field's name only: it ate `!r`, `:>10` or
+  `=`. A string closed just before the caret (`'''a-b'''|`) is no longer
+  read as part of the word.
 - LSP: go-to-definition without a backend resolves a relative module, of a
   `require` or a `from`, as Python does: in the document's package, never
   beyond its top-level package, and not at all for a buffer with no file.

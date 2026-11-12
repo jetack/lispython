@@ -20,11 +20,11 @@ from lsprotocol import types as lsp
 
 import lispy.macros
 from lispy import form_docs
-from lispy.core import nodes
+from lispy.core import nodes, parser
 from lispy.core.compiler import features, literal
 from lispy.core.compiler.utils import FORM_USAGE, HEADLESS_FORMS
 from lispy.core.macro import macroexpand_then_compile
-from lispy.core.parser import parse
+from lispy.core.parser import parse, tokenize
 
 # lispy.lsp re-exports the server *object* as ``server``; take the module.
 server = importlib.import_module("lispy.lsp.server")
@@ -1332,6 +1332,132 @@ def test_local_completion_tags_special_forms_in_label_details_not_detail():
     assert items["ife"].detail is None
 
 
+@pytest.mark.parametrize(
+    "marked",
+    [
+        "; call fo|",
+        '(print "say fo| x")',
+        '(print f"{foo!r|}")',
+        'f"""\n  text fo| {x}\n"""',
+    ],
+)
+def test_completion_offers_nothing_in_a_strings_or_comments_text(marked):
+    # Defect: the caret in a string's, comment's or conversion's text is
+    # taken for an empty word (or for the word fo), so every form, macro and
+    # builtin is offered while the user writes prose. The same word in code
+    # is answered, so the empty list is the text's, not the handler's.
+    at = marked.index("|")
+    source = marked[:at] + marked[at + 1 :]
+    line = marked[:at].count("\n")
+    col = at - (marked.rfind("\n", 0, at) + 1)
+    answer = run_completion(ls_with(source), position(line, col))
+    assert answer.is_incomplete and answer.items == []
+    code = run_completion(ls_with("(print fo"), position(0, 9))
+    assert "format" in {item.label for item in code.items}
+
+
+def _marked_caret(marked):
+    """(source, 1-based line, col) of the | in marked."""
+    at = marked.index("|")
+    line = marked[:at].count("\n") + 1
+    return marked[:at] + marked[at + 1 :], line, at - (marked.rfind("\n", 0, at) + 1)
+
+
+@pytest.mark.parametrize(
+    ("marked", "expected"),
+    [
+        ("(mod.|", True),
+        ("(1.|", False),
+        ("1.|", False),
+        ("(mod.ma|cro x)", True),
+        ('(mod.|"x")', True),
+        ("(mod.| ; a comment", True),
+        ('"mod.|"', False),
+        ("; mod.|", False),
+        ("(print 1) ; mod.|", False),
+        ('f"{mod.|}"', True),
+        ('t"{(g mod.|)}"', True),
+        ('f"{x:{mod.|}}"', True),
+        ('f"""\n{mod.|\n}"""', True),
+        ('f"text mod.|', False),
+        ('(= s f"{=}")\n(mod.|)', False),
+    ],
+)
+def test_code_symbol_p_reads_the_caret_as_the_text_before_it_lexes(marked, expected):
+    # Defects: the caret's symbol is read from the caret_context pass, so a
+    # token holding the caret (mod.ma|cro) or ending at it is missed, a
+    # string's or comment's text counts as code, a field is not code, or the
+    # line-alone reading after an earlier lexer error lets mod.| through.
+    # Each answer is the one the text before the caret, lexed alone with its
+    # comments, gives (its last token a symbol ending at the caret).
+    source, line, col = _marked_caret(marked)
+    assert pv.code_symbol_p(source, line, col) is expected
+    tokens = tokenize(pv.source_prefix(source, line, col), comments=True)
+    [_, tktype, end, _] = tokens[-1]
+    lexed_alone = tktype == "symbol" and (end["end_lineno"], end["end_col_offset"])
+    assert (lexed_alone == (line, col)) is expected
+
+
+@pytest.mark.parametrize(
+    ("marked", "reader"),
+    [("(os.pa|)", "code_symbol_p"), ("(pri|)", "attribute_context_p")],
+)
+def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, reader):
+    # Defect: a completion lexes the whole text before the caret twice, once
+    # for the word's context (caret_context) and again for the qualified
+    # base's code check (at mod.|) or for the forms open at the caret
+    # (attribute-context-p's open-form-closers, at any word), doubling the
+    # per-keystroke cost of a long buffer. Every lexer pass over that text
+    # is counted, the caret caches emptied first so their one pass is this
+    # request's; reader is the second reader of that text, which the request
+    # must reach.
+    source, line, col = _marked_caret(f"(import os)\n{marked}\n(print 1)\n")
+    prefix = pv.source_prefix(source, line, col)
+    passes = []
+    run = parser._Lexer.run
+
+    def counted(lexer):
+        if lexer.stop is not None or lexer.src == prefix:
+            passes.append(lexer.stop)
+        return run(lexer)
+
+    reads = []
+    read = getattr(server, reader)
+
+    def recorded(*args, **kwargs):
+        reads.append(args)
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(parser._Lexer, "run", counted)
+    monkeypatch.setattr(server, reader, recorded)
+    parser.caret_context.cache_clear()
+    parser._caret_lexer.cache_clear()
+    run_completion(ls_with(source), position(line - 1, col))
+    assert reads, f"the request never reached {reader}"
+    assert passes == [len(prefix)]
+
+
+def test_open_forms_past_the_last_line_reuse_the_word_spans_pass(monkeypatch):
+    # Defect: at a line past the source's end (an unclamped position, which
+    # word-span reads as the end of the source), attribute-context-p's open
+    # forms tokenize all of the source again, though word-span's pass there
+    # already lexed it. The two run in this order in a completion.
+    source = "(import os)\n(pri"
+    passes = []
+    run = parser._Lexer.run
+
+    def counted(lexer):
+        passes.append((lexer.src, lexer.stop))
+        return run(lexer)
+
+    monkeypatch.setattr(parser._Lexer, "run", counted)
+    parser.caret_context.cache_clear()
+    parser._caret_lexer.cache_clear()
+    assert pv.word_span(source, 5, 0) is not None
+    server.attribute_context_p(source, 5, 0)
+    assert [stop for text, stop in passes if text == source] == [len(source)]
+
+
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
     items = server.general_items(SimpleNamespace(source="", uri=URI))
     macros = {
@@ -1745,7 +1871,7 @@ def test_the_cursor_word_is_the_word_its_view_restores(line):
         if word is None:
             continue
         start, end, _ = word
-        assert (start, end) == pv.partial_span(line, end), col
+        assert (start, end) == pv.partial_span(line, 1, end), col
     assert server.cursor_word(doc, 1, len(line) - 1) is not None
 
 
