@@ -9,11 +9,11 @@ counting UTF-16 units converts (the astral case is there for it).
 
 Every character set and pattern in the rule is read off the reader's own
 patterns and tables, never written here; a pattern is Python ``re`` syntax
-over str (``\\d``, ``\\w`` and ``\\s`` are Unicode as the running
-Python's own tables define them; each CPython release ships its own Unicode
-version, so the spec names none and a client approximates the classes with
-its own engine's tables). No pygls or lsprotocol
-import: this runs wherever lispython does.
+over str (``\\d``, ``\\w`` and ``\\s`` are Unicode as the running Python's
+own tables define them; the Unicode version varies by CPython release, so the
+spec names none, and a client approximates ``\\w`` and ``\\d`` with its own
+engine's tables). No pygls or lsprotocol import: this runs wherever
+lispython does.
 """
 
 import itertools
@@ -247,7 +247,7 @@ def spec():
         "columns": "code points",
         "patterns": "Python re syntax over str: \\d, \\w and \\s are Unicode "
         "as the running Python's tables define them (\\w holds 한, \\d holds ١); "
-        "a client approximates them with its own engine's tables",
+        "a client approximates \\w and \\d with its own engine's tables",
         "rule": rule(),
         "cases": [case(marked) for marked in CASE_INPUTS],
     }
