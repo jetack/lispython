@@ -376,11 +376,11 @@ def rule():
             "the next one), and the scan resumes at the refusal's end, or where "
             "it last resumed when that is later, in the innermost literal "
             "the stack then holds (the next one out when a literal was "
-            "dropped; code mode when none is left). A "
-            "refusal that ends at or before where the scan last resumed (none "
-            "does today) drops the innermost literal kept as well, with the "
-            "fields above the next one, so the scan always ends: each "
-            "resumed pass moves forward or holds fewer literals",
+            "dropped; code mode when none is left). Any "
+            "other refusal that ends at or before where the scan last "
+            "resumed (none does today) drops the innermost literal kept as "
+            "well, with the fields above the next one, so the scan always "
+            "ends: each resumed pass moves forward or holds fewer literals",
             "code, field and bracket mode: find the next token with the mode's "
             "patterns (a character no pattern matches is skipped); none, or "
             "one starting at or after the caret, stops the scan in the mode. "
