@@ -3024,19 +3024,18 @@
    view directory, the same settings with that environment's search paths,
    and a nested one no environment has any more is removed.
    file-environments is unused: pyrefly's documented limit is that a
-   sub-config refuses search-path, so a file-link script takes its
-   directory's list: a root-level script linked out of the project gets the
-   default list, a link beside plain scripts takes theirs, a directory of
-   only link scripts takes the first link's, which is wrong for any link
-   that searches elsewhere; each is a false unresolved import under pyrefly
-   only (the backend's analysis alone: the link script's own lispython
-   compile still searches its own directories). No config shape fixes it (a directory has one list, and a union of
-   runs is forbidden). When
+   sub-config refuses search-path, so a file-link script takes its directory's
+   list: a root-level script linked out of the project gets the default list,
+   a link beside plain scripts takes theirs, a directory of only link scripts
+   takes the first link's, which is wrong for any link that searches
+   elsewhere; each is a false unresolved import under pyrefly only (the
+   backend's analysis alone: the link script's own lispython compile still
+   searches its own directories).  No config shape fixes it (a directory has
+   one list, and a union of runs is forbidden).  When
    test_pyrefly_takes_search_path_from_a_directory_config_only fails, write
-   file-environments as [[sub-config]] search-path entries.  A view root
-   that overlaps the project is a ValueError; the writes hold the view
-   root's lock.  Returns the root file's path (config-files lists them
-   all)."
+   file-environments as [[sub-config]] search-path entries.  A view root that
+   overlaps the project is a ValueError; the writes hold the view root's lock.
+   Returns the root file's path (config-files lists them all)."
   (_refuse-overlap project-root view-root)
   (= project-root (osp.abspath project-root))
   (= root (osp.abspath (os.fspath view-root)))
