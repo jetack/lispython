@@ -373,7 +373,11 @@ def rule():
             "literal (the fields above it are dropped; a bareQuote refusal of "
             "an escaped literal drops that literal too, with the fields above "
             "the next one), and the scan resumes in that literal's text at the "
-            "refusal's end, or where it last resumed when that is later",
+            "refusal's end, or where it last resumed when that is later. A "
+            "refusal that ends at or before where the scan last resumed (none "
+            "does today) drops the innermost literal kept as well, with the "
+            "fields above the next one, so the scan always ends: each "
+            "resumed pass moves forward or holds fewer literals",
             "code, field and bracket mode: find the next token with the mode's "
             "patterns (a character no pattern matches is skipped); none, or "
             "one starting at or after the caret, stops the scan in the mode. "
