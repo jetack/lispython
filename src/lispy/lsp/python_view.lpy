@@ -1809,6 +1809,59 @@
       (return None))
   (return (osp.normpath (osp.join (os.fspath view-root) rel))))
 
+;; The view root's directory of shadows of directories outside the project
+;; that a module of it searches: proj/scripts/t.lpy -> /out/t.lpy runs with
+;; sys.path[0] /out, whose .lpy modules the backend can resolve only as
+;; shadows.  A dot name, so neither a package overlay nor a mirror links a
+;; project entry there (_pruned-p), and _view-own-files reserves it besides.
+(= _OUTSIDE-DIR ".outside")
+
+(def outside-view-dir [root directory]
+  "directory's counterpart under view root root's _OUTSIDE-DIR: its
+   absolute path below it with the anchor stripped (a Windows drive kept as
+   its letter, a UNC share as UNC/server/share).  Derived from the path
+   alone, so a file's shadow lies at one place whichever outside directory's
+   walk reached it, and outside-path inverts it without state."
+  (= [drive rest] (osp.splitdrive (osp.abspath directory)))
+  (= parts [(osp.join (os.fspath root) _OUTSIDE-DIR)])
+  (cond (.endswith drive ":")
+        (.append parts (sub drive [: -1]))
+        drive
+        (.extend parts (+ ["UNC"] (.split (.strip drive os.sep) os.sep))))
+  (return (osp.normpath (osp.join *parts (.lstrip rest os.sep)))))
+
+(def outside-path [root path]
+  "The path outside the project whose counterpart under view root root
+   (outside-view-dir) is path, or None when path is not below root's
+   _OUTSIDE-DIR."
+  (= rel (osp.relpath path (osp.join (os.fspath root) _OUTSIDE-DIR)))
+  (if (or (== rel os.curdir) (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))
+      (return None))
+  (if (!= os.name "nt")
+      (return (+ os.sep rel)))
+  (= [head *tail] (.split rel os.sep))
+  (if (== head "UNC")
+      (return (+ os.sep os.sep (.join os.sep tail))))
+  (return (+ head ":" os.sep (.join os.sep tail))))
+
+(def _outside-dir-p [project-root directory]
+  "Whether directory lies outside project-root and does not hold it: one
+   the view gives shadows of its own (outside-view-dir).  An import root
+   holding the project (the project inside a package) is no such directory:
+   the view mirrors the project's part of it."
+  (= up (osp.relpath project-root directory))
+  (return (and (_outside-p project-root directory)
+               (or (== up os.pardir) (.startswith up (+ os.pardir os.sep))))))
+
+(def _outside-view [project-root root directory]
+  "outside-view-dir of directory when it is an _outside-dir-p directory of
+   project-root and that view directory exists (the sweep wrote shadows of
+   directory there), else None."
+  (if (not (_outside-dir-p project-root directory))
+      (return None))
+  (= view-dir (outside-view-dir root directory))
+  (return (ife (osp.isdir view-dir) view-dir None)))
+
 (def project-import-roots [project-root]
   "The search roots a project's modules are imported from: the project
    root and its src directory (the src layout).  The one home of that
@@ -2076,7 +2129,8 @@
   ;; run's sys.path[0] is, by its own directory's spelling when that is the
   ;; same directory (scripts -> /out/scripts).  The backend's list spells a
   ;; directory outside the project by a project directory when one is the
-  ;; same (_environments).
+  ;; same (_environments), else searches the shadows the sweep writes of it
+  ;; (outside-view-dir).
   (= real-directory (osp.dirname (osp.realpath lpy-path)))
   (= script-dir (ife (== (osp.realpath directory) real-directory) directory real-directory))
   (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root script-dir)]
@@ -2349,7 +2403,12 @@
 (def write-shadows [project-root view-root :manifest None :open-paths (,)]
   "Write a compiled shadow .py into view-root for every .lpy under
    project-root (project-sources), mirroring the project's layout, so
-   imports between .lpy modules resolve for the backend.  The manifest's
+   imports between .lpy modules resolve for the backend; and for every .lpy
+   under each search dir of those modules or of open-paths that lies
+   outside the project, holds no part of it and has no project spelling
+   (a script link's real directory), under its outside-view-dir, which
+   that directory's packages and import roots are overlaid and mirrored
+   into as the project's are into the view root.  The manifest's
    environments come from the sources with a shadow and from open-paths,
    the absolute paths of the documents open in the backend, on disk or
    not, compiled or not (_environments).  A shadow is written only when
@@ -2396,7 +2455,9 @@
    spellings (real path -> the first directory of the project's sources
    that is it) is spelled as that project directory, which the view mirrors with shadows: scripts/a.lpy ->
    /out/lib/a.lpy, with lib -> /out/lib, searches lib/, the run's
-   sys.path[0] /out/lib by another name.  environments:
+   sys.path[0] /out/lib by another name; any other outside dir keeps its
+   spelling, and its own shadows (outside-view-dir) are searched before it
+   (_search-paths).  environments:
    environment root (_module-environment) -> the search dirs of the
    modules it is the root of, sorted by root.  Only the modules whose
    first search dir is the root (a package module, a script searching its
@@ -2486,58 +2547,56 @@
     (= self.written written)
     (= self.removed removed)))
 
+(def _shadow-source [root manifest macro-epoch lpy-path shadow names shadows written]
+  "Bring the shadow at shadow, in view root root, of the source lpy-path,
+   of module-names names, up to date for _write-shadows: kept when the
+   manifest's entry still holds (same stamp, names and macro epoch), else
+   compiled and written when its text changed (written gets it); added to
+   shadows (shadow -> lpy-path) when it is current, its entry stored in the
+   manifest when the source compiled or failed to."
+  (try
+    (= st (os.stat lpy-path))
+    (= stamp (, st.st_mtime_ns st.st_size))
+    (= known (.get manifest.sources lpy-path))
+    (if (and (is-not known None) (== (sub known 0) stamp) (== (sub known 1) names)
+             (is-not macro-epoch None) (== (sub known 3) macro-epoch)
+             (or (not (sub known 2)) (_shadow-file-p root shadow)))
+        (do (if (sub known 2)
+                (= (sub shadows shadow) lpy-path))
+            (return)))
+    (.pop manifest.sources lpy-path None)
+    (with [(open lpy-path "r" :encoding "utf-8") as f]
+      (= source (.read f)))
+    ;; A source gone since the walk loses its shadow; one that cannot be
+    ;; read now (permissions, a busy network mount) keeps the one it has,
+    ;; which was its text when it last could be.
+    (except [OSError as e]
+      (.warning logger "lispython view: cannot read %s: %s" lpy-path e)
+      (if (and (not (isinstance e FileNotFoundError)) (_shadow-file-p root shadow))
+          (= (sub shadows shadow) lpy-path))
+      (return))
+    (except [ValueError as e]
+      (.warning logger "lispython view: no shadow for %s: %s" lpy-path e)
+      (return)))
+  (try
+    (= compiled (compile-buffer source :name (sub names 0) :package (sub names 1)
+                                :search-dirs (sub names 3)))
+    (= view compiled.view)
+    (if (is-not view None)
+        (do (_real-view-dir root (osp.dirname shadow))
+            (if (_write-if-changed root shadow view.text)
+                (.append written shadow))
+            (= (sub shadows shadow) lpy-path)))
+    (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
+    (except [OSError as e]
+      (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
+
 (def _write-shadows [project-root root manifest open-paths]
   "write-shadows' sweep, under the view root's lock."
   (= sources (project-sources project-root))
-  (= current (set sources))
-  ;; None: a drop is due, so every entry is stale.
-  (= macro-epoch (epoch))
-  (for path in (list manifest.sources)
-    (if (not (in path current))
-        (del (sub manifest.sources path))))
   (= names-of {})
-  (= shadows {})
-  (= written [])
   (for lpy-path in sources
-    (= shadow (view-path project-root root lpy-path))
-    (= names (module-names lpy-path :project-root project-root))
-    (= (sub names-of lpy-path) names)
-    (try
-      (= st (os.stat lpy-path))
-      (= stamp (, st.st_mtime_ns st.st_size))
-      (= known (.get manifest.sources lpy-path))
-      (if (and (is-not known None) (== (sub known 0) stamp) (== (sub known 1) names)
-               (is-not macro-epoch None) (== (sub known 3) macro-epoch)
-               (or (not (sub known 2)) (_shadow-file-p root shadow)))
-          (do (if (sub known 2)
-                  (= (sub shadows shadow) lpy-path))
-              (continue)))
-      (.pop manifest.sources lpy-path None)
-      (with [(open lpy-path "r" :encoding "utf-8") as f]
-        (= source (.read f)))
-      ;; A source gone since the walk loses its shadow; one that cannot be
-      ;; read now (permissions, a busy network mount) keeps the one it has,
-      ;; which was its text when it last could be.
-      (except [OSError as e]
-        (.warning logger "lispython view: cannot read %s: %s" lpy-path e)
-        (if (and (not (isinstance e FileNotFoundError)) (_shadow-file-p root shadow))
-            (= (sub shadows shadow) lpy-path))
-        (continue))
-      (except [ValueError as e]
-        (.warning logger "lispython view: no shadow for %s: %s" lpy-path e)
-        (continue)))
-    (try
-      (= compiled (compile-buffer source :name (sub names 0) :package (sub names 1)
-                                  :search-dirs (sub names 3)))
-      (= view compiled.view)
-      (if (is-not view None)
-          (do (_real-view-dir root (osp.dirname shadow))
-              (if (_write-if-changed root shadow view.text)
-                  (.append written shadow))
-              (= (sub shadows shadow) lpy-path)))
-      (= (sub manifest.sources lpy-path) (, stamp names (is-not view None) compiled.epoch))
-      (except [OSError as e]
-        (.warning logger "lispython view: no shadow for %s: %s" lpy-path e))))
+    (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root)))
   (for lpy-path in open-paths
     (if (not-in lpy-path names-of)
         (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root))))
@@ -2545,29 +2604,83 @@
   (for lpy-path in sources
     (= directory (osp.dirname lpy-path))
     (.setdefault spellings (osp.realpath directory) directory))
+  ;; A search dir outside the project with no project spelling (the real
+  ;; directory /out of a script link scripts/t.lpy -> /out/t.lpy, which its
+  ;; run puts on sys.path[0]) gets shadows of its own .lpy modules under
+  ;; outside-view-dir, compiled as the project's are, so the backend
+  ;; resolves the (import sib) of /out/sib.lpy that the run does.  An import
+  ;; root holding the project stays out, as _search-paths leaves it out.
+  ;; Every sweep re-stats these sources (the manifest's stamps), as no file
+  ;; event comes from outside the workspace.
+  (= bases [(, project-root root sources)])
+  (= outside-names {})
+  (for names in (list (.values names-of))
+    (for directory in (sub names 3)
+      (= directory (osp.normpath (osp.abspath directory)))
+      (if (and (_outside-dir-p project-root directory)
+               (not-in (osp.realpath directory) spellings)
+               (not (any ((== directory (sub base 0)) for base in bases))))
+          (do (= found (project-sources directory))
+              (.append bases (, directory (outside-view-dir root directory) found))
+              (for lpy-path in found
+                (if (not-in lpy-path names-of)
+                    (= (sub outside-names lpy-path)
+                       (module-names lpy-path :project-root project-root))))))))
+  (.update names-of outside-names)
+  (= current (| (set sources) (set outside-names)))
+  ;; None: a drop is due, so every entry is stale.
+  (= macro-epoch (epoch))
+  (for path in (list manifest.sources)
+    (if (not (in path current))
+        (del (sub manifest.sources path))))
+  (= shadows {})
+  (= written [])
+  ;; lpy path -> its shadow; a file under two outside dirs (/out and
+  ;; /out/sub) has one, since outside-view-dir derives from the path alone.
+  (= shadow-of {})
+  (for [base-root base-view found] in bases
+    (for lpy-path in found
+      (if (not-in lpy-path shadow-of)
+          (do (= (sub shadow-of lpy-path) (view-path base-root base-view lpy-path))
+              (_shadow-source root manifest macro-epoch lpy-path (sub shadow-of lpy-path)
+                              (sub names-of lpy-path) shadows written)))))
   (= [manifest.environments manifest.file-environments]
      (_environments project-root
                     (+ [(, lpy-path (sub names-of lpy-path)) for lpy-path in (.values shadows)]
                        [(, lpy-path (sub names-of lpy-path))
                         for lpy-path in (sorted open-paths)])
                     spellings))
-  (= packages (set))
-  (= module-dirs (set))
-  (for lpy-path in (.values shadows)
-    (= import-root (sub (sub names-of lpy-path) 2))
-    (= directory (osp.dirname (osp.abspath lpy-path)))
-    ;; module-dirs: every import root with a shadow, whose other modules
-    ;; are linked in (_mirror-py-files).
-    (.add module-dirs import-root)
-    (if (!= directory import-root)
-        (.add packages (_top-package project-root import-root directory))))
   (= reserved (_view-own-files project-root root manifest.environments))
-  (= source-dirs (_source-dirs project-root sources))
   (= links (set))
-  (for package in (sorted packages)
-    (_overlay-package project-root root package source-dirs shadows links reserved))
-  (for directory in (sorted module-dirs)
-    (_mirror-py-files project-root root directory shadows links reserved))
+  ;; Each base (the project, then each outside dir) overlays its packages
+  ;; and mirrors its import roots into its own view directory, with that
+  ;; directory as the root every write is checked against.
+  (for [base-root base-view found] in bases
+    (= packages (set))
+    (= module-dirs (set))
+    (for lpy-path in found
+      (if (not-in (sub shadow-of lpy-path) shadows)
+          (continue))
+      (= import-root (sub (sub names-of lpy-path) 2))
+      (= directory (osp.dirname (osp.abspath lpy-path)))
+      ;; module-dirs: every import root with a shadow, whose other modules
+      ;; are linked in (_mirror-py-files).
+      (.add module-dirs import-root)
+      (if (!= directory import-root)
+          (.add packages (_top-package base-root import-root directory))))
+    (if (not module-dirs)
+        (continue))
+    (if (!= base-view root)
+        (try
+          (_real-view-dir root base-view)
+          (except [OSError as e]
+            (.warning logger "lispython view: cannot mirror %s: %s" base-root e)
+            (continue))))
+    (= source-dirs (_source-dirs base-root found))
+    (for package in (sorted packages)
+      (_overlay-package base-root base-view package source-dirs shadows links reserved))
+    (for directory in (sorted module-dirs)
+      (_mirror-py-files base-root base-view directory shadows links reserved)))
   (= removed (_sweep-orphans root shadows links))
   (return (ShadowSweep (sorted shadows) (sorted written) (sorted removed))))
 
@@ -2682,11 +2795,11 @@
    project-root (both absolute).  The dirs searched are dirs alone, in
    their order, so the backend resolves what the module's compile does,
    each once; an import root above the project (the project lying inside
-   a package) is left out, while another directory outside it (the real
-   directory of a script linked out of the project) is searched as
-   itself, so the backend resolves only its .py modules: the view mirrors
-   the project alone, and its .lpy modules have no shadow.  First the view counterpart of each inside the project, so `import pkg` finds
-   the shadows before any real directory of uncompiled .lpy; then each
+   a package) is left out.  First the view counterpart of each: inside
+   the project its _view-dir, outside it (the real directory of a script
+   linked out of the project) its outside-view-dir when the sweep gave it
+   shadows (_outside-view), so `import pkg` finds the shadows before any
+   real directory of uncompiled .lpy; then each
    real directory, so what the view lacks of one still resolves: its
    namespace packages, its extension modules and, whole, a package of it
    that holds a nested import root (_mirror-py-files links every other
@@ -2709,6 +2822,8 @@
                  (not (or (== up os.pardir) (.startswith up (+ os.pardir os.sep))))))
         (continue))
     (.append kept directory)
+    (if (is None view-dir)
+        (= view-dir (_outside-view project-root root directory)))
     (if (is-not view-dir None)
         (.append views view-dir)))
   (= paths (+ views
@@ -2721,7 +2836,9 @@
   "The search environments of view root root besides its default list:
    (view directory, search paths) for each environment root of
    environments (ShadowManifest.environments) inside the project other
-   than the project root, with the search paths of its search dirs
+   than the project root, or outside it with shadows (_outside-view: an
+   outside dir's own modules, /out/sib.lpy searching /out), with the
+   search paths of its search dirs
    (_search-paths): scripts/x.lpy searches scripts/ first, as
    `lpy scripts/x.lpy` does, and no module outside scripts/ searches it.
    Then (view file, search paths) for each module of files
@@ -2741,7 +2858,8 @@
    pyrefly's nested pyrefly.toml)."
   (= found [])
   (for [env-root dirs] in (.items (or environments {}))
-    (= view-dir (_view-dir project-root root env-root))
+    (= view-dir (or (_view-dir project-root root env-root)
+                    (_outside-view project-root root env-root)))
     (if (and (is-not view-dir None) (!= env-root project-root))
         (.append found (, view-dir (_search-paths project-root root dirs)))))
   (for [lpy-path dirs] in (.items (or files {}))
@@ -2753,10 +2871,13 @@
 
 (def _view-own-files [project-root root environments]
   "The view's own files, which no shadow writer links over or removes: the
-   view root's (_ROOT-FILES) and the nested pyrefly.toml of each search
-   environment (search-environments), which a project file of that name
-   in an overlaid package would otherwise replace."
+   view root's (_ROOT-FILES), its directory of outside shadows
+   (_OUTSIDE-DIR), and the nested pyrefly.toml of each search environment
+   (search-environments), which a project file of that name in an
+   overlaid package (a project inside a package overlays the project root)
+   would otherwise replace."
   (return (frozenset (+ [(osp.join root name) for name in _ROOT-FILES]
+                        [(osp.join root _OUTSIDE-DIR)]
                         [(osp.join view-dir PYREFLY-CONFIG)
                          for [view-dir _] in (search-environments project-root root
                                                                   environments)]))))

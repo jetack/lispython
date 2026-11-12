@@ -2335,10 +2335,113 @@ def test_a_script_file_linked_out_searches_its_real_directory(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
+    # /out holds t.lpy, so its own shadows are searched before it.
+    outside = pv.outside_view_dir(str(view), str(out))
+    assert (pathlib.Path(outside) / "helper.py").resolve() == out / "helper.py"
     assert environment_search_paths(client) == {
-        str(view / "scripts" / "t.py"): [str(out)],
-        str(view / "scripts"): [str(out)],
+        outside: [outside, str(out)],
+        str(view / "scripts" / "t.py"): [outside, str(out)],
+        str(view / "scripts"): [outside, str(out)],
     }
+
+
+def test_a_script_file_linked_out_gets_shadows_of_its_real_directory(tmp_path):
+    # Defect: /out, the real directory of proj/scripts/t.lpy -> /out/t.lpy
+    # and its run's sys.path[0], is searched as itself, where sib.lpy has
+    # no .py, so the backend reports the (import sib) the run resolves.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    outside = pathlib.Path(pv.outside_view_dir(str(view), str(out)))
+    assert (outside / "sib.py").read_text() == "s = 1"
+    envs = environment_search_paths(client)
+    for env in [view / "scripts" / "t.py", view / "scripts"]:
+        assert envs[str(env)][:2] == [str(outside), str(out)]
+    # A sweep with nothing outside left removes the outside shadows.
+    (proj / "scripts" / "t.lpy").unlink()
+    client._prepare_view_root([])
+    assert not (view / ".outside").exists()
+
+
+def test_a_package_outside_the_project_is_overlaid_into_its_view(tmp_path):
+    # Defect: a regular package /out/pkg beside a script linked out of the
+    # project is no package in the view, so the backend misses pkg.m.
+    out = tmp_path / "out"
+    (out / "pkg").mkdir(parents=True)
+    (out / "pkg" / "__init__.py").write_text("")
+    (out / "pkg" / "m.lpy").write_text("(= m 1)\n")
+    (out / "t.lpy").write_text("(import pkg.m)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    pkg = pathlib.Path(pv.outside_view_dir(str(view), str(out))) / "pkg"
+    assert os.readlink(pkg / "__init__.py") == str(out / "pkg" / "__init__.py")
+    assert not (pkg / "m.py").is_symlink()
+    assert (pkg / "m.py").read_text() == "m = 1"
+
+
+def test_locate_names_the_file_of_an_outside_shadow(tmp_path):
+    # Defect: a backend location in the shadow of /out/sib.lpy is taken for
+    # a project file, which does not exist, and is dropped.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    shadow = pathlib.Path(pv.outside_view_dir(client.view_root.path, str(out)))
+    assert client.locate((shadow / "sib.py").as_uri()) == (
+        "lpy",
+        (out / "sib.lpy").as_uri(),
+        None,
+    )
+
+
+def test_saving_an_outside_source_sweeps_the_view_that_shadows_it(
+    tmp_path, monkeypatch
+):
+    # Defect: /out/sib.lpy lies in no project, so its save sweeps nothing,
+    # and the project whose script link scripts/t.lpy -> /out/t.lpy shadows
+    # it keeps the old text until its next sweep.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "main.lpy").write_text("(= y 1)\n")
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, other)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    clients = [
+        backends.client_for((proj / "scripts" / "t.lpy").as_uri()),
+        backends.client_for((other / "main.lpy").as_uri()),
+    ]
+    for client in clients:
+        client._prepare_view_root([])
+        client.state = "running"
+        client.process = SimpleNamespace(returncode=None)
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((out / "sib.lpy").as_uri())
+    assert swept == [clients[0]]
 
 
 def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
@@ -2421,7 +2524,11 @@ def test_a_root_script_linked_out_searches_its_real_directory(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
-    assert environment_search_paths(client) == {str(view / "t.py"): [str(out)]}
+    outside = pv.outside_view_dir(str(view), str(out))
+    assert environment_search_paths(client) == {
+        outside: [outside, str(out)],
+        str(view / "t.py"): [outside, str(out)],
+    }
     # Not -I: isolated mode puts no script directory on sys.path.
     run = subprocess.run(
         [sys.executable, "-E", "-s", str(proj / "t.py")],
@@ -2628,6 +2735,56 @@ def test_real_backend_resolves_an_import_of_a_root_script_linked_out(tmp_path, n
     found = run_bounded(scenario(), timeout=90)
     assert found is not None and any("nowhere" in m for m in found), found
     assert not any("helper" in m and "nowhere" not in m for m in found), found
+
+
+@pytest.mark.parametrize("name", list(REAL_BACKENDS))
+def test_real_backend_resolves_an_lpy_sibling_of_a_script_linked_out(tmp_path, name):
+    # Defect: /out, the real directory of proj/scripts/t.lpy -> /out/t.lpy,
+    # is searched as itself, where sib.lpy has no .py, so the backend
+    # reports the (import sib) its run (sys.path[0] the real /out) resolves.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    source = "(import sib)\n(print sib.s sib.nowhere)\n"
+    (out / "t.lpy").write_text(source)
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "scripts" / "t.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: sib resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("sib" in m and "nowhere" not in m for m in found), found
 
 
 @pytest.mark.parametrize("absolute", [True, False])

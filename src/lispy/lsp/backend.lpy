@@ -31,7 +31,8 @@
 (from pygls.uris [to-fs-path])
 
 (from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest config-files
-                             new-environment-p read-quietly view-path view-root-for
+                             new-environment-p outside-path read-quietly view-path
+                             view-root-for
                              write-pyrefly-config write-pyright-config write-shadows])
 
 (= logger (logging.getLogger __name__))
@@ -1008,7 +1009,8 @@
      has no origin, since its disk shadow is not what the backend read; any
      other .py file under the view
      root is a shadow when its .lpy is in the project (view-path's
-     inverse); a path that leaves the view root through a link (a mirrored
+     inverse) or, under the outside shadows' directory, is the file outside
+     the project that outside-path names; a path that leaves the view root through a link (a mirrored
      .py or .pyi, a linked directory) is the file it reaches, spelled as in
      the project (project root plus its place in the view) when that
      spelling reaches the same file, else by its real path; anything
@@ -1054,7 +1056,12 @@
                                                 spelled
                                                 real)))))))
       (if (and (.endswith path ".py") (osp.isfile path))
-          (do (= lpy-path (osp.join self.project-root (+ (sub (osp.splitext rel) 0) ".lpy")))
+          (do (= outside (outside-path root (osp.join root rel)))
+              (= lpy-path (+ (sub (osp.splitext (ife (is outside None)
+                                                     (osp.join self.project-root rel)
+                                                     outside))
+                                  0)
+                             ".lpy"))
               (if (osp.isfile lpy-path)
                   (return (, "lpy" (.as-uri (pathlib.Path lpy-path)) None)))))
       (return None)
@@ -1531,11 +1538,25 @@
   (def document-saved [self lpy-uri]
     "A buffer was saved: BackendClient.saved for a running backend or one
      starting, which replays it once it runs (its sweep may predate the
-     save).  Call on the loop."
+     save), and a sweep (_sweep-soon) of every other backend that shadows
+     the file as one outside its project.  Call on the loop."
     (try
       (= client (._existing self lpy-uri))
       (if (and (is-not client None) (or client.running client.starting))
           (._schedule self (.saved client lpy-uri)))
+      ;; A file outside a project that another project's view shadows (the
+      ;; real directory /out of its script link scripts/t.lpy -> /out/t.lpy,
+      ;; outside-view-dir) gets no file event from that project's
+      ;; workspace, so its save sweeps every other backend whose manifest
+      ;; holds it, or that view keeps the old text until its next sweep.
+      ;; The manifest's keys are normalised absolute paths, and a lookup
+      ;; reads a dict a sweep thread may be writing without iterating it.
+      (= path (to-fs-path lpy-uri))
+      (if (is-not path None)
+          (do (= path (osp.normpath (osp.abspath path)))
+              (for other in (list (.values self.clients))
+                (if (and (is-not other client) (in path other.manifest.sources))
+                    (._sweep-soon self other [])))))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
 
