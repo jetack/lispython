@@ -1931,6 +1931,27 @@ def test_a_linked_scripts_search_dir_is_its_runs_sys_path_0(tmp_path):
     assert search_dirs[0] == json.loads(run.stdout) == str(out)
 
 
+def test_a_mirrored_file_behind_a_package_link_is_located_by_its_spelling(
+    tmp_path,
+):
+    # Defect: a location in a .py the overlay linked in through src/acme ->
+    # <tmp>/shared/acme is placed at its real path, a file in no workspace
+    # folder, where the editor's import and the user's project spell it
+    # src/acme/x.py.
+    proj, folders = linked_package(tmp_path)
+    (tmp_path / "shared" / "acme" / "x.py").write_text("x = 1\n")
+    client = backend.BackendClient(
+        view_root(proj, tmp_path), ["unused"], folders=lambda: folders
+    )
+    client._prepare_view_root([])
+    mirrored = pathlib.Path(client.view_root.path) / "src" / "acme" / "x.py"
+    assert mirrored.is_symlink()
+    assert client.locate(mirrored.as_uri()) == (
+        "file",
+        (proj / "src" / "acme" / "x.py").as_uri(),
+    )
+
+
 def test_a_document_through_a_folder_link_is_named_under_the_real_root(tmp_path):
     # Defect: the document keeps the folder link's spelling, so its import
     # root is link/src while the project root and the shadow sweep's

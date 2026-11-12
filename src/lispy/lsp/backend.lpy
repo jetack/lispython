@@ -1006,7 +1006,9 @@
      other .py file under the view
      root is a shadow when its .lpy is in the project (view-path's
      inverse); a path that leaves the view root through a link (a mirrored
-     .py or .pyi, a linked directory) is the real file it reaches; anything
+     .py or .pyi, a linked directory) is the file it reaches, spelled as in
+     the project (project root plus its place in the view) when that
+     spelling reaches the same file, else by its real path; anything
      else under the view root (a temporary file, a shadow whose .lpy is
      gone) is dropped; a path outside it is a real file.  origins (lpy uri
      -> origin) names the origin of a document the caller knows better than
@@ -1039,7 +1041,15 @@
           (return (, "file" uri)))
       (= real (osp.realpath path))
       (if (!= real (osp.normpath (osp.join real-root rel)))
-          (return (, "file" (.as-uri (pathlib.Path real)))))
+          ;; A link out of the view: the project's own spelling of the
+          ;; file when it reaches the same one (src/acme/x.py through
+          ;; src/acme -> /outside/shared/acme, as the import spells it).
+          (do (= spelled (osp.join self.project-root rel))
+              (return (, "file" (.as-uri (pathlib.Path
+                                           (ife (and (osp.exists spelled)
+                                                     (== (osp.realpath spelled) real))
+                                                spelled
+                                                real)))))))
       (if (and (.endswith path ".py") (osp.isfile path))
           (do (= lpy-path (osp.join self.project-root (+ (sub (osp.splitext rel) 0) ".lpy")))
               (if (osp.isfile lpy-path)
