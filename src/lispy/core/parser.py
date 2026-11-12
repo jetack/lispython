@@ -1532,17 +1532,25 @@ def _recovered_context(text, offset):
     """caret_context's ``(context, resume, symbol)`` at ``offset`` of
     ``text``, read on past each lexer error before the offset: the reader
     resumes just after the error, in the innermost f/t literal open there
-    (top-level code when none), repeating until it reaches the offset, so
+    (every error lies in one), repeating until it reaches the offset, so
     the text after an error keeps its reading (a later line continuing a
     multi-line literal stays in it). ``resume`` is then never before the
     last error's end.
 
+    The stack kept is the stopped pass's up to its innermost literal (the
+    fields above it dropped). An escaped literal refused at its own opening
+    (a bare " in ``f\\"a"``) is dropped too, with the fields above the next
+    one: resumed in, it would meet the same bare " again. The pass resumes
+    at the error's end, or where the last pass resumed when that is later
+    (an escaped literal's opening lies before it). Any other error not
+    ending past where its pass resumed drops the innermost literal kept as
+    well (none does today), so the reading always ends: each pass moves
+    forward or holds fewer literals.
+    ``python -m lispy.word_boundary`` publishes this as its context step,
+    and each error's span as its refusals step.
+
     Each pass is a new ``_Lexer`` over a copy of the stopped one's stack, so
-    the cached first pass (caret_tokens) is never changed. A pass resumes
-    past the last one's start, or with fewer literals open: an error placed
-    at or before where its pass resumed (an escaped literal refused at its
-    own opener) also drops the innermost literal kept, so the reading always
-    ends."""
+    the cached first pass (caret_tokens) is never changed."""
     found = caret_context(text, offset)
     if found is not None:
         return found
@@ -1555,14 +1563,16 @@ def _recovered_context(text, offset):
         error = lexer.tokens[-1][3]
         start = offset_of(error.lineno, error.offset - 1)
         end = offset_of(error.end_lineno, error.end_offset - 1)
-        stack = [
-            state
-            for state in lexer.stack
-            if (state.start if isinstance(state, _LiteralState) else state.open) < start
-        ]
+        stack = list(lexer.stack)
         while stack and isinstance(stack[-1], _FieldState):
             stack.pop()
-        if end <= resumed_at and stack:
+        # A bare " refusing the escaped literal itself is placed at its
+        # opening quote (_escaped_error); any error not past where its pass
+        # resumed would be met again from there, so the literal goes too.
+        escaped = stack and stack[-1].escaped_in is not None
+        if stack and (
+            (escaped and stack[-1].quote_start == start) or end <= resumed_at
+        ):
             stack.pop()
             while stack and isinstance(stack[-1], _FieldState):
                 stack.pop()
@@ -1670,7 +1680,8 @@ def completion_word_span(line, col, before=""):
     top-level code with no scan, for a position the reader gave a node (the
     LSP's name mapping, which would otherwise lex the buffer per node).
     Past a lexer error before the caret, the reader resumes just after it,
-    in the f/t literal open there (``_recovered_context``).
+    in the f/t literal open there (``_recovered_context``; the spec's
+    refusals and context steps).
 
     The word is the reader's own: the symbol or number token (run_tokens)
     that ends at or holds ``col``, less the prefixes token_parse peels

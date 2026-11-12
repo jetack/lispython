@@ -18,8 +18,10 @@ from lispy.core.parser import (
     _signed_complex_p,
     caret_context,
     caret_symbol_p,
+    caret_tokens,
     completion_word_span,
     parse,
+    source_offset,
     token_prefixes,
     tokenize,
 )
@@ -191,9 +193,9 @@ SPANS = [
     # a continuation, \= no symbol at all.
     ('f"{a\\|=}"', (5, 5, 5)),
     ('f"{\\|=}"', (4, 4, 4)),
-    # Texts the reader refuses before the caret, so no published case: past
-    # each lexer error the reader resumes just after it, in the literal open
-    # there, so the text after an error keeps its reading.
+    # Texts the reader refuses before the caret: past each lexer error the
+    # reader resumes just after it, in the literal open there, so the text
+    # after an error keeps its reading.
     ('f"{x!z}" (fo|', (10, 10, 12)),
     ('f"}"\nf"{x|!r}"', (3, 3, 4)),
     ('f"{x!}"\n(print "ab|c")', None),
@@ -375,7 +377,7 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 7 and spec["columns"] == "code points"
+    assert spec["version"] == 8 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"], case["before"])
@@ -465,15 +467,11 @@ def test_resuming_past_many_errors_copies_the_tokens_once(monkeypatch):
     assert resumed[0] is not first
 
 
-# spec_word_span's answer where the reader refuses the text before the caret.
-REFUSED = "refused"
-
-
 def spec_word_span(rule):
     """A function (line, caret, before) -> (start, replaceStart, end), or
-    None for no word (REFUSED where the reader refuses the text), as an
-    editor client reproduces it from the published rule alone: no parser
-    internal is read here. The rule's regexes are compiled once."""
+    None for no word, as an editor client reproduces it from the published
+    rule alone, past the reader's refusals too: no parser internal is read
+    here. The rule's regexes are compiled once."""
     stop = chars(rule["stopChars"])
     wrapper = f"(?:{one_of(rule['wrappers'])})"
     opening = f"(?:{one_of(rule['openings'])})"
@@ -538,6 +536,7 @@ def spec_word_span(rule):
     braces = rule["fieldBraces"]
     whitespace = set(rule["whitespace"])
     continuation_re = re.compile(rule["fieldContinuation"])
+    line_breaks = set(rule["lineBreakChars"])
 
     def body(text, i, quote, raw, kind, doubled):
         """(stop, at): the body step from i."""
@@ -579,36 +578,105 @@ def spec_word_span(rule):
         kinds = [kind for letter, kind in rule["kindLetters"] if letter in lowered]
         return rule["rawLetter"] in lowered, (kinds + ["string"])[0]
 
-    def context(text, stop):
-        """(mode at stop, resume), the context and resume steps, or None
-        where the reader refuses the text before stop (no agreement asked)."""
-        # Literals: ["literal", quote, raw, kind]; fields: ["field", dict].
-        stack, pos, resume = [], 0, 0
+    def spec_line_break(text, start, end):
+        """The first line break in text[start:end] after an even run of
+        backslashes (\\r\\n one break), or None."""
+        i = start
+        while i < end:
+            if text[i] in line_breaks:
+                run = i
+                while run > start and text[run - 1] == backslash:
+                    run -= 1
+                if (i - run) % 2 == 0:
+                    return i
+                i += 2 if text.startswith("\r\n", i) else 1
+            else:
+                i += 1
+        return None
+
+    def blanks(text, i):
+        """Past the blanks at i: whitespace and fieldContinuation matches."""
+        while i < len(text) and (
+            text[i] in whitespace or continuation_re.match(text, i)
+        ):
+            i += 1
+        return i
+
+    def opening_at(text, i):
+        """The string opening's quote at i (no prefix), longest first."""
+        for quote in rule["escapedStringOpenings"] + rule["stringOpenings"]:
+            if text.startswith(quote, i):
+                return quote
+        return None
+
+    def context(text, stop, refusals=None):
+        """(mode at stop, resume): the context, refusals and resume steps;
+        each refusal's (start, end) appended to refusals."""
+        # Literals: ["literal", quote, raw, kind, body start]; fields:
+        # ["field", dict].
+        stack = []
+        state = {"pos": 0, "closed": 0, "resumed": 0}
+
+        def refuse(start, end, literal=False):
+            """The recovery from a refusal from start to end: keep the stack
+            up to its innermost literal (dropping that one too when literal),
+            resume at end or the last resume point, whichever is later."""
+            if refusals is not None:
+                refusals.append((start, end))
+            while stack and stack[-1][0] == "field":
+                stack.pop()
+            if literal:
+                stack.pop()
+                while stack and stack[-1][0] == "field":
+                    stack.pop()
+            state["pos"] = state["resumed"] = max(end, state["resumed"])
+
+        def result(mode):
+            return mode, max(state["closed"], state["resumed"])
+
+        def read_string(at, raw):
+            """Read the string opening at at (no prefix) after a conversion's
+            !: True when it refuses itself (and recovery ran)."""
+            quote = opening_at(text, at)
+            stop_kind, end = body(text, at + len(quote), quote, raw, "string", "")
+            if stop_kind == "refused" and end < stop:
+                refuse(at, at + len(quote))
+                return True
+            if stop_kind == "quote" and end + len(quote) <= stop:
+                state["closed"] = end + len(quote)
+            return False
+
         while True:
+            pos = state["pos"]
             top = stack[-1] if stack else None
             if top is not None and (top[0] == "literal" or top[1]["spec"]):
                 [literal, spec] = (
                     [top, None] if top[0] == "literal" else [top[1]["literal"], top[1]]
                 )
                 if pos >= stop:
-                    return "text", resume
+                    return result("text")
                 doubled = (
                     braces if spec is None else braces[0] if spec["nested"] else ""
                 )
-                stop_kind, at = body(
-                    text, pos, literal[1], literal[2], literal[3], doubled
-                )
-                if stop_kind == "quote":
-                    if at + len(literal[1]) > stop:
-                        return "text", resume
+                quote = literal[1]
+                stop_kind, at = body(text, pos, quote, literal[2], literal[3], doubled)
+                if spec is not None and len(quote.replace(backslash, "")) == 1:
+                    brk = spec_line_break(text, pos, at)
+                    if brk is not None and brk < stop:
+                        refuse(brk, brk + 1)
+                        continue
+                if stop_kind == "refused" and at < stop:
+                    refuse(literal[4] - len(quote), literal[4], literal=True)
+                elif stop_kind == "quote":
+                    if at + len(quote) > stop:
+                        return result("text")
                     if spec is not None:
-                        return None
-                    pos = resume = at + len(literal[1])
+                        refuse(at, at + len(quote))
+                        continue
+                    state["pos"] = state["closed"] = at + len(quote)
                     stack.pop()
-                elif stop_kind == "refused" and at < stop:
-                    return None
                 elif stop_kind in ("end", "refused") or at >= stop:
-                    return "text", resume
+                    return result("text")
                 elif stop_kind == "field":
                     if spec is not None:
                         spec["nested"] = True
@@ -617,14 +685,15 @@ def spec_word_span(rule):
                         "brackets": 0,
                         "spec": False,
                         "nested": False,
+                        "tokens": False,
                     }
                     stack.append(["field", field])
-                    pos = at + 1
+                    state["pos"] = at + 1
                 elif spec is not None:
                     stack.pop()
-                    pos = at + 1
+                    state["pos"] = at + 1
                 else:
-                    return None
+                    refuse(at, at + 1)
                 continue
             field = None if top is None else top[1]
             mode = (
@@ -632,17 +701,24 @@ def spec_word_span(rule):
             )
             m = token_res[mode].search(text, pos)
             if m is None or m.start() >= stop:
-                return mode, resume
+                return result(mode)
             start, end, kind = m.start(), m.end(), m.lastgroup
             if mode == "field":
+                if (
+                    text[start] == "="
+                    and not text.startswith("==", start)
+                    and not field["tokens"]
+                ):
+                    refuse(start, start + 1)
+                    continue
                 if text[start] == braces[1]:
                     stack.pop()
-                    pos = start + 1
+                    state["pos"] = start + 1
                     continue
                 if delimiter_re.match(text, start):
                     if text[start] == ":":
                         field["spec"] = True
-                        pos = start + 1
+                        state["pos"] = start + 1
                         continue
                     ends = [
                         k
@@ -650,39 +726,57 @@ def spec_word_span(rule):
                         if text[k] in rule["conversionEnds"]
                     ]
                     if not ends:
-                        return "text", resume
+                        return result("text")
                     name_end = start + 1
                     while text[name_end].isalnum() or text[name_end] == "_":
                         name_end += 1
-                    if text[start + 1 : name_end] not in rule["conversionNames"]:
-                        return None
-                    while name_end < ends[0] and (
-                        text[name_end] in whitespace
-                        or continuation_re.match(text, name_end)
+                    name = text[start + 1 : name_end]
+                    if not name:
+                        at = blanks(text, start + 1)
+                        if text[at].isalnum() or text[at] == "_":
+                            refuse(start, start + 1)
+                        elif opening_at(text, at) is None or not read_string(at, False):
+                            refuse(at, at + 1)
+                    elif opening_at(text, name_end) is not None and (
+                        name.lower() in rule["plainStringPrefixes"]
                     ):
-                        name_end += 1
-                    if name_end < ends[0]:
-                        return None
-                    pos = ends[0]
+                        raw = rule["rawLetter"] in name.lower()
+                        if not read_string(name_end, raw):
+                            refuse(start + 1, start + 2)
+                    elif opening_at(text, name_end) is not None and (
+                        name.lower() in rule["interpolatedStringPrefixes"]
+                    ):
+                        refuse(start + 1, start + 2)
+                    elif name not in rule["conversionNames"]:
+                        refuse(start + 1, name_end)
+                    else:
+                        rest = blanks(text, name_end)
+                        if text[rest] not in rule["conversionEnds"]:
+                            refuse(rest, rest + 1)
+                        else:
+                            state["pos"] = rest
                     continue
             if kind == "comment" and end >= stop:
-                return "text", resume
+                return result("text")
             if end > stop:
-                return mode, resume
-            pos = end
+                return result(mode)
+            state["pos"] = end
+            if field is not None and kind not in ("spaces", "comment", "comma"):
+                field["tokens"] = True
             if kind == "string":
                 prefix = prefix_re.match(text, start).group()
                 quote = text[start + len(prefix) : end]
                 raw, string = string_kind(prefix)
                 if string != "string":
-                    stack.append(["literal", quote, raw, string])
+                    stack.append(["literal", quote, raw, string, end])
                     continue
                 stop_kind, at = body(text, end, quote, raw, string, "")
                 if stop_kind == "refused" and at < stop:
-                    return None
+                    refuse(end - len(quote), end)
+                    continue
                 if stop_kind != "quote" or at + len(quote) > stop:
-                    return "text", resume
-                pos = resume = at + len(quote)
+                    return result("text")
+                state["pos"] = state["closed"] = at + len(quote)
             elif field is not None:
                 if kind == "opening" or (
                     kind == "bad" and text[end - 1] in rule["openings"]
@@ -720,11 +814,9 @@ def spec_word_span(rule):
             pos = end
         return None
 
-    def word_span(line, caret, before=""):
-        found = context(before + line, len(before) + caret)
-        if found is None:
-            return REFUSED  # the rule has no answer where the reader refuses
-        [mode, resume] = [found[0], max(found[1] - len(before), 0)]
+    def word_span(line, caret, before="", refusals=None):
+        [mode, resume] = context(before + line, len(before) + caret, refusals)
+        resume = max(resume - len(before), 0)
         if mode == "text":
             return None
         run_start = caret
@@ -787,64 +879,101 @@ def test_the_published_rule_alone_reproduces_every_case(published):
     # the cases it is pinned against.
     word_span = spec_word_span(published["rule"])
     for case in published["cases"]:
-        # No case is a text the reader refuses, where the rule has no answer.
-        text = case["before"] + case["text"]
-        assert caret_context(text, len(case["before"]) + case["caret"]) is not None
         expected = (case["start"], case["replaceStart"], case["end"])
         got = word_span(case["text"], case["caret"], case["before"])
         assert (got or (None, None, None)) == expected, (case["text"], case["caret"])
 
 
 # The entry's prefix followed by every text up to the length over its
-# alphabet, at every caret; with refusals set, the rule must also refuse
-# exactly the texts the reader refuses.
+# alphabet, at every caret, texts the reader refuses included.
 DIFFERENTIAL = [
-    ("-+*^:'`~@([{\" .1jx;#", 4, "", False),
-    ("-+*:1jx.e{", 4, "", False),
-    # Strings and fields: delimiters, debug =, conversions, specs.
-    ("f\"{}:!x='", 5, "", False),
+    ("-+*^:'`~@([{\" .1jx;#", 4, ""),
+    ("-+*:1jx.e{", 4, ""),
+    # Strings and fields: delimiters, debug =, conversions, specs, a leading
+    # =, a single }, a quote in a spec.
+    ("f\"{}:!x='", 5, ""),
     # Raw and \N{ escapes, escaped quotes, brackets and comments in a field.
-    ('rf\\N{}"(;x ', 4, "", False),
+    ('rf\\N{}"(;x ', 4, ""),
     # Strings, fields and comments across lines.
-    ('f"{}x;\n', 5, "", False),
+    ('f"{}x;\n', 5, ""),
     # A debug = and the line break or continuation after it.
-    ('f"{}x=\n\\', 5, "", False),
+    ('f"{}x=\n\\', 5, ""),
     # A conversion past its !: valid and invalid names, the blanks (Unicode
     # whitespace, a line break, a continuation) up to its end, anything else.
-    # No case may be a refused text, so the conversion check (conversionNames,
-    # the blanks) is pinned by the rule refusing where the reader does.
-    ("rsaz \x85:}\n\\(", 4, 'f"{x!', True),
+    ("rsaz \x85:}\n\\(", 4, 'f"{x!'),
+    # A string after the !: glued to a name or not, its prefix, escaped
+    # quotes, and where the reading resumes past it.
+    ('ruf\\"}a{', 4, 'f"{x!'),
+    # A line break or a quote in a format spec: single and triple quotes, a
+    # continuation's backslashes, \r\n as one break.
+    ("'\":{}\n\r\\", 4, "f'{x:"),
+    ('"{}\n\\:', 4, 'f"""{x:'),
+    # Escaped strings and literals in a field: a bare " refused at the
+    # string's opening, an escaped literal dropped past it.
+    ('\\"{}x=!', 5, 'f"{f'),
+    # A string after the ! that closes before the caret: its end is where a
+    # word starts at the earliest.
+    ("a.'b", 6, "f\"{x!''':{"),
 ]
 
 
-@pytest.mark.parametrize("alphabet, length, prefix, refusals", DIFFERENTIAL)
+@pytest.mark.parametrize("alphabet, length, prefix", DIFFERENTIAL)
 def test_the_published_rule_agrees_with_the_reader_everywhere(
-    published, alphabet, length, prefix, refusals
+    published, alphabet, length, prefix
 ):
     # Defect: the rule and completion_word_span part on a line no case
     # names (an ordering of the token patterns, a lookahead, the peel's
-    # re-typing, the blanks a conversion takes), so a client pinned on the
-    # cases still differs from the reader as the user types.
+    # re-typing, the blanks a conversion takes, a refusal's span or what the
+    # reading keeps past it), so a client pinned on the cases still differs
+    # from the reader as the user types, or offers no word below a refused
+    # text.
     word_span = spec_word_span(published["rule"])
-    ends = published["rule"]["conversionEnds"]
     for size in range(length + 1):
         for chars in itertools.product(alphabet, repeat=size):
             text = prefix + "".join(chars)
-            # Past the conversion's end the reader refuses texts the rule
-            # leaves to it (a line break in a single-quoted spec).
-            end = next(
-                (k for k in range(len(prefix), len(text)) if text[k] in ends),
-                len(text),
-            )
             for at in range(len(text) + 1):
                 before, line, caret = case_input(text[:at] + "|" + text[at:])
                 got = word_span(line, caret, before)
-                refused = caret_context(before + line, len(before) + caret) is None
-                if refusals and at <= end + 1:
-                    assert (got == REFUSED) == refused, (text, at)
-                if refused:
-                    continue  # the reader refuses the text: no span asked
                 assert got == completion_word_span(line, caret, before), (text, at)
+
+
+def reader_error_span(text):
+    """(start, end) of the first error the reader's scan to the end of
+    ``text`` meets (caret_tokens' last token, an error token or a string
+    carrying its error), or None."""
+    tokens = caret_tokens(text, len(text), "")
+    error = tokens[-1][3] if tokens else None
+    if not isinstance(error, SyntaxError):
+        return None
+    offset_of = source_offset(text)
+    return (
+        offset_of(error.lineno, error.offset - 1),
+        offset_of(error.end_lineno, error.end_offset - 1),
+    )
+
+
+def test_the_published_refusal_spans_are_the_readers(published):
+    # Defect: a refusal's published span is not the reader's error (the
+    # whole name for !rb"a", which the reader refuses at r), so a client
+    # built from the rule resumes elsewhere wherever that changes the
+    # reading. Each text is read to a caret at its end, where the reader's
+    # scan stops at its first refusal.
+    word_span = spec_word_span(published["rule"])
+    texts = [case["before"] + case["text"] for case in published["cases"]]
+    texts += [
+        prefix + "".join(chars)
+        for alphabet, length, prefix in DIFFERENTIAL
+        for size in range(min(length, 4) + 1)
+        for chars in itertools.product(alphabet, repeat=size)
+    ]
+    checked = 0
+    for text in texts:
+        refusals = []
+        word_span(text, len(text), "", refusals)
+        expected = reader_error_span(text)
+        assert (refusals[0] if refusals else None) == expected, text
+        checked += expected is not None
+    assert checked > 1000
 
 
 def number_token_corpus():

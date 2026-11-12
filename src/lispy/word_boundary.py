@@ -5,7 +5,9 @@
 cases whose expected spans that function computes. The rule's input is the
 text before the caret's line, the caret's line and the caret's column: the
 caret's context (code, an f/t-string field, or a string's or comment's text)
-is read from the start of the text. lpy-mode and vsc-lispy
+is read from the start of the text, on past every text the reader refuses
+before the caret (the rule's refusals step gives each refusal's span, and
+some cases are such texts). lpy-mode and vsc-lispy
 compute the boundary natively on every keystroke, so they pin their copies
 against these cases. Columns are code points (Python str indices); a client
 counting UTF-16 units converts (the astral case is there for it).
@@ -26,6 +28,7 @@ import string
 import sys
 
 from lispy.core import parser
+from lispy.core.compiler.literal import PLAIN_STRING_PREFIXES
 from lispy.core.parser import (
     SIGN_PEEL_FOLLOWERS,
     SIGNS,
@@ -35,7 +38,7 @@ from lispy.core.parser import (
 )
 from lispy.core.utils import augassignop_dict
 
-VERSION = 7
+VERSION = 8
 
 # The case inputs, each a text with ``|`` at the caret, the caret's line its
 # last line holding the caret. Only the inputs are written here: the
@@ -176,6 +179,53 @@ CASE_INPUTS = (
     # A continuation's backslash before a debug =.
     'f"{\\|=}"',
     'f"{\\=|}"',
+    # Past a refusal before the caret the reader reads on in place: in the
+    # innermost literal open there, from the refusal's end. A conversion's
+    # name that is none, after a gap, missing, or followed by more.
+    'f"{x!z}" (fo|',
+    'f"{x! r}" fo|',
+    'f"{x!}" fo|',
+    'f"{x!r z}" fo|',
+    # A string after the !: a plain prefix is read through (r), any other
+    # conversion name is refused at the quote (s); an escaped string's bare "
+    # is refused at its opening; a read string's end bounds the word, and an
+    # f prefix's string is never read.
+    'f"{x!r"}"{fo|',
+    'f"{x!s"}"{fo|',
+    'f"{x!"a"} fo|',
+    'f"{x!\\"a"} fo|',
+    "f\"{x!r''':{a.'''b|",
+    "f\"{x!f''':{a.'''b|",
+    # A valid prefix is refused at its first character, any other name
+    # over itself.
+    'f"{x!rb"a"} fo|',
+    'f"{x!fr"a"} fo|',
+    'f"{x!ub"a"} fo|',
+    'f"{!""":"|',
+    # A single } in a literal's text; a leading = in a field, commas aside.
+    'f"}"\nf"{x|!r}"',
+    'f"{=:"" fo|',
+    'f"{,=:"" fo|',
+    # A line break in a single-quoted literal's spec, unless continued; \r\n
+    # is one break.
+    'f"{x:\n" fo|',
+    'f"{x:\\\n" fo|',
+    'f"{x:\\\\\n" fo|',
+    'f"{x:\\\r\n" fo|',
+    # The literal's quote in a spec, as written.
+    'f"{x:" fo|',
+    'f"""{x:"""" fo|',
+    'f"{f\\"{x:\\"} fo|',
+    # A bare " in an escaped literal drops it; in an escaped string it does
+    # not.
+    'f"{f\\"a"} fo|',
+    'f"{\\"a" fo|',
+    # Several refusals, and later lines continuing a literal.
+    'f"{z!} {y|!r}"',
+    'f"{x!}"\n(print "ab|c")',
+    'x = f"{a:\n}"\n"abc|"',
+    'f"{x!}"\n"""doc\nprose|"""',
+    'f"{x!}"\nf"""{a}\n{b|!r}"""',
     # A field's { ends the word before it, in a format spec and after text:
     # the line is lexed as code, so the word is the field's own name.
     'f"{1:{wi|',
@@ -294,6 +344,10 @@ def rule():
         "whitespace": [chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()],
         "fieldDelimiter": parser._FIELD_DELIMITER,
         "conversionNames": sorted(parser.conversion_dict),
+        "plainStringPrefixes": list(PLAIN_STRING_PREFIXES),
+        "interpolatedStringPrefixes": list(
+            parser._F_STRING_PREFIXES + parser._T_STRING_PREFIXES
+        ),
         "conversionEnds": list(parser._CONVERSION_ENDS),
         "fieldContinuation": parser._FIELD_CONTINUATION,
         "fieldSymbolBackslash": parser._FIELD_SYMBOL_BACKSLASH,
@@ -313,16 +367,13 @@ def rule():
             "string's body, a literal's or format spec's text, a conversion, a "
             "comment); the context is the mode the caret lies in. In text "
             "there is no word: start, replaceStart and end are null (an editor "
-            "offers no completion there). The reader's scan is its lexer: "
-            "where that lexer refuses the text before the caret (a malformed "
-            "literal, field or conversion) the reader resumes just after the "
-            "error, in the innermost f/t literal open there (top level when "
-            "none, resume then the error's end at the earliest), repeating on "
-            "each further error until it reaches the caret (an error not ending "
-            "past where its scan resumed also drops the innermost literal "
-            "kept); the cases hold no "
-            "such text, and a client need not agree on a text the reader "
-            "refuses",
+            "offers no completion there). The reader's scan is its lexer, "
+            "which refuses some texts (refusals step); past a refusal the scan "
+            "goes on in place: the stack keeps its entries up to its innermost "
+            "literal (the fields above it are dropped; a bareQuote refusal of "
+            "an escaped literal drops that literal too, with the fields above "
+            "the next one), and the scan resumes in that literal's text at the "
+            "refusal's end, or where it last resumed when that is later",
             "code, field and bracket mode: find the next token with the mode's "
             "patterns (a character no pattern matches is skipped); none, or "
             "one starting at or after the caret, stops the scan in the mode. "
@@ -332,17 +383,26 @@ def rule():
             "literal's text); one starting at a fieldDelimiter match ends the "
             "expression: at : the format spec's text follows; at ! the "
             "conversion, which ends at the first conversionEnds character "
-            "after the !, where field mode resumes: with none before the "
-            "caret, the caret is in its text; else the conversion is the name "
-            "right after the ! (characters str.isalnum holds, or _), then only "
-            "blanks (whitespace characters and fieldContinuation matches) up "
-            "to that character: a name not in conversionNames (an empty one "
-            "included), or anything else there, is a refusal of the text, "
-            "so the check decides where the reading goes on: a valid "
-            "conversion resumes field mode at that character, while past a "
-            "refusal the reader recovers (context step) in the field's "
-            "literal, never in the field. "
-            "Any other token: a string "
+            "after the !: with none before the caret, the caret is in its "
+            "text. Else its name is the characters str.isalnum holds, or _, "
+            "right after the !, and blanks are whitespace characters and "
+            "fieldContinuation matches. With no name, a name character after "
+            "the blanks is a refusal (span: the !); anything else there is "
+            "refused (span: its first character), a string opening there "
+            "read first (conversion string). A name followed directly by a "
+            "stringOpenings or escapedStringOpenings entry is that string's "
+            "prefix when, lower-cased, it is a plainStringPrefixes entry (that "
+            "string is read, conversion string) or an "
+            "interpolatedStringPrefixes entry (not read): then the name is "
+            "refused (span: its first character). Any other name not in "
+            "conversionNames is refused (span: the name). Else "
+            "past the name's blanks the conversionEnds character resumes field "
+            "mode, and anything else is refused (span: its first character). "
+            "A conversion string is a plain string read by the body step "
+            "(raw when its lower-cased name holds rawLetter): its own refusal "
+            "comes first, "
+            "and one that closes before the caret is the last string closed "
+            "(resume step). Any other token: a string "
             "opening reads its prefix (stringPrefix) lower-cased: the first "
             "kindLetters entry whose letter it holds makes it an f/t-string, "
             "rawLetter raw; an f/t-string opening opens a literal (its quote "
@@ -355,10 +415,28 @@ def rule():
             "text of a literal or a format spec: at or past the caret it is "
             "text; read the body (body step): a closing quote ending after the "
             "caret, or any other stop at or after it, is text; the closing "
-            "quote closes the literal; a { opens a field (in a format spec, "
-            "marking the spec nested); a } in a format spec closes its field",
+            "quote closes the literal (in a format spec it is refused); a { "
+            "opens a field (in a format spec, marking the spec nested); a } in "
+            "a format spec closes its field (in a literal's own text it is "
+            "refused)",
+            "refusals, each with its span (from its start to its end), met "
+            "only before the caret: in field mode a token starting with = but "
+            "not == that is the field's first token (spaces, commas and "
+            "comments aside): the =, even when that token holds the caret; a "
+            "single } in a literal's own text: the }; in a format spec's text "
+            "of a literal whose quote less its backslashes is one character, a "
+            "line break (\\r\\n is one) not after an odd run of backslashes in "
+            "the text read, before the caret: the break's first character, "
+            "refused before the text step reads on; the literal's closing "
+            "quote in a format spec's text: that quote as written; a bareQuote "
+            "ending an escaped string's or literal's body: the string's "
+            "opening quote (its escapedStringOpenings entry); and the "
+            "conversion's (code, field and bracket mode step). The reader "
+            "refuses no other text before the caret: an unclosed string or "
+            "literal is text, since the text's end lies past the caret",
             "resume: where the last string or literal the scan closed ends "
-            "(its closing quote's end)",
+            "(its closing quote's end), or where the scan last resumed past a "
+            "refusal, whichever is later",
             "body: read from the position to the next plainBodyStops "
             "character (a plain string) or interpolatedBodyStops character (an "
             "f/t-string). A backslash pairs with the character after it (raw "
@@ -370,7 +448,7 @@ def rule():
             "where the string's quote starts, else text. In an escaped string "
             "(its quote an escapedStringOpenings entry) its quote closes it, a "
             "backslash before escapedQuote is one piece with it, and a "
-            "bareQuote ends the scan (the reader refuses it). A doubled brace "
+            "bareQuote ends the scan (a refusal). A doubled brace "
             "is text where it is in the doubled set: both braces in a "
             "literal's own text, none in a format spec before its first "
             "nested field, only { after one; else it, as a single brace, ends "
