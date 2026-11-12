@@ -1,4 +1,5 @@
 import contextvars
+import copy
 import functools
 import re
 from bisect import bisect_right
@@ -1009,8 +1010,12 @@ class _Lexer:
         self._string(at, opening)
         if self.stop_context is not None:
             # The string holds the stop, but the reader refuses the
-            # conversion whatever it holds: no context there.
+            # conversion at its opening whatever it holds: that refusal is
+            # where lexing ends, with no context (_recovered_context resumes
+            # after it).
             self.stop_context = None
+            msg = f"{self.stack[-1].literal.kind}: invalid conversion character"
+            self._emit_error(self._error(msg, at, at + 1))
         return not self.done
 
     def _skip_blanks(self, i):
@@ -1485,10 +1490,10 @@ _FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
 
 
 # The stop pass over text up to a caret, kept with its tokens for
-# caret_tokens. Few are kept, since the tokens of a long buffer are large; a
-# second entry keeps the full text's pass through the line-alone read
-# (_line_context) of the same request.
-@functools.lru_cache(maxsize=2)
+# caret_tokens. One is kept, since the tokens of a long buffer are large: a
+# request reads one caret's text, and _recovered_context keeps only the
+# context its resumed passes reach, never their lexers.
+@functools.lru_cache(maxsize=1)
 def _caret_lexer(text, offset):
     lexer = _Lexer(text, stop=offset)
     lexer.run()
@@ -1502,7 +1507,8 @@ def caret_context(text, offset):
     """``(context, resume, symbol)`` at code-point ``offset`` of ``text`` (a
     caret), as the reader reads it: ``_Lexer`` over ``text`` up to the offset, one
     pass that stops where it would read past it; None where the reader
-    refuses the text before the offset (a lexer error there).
+    refuses the text before the offset (a lexer error there), whose reading
+    after the error is _recovered_context's.
 
     ``context`` is ``"code"`` (top-level code), ``"field"`` (an f/t-string
     field's own level, outside its brackets, conversion and format spec),
@@ -1519,17 +1525,74 @@ def caret_context(text, offset):
     return lexer.stop_context, lexer.closed_string_end, lexer.stop_symbol
 
 
+@functools.lru_cache(maxsize=8)
+def _recovered_context(text, offset):
+    """caret_context's ``(context, resume, symbol)`` at ``offset`` of
+    ``text``, read on past each lexer error before the offset: the reader
+    resumes just after the error, in the innermost f/t literal open there
+    (top-level code when none), repeating until it reaches the offset, so
+    the text after an error keeps its reading (a later line continuing a
+    multi-line literal stays in it). ``resume`` is then never before the
+    last error's end.
+
+    Each pass is a new ``_Lexer`` over a copy of the stopped one's stack, so
+    the cached first pass (caret_tokens) is never changed. A pass resumes
+    past the last one's start, or with fewer literals open: an error placed
+    at or before where its pass resumed (an escaped literal refused at its
+    own opener) also drops the innermost literal kept, so the reading always
+    ends."""
+    found = caret_context(text, offset)
+    if found is not None:
+        return found
+    lexer = _caret_lexer(text, offset)
+    offset_of = source_offset(text)
+    resumed_at = 0
+    while lexer.stop_context is None:
+        # The error is the last token's: an "error" token, or a plain
+        # string carrying its own.
+        error = lexer.tokens[-1][3]
+        start = offset_of(error.lineno, error.offset - 1)
+        end = offset_of(error.end_lineno, error.end_offset - 1)
+        stack = [
+            state
+            for state in lexer.stack
+            if (state.start if isinstance(state, _LiteralState) else state.open) < start
+        ]
+        while stack and isinstance(stack[-1], _FieldState):
+            stack.pop()
+        if end <= resumed_at and stack:
+            stack.pop()
+            while stack and isinstance(stack[-1], _FieldState):
+                stack.pop()
+        resumed = _Lexer(text, stop=offset)
+        resumed.locate = lexer.locate
+        # One deepcopy, so a field's literal stays the literal on the stack.
+        resumed.stack = copy.deepcopy(stack)
+        # A field indexes its tokens (first, tail).
+        resumed.tokens = list(lexer.tokens)
+        resumed.previous = lexer.previous
+        resumed.closed_string_end = lexer.closed_string_end
+        resumed.pos = resumed_at = max(end, resumed_at)
+        resumed.run()
+        lexer = resumed
+    return (
+        lexer.stop_context,
+        max(lexer.closed_string_end, resumed_at),
+        lexer.stop_symbol,
+    )
+
+
 def caret_symbol_p(line, col, before):
     """Whether the text ``before`` ``line`` (its line breaks included) ends,
     at code-point column ``col`` of ``line``, in a symbol the reader reads
     there: the token of code ending at or holding the caret is a symbol
     (``mod.|``, ``mod.ma|cro``), a field of an f/t-string being code, and
-    never in a string's or comment's text, which holds no symbol. False
-    where the reader refuses the text before the caret (a lexer error
-    there). It reads the caret_context completion_word_span reads with the
-    same ``before``, so a request asking both lexes the text once."""
-    found = caret_context(before + line, len(before) + col)
-    return found is not None and found[2]
+    never in a string's or comment's text, which holds no symbol. Past a
+    lexer error before the caret it is read as the reader resumes there
+    (_recovered_context). It reads the context completion_word_span reads
+    with the same ``before``, so a request asking both lexes the text
+    once."""
+    return _recovered_context(before + line, len(before) + col)[2]
 
 
 def caret_tokens(line, col, before):
@@ -1541,8 +1604,10 @@ def caret_tokens(line, col, before):
     caret, which the pass never emits (in ``(mo|d`` the list ends at ``(``,
     where tokenize would end in the symbol ``mo``); a token ending at the
     caret is there. Lexing ends at the caret, or at an earlier error, the
-    last token as in tokenize; with the caret in a literal's text, the
-    literal is open, where tokenize of the text cut at the caret ends in its
+    last token as in tokenize (only _recovered_context reads on past it); a
+    string after a conversion's ``!`` holding the caret ends it in the
+    conversion's refusal. With the caret in a literal's text, the literal is
+    open, where tokenize of the text cut at the caret ends in its
     unterminated error. The brackets, fields and literals open at the caret
     are tokenize's whenever the caret is in code. The list is the cached
     pass's own: read it, never change it."""
@@ -1579,19 +1644,14 @@ def _word_token(line, start, col, context, endpos=None):
 
 
 def _line_context(line, col, before):
-    """``(context, resume)`` of caret_context at ``col`` of ``line`` after
-    ``before``, ``resume`` a column of the line (0 before it). Where the
-    reader refuses the text before the caret, the line alone is read (its
-    start taken as top-level code), so an error lines above leaves later
-    lines their reading; where it refuses that too, or with ``before`` None,
-    the caret is in top-level code."""
+    """``(context, resume)`` at ``col`` of ``line`` after ``before``, read as
+    the reader reads the text before the caret, past any lexer error there
+    (_recovered_context), ``resume`` a column of the line (0 before it);
+    with ``before`` None, the caret is in top-level code."""
     if before is None:
         return "code", 0
-    found = caret_context(before + line, len(before) + col)
-    if found is not None:
-        return found[0], max(found[1] - len(before), 0)
-    found = caret_context(line, col)
-    return ("code", 0) if found is None else found[:2]
+    found = _recovered_context(before + line, len(before) + col)
+    return found[0], max(found[1] - len(before), 0)
 
 
 def completion_word_span(line, col, before=""):
@@ -1606,8 +1666,8 @@ def completion_word_span(line, col, before=""):
     the line up to ``col``) is the reader's; None takes the caret to be in
     top-level code with no scan, for a position the reader gave a node (the
     LSP's name mapping, which would otherwise lex the buffer per node).
-    Where the reader refuses the text before the caret, the caret's line is
-    read alone (``_line_context``).
+    Past a lexer error before the caret, the reader resumes just after it,
+    in the f/t literal open there (``_recovered_context``).
 
     The word is the reader's own: the symbol or number token (run_tokens)
     that ends at or holds ``col``, less the prefixes token_parse peels

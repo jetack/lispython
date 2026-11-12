@@ -16,6 +16,7 @@ from lispy.core.nodes import Constant, Paren, Symbol
 from lispy.core.parser import (
     _signed_complex_p,
     caret_context,
+    caret_symbol_p,
     completion_word_span,
     parse,
     token_prefixes,
@@ -189,15 +190,21 @@ SPANS = [
     # a continuation, \= no symbol at all.
     ('f"{a\\|=}"', (5, 5, 5)),
     ('f"{\\|=}"', (4, 4, 4)),
-    # Where the reader refuses the text before the caret (an invalid
-    # conversion), the caret's line is read alone; refused there too, the
-    # caret is in top-level code.
+    # Texts the reader refuses before the caret, so no published case: past
+    # each lexer error the reader resumes just after it, in the literal open
+    # there, so the text after an error keeps its reading.
     ('f"{x!z}" (fo|', (10, 10, 12)),
-    # An error lines above leaves the caret's line its own reading.
     ('f"}"\nf"{x|!r}"', (3, 3, 4)),
     ('f"{x!}"\n(print "ab|c")', None),
     ('x = f"{a:\n}"\n"abc|"', None),
-    # A string after a conversion's ! is refused, whatever holds the caret.
+    # A later line continuing a multi-line literal stays in it: a string's
+    # text, a field's word up to its conversion.
+    ('f"{x!}"\n"""doc\nprose|"""', None),
+    ('f"{x!}"\nf"""{a}\n{b|!r}"""', (1, 1, 2)),
+    # On the error's own line, after it, in the literal it stood in.
+    ('f"{z!} {y|!r}"', (8, 8, 9)),
+    # A string after a conversion's ! is refused at its opening, whatever
+    # holds the caret; the reader resumes after that opening.
     ('f"{!""":"|', (9, 9, 9)),
     # A debug = followed only by blanks to the line's end: the field's
     # delimiter comes on a later line.
@@ -223,7 +230,8 @@ def test_completion_word_span(marked, expected):
     # (-->); the dotted word's head left in the replaced word; a field's word
     # run past its delimiter (x!r, x:>10, x=), so a completion there eats the
     # conversion, the spec or the debug =; a word found in a string's text or
-    # a comment.
+    # a comment; after a lexer error, the caret's line read alone, so a later
+    # line of a multi-line literal (a docstring's prose) reads as code.
     assert span_at(marked) == expected
 
 
@@ -233,6 +241,23 @@ def test_a_string_after_a_conversion_bang_has_no_caret_context(text):
     # context, though the reader refuses the conversion whatever the string
     # holds, so a client would read the line as text the reader never lexes.
     assert caret_context(text, len(text)) is None
+
+
+def test_the_symbol_after_a_lexer_error_is_read_in_the_resumed_context():
+    # Defect: caret_symbol_p (the LSP's qualified-base code check) answers
+    # False wherever the text before the caret holds a lexer error, so a
+    # mod.| on a line after one gets no qualified macros; or reads the line
+    # alone, so a docstring's prose after the error passes for code.
+    assert caret_symbol_p("mod.", 4, 'f"{x!}"\n')
+    assert not caret_symbol_p("mod.", 4, 'f"{x!}"\n"""doc\n')
+
+
+def test_resuming_past_an_error_before_the_resume_point_ends(time_bound):
+    # Defect: an escaped literal refused at its own opening (a bare " in
+    # f\"a"), which lies before the point the reader resumed from, is
+    # resumed in and refused again forever, so the completion never answers.
+    line = 'f"{f\\"a"} fo'
+    assert completion_word_span(line, len(line)) == (10, 10, 12)
 
 
 def reader_leaf(line):
@@ -385,11 +410,15 @@ def chars(entries):
     return "[" + "".join(re.escape(c) for c in entries) + "]"
 
 
+# spec_word_span's answer where the reader refuses the text before the caret.
+REFUSED = "refused"
+
+
 def spec_word_span(rule):
     """A function (line, caret, before) -> (start, replaceStart, end), or
-    None for no word, as an editor client reproduces it from the published
-    rule alone: no parser internal is read here. The rule's regexes are
-    compiled once."""
+    None for no word (REFUSED where the reader refuses the text), as an
+    editor client reproduces it from the published rule alone: no parser
+    internal is read here. The rule's regexes are compiled once."""
     stop = chars(rule["stopChars"])
     wrapper = f"(?:{one_of(rule['wrappers'])})"
     opening = f"(?:{one_of(rule['openings'])})"
@@ -625,11 +654,9 @@ def spec_word_span(rule):
 
     def word_span(line, caret, before=""):
         found = context(before + line, len(before) + caret)
-        if found is not None:
-            [mode, resume] = [found[0], max(found[1] - len(before), 0)]
-        else:
-            # Refused: the caret's line alone, else code.
-            [mode, resume] = context(line, caret) or ("code", 0)
+        if found is None:
+            return REFUSED  # the rule has no answer where the reader refuses
+        [mode, resume] = [found[0], max(found[1] - len(before), 0)]
         if mode == "text":
             return None
         run_start = caret
@@ -692,6 +719,9 @@ def test_the_published_rule_alone_reproduces_every_case(published):
     # the cases it is pinned against.
     word_span = spec_word_span(published["rule"])
     for case in published["cases"]:
+        # No case is a text the reader refuses, where the rule has no answer.
+        text = case["before"] + case["text"]
+        assert caret_context(text, len(case["before"]) + case["caret"]) is not None
         expected = (case["start"], case["replaceStart"], case["end"])
         got = word_span(case["text"], case["caret"], case["before"])
         assert (got or (None, None, None)) == expected, (case["text"], case["caret"])
