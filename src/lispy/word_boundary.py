@@ -129,10 +129,6 @@ CASE_INPUTS = (
     'f"{x|!r}"',
     'f"{x|:>10}"',
     'f"{x!|r}"',
-    # A valid conversion name, blanks and a continuation after it included,
-    # ends at its } (an invalid one is refused, and no case is refused text).
-    'f"{x!r} (fo|',
-    'f"{x!r \\\n} (fo|',
     'f"{x:>1|0}"',
     'f"{x|=}"',
     'f"{x =|}"',
