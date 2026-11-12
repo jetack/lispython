@@ -1987,11 +1987,14 @@ def test_the_sweep_shadows_a_package_linked_into_src(tmp_path):
     assert os.readlink(init) == str(proj / "src" / "acme" / "__init__.py")
 
 
-def test_a_package_linked_within_the_project_is_listed_by_its_link_too(tmp_path):
-    # Defect: a walk entering each real directory once, its real spelling
+def test_a_package_linked_within_the_project_is_listed_by_its_link_too(
+    tmp_path, time_bound
+):
+    # Defects: a walk entering each real directory once, its real spelling
     # included, enters shared/acme (sorted first) and skips src/acme, so the
-    # spelling Python imports as acme.m gets no shadow.  A second link to
-    # the same package (src/zeta) is entered no more, and the loop up ends.
+    # spelling Python imports as acme.m gets no shadow; or a second link to
+    # the same package (src/zeta, the package zeta) is skipped.  The loop
+    # links up end.
     proj = tmp_path / "proj"
     (proj / "shared" / "acme").mkdir(parents=True)
     (proj / "shared" / "acme" / "m.lpy").write_text("")
@@ -2001,6 +2004,24 @@ def test_a_package_linked_within_the_project_is_listed_by_its_link_too(tmp_path)
     (proj / "src" / "acme" / "up").symlink_to(proj / "src")
     assert pv.project_sources(str(proj)) == [
         str(proj / "shared" / "acme" / "m.lpy"),
+        str(proj / "src" / "acme" / "m.lpy"),
+        str(proj / "src" / "zeta" / "m.lpy"),
+    ]
+
+
+def test_two_links_to_one_package_each_get_their_sources(tmp_path, time_bound):
+    # Defect: links are de-duplicated in walk order, so docs/acme (sorted
+    # first) takes /outside/acme and src/acme, the package acme, is left
+    # with no shadow.
+    outside = tmp_path / "outside" / "acme"
+    outside.mkdir(parents=True)
+    (outside / "m.lpy").write_text("")
+    proj = tmp_path / "proj"
+    for parent in ["docs", "src"]:
+        (proj / parent).mkdir(parents=True)
+        (proj / parent / "acme").symlink_to(outside)
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "docs" / "acme" / "m.lpy"),
         str(proj / "src" / "acme" / "m.lpy"),
     ]
 
@@ -2030,8 +2051,9 @@ def test_the_sweep_walks_a_dag_of_links_in_linear_time(tmp_path, time_bound):
     for i in range(count - 1):
         for name in ["a", "b"]:
             (proj / f"d{i}" / name).symlink_to(proj / f"d{i + 1}")
-    # Each directory by its own spelling, and each but d0 once through a link.
-    assert len(pv.project_sources(str(proj))) == 2 * count - 1
+    # Each directory by its own spelling, both its links from there, and
+    # inside those trees each directory at most once more: linear.
+    assert len(pv.project_sources(str(proj))) <= 4 * count
 
 
 def environment_search_paths(client):

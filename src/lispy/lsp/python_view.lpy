@@ -2044,26 +2044,27 @@
    /outside/shared/acme lists src/acme/m.lpy, the module acme.m), and
    skips _pruned-p directories.  It never enters a link to a directory
    above it on the way, the project root's own ancestors included (proj/up
-   -> .. would walk the whole parent tree), and enters each real directory
-   through a link at most once, so a loop ends and a DAG of links stays
-   linear: of two links to one package only the first is listed, while a
-   directory's own spelling is walked whether or not a link reached it
-   too (shared/acme beside src/acme -> shared/acme lists both).  Each path
-   is its own module, so two paths to one file (a file symlink beside it)
-   are both listed."
+   -> .. would walk the whole parent tree), so a loop ends.  A link met in
+   a directory reached by its own spelling (no link on the way) is always
+   followed, since each such spelling is a name an import can take
+   (src/acme and src/zeta -> shared/acme are the packages acme and zeta,
+   whatever else links there); inside a tree entered through a link, a
+   link to a real directory already entered through a link is not, so a
+   DAG of links stays linear.  Each path is its own module, so two paths
+   to one file (a file symlink beside it) are both listed."
   (= found [])
   (= real-root (osp.realpath project-root))
   (= root-above (set [real-root]))
   (while (!= (osp.dirname real-root) real-root)
     (= real-root (osp.dirname real-root))
     (.add root-above real-root))
-  ;; dirpath -> the real paths of it and the directories above it on the
-  ;; way down, whose links would loop.
-  (= ancestors {project-root (frozenset root-above)})
-  ;; The real directories already entered through a link.
+  ;; dirpath -> (the real paths of it and the directories above it on the
+  ;; way down, whose links would loop; whether a link is on the way).
+  (= ancestors {project-root (, (frozenset root-above) False)})
+  ;; The real directories entered through a link.
   (= linked (set))
   (for [dirpath dirnames filenames] in (os.walk project-root :followlinks True)
-    (= above (.pop ancestors dirpath))
+    (= [above via-link] (.pop ancestors dirpath))
     (= kept [])
     (for name in (sorted dirnames)
       (= path (osp.join dirpath name))
@@ -2072,11 +2073,12 @@
       (= real (osp.realpath path))
       (if (in real above)
           (continue))
-      (if (osp.islink path)
-          (do (if (in real linked)
+      (= link (osp.islink path))
+      (if link
+          (do (if (and via-link (in real linked))
                   (continue))
               (.add linked real)))
-      (= (sub ancestors path) (.union above [real]))
+      (= (sub ancestors path) (, (.union above [real]) (or via-link link)))
       (.append kept name))
     (.clear dirnames)
     (.extend dirnames kept)
