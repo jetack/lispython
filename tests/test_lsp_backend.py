@@ -2508,10 +2508,11 @@ def test_an_opened_file_link_with_no_environment_sweeps_again(tmp_path):
 
 
 def _pyrefly_error_names(tmp_path, config_text):
-    # The sorted error names `pyrefly check` reports on proj/scripts/a.py
-    # under this config. a.py imports helper (only out/lib holds it), adds
-    # a str to helper.X (an int: an error only when the import resolved) and
-    # assigns a str to an int (an error unless the config turns it off).
+    # The sorted names, among the three kinds counted below, of the errors
+    # `pyrefly check` reports on proj/scripts/a.py under this config. a.py
+    # imports helper (only out/lib holds it), adds a str to helper.X (an
+    # int: an error only when the import resolved) and assigns a str to an
+    # int (an error unless the config turns it off).
     proj = tmp_path / "proj"
     (proj / "scripts").mkdir(parents=True)
     (tmp_path / "out" / "lib").mkdir(parents=True)
