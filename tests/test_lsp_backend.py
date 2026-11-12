@@ -2507,6 +2507,51 @@ def test_an_opened_file_link_with_no_environment_sweeps_again(tmp_path):
     )
 
 
+def _pyrefly_missing_imports(tmp_path, config_text):
+    # The "missing-import" errors `pyrefly check` reports on proj/scripts/a.py
+    # (`import helper`, a module only out/lib holds) under this config.
+    argv = backend.backend_argv("pyrefly")
+    if argv is None:
+        pytest.skip("pyrefly is not installed (its lsp extra)")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (tmp_path / "out" / "lib").mkdir(parents=True)
+    (tmp_path / "out" / "lib" / "helper.py").write_text("X = 1\n")
+    (proj / "scripts" / "a.py").write_text("import helper\n")
+    (proj / "pyrefly.toml").write_text(
+        f"python-interpreter-path = {json.dumps(sys.executable)}\n"
+        + config_text.format(lib=json.dumps(str(tmp_path / "out" / "lib")))
+    )
+    found = subprocess.run(
+        [argv[0], "check", "--color", "never", "--output-format", "json"]
+        + ["-c", str(proj / "pyrefly.toml"), str(proj / "scripts" / "a.py")],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    errors = json.loads(found.stdout)["errors"]
+    return [error for error in errors if error["name"] == "missing-import"]
+
+
+def test_pyrefly_takes_search_path_from_a_directory_config_only(tmp_path):
+    # Trip-wire for pyrefly's documented limit: a [[sub-config]] refuses
+    # search-path, so write-pyrefly-config cannot give a file-link script
+    # its own search list (ShadowManifest.file-environments goes unused
+    # there). The control proves the check can see an import resolve.
+    control = _pyrefly_missing_imports(tmp_path / "control", "search-path = [{lib}]\n")
+    assert control == []
+    sub = _pyrefly_missing_imports(
+        tmp_path / "sub",
+        '[[sub-config]]\nmatches = "scripts/a.py"\nsearch-path = [{lib}]\n',
+    )
+    assert sub, (
+        "pyrefly now takes search-path per sub-config: write "
+        "ShadowManifest.file-environments as [[sub-config]] search-path "
+        "entries in write-pyrefly-config, and drop this test"
+    )
+
+
 @pytest.mark.parametrize(
     "name", [name for name in REAL_BACKENDS if name == "basedpyright"]
 )
