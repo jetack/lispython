@@ -30,7 +30,8 @@
 (from pygls.protocol [default-converter])
 (from pygls.uris [to-fs-path])
 
-(from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest config-files
+(from lispy.lsp.python-view [PYREFLY-CONFIG PYRIGHT-CONFIG ShadowManifest below-p
+                             config-files
                              new-environment-p outside-path read-quietly
                              shadow-module-names view-path view-root-for
                              write-pyrefly-config write-pyright-config write-shadows])
@@ -393,11 +394,6 @@
   (if (and (is-not place None) (== (sub place 0) "lpy") (is (sub place 2) _OWN-DOCUMENT))
       (return (, "lpy" (sub place 1) origin)))
   (return place))
-
-(def _below-p [path directory]
-  "Whether path is directory or lies below it, by their spelling."
-  (= rel (osp.relpath path directory))
-  (return (not (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep))))))
 
 (def _kill [process]
   (if (and (is-not process None) (is process.returncode None))
@@ -1560,7 +1556,8 @@
       ;; real directory /out of its script link scripts/t.lpy -> /out/t.lpy,
       ;; outside-view-dir) gets no file event from that project's
       ;; workspace, so its save sweeps every other backend whose last sweep
-      ;; shadowed an outside dir holding its real path, or that view keeps
+      ;; shadowed an outside dir (or a directory a link in one reaches)
+      ;; holding its real path, or that view keeps
       ;; the old text until its next sweep.  By directory, not by source:
       ;; a new file there has no shadow yet, and the real path matches
       ;; whatever spelling the editor saved it through.
@@ -1569,7 +1566,7 @@
           (do (= real (osp.realpath path))
               (for other in (list (.values self.clients))
                 (if (and (is-not other client)
-                         (any ((_below-p real directory)
+                         (any ((below-p real directory)
                                for directory in other.manifest.outside-dirs)))
                     (._sweep-soon self other [])))))
       (except [Exception]

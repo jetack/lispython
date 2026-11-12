@@ -2490,6 +2490,51 @@ def test_saving_an_outside_source_sweeps_the_view_that_shadows_it(
     assert swept == [clients[0], clients[0]]
 
 
+def test_saving_through_a_link_in_an_outside_dir_sweeps_its_view(tmp_path, monkeypatch):
+    # Defects: a file new in /out saved during the first sweep's walk of
+    # /out sweeps nothing, as the view names /out only once every walk is
+    # done; and a source shadowed through a link in /out (/out/lib ->
+    # /data/lib, /out/f.lpy -> /data2/f.lpy) saved at its real path lies
+    # below no outside dir, so the view keeps its old text.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import lib.m f)\n")
+    data = tmp_path / "data" / "lib"
+    data.mkdir(parents=True)
+    (data / "m.lpy").write_text("(= m 1)\n")
+    (out / "lib").symlink_to(data)
+    (tmp_path / "data2").mkdir()
+    (tmp_path / "data2" / "f.lpy").write_text("(= f 1)\n")
+    (out / "f.lpy").symlink_to(tmp_path / "data2" / "f.lpy")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    other = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    other.state = "running"
+    other.process = SimpleNamespace(returncode=None)
+    backends.clients["elsewhere"] = other
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    walk = pv.project_sources
+
+    def saving_during_walk(directory, **kwargs):
+        if directory == str(out):
+            backends.document_saved((out / "new.lpy").as_uri())
+        return walk(directory, **kwargs)
+
+    monkeypatch.setattr(pv, "project_sources", saving_during_walk)
+    other._prepare_view_root([])
+    assert swept == [other]
+    swept.clear()
+    backends.document_saved((data / "m.lpy").as_uri())
+    backends.document_saved((tmp_path / "data2" / "f.lpy").as_uri())
+    assert swept == [other, other]
+
+
 def test_an_outside_package_overlay_never_writes_through_a_swapped_link(
     tmp_path, monkeypatch
 ):

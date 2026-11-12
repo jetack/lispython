@@ -1794,19 +1794,31 @@
 (= _TEMP-SUFFIX ".tmp")
 (= _TEMP-MAX-AGE 3600)
 
+(def below-p [path directory]
+  "Whether path (absolute) is directory or lies below it, by their
+   spelling.  A path on another drive (Windows, where relpath raises
+   ValueError across drives) lies below nothing there, as _refuse-overlap
+   reads drives.  The one home of path containment for the view's layout
+   and Backends.document-saved."
+  (if (!= (osp.normcase (sub (osp.splitdrive path) 0))
+          (osp.normcase (sub (osp.splitdrive directory) 0)))
+      (return False))
+  (= rel (osp.relpath path directory))
+  (return (not (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep))))))
+
 (def view-path [project-root view-root lpy-path]
   "The shadow .py of lpy-path in view-root, mirroring its place under
    project-root, or None for a file outside the project."
-  (= rel (osp.relpath (osp.abspath lpy-path) (osp.abspath project-root)))
-  (if (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))
+  (if (not (below-p (osp.abspath lpy-path) (osp.abspath project-root)))
       (return None))
+  (= rel (osp.relpath (osp.abspath lpy-path) (osp.abspath project-root)))
   (return (osp.join (os.fspath view-root) (+ (sub (osp.splitext rel) 0) ".py"))))
 
 (def _view-dir [project-root view-root directory]
   "directory's counterpart in view-root, or None outside project-root."
-  (= rel (osp.relpath directory project-root))
-  (if (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))
+  (if (not (below-p directory project-root))
       (return None))
+  (= rel (osp.relpath directory project-root))
   (return (osp.normpath (osp.join (os.fspath view-root) rel))))
 
 ;; The view root's directory of shadows of directories outside the project
@@ -1849,9 +1861,8 @@
    the view gives shadows of its own (outside-view-dir).  An import root
    holding the project (the project inside a package) is no such directory:
    the view mirrors the project's part of it."
-  (= up (osp.relpath project-root directory))
   (return (and (_outside-p project-root directory)
-               (or (== up os.pardir) (.startswith up (+ os.pardir os.sep))))))
+               (not (below-p project-root directory)))))
 
 (def _outside-view [project-root root directory]
   "outside-view-dir of directory when it is an _outside-dir-p directory of
@@ -2165,7 +2176,7 @@
 (= _MAX-REPEAT-LINK-DIRS 1000)
 (= _CAPPED-WALKS (set))
 
-(def project-sources [project-root]
+(def project-sources [project-root :linked None]
   "The .lpy files under project-root, sorted, each spelled by the way the
    walk reached it.  The walk follows directory links by their spelled
    name, as FileFinder imports a package through one (src/acme ->
@@ -2179,7 +2190,11 @@
    met inside a tree entered through a link it enters a real directory
    again only _MAX-REPEAT-LINK-DIRS times in all, which bounds the
    directories a DAG of links makes it list.  Each path is its own module, so two paths to
-   one file (a file symlink beside it) are both listed."
+   one file (a file symlink beside it) are both listed.  linked, when
+   given, a set, gets the real path of every directory the walk enters
+   through a link and the real directory of every .lpy it lists through a
+   file link: the places a save of a listed file may be spelled by
+   (Backends.document-saved)."
   (= found [])
   (= real-root (osp.realpath project-root))
   (= root-above (set [real-root]))
@@ -2214,13 +2229,18 @@
               (+= repeats 1)))
       (if below-nested
           (.add nested-entered real))
+      (if (and link (is-not linked None))
+          (.add linked real))
       (= (sub ancestors path) (, (.union above [real]) (or via-link link) below-nested))
       (.append kept name))
     (.clear dirnames)
     (.extend dirnames kept)
     (for filename in filenames
       (if (.endswith filename ".lpy")
-          (.append found (osp.join dirpath filename)))))
+          (do (= path (osp.join dirpath filename))
+              (if (and (is-not linked None) (osp.islink path))
+                  (.add linked (osp.dirname (osp.realpath path))))
+              (.append found path)))))
   (if (and capped (not-in project-root _CAPPED-WALKS))
       (do (.add _CAPPED-WALKS project-root)
           (.warning logger "lispython view: %s links to one directory under more than %d names; the rest get no shadow"
@@ -2504,8 +2524,7 @@
 
 (def _outside-p [project-root directory]
   "Whether directory lies outside project-root."
-  (= rel (osp.relpath directory project-root))
-  (return (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))))
+  (return (not (below-p directory project-root))))
 
 (def _real-dirs [dirs]
   "The real paths of dirs in order, each once, or None for no dirs."
@@ -2631,28 +2650,35 @@
   ;; root holding the project stays out, as _search-paths leaves it out.
   ;; Every sweep re-stats these sources (the manifest's stamps), as no file
   ;; event comes from outside the workspace.
-  (= bases [(, project-root root sources)])
-  (= outside-names {})
+  (= outside-dirs [])
   (for names in (list (.values names-of))
     (for directory in (sub names 3)
       (= directory (osp.normpath (osp.abspath directory)))
       (if (and (_outside-dir-p project-root directory)
                (not-in (osp.realpath directory) spellings)
-               (not (any ((== directory (sub base 0)) for base in bases))))
-          ;; The whole tree, as the project's walk: any directory below
-          ;; one on sys.path is importable (a namespace package), so a
-          ;; module at any depth of it may be the one an import names.
-          (do (= found (project-sources directory))
-              (.append bases (, directory (outside-view-dir root directory) found))
-              (for lpy-path in found
-                (if (not-in lpy-path names-of)
-                    (= (sub outside-names lpy-path)
-                       (shadow-module-names project-root lpy-path))))))))
+               (not-in directory outside-dirs))
+          (.append outside-dirs directory))))
+  ;; manifest.outside-dirs is replaced whole, never mutated:
+  ;; Backends.document-saved reads it on the loop while a sweep thread
+  ;; runs.  It names the dirs before their walks (a file saved there during
+  ;; a long walk still sweeps), keeping the last sweep's linked dirs until
+  ;; this one's are known.
+  (= linked (set (map osp.realpath outside-dirs)))
+  (= manifest.outside-dirs (| manifest.outside-dirs linked))
+  (= bases [(, project-root root sources)])
+  (= outside-names {})
+  (for directory in outside-dirs
+    ;; The whole tree, as the project's walk: any directory below one on
+    ;; sys.path is importable (a namespace package), so a module at any
+    ;; depth of it may be the one an import names.
+    (= found (project-sources directory :linked linked))
+    (.append bases (, directory (outside-view-dir root directory) found))
+    (for lpy-path in found
+      (if (not-in lpy-path names-of)
+          (= (sub outside-names lpy-path)
+             (shadow-module-names project-root lpy-path)))))
   (.update names-of outside-names)
-  ;; Replaced whole, never mutated: Backends.document-saved reads it on the
-  ;; loop while a sweep thread runs.
-  (= manifest.outside-dirs (frozenset ((osp.realpath (sub base 0))
-                                       for base in (sub bases [: 1 None]))))
+  (= manifest.outside-dirs (frozenset linked))
   (= current (| (set sources) (set outside-names)))
   ;; None: a drop is due, so every entry is stale.
   (= macro-epoch (epoch))
@@ -2844,11 +2870,9 @@
   (for directory in dirs
     (= directory (osp.abspath directory))
     (= view-dir (_view-dir project-root root directory))
-    (= up (osp.relpath project-root directory))
     (if (or (in directory kept)
             ;; An import root holding the project.
-            (and (is view-dir None)
-                 (not (or (== up os.pardir) (.startswith up (+ os.pardir os.sep))))))
+            (and (is view-dir None) (below-p project-root directory)))
         (continue))
     (.append kept directory)
     (if (is None view-dir)
