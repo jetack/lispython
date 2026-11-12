@@ -1111,14 +1111,20 @@ def test_a_module_file_flipping_the_src_layout_republishes(outside_documents, cr
     run_bounded(scenario())
 
 
-def test_a_deleted_src_package_folder_republishes(outside_documents):
-    # Defect: rm -r src/pkg sends one event, for the folder, which names no
+@pytest.mark.parametrize("linked", [False, True])
+def test_a_deleted_src_package_folder_republishes(outside_documents, linked):
+    # Defects: rm -r src/pkg sends one event, for the folder, which names no
     # module file, so the src layout is never asked again and the open
-    # document keeps searching a src that holds no Python.
+    # document keeps searching a src that holds no Python; and with src a
+    # directory link out of the project (src -> ../shared-src), the folder's
+    # resolved path lies in no project, so its event is dropped.
     editor, outside, _, folders = outside_documents
     folders.append(SimpleNamespace(uri=outside.as_uri()))
-    (outside / "src" / "pkg").mkdir(parents=True)
-    (outside / "src" / "pkg" / "__init__.py").write_text("")
+    real_src = outside.parent / "shared-src" if linked else outside / "src"
+    (real_src / "pkg").mkdir(parents=True)
+    (real_src / "pkg" / "__init__.py").write_text("")
+    if linked:
+        (outside / "src").symlink_to(real_src)
     scripts = outside / "scripts"
     scripts.mkdir()
     script = scripts / "x.lpy"
@@ -1129,7 +1135,7 @@ def test_a_deleted_src_package_folder_republishes(outside_documents):
         await until(lambda: uri in editor.published)
         assert server.uri_module_names(uri)[3] == (str(scripts), str(outside / "src"))
         count = len(editor.published[uri])
-        shutil.rmtree(outside / "src" / "pkg")
+        shutil.rmtree(real_src / "pkg")
         files_changed(editor, outside / "src" / "pkg", lsp.FileChangeType.Deleted)
         await until(lambda: len(editor.published[uri]) > count, timeout=5)
         assert server.uri_module_names(uri)[3] == (str(scripts),)

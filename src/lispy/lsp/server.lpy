@@ -1748,10 +1748,37 @@
   (= parts (.split (osp.normpath path) os.sep))
   (return (and (in "src" parts) (not-in "__pycache__" parts))))
 
-(def within-src-p [project-root real]
-  "Whether real (a document-path) is project-root's src or lies below it."
+(def src-base [project-root real]
+  "The src directory real (a document-path) is or lies below: project-root's
+   src, or that src's real path when src is a directory link
+   (proj/src -> ../shared/src, whose entries document-path resolves
+   there); None when neither holds it."
   (= src (osp.join project-root "src"))
-  (return (or (== real src) (.startswith real (+ src os.sep)))))
+  (for base in [src (osp.realpath src)]
+    (if (or (== real base) (.startswith real (+ base os.sep)))
+        (return base)))
+  (return None))
+
+(def src-entry-project [path folders]
+  "The project (project-root-of, over folders) whose src the event's path,
+   src-entry-shape-p's, is or lies below (src-base) outside a pruned
+   directory (pruned-in-project-p, measured from that src), or None.  The
+   project is that of the path's deepest src component as spelled, never of
+   the resolved path, which a linked src takes out of the project."
+  (= src-path (osp.normpath path))
+  (while (!= (osp.basename src-path) "src")
+    (= parent (osp.dirname src-path))
+    (if (== parent src-path)
+        (return None))
+    (= src-path parent))
+  (= project-root (project-root-of src-path folders))
+  (if (is project-root None)
+      (return None))
+  (= real (document-path (osp.normpath path)))
+  (= base (src-base project-root real))
+  (if (or (is base None) (pruned-in-project-p base real))
+      (return None))
+  (return project-root))
 
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
 (def did-change-watched-files [ls params]
@@ -1759,8 +1786,8 @@
    indexed again (reindex-watched-file), and when one may rename a module
    (renaming-file-p), or moved the src layout answer of its project
    (refresh-src-layout, asked once per project of a module file in the
-   batch, or of any entry of its src (src-entry-shape-p, within-src-p: a
-   package folder deleted or moved in whole is one event), outside a
+   batch, or of any entry of its src (src-entry-shape-p, src-entry-project:
+   a package folder deleted or moved in whole is one event), outside a
    pruned directory, pruned-in-project-p: a file behind a link into src
    included, a .venv install never), every open document is published
    again.  The pruned check reads the event's path as
@@ -1779,14 +1806,16 @@
           (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
-      (= module-file (module-file-path-p path :suffixes suffixes))
-      (if (or module-file (src-entry-shape-p path))
+      (= project-root None)
+      (if (module-file-path-p path :suffixes suffixes)
           (do (= project-root (project-root-of path (workspace-folders)))
-              (if (is-not project-root None)
-                  (do (= real (document-path (osp.normpath path)))
-                      (if (and (or module-file (within-src-p project-root real))
-                               (not (pruned-in-project-p project-root real)))
-                          (.add projects project-root))))))
+              (if (and (is-not project-root None)
+                       (pruned-in-project-p project-root (document-path path)))
+                  (= project-root None))))
+      (if (and (is project-root None) (src-entry-shape-p path))
+          (= project-root (src-entry-project path (workspace-folders))))
+      (if (is-not project-root None)
+          (.add projects project-root))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
   ;; Every project is refreshed, a renaming batch too, so none keeps the
