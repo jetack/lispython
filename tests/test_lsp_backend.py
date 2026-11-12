@@ -2097,6 +2097,45 @@ def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path
     }
 
 
+def test_a_file_link_script_leaves_its_neighbours_search_list(tmp_path):
+    # Defect: the environment of scripts/ merges the search dirs of every
+    # script in it, so the link scripts/a.lpy -> lib/a.lpy adds lib/ to
+    # scripts/b.lpy's list and the backend resolves b's (import helper)
+    # from lib/, which `python scripts/b.py` refuses.
+    def layout(root, with_link):
+        (root / "lib").mkdir(parents=True)
+        (root / "lib" / "a.lpy").write_text("(= a 1)\n")
+        (root / "lib" / "helper.py").write_text("h = 1\n")
+        (root / "scripts").mkdir()
+        (root / "scripts" / "b.lpy").write_text("(import helper)\n")
+        (root / "scripts" / "b.py").write_text("import helper\n")
+        if with_link:
+            (root / "scripts" / "a.lpy").symlink_to(root / "lib" / "a.lpy")
+        client = backend.BackendClient(view_root(root, tmp_path), ["unused"])
+        client._prepare_view_root([])
+        view = client.view_root.path
+        # Spelled relative to each view and project, so the two compare.
+        return {
+            os.path.relpath(env, view): [
+                os.path.relpath(path, view if path.startswith(view) else root)
+                for path in paths
+            ]
+            for env, paths in environment_search_paths(client).items()
+        }
+
+    proj = tmp_path / "proj"
+    linked = layout(proj, True)
+    assert linked["scripts"] == layout(tmp_path / "plain", False)["scripts"]
+    assert linked["scripts"] == ["scripts", "scripts"]
+    # Not -I: isolated mode puts no script directory on sys.path.
+    run = subprocess.run(
+        [sys.executable, "-E", "-s", str(proj / "scripts" / "b.py")],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode != 0 and "No module named 'helper'" in run.stderr
+
+
 def test_a_script_directory_linked_out_searches_its_view(tmp_path):
     # Defect: the environment root is the script's first search dir, its
     # real directory /out/scripts, which has no view directory, so the

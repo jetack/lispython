@@ -1988,7 +1988,7 @@
    of the directories the module is analysed against: its compile searches
    them (before sys.path while its macros run, compile-buffer), and so do
    the local definition fallback, resolve-module-to-file and the backend
-   (write-shadows, the first being the module's environment root).  They
+   (write-shadows: the module's search environment, _environments).  They
    follow the one run mode Python gives the file (package-module-p): a
    module inside a regular package is that module, searching its import
    root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
@@ -2094,9 +2094,9 @@
    same macro environment, is not compiled again.  And the search dirs of
    the written shadows' sources and of the documents open in the backend
    (module-names), which the config writers read (_search-paths,
-   search-environments): environments, environment root -> the search dirs
-   of the modules it is the first of, in order (merged, each once, should
-   two modules of one root differ; _environments)."
+   search-environments): environments, environment root (the directory
+   holding a module's view file, _module-environment) -> the search dirs
+   its backend environment searches (_environments decides them)."
   (def __init__ [self]
     (= self.sources {})
     (= self.environments {})))
@@ -2291,7 +2291,9 @@
    its environment's root, holds the module's view file, so it is a
    package module's import root (its first search dir) and a script's own
    spelled directory, which its first search dir (its real path's
-   directory, scripts/a.lpy -> lib/a.lpy searching lib/) need not be."
+   directory, scripts/a.lpy -> lib/a.lpy searching lib/) need not be.  A
+   backend applies an environment only to the files under its root, so a
+   root elsewhere would leave the module under the default list."
   (= dirs (sub names 3))
   (return (, (ife (sub names 1) (sub dirs 0) (osp.dirname (osp.abspath lpy-path)))
              dirs)))
@@ -2299,19 +2301,30 @@
 (def _environments [modules]
   "ShadowManifest.environments of modules, (lpy path, module-names) pairs, in
    order: environment root (_module-environment) -> the search dirs of the
-   modules it is the root of, merged in order, each once, sorted by root.
+   modules it is the root of, sorted by root.  Only the modules whose
+   first search dir is the root (a package module, a script searching its
+   own directory) give it search dirs, merged in order, each once; the
+   first other module (a file-link script scripts/a.lpy -> lib/a.lpy,
+   searching lib/) gives them only to a root that has none of those.
    The modules are every source with a shadow and every document open in
    the backend (write-shadows' open-paths): a buffer not yet saved has no
    shadow but is synced to the backend at its view path, and analysing it
    under the default list instead of its own search dirs leaves a sibling
    import its run (`python scripts/y.py`) resolves unresolved until the
    first save."
-  (= environments {})
+  ;; One backend environment has one search list, and a plain script's run
+  ;; (python scripts/b.py) never searches the lib/ a link beside it
+  ;; searches, so the plain modules decide it and the link is analysed
+  ;; under their list (its own compile still searches lib/).
+  (= plain {})
+  (= other {})
   (for [lpy-path names] in modules
     (= [env-root dirs] (_module-environment lpy-path names))
-    (= (sub environments env-root)
-       (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs)))))
-  (return (dict (sorted (.items environments)))))
+    (if (== (sub dirs 0) env-root)
+        (= (sub plain env-root)
+           (tuple (dict.fromkeys (+ (.get plain env-root (,)) dirs))))
+        (.setdefault other env-root dirs)))
+  (return (dict (sorted (.items (| other plain))))))
 
 (def new-environment-p [project-root environments lpy-path]
   "Whether lpy-path, the absolute path of a document open in project-root's
