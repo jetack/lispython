@@ -74,6 +74,7 @@ _SIGNED_COMPLEX = f"[+-]*(?:{_PY_NUMBER})[+-](?:{_PY_NUMBER})"
 # or the call f(*', a)); ^*Ts stays a symbol.
 _WRAPPER = "(?:\\^|\\*{1,2})?"
 _OPENING = "[\\(\\{\\[]"
+_CLOSING = "[\\)\\}\\]]"
 _META_CHARS = "(?:'|`|~@|~)"
 # The quote marks that, with no form after them, are a dangling quote: ~ alone
 # is the invert symbol.
@@ -96,7 +97,8 @@ _LINE_BREAK_CHARS = "\\r\\n"
 # open right after a form. "[" so that f[T] is a symbol glued to a bracket
 # (the one glued head); "{" so that the word at a caret never runs into a
 # preceding f-string text or format spec through a field's brace
-# (completion_word_span lexes the line as code: f"ab{wi" is the word wi).
+# (completion_word_span lexes the run from a stop character on, with the
+# token regex of the code there: f"ab{wi" is the word wi).
 # x{y} is the symbol x then the dict {y}, never a glued head.
 _SYMBOL_STOP = _FORM_END + '\\"\\[\\{'
 # What ends a number token: a form end, or the "{" a symbol stops at, so 1{2}
@@ -106,6 +108,17 @@ _NUMBER_END = _FORM_END + "\\{"
 # A line continuation in a field: a backslash before a line break or the end
 # of the source (_token_patterns).
 _FIELD_CONTINUATION = "\\\\(?:\\r\\n|\\r|\\n|\\Z)"
+# What ends a field's expression at the field's own level besides its "}":
+# the format spec's ":" or the conversion's "!" (never "!=", an operator).
+_FIELD_DELIMITER = ":|!(?!=)"
+# What ends a field's conversion (_Lexer._conversion): its spec or its end.
+_CONVERSION_ENDS = ":}"
+# The escaped quotes that open a string in a field, longest first: the
+# deprecated spelling of a field's string (_token_patterns).
+_ESCAPED_STRING_TYPES = ('\\"\\"\\"', '\\"')
+# A backslash a symbol in a field holds: one before no quote, line break or
+# end of the source (those open an escaped string or continue the line).
+_FIELD_SYMBOL_BACKSLASH = f'\\\\(?!["{_LINE_BREAK_CHARS}]|\\Z)'
 
 
 def _token_patterns(in_field, field_level=False):
@@ -139,15 +152,16 @@ def _token_patterns(in_field, field_level=False):
     ``_FIELD_BRACES``): a new token label needs a ``_LABEL_ACTIONS`` entry
     there, or that module refuses to import.
     """
-    end = "$|:|!(?!=)" if field_level else "$"
+    end = f"$|{_FIELD_DELIMITER}" if field_level else "$"
     if in_field:
         # A continuation ends a form as whitespace does.
         end = f"{_FIELD_CONTINUATION}|{end}"
     # In a field a symbol also stops before \" (see above), so ^* before it
     # is a bad prefix, reported ahead of anything in the escaped string.
-    quote = '(?:\\\\"){3}|\\\\"|' if in_field else ""
+    escaped = [re.escape(quote) for quote in _ESCAPED_STRING_TYPES]
+    quote = "|".join(escaped) + "|" if in_field else ""
     stop_ahead = (
-        f'(?=[{_SYMBOL_STOP}]|\\\\"|{end})'
+        f"(?=[{_SYMBOL_STOP}]|{escaped[-1]}|{end})"
         if in_field
         else f"(?=[{_SYMBOL_STOP}]|{end})"
     )
@@ -155,13 +169,13 @@ def _token_patterns(in_field, field_level=False):
     # possessive (++, *+): a plain + makes re keep a backtracking point per
     # character, hundreds of MB for a long symbol or comment.
     if field_level:
-        char = f"[^{_SYMBOL_STOP}\\\\:!]|!(?==)"
-        comment_char = f"[^{_LINE_BREAK_CHARS}}}:!]|!(?==)"
+        char = f"(?!{_FIELD_DELIMITER})[^{_SYMBOL_STOP}\\\\]"
+        comment_char = f"(?!{_FIELD_DELIMITER})[^{_LINE_BREAK_CHARS}}}]"
     else:
         [char, comment_char] = [f"[^{_SYMBOL_STOP}\\\\]", f"[^{_LINE_BREAK_CHARS}]"]
     return [
         [_WRAPPER + _OPENING, "opening"],
-        ["[\\)\\}\\]]", "closing"],
+        [_CLOSING, "closing"],
         # Only the opening of a string (prefix and quote): scan_string_body,
         # the one scanner of string bodies, reads the rest.
         [f"{_STRING_PREFIX}(?:{quote}{_STRING_OPENINGS})", "string"],
@@ -177,8 +191,8 @@ def _token_patterns(in_field, field_level=False):
         # bracket). At a field's own level a lone ":" or "!" matches too, so
         # the lexer sees the delimiter where a token starts.
         [
-            f'(?:{char}|\\\\(?!["{_LINE_BREAK_CHARS}]|\\Z))++'
-            + ("|[:!]" if field_level else "")
+            f"(?:{char}|{_FIELD_SYMBOL_BACKSLASH})++"
+            + (f"|{_FIELD_DELIMITER}" if field_level else "")
             if in_field
             else f"[^{_SYMBOL_STOP}]+",
             "symbol",
@@ -357,6 +371,36 @@ def scan_string_body(src, i, quote, raw, kind, doubled="{}"):
             i += 2
         else:
             return ["".join(buf), "field" if c == "{" else "close", i]
+
+
+# The string prefix letter that makes a literal raw, and the letters that make
+# it an f/t-string, the first one held winning (_string_kind).
+_RAW_LETTER = "r"
+_KIND_LETTERS = (("t", "t-string"), ("f", "f-string"))
+
+
+def _string_kind(prefix):
+    """``[raw, kind]`` of a string opening's ``prefix`` (any letters, case
+    aside), as the lexer reads its body: the parser refuses a prefix no
+    Python string takes afterwards."""
+    lowered = prefix.lower()
+    kind = next((kind for [c, kind] in _KIND_LETTERS if c in lowered), "string")
+    return [_RAW_LETTER in lowered, kind]
+
+
+def _skip_blanks(src, i):
+    """Past the whitespace and backslash continuations (a backslash before
+    a line break or the end of the source) at ``i`` of ``src``, as CPython's
+    tokenizer skips them between tokens."""
+    n = len(src)
+    while i < n:
+        if src[i].isspace():
+            i += 1
+        elif src[i] == "\\" and (i + 1 == n or src[i + 1] in "\r\n"):
+            i += 1
+        else:
+            break
+    return i
 
 
 class _LiteralState:
@@ -558,11 +602,7 @@ class _Lexer:
         src = self.src
         prefix = _STRING_PREFIX_RE.match(opening).group()
         quote_text = opening[len(prefix) :]
-        lowered = prefix.lower()
-        raw = "r" in lowered
-        kind = (
-            "t-string" if "t" in lowered else "f-string" if "f" in lowered else "string"
-        )
+        [raw, kind] = _string_kind(prefix)
         body = start + len(opening)
         quote_start = body - len(quote_text)
         # Only a field's token pattern lets a quote start with \.
@@ -866,7 +906,7 @@ class _Lexer:
         if rest == n:
             self._eof()
             return None
-        if src[rest] not in "}:":
+        if src[rest] not in _CONVERSION_ENDS:
             self._fail(self._error(f"{kind}: expecting ':' or '}}'", rest, rest + 1))
             return None
         self._emit(src[bang:name_end], "field-conversion", bang, name_end, name)
@@ -896,19 +936,7 @@ class _Lexer:
         return not self.done
 
     def _skip_blanks(self, i):
-        """Past the whitespace and backslash continuations (a backslash before
-        a line break or the end of the source) at ``i``, as CPython's
-        tokenizer skips them between tokens."""
-        src = self.src
-        n = len(src)
-        while i < n:
-            if src[i].isspace():
-                i += 1
-            elif src[i] == "\\" and (i + 1 == n or src[i + 1] in "\r\n"):
-                i += 1
-            else:
-                break
-        return i
+        return _skip_blanks(self.src, i)
 
     def _drop_debug_equals(self, field, equals):
         """Take the ``=`` of ``{x=}`` at ``equals`` off the expression's last
@@ -1344,25 +1372,161 @@ def symbol_stop_p(ch):
     return _SYMBOL_STOP_RE.match(ch) is not None
 
 
-def run_tokens(line, start):
+def run_tokens(line, start, regex=_TOKEN_RE):
     """``(start, end, type)`` of each token the reader lexes from ``start``
     (just after a stop character or at the line's start) until one reaches or
-    passes the end of the run of symbol characters there, in order. The
+    passes the end of the run of symbol characters there, in order, with the
+    token ``regex`` of the code there (top-level code by default; a field's
+    own: ``_word_context``). The
     reader lexes the whole ``line``, never the run alone, so the last token
     may pass the run's end: an opening whose bracket is a stop character
     (``*[``) or a string opening whose quote is (``a"``). A string opening
     may also lex inside the run (``x'''``); the run's tokens are otherwise
     openings, meta-indicators and quote marks (``(``, ``^{``, ``'``, ``~@``),
     bad prefixes (``^*(``, ``^*'``, ``^**``) and a symbol or number, which
-    ends the run."""
+    ends the run (in a field also a delimiter, ``x:y``)."""
     end = start
     while end < len(line) and not symbol_stop_p(line[end]):
         end += 1
     pos = start
     while pos < end:
-        m = _TOKEN_RE.match(line, pos)
+        m = regex.match(line, pos)
         yield pos, m.end(), _TOKEN_LABELS[m.lastindex - 1]
         pos = m.end()
+
+
+# The token regex of each code context (_word_context).
+_CONTEXT_TOKEN_RES = {
+    "code": _TOKEN_RE,
+    "field": _FIELD_TOKEN_RE,
+    "bracket": _BRACKETED_FIELD_TOKEN_RE,
+}
+_FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
+_CONVERSION_END_RE = re.compile(f"[{re.escape(_CONVERSION_ENDS)}]")
+
+
+def _word_context(line, col):
+    """What the reader reads at code-point column ``col`` of ``line``:
+    ``"code"`` (top-level code), ``"field"`` (an f/t-string field's own
+    level, outside its brackets, conversion and format spec), ``"bracket"``
+    (inside a field's brackets), or ``"text"`` (a string's body, an f/t
+    string's literal or format-spec text, a conversion, or a comment).
+
+    The rule is per line: ``line`` is read as starting in top-level code, so
+    a string or field opened on an earlier line is not seen, except that a
+    string that does not close on the line (reached with the caret in it)
+    has its opening quote read as the close of a string from an earlier line
+    (the scan restarts as code after the quote of the outermost string open
+    there): a line can be the end of a multi-line string (``b") (foo|``),
+    whose code must keep its words, and an unclosed string is text being
+    typed either way. It lexes as ``_Lexer`` does (its token regexes,
+    ``scan_string_body`` with ``_Lexer._doubled``, ``_string_kind``) but never
+    stops on an error: a single ``}`` in a literal's text is skipped, the
+    literal's quote in a format spec closes the literal, and a conversion
+    runs to the next ``:`` or ``}`` whatever it holds."""
+    stack = []
+    pos = 0
+    while True:
+        top = stack[-1] if stack else None
+        if top is not None and (isinstance(top, _LiteralState) or top.spec):
+            [literal, spec] = (
+                [top, None] if isinstance(top, _LiteralState) else [top.literal, top]
+            )
+            if pos >= col:
+                return "text"
+            [_, stop, at] = scan_string_body(
+                line,
+                pos,
+                literal.quote,
+                literal.raw,
+                literal.kind,
+                _Lexer._doubled(spec),
+            )
+            if stop == "quote":
+                pos = at + len(literal.quote)
+                if pos > col:
+                    return "text"
+                del stack[-1 if spec is None else -2 :]
+            elif stop in ("eof", "mixed"):
+                [pos, stack] = [stack[0].body, []]
+            elif at >= col:
+                return "text"
+            elif stop == "field":
+                if spec is not None:
+                    spec.nested = True
+                stack.append(_FieldState(literal, at, None))
+                pos = at + 1
+            else:
+                if spec is not None:
+                    stack.pop()
+                pos = at + 1
+            continue
+        mode = "code" if top is None else "bracket" if top.brackets else "field"
+        if pos >= col:
+            return mode
+        m = _CONTEXT_TOKEN_RES[mode].search(line, pos)
+        if m is None or m.start() >= col:
+            return mode
+        start = m.start()
+        if mode == "field":
+            if line[start] == "}":
+                stack.pop()
+                pos = start + 1
+                continue
+            if line[start] == ":":
+                top.spec = True
+                pos = start + 1
+                continue
+            if _FIELD_DELIMITER_RE.match(line, start):
+                end = _CONVERSION_END_RE.search(line, start + 1)
+                if end is None or end.start() >= col:
+                    return "text"
+                pos = end.start()
+                continue
+        [tk, end] = [m.group(), m.end()]
+        tktype = _TOKEN_LABELS[m.lastindex - 1]
+        if tktype == "comment" and end >= col:
+            return "text"
+        if end > col:
+            return mode
+        pos = end
+        if tktype == "string":
+            prefix = _STRING_PREFIX_RE.match(tk).group()
+            quote = tk[len(prefix) :]
+            [raw, kind] = _string_kind(prefix)
+            if kind != "string":
+                escaped_in = top.literal.kind if quote[0] == "\\" else None
+                stack.append(
+                    _LiteralState(
+                        kind, raw, quote, start, end - len(quote), end, escaped_in
+                    )
+                )
+                continue
+            [_, stop, at] = scan_string_body(line, end, quote, raw, kind)
+            if stop != "quote":
+                [pos, stack] = [stack[0].body if stack else end, []]
+                continue
+            pos = at + len(quote)
+            if pos > col:
+                return "text"
+        elif top is not None:
+            if tktype == "opening" or (tktype == "bad-prefix" and tk[-1] in "([{"):
+                top.brackets.append(tk[-1])
+            elif tktype == "closing" and top.brackets:
+                top.brackets.pop()
+
+
+def _debug_equals_p(line, end):
+    """Whether the symbol ending at ``end`` of ``line``, at a field's own
+    level, ends in the ``=`` of ``{x=}``, as ``_Lexer._delimiter`` reads it:
+    an ``=`` not ending an operator (``_DEBUG_BLOCKERS`` before it), with only
+    blanks between it and a delimiter of the field."""
+    if end < 2 or line[end - 1] != "=" or line[end - 2] in _DEBUG_BLOCKERS:
+        return False
+    at = _skip_blanks(line, end)
+    return at < len(line) and (
+        line[at] == "}" or _FIELD_DELIMITER_RE.match(line, at) is not None
+    )
 
 
 def completion_word_span(line, col):
@@ -1378,6 +1542,12 @@ def completion_word_span(line, col):
     is a word character (``->>``, ``swap!``, ``a~b``), and openings and quote
     marks before it are separate tokens (``(->>``, ``'x``, ``~@x``).
 
+    The token is the one the reader lexes in the code at ``col``
+    (``_word_context``, per line): top-level code, or an f/t-string field,
+    where the word stops at the field's delimiters (``x`` in ``{x:>4}``,
+    ``{x!r}``) and before a debug ``=`` (``{x=}``). A string's body, a
+    literal's text, a format spec, a conversion or a comment holds no word.
+
     - ``start``: where the leaf starts; with ``col`` inside the peeled
       prefixes (``-|-x``), where the token starts, the whole token being the
       word, so nothing of it is left to glue onto what replaces the word.
@@ -1385,18 +1555,27 @@ def completion_word_span(line, col):
       since a completion offers the part after the last dot.
     - ``end``: the first ``.`` after ``col`` in the token, else the token's end.
 
-    No word (an opening or a quote mark at ``col``, ``(|``) is the empty span
-    at ``col``."""
+    No word (an opening or a quote mark at ``col``, ``(|``, or text) is the
+    empty span at ``col``."""
+    context = _word_context(line, col)
+    if context == "text":
+        return col, col, col
     run_start = col
     while run_start > 0 and not symbol_stop_p(line[run_start - 1]):
         run_start -= 1
-    for start, end, tktype in run_tokens(line, run_start):
+    for start, end, tktype in run_tokens(line, run_start, _CONTEXT_TOKEN_RES[context]):
+        if context == "field" and _FIELD_DELIMITER_RE.match(line, start):
+            return col, col, col
         if end > col or (end == col and tktype in _WORD_TOKENS):
             break
     else:
         return col, col, col
     if tktype not in _WORD_TOKENS:
         return col, col, col
+    if context == "field" and tktype == "symbol" and _debug_equals_p(line, end):
+        end -= 1
+        if end <= start or end < col:
+            return col, col, col
     _, leaf, _ = token_prefixes(line[start:end], tktype)
     leaf_start = end - len(leaf)
     if col >= leaf_start:
