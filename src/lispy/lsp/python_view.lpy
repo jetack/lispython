@@ -45,7 +45,7 @@
                          wrapper-form-keys])
 (from lispy.core.parser [caret-symbol-p completion-word-span parse source-offset
                           split-lines tokenize word-parts])
-(from lispy.core.parser [caret-tokens as caret-tokens-of])
+(from lispy.core.parser [caret-forms as caret-forms-of caret-tokens as caret-tokens-of])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.literal [hyphen-spelling name-key python-name python-name-p
@@ -111,21 +111,31 @@
         (do (del (sub stack [: index None]))
             (return)))))
 
+(def _drop-states [stack kept]
+  "Drop the entries of stack from its (kept + 1)th field or literal on,
+   every bracket opened inside them included: what the lexer dropped on
+   resuming past an error (a recovered token's kept, _recovered_lexer)."
+  (for index in (range (len stack))
+    (if (in (sub (sub stack index) 0) "fq")
+        (do (if (== kept 0)
+                (do (del (sub stack [: index None]))
+                    (return)))
+            (-= kept 1)))))
+
 (def open-forms [prefix :literals False :tokens None]
   "The forms still open at the end of prefix, outermost first, or None
    when the lexer cannot read it or it ends inside an f/t-string, which no
-   bracket can close: each a list [kind closer opening head index], kind
-   \"b\" a bracket, \"f\" a field's }, \"q\" a literal's quote; opening and
-   head are the (1-based line, code-point column) of a bracket's token (its
-   prefix included) and of the token after it (None when there is none),
-   index the opening's index in prefix, all three None for a field or
-   literal.  literals: keep an open f/t-string too (open-form-closers).
-   tokens: prefix's tokens when the caller has them (caret-tokens, for a
-   prefix ending at a caret), else prefix is lexed here.  An error token
-   that ends the tokens (lexing stopped there, the text after it unread)
-   gives None; one followed by more tokens (caret-tokens read on past it as
-   the reader resumes) is skipped, and an entry it left open is popped by a
-   later field or literal end (_pop-through)."
+   bracket can close: each a list [kind closer opening head index token],
+   kind \"b\" a bracket, \"f\" a field's }, \"q\" a literal's quote; opening
+   and head are the (1-based line, code-point column) of a bracket's token
+   (its prefix included) and of the token after it (None when there is
+   none), index the opening's index in prefix and token its index in the
+   tokens, all four None for a field or literal.  literals: keep an open
+   f/t-string too (open-form-closers).  tokens: prefix's tokens when the
+   caller has them (caret-tokens, for a prefix ending at a caret, read on
+   past each lexer error: a recovered token drops the fields and literals
+   the lexer dropped there, and the brackets opened inside them), else
+   prefix is lexed here."
   (if (is tokens None)
       (try
         (= tokens (list (tokenize prefix)))
@@ -138,27 +148,29 @@
   (= open-literals 0)
   (= awaiting-head None)
   (= offset (source-offset prefix))
-  (= last (- (len tokens) 1))
-  (for [index [text tktype info _]] in (enumerate tokens)
+  (for [index [text tktype info extra]] in (enumerate tokens)
     (= position (, (sub info "lineno") (sub info "col_offset")))
     (if (is-not awaiting-head None)
         (do (= (sub awaiting-head 3) position)
             (= awaiting-head None)))
     (cond
       (== tktype "error")
-      (if (== index last)
-          (return None))
+      (return None)
+
+      (== tktype "recovered")
+      (do (_drop-states stack (sub extra 1))
+          (= open-literals (len [entry for entry in stack if (== (sub entry 0) "q")])))
 
       (== tktype "interpolated-start")
       (do (+= open-literals 1)
-          (.append stack ["q" (.lstrip text "fFtTrR") None None None]))
+          (.append stack ["q" (.lstrip text "fFtTrR") None None None None]))
 
       (== tktype "interpolated-end")
       (do (-= open-literals 1)
           (_pop-through stack "q"))
 
       (== tktype "field-start")
-      (.append stack ["f" "}" None None None])
+      (.append stack ["f" "}" None None None None])
 
       (== tktype "field-end")
       (_pop-through stack "f")
@@ -168,7 +180,8 @@
       (do (= closer (.get _CLOSERS (sub text -1)))
           (if (is closer None)
               (return None))
-          (= awaiting-head ["b" closer position None (offset (sub position 0) (sub position 1))])
+          (= awaiting-head ["b" closer position None
+                            (offset (sub position 0) (sub position 1)) index])
           (.append stack awaiting-head))
 
       (and (== tktype "closing") stack (== (sub (sub stack -1) 0) "b"))
@@ -261,6 +274,17 @@
   (if (is caret None)
       (return (caret-tokens-of "" 0 source)))
   (return (caret-tokens-of *caret)))
+
+(def caret-forms [source line col start states closer]
+  "The forms of source's caret-tokens at the 1-based line and code-point col
+   from token start on, the bracket open there closed right after the
+   caret by closer, states the fields and literals open outside it
+   (caret_forms): the caret-tokens pass, never lexed again; None where the
+   reader refuses them."
+  (= caret (_caret-line source line col))
+  (if (is caret None)
+      (return (caret-forms-of "" 0 source start states closer)))
+  (return (caret-forms-of *caret start states closer)))
 
 (def code-symbol-p [source line col]
   "Whether the text of source before the 1-based line and code-point col

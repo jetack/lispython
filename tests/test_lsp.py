@@ -1431,12 +1431,82 @@ def test_attribute_context_p_reads_past_a_lexer_error_as_the_reader_resumes(
     source, line, col = _marked_caret(marked)
     assert server.attribute_context_p(source, line, col) is expected
 
+    source, line, col = _marked_caret(marked)
+    assert server.attribute_context_p(source, line, col) is expected
+
 
 @pytest.mark.parametrize(
-    ("marked", "reader"),
-    [("(os.pa|)", "code_symbol_p"), ("(pri|)", "attribute_context_p")],
+    ("marked", "expected"),
+    [
+        # Field text keeps the field's own reading: a continuation line, and
+        # a deprecated \" string, which top-level code would read otherwise.
+        ('f"{(. \\\n me|', False),
+        ('f"{(. \\"a\\" me|', True),
+        ('f"{(. \\"a\\" |', True),
+        # A lexer error inside the cursor's own form.
+        ('(. obj f"{=}" me|', True),
+        ('(. obj f"{=}"\n me|', True),
+        ('(. (g f"{=}") me|', True),
+        ('(. obj (g f"{=}") me|', True),
+    ],
 )
-def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, reader):
+def test_attribute_context_p_reads_the_cursors_form_as_the_reader_lexed_it(
+    marked, expected
+):
+    # Defect: the cursor's form is read again from its text, out of the
+    # field it stands in (a field's \<LF> read as a symbol, a \" string as
+    # a stray quote), or dropped whole by a lexer error inside it, which
+    # word-span and code-symbol-p read past.
+    source, line, col = _marked_caret(marked)
+    assert server.attribute_context_p(source, line, col) is expected
+
+
+@pytest.mark.parametrize(
+    ("marked", "expected"),
+    [
+        ("(. obj me[me|", False),
+        (")(. obj me|", True),
+        ('f"{"s" (. obj me|', True),
+        ("(f me[(. obj me|", True),
+    ],
+)
+def test_attribute_context_p_reads_only_the_cursors_form(marked, expected):
+    # Defect: the form at the cursor is found in a parse of everything before
+    # it, so a stray closer or a second form in a field before it refuses the
+    # whole prefix, and a glued subscript (me[...]) hides the bracket it
+    # holds: an operand's subscript passes for the operand, a form inside a
+    # subscript is never found.
+    source, line, col = _marked_caret(marked)
+    assert server.attribute_context_p(source, line, col) is expected
+
+
+def test_open_forms_drop_the_forms_the_lexer_dropped_past_an_error():
+    # Defect: past a lexer error the forms open in the field the reader
+    # dropped stay open, so the closers misalign: a stale field's } and,
+    # after a bracket opened in the dropped field, its ) too.
+    source, line, col = _marked_caret('f"""a{=}\n{(. obj me|')
+    prefix = pv.source_prefix(source, line, col)
+    tokens = pv.caret_tokens(source, line, col)
+    assert pv.open_form_closers(prefix, literals=True, tokens=tokens) == ')}"""'
+    source, line, col = _marked_caret('f"""{(. obj \\"x" y\n{me|')
+    prefix = pv.source_prefix(source, line, col)
+    tokens = pv.caret_tokens(source, line, col)
+    assert pv.open_form_closers(prefix, literals=True, tokens=tokens) == '}"""'
+
+
+@pytest.mark.parametrize(
+    ("marked", "reader", "lexings"),
+    [
+        ("(os.pa|)", "code_symbol_p", 1),
+        ("(pri|)", "attribute_context_p", 1),
+        # One lexer error before the caret: the first pass and the one that
+        # resumes past it, each read once by every reader.
+        ('f"{x!}"\n(. obj me|)', "attribute_context_p", 2),
+    ],
+)
+def test_a_completion_lexes_the_text_before_the_caret_once(
+    monkeypatch, marked, reader, lexings
+):
     # Defect: a completion lexes the whole text before the caret twice, once
     # for the word's context (caret_context) and again for the qualified
     # base's code check (at mod.|) or for the forms open at the caret
@@ -1444,7 +1514,8 @@ def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, 
     # per-keystroke cost of a long buffer. Every lexer pass over that text
     # is counted, the caret caches emptied first so their one pass is this
     # request's; reader is the second reader of that text, which the request
-    # must reach.
+    # must reach. Past a lexer error, a reader asking for the caret's text
+    # under other arguments lexes it, and its resumed passes, again.
     source, line, col = _marked_caret(f"(import os)\n{marked}\n(print 1)\n")
     prefix = pv.source_prefix(source, line, col)
     passes = []
@@ -1470,7 +1541,7 @@ def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, 
     parser._caret_lexer.cache_clear()
     run_completion(ls_with(source), position(line - 1, col))
     assert reads, f"the request never reached {reader}"
-    assert passes == [len(prefix)]
+    assert passes == [len(prefix)] * lexings
 
 
 def test_open_forms_past_the_last_line_reuse_the_word_spans_pass(monkeypatch):

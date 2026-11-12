@@ -42,7 +42,7 @@
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
                              FROM-HEADS GENERATED-PREFIX IMPORT-HEADS IMPORT-ONLY-HEADS
-                             PARSE-STAGE ViewCache caret-tokens code-symbol-p
+                             PARSE-STAGE ViewCache caret-forms caret-tokens code-symbol-p
                              compile-buffer
                              glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
@@ -2782,11 +2782,9 @@
    Python view's attribute decides what the backend is asked); with no
    backend answer it limits the local answer (local-completion) to the
    qualified macros of the cached full view.  Only the innermost bracket
-   open at the cursor is parsed (from its opening, with the closers of it
-   and every form inside it), so a lexer error before that bracket is read
-   past as the reader resumes (caret-tokens); an error inside the bracket
-   itself (a refused f-string field in it) leaves no form to read, and
-   gives False."
+   open at the cursor is parsed, from caret-tokens' own tokens (caret-forms),
+   read on past each lexer error as the reader resumes there, so an error
+   before the bracket or inside it never hides the form."
   (= text (line-text source line))
   (= col (min col (len text)))
   (= span (partial-span source line col))
@@ -2799,25 +2797,16 @@
   ;; prefix's tokens are those of partial-span's lexer pass, never lexed again.
   (= stack (open-forms prefix :literals True
                        :tokens (caret-tokens source line col)))
-  (if (is stack None)
+  ;; A field or literal open inside the innermost bracket puts its
+  ;; f-string form between the bracket and the cursor: no attribute.
+  (if (or (not stack) (!= (sub (sub stack -1) 0) "b"))
       (return False))
-  (= inner None)
-  (for index in (range (- (len stack) 1) -1 -1)
-    (if (== (sub (sub stack index) 0) "b")
-        (do (= inner index)
-            (break))))
-  (if (is inner None)
+  (= entry (sub stack -1))
+  (= states (len [outer for outer in stack if (in (sub outer 0) "fq")]))
+  (= tree (caret-forms source line col (sub entry 5) states (sub entry 1)))
+  (if (is tree None)
       (return False))
-  ;; The cursor's form is always the innermost bracket, so its own text
-  ;; is parsed with the cursor shifted to it: the forms before it, and any
-  ;; error among them, are never read.
-  (= entry (sub stack inner))
-  (= [oline ocol] (sub entry 2))
-  (= closers (.join "" (reversed [(sub inward 1)
-                                   for inward in (sub stack [: inner None])])))
-  (= tree (parse (+ (sub prefix [: (sub entry 4) None]) closers) :partial True))
-  (= [path leaf] (open-path tree (+ (- line oline) 1)
-                            (ife (== line oline) (- col ocol) col)))
+  (= [path leaf] (open-path tree line col))
   (if (or (not path) (!= (head-of (sub path -1)) "."))
       (return False))
   (= form (sub path -1))

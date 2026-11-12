@@ -516,6 +516,11 @@ class _Lexer:
         # Whether the token of code ending at or holding the stop offset is
         # a symbol: the text before the offset then ends in that symbol.
         self.stop_symbol = False
+        # [start, emitted] of the token of code holding the stop offset (not
+        # emitted) or ending at it (emitted, the last token), whose reading
+        # may hang on the text past the offset (~ before a quote, a cut "),
+        # so caret_forms lexes its text cut at the offset; else None.
+        self.stop_cut = None
 
     def run(self):
         while not self.done:
@@ -591,6 +596,8 @@ class _Lexer:
             # else code.
             mode = "code" if field is None else "bracket" if field.brackets else "field"
             self.stop_symbol = tktype == "symbol"
+            if tktype not in ("comment", "spaces", "new-line"):
+                self.stop_cut = [start, False]
             self._reached("text" if tktype == "comment" else mode)
             return
         if tktype == "string":
@@ -606,6 +613,8 @@ class _Lexer:
         if end == self.stop:
             # The last token before the stop, which lexing reaches next.
             self.stop_symbol = tktype == "symbol"
+            if tktype not in ("spaces", "new-line", "comment"):
+                self.stop_cut = [start, True]
         if field is not None:
             if tktype == "opening" or (tktype == "bad-prefix" and tk[-1] in "([{"):
                 field.brackets.append(tk[-1])
@@ -1233,13 +1242,18 @@ def _parse_into(src, rst):
     return _parse_tokens(src, tokenize(src), [], rst)
 
 
-def _parse_tokens(src, tokens, stack, rst):
-    """The loop of ``_parse_into``."""
+def _parse_tokens(src, tokens, stack, rst, states=0):
+    """The loop of ``_parse_into``. A "recovered" token (caret_forms' tokens
+    only, ``states`` the literals and fields open outside them) drops the
+    entries of what the lexer dropped there (_drop_states)."""
     while tokens:
         [t, tktype, position_info, extra] = tokens.popleft()
         if tktype in _LEXER_ONLY_TOKENS:
             if tktype == "error":
                 raise extra
+            if tktype == "recovered":
+                _drop_states(stack, extra[1] - states, extra[0])
+                continue
             if tktype == "deprecated":
                 if not _PARTIAL.get():
                     compile_warning(t, SyntaxWarning, position_info)
@@ -1350,6 +1364,24 @@ def _parse_tokens(src, tokens, stack, rst):
             (stack[-1] if stack else rst).append(e)
     _check_all_closed(stack)
     return rst
+
+
+def _drop_states(stack, kept, error):
+    """Drop the entries of ``stack`` from its (``kept`` + 1)th literal or
+    field on (a format spec counts as its field's), every form opened inside
+    them included, as the lexer dropped those states on resuming past
+    ``error``; a negative ``kept`` (a state open outside the parsed tokens
+    dropped) raises it."""
+    if kept < 0:
+        raise error
+    for at, entry in enumerate(stack):
+        if isinstance(entry, _Field) or (
+            isinstance(entry, _Interpolated) and not entry.spec
+        ):
+            if kept == 0:
+                del stack[at:]
+                return
+            kept -= 1
 
 
 def _split_bad_prefix(token):
@@ -1494,7 +1526,8 @@ _FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
 # The stop pass over text up to a caret, kept with its tokens. One is kept,
 # since the tokens of a long buffer are large: a request reads one caret's
 # text. Past a lexer error the last resumed pass is kept the same way
-# (_recovered_lexer), and caret_tokens reads that one.
+# (_recovered_lexer), with its own copy of the tokens, so at most two token
+# lists of one caret's text are alive.
 @functools.lru_cache(maxsize=1)
 def _caret_lexer(text, offset):
     lexer = _Lexer(text, stop=offset)
@@ -1535,9 +1568,14 @@ def _recovered_lexer(text, offset):
     lies in one), repeating until it reaches the offset, so the text after
     an error keeps its reading (a later line continuing a multi-line literal
     stays in it). ``lexer`` is the last pass (the cached first pass itself
-    when it met no error), its tokens those through the caret with each
-    error's token where it was met; ``resumed_at`` is where the last pass
-    resumed (0 when none).
+    when it met no error), its tokens those through the caret, each error's
+    token replaced by a "recovered" token where it was met: text the error's
+    message, extra ``(error, kept)``, ``kept`` the number of literals and
+    fields (interpolated-start and field-start tokens not yet ended) still
+    open where lexing resumed, the innermost of them a literal (none:
+    top-level code). Every reader of the recovered tokens drops what the
+    lexer dropped by that count (open-forms, _drop_states), never by a rule
+    of its own. ``resumed_at`` is where the last pass resumed (0 when none).
 
     The stack kept is the stopped pass's up to its innermost literal (the
     fields above it dropped). An escaped literal refused at its own opening
@@ -1582,6 +1620,17 @@ def _recovered_lexer(text, offset):
         # first pass only, a resumed pass's own list being taken over, so k
         # errors cost no k copies.
         resumed.tokens = list(lexer.tokens) if lexer is first else lexer.tokens
+        resumed.tokens[-1] = [
+            error.msg,
+            "recovered",
+            {
+                "lineno": error.lineno,
+                "col_offset": error.offset - 1,
+                "end_lineno": error.end_lineno,
+                "end_col_offset": error.end_offset - 1,
+            },
+            (error, len(stack)),
+        ]
         resumed.previous = lexer.previous
         resumed.closed_string_end = lexer.closed_string_end
         resumed.pos = resumed_at = max(end, resumed_at)
@@ -1629,14 +1678,60 @@ def caret_tokens(line, col, before):
     caret, which the pass never emits (in ``(mo|d`` the list ends at ``(``,
     where tokenize would end in the symbol ``mo``); a token ending at the
     caret is there. Lexing reads on past each lexer error before the caret
-    as the reader resumes there (_recovered_lexer): the error's token stays
-    where it was met, where tokenize would end, and the tokens after it are
-    the resumed passes'. With the caret in a literal's text, the literal is
+    as the reader resumes there (_recovered_lexer): where tokenize would end
+    in the error, a "recovered" token stands, and the tokens after it are the
+    resumed passes'. With the caret in a literal's text, the literal is
     open, where tokenize of the text cut at the caret ends in its
     unterminated error. The brackets, fields and literals open at the caret
     are tokenize's whenever the caret is in code and no error precedes it.
     The list is the cached pass's own: read it, never change it."""
     return _recovered_lexer(before + line, len(before) + col)[0].tokens
+
+
+def caret_forms(line, col, before, start, states, closer):
+    """The forms parse reads from caret_tokens' token ``start`` on (the
+    opening of a bracket open at the caret, ``closer`` its closing bracket),
+    read on past each lexer error as the lexer resumed there (a "recovered"
+    token drops the literals and fields the lexer dropped, ``states`` of
+    them open outside the bracket), with the token holding the caret cut at
+    it and the bracket closed right after the caret; None where the reader
+    refuses them. The tokens are caret_tokens' with the same arguments,
+    never lexed again, so each keeps the context it was lexed in (a field's
+    continuation line, a \\" string in a field); only the code token
+    holding or ending at the caret is lexed again, alone, as its text cut at
+    the caret (``_Lexer.stop_cut``), so it reads as the text before the caret
+    does (``~|"`` the invert symbol, ``""|"`` an empty string)."""
+    text = before + line
+    offset = len(before) + col
+    lexer = _recovered_lexer(text, offset)[0]
+    tokens = deque(lexer.tokens[start:])
+    if lexer.stop_cut is not None:
+        [cut, emitted] = lexer.stop_cut
+        if emitted:
+            tokens.pop()
+        tokens.extend(_shifted_tokens(text[cut:offset], cut, lexer.locate))
+    at = lexer.locate(offset)
+    at["end_col_offset"] += 1
+    tokens.append([closer, "closing", at, None])
+    token = _PARTIAL.set(True)
+    try:
+        return _parse_tokens(text, tokens, [], [], states)
+    except Exception:
+        return None
+    finally:
+        _PARTIAL.reset(token)
+
+
+def _shifted_tokens(snippet, at, locate):
+    """tokenize's tokens of ``snippet``, the text at offset ``at`` of the
+    source ``locate`` places, positioned in that source."""
+    offset_of = source_offset(snippet)
+    shifted = []
+    for [text, tktype, info, extra] in tokenize(snippet):
+        i = offset_of(info["lineno"], info["col_offset"])
+        j = offset_of(info["end_lineno"], info["end_col_offset"])
+        shifted.append([text, tktype, locate(at + i, at + j), extra])
+    return shifted
 
 
 def _debug_equals_p(line, end):
@@ -1878,6 +1973,7 @@ class _Interpolated:
         self.start = [position_info["lineno"], position_info["col_offset"]]
         self.parts = []
         self.pending = None  # [value, position_info] of the literal text last read
+        self.spec = False  # a field's format spec, not a literal
 
     def literal(self, text, position_info):
         value = string_literal_value(
@@ -2033,7 +2129,9 @@ def _interpolated_step(src, stack, t, tktype, position_info, extra):
     elif tktype == "field-spec-start":
         owner = stack[-1].owner
         # As in CPython, the spec's JoinedStr starts at the ":".
-        stack.append(_Interpolated("f-string", owner.kind, owner.raw, position_info))
+        spec = _Interpolated("f-string", owner.kind, owner.raw, position_info)
+        spec.spec = True
+        stack.append(spec)
     else:  # field-end
         if isinstance(stack[-1], _Interpolated):
             spec = stack.pop()
@@ -2051,6 +2149,7 @@ def _interpolated_step(src, stack, t, tktype, position_info, extra):
 _LEXER_ONLY_TOKENS = frozenset(
     [
         "error",
+        "recovered",
         "deprecated",
         "interpolated-start",
         "interpolated-middle",
