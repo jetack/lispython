@@ -1758,23 +1758,29 @@
 ;; (_src-python-witness) and FileFinder import through a link by its
 ;; spelled name (src/acme -> .shared/acme is the package acme), so a
 ;; resolved path would prune a link into a dot-directory, or leave the
-;; project through one, where the import does neither.
+;; project through one, where the import does neither.  This differs on
+;; purpose from project-root-of (backend.lpy), which resolves a document's
+;; directory: events feed the src walk and module renames, which follow
+;; links below the folder by spelled names.
 (def watched-place [path folders]
   "(real project root, spelled relative path) of path in the innermost of
    folders (objects with .uri) holding it, each matched by its own spelling
-   or its real path, or None outside every folder."
+   or its real path, or None outside every folder.  Innermost is the
+   longest prefix that matched path, whichever spelling it was, so an inner
+   folder that is a link wins over the folder spelled around it."
   (= path (osp.normpath (osp.abspath path)))
   (= best None)
+  (= best-length -1)
   (for folder in folders
     (= folder-path (to-fs-path folder.uri))
     (if (is folder-path None)
         (continue))
     (= real (osp.realpath folder-path))
-    (for spelled in [(osp.normpath (osp.abspath folder-path)) real]
-      (if (or (== path spelled) (.startswith path (+ spelled os.sep)))
-          (do (if (or (is best None) (> (len real) (len (sub best 0))))
-                  (= best (, real (osp.relpath path spelled))))
-              (break)))))
+    (for prefix in [(osp.normpath (osp.abspath folder-path)) real]
+      (if (and (> (len prefix) best-length)
+               (or (== path prefix) (.startswith path (+ prefix os.sep))))
+          (do (= best (, real (osp.relpath path prefix)))
+              (= best-length (len prefix))))))
   (return best))
 
 (def watched-project [path module-file folders]

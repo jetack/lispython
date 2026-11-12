@@ -1210,6 +1210,23 @@ def test_a_linked_workspace_folders_pruned_files_walk_no_src(
     assert asked == [str(outside)]
 
 
+def test_an_inner_linked_folder_owns_its_files(outside_documents, monkeypatch):
+    # Defect: the innermost folder was ranked by its real path's length, so
+    # with folders outside and outside/p (a link to a shorter real path) a
+    # file spelled outside/p/src/m.py was outside's, which refreshed the
+    # wrong project.
+    _, outside, _, folders = outside_documents
+    real = outside.parent / "r"
+    real.mkdir()
+    (outside / "p").symlink_to(real)
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    folders.append(SimpleNamespace(uri=(outside / "p").as_uri()))
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    files_changed(SimpleNamespace(), outside / "p" / "src" / "m.py")
+    assert asked == [str(real)]
+
+
 @pytest.mark.parametrize("outside_project", [False, True])
 def test_a_module_file_behind_a_src_package_link_walks_src(
     outside_documents, monkeypatch, outside_project
