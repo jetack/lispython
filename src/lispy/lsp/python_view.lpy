@@ -249,10 +249,11 @@
 (def caret-tokens [source line col]
   "The tokens of the text of source before the 1-based line and code-point
    col (caret_tokens): source-prefix's tokens, out of word-span's lexer
-   pass (_caret-line), so a reader of both lexes that text once."
+   pass (_caret-line), so a reader of both lexes that text once; past the
+   last line, all of source's, read as word-span reads it there."
   (= caret (_caret-line source line col))
   (if (is caret None)
-      (return (list (tokenize source))))
+      (return (caret-tokens-of "" 0 source)))
   (return (caret-tokens-of *caret)))
 
 (def code-symbol-p [source line col]

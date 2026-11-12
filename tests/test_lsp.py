@@ -1367,6 +1367,8 @@ def _marked_caret(marked):
     ("marked", "expected"),
     [
         ("(mod.|", True),
+        ("(1.|", False),
+        ("1.|", False),
         ("(mod.ma|cro x)", True),
         ('(mod.|"x")', True),
         ("(mod.| ; a comment", True),
@@ -1433,6 +1435,27 @@ def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, 
     run_completion(ls_with(source), position(line - 1, col))
     assert reads, f"the request never reached {reader}"
     assert passes == [len(prefix)]
+
+
+def test_open_forms_past_the_last_line_reuse_the_word_spans_pass(monkeypatch):
+    # Defect: at a line past the source's end (an unclamped position, which
+    # word-span reads as the end of the source), attribute-context-p's open
+    # forms tokenize all of the source again, though word-span's pass there
+    # already lexed it. The two run in this order in a completion.
+    source = "(import os)\n(pri"
+    passes = []
+    run = parser._Lexer.run
+
+    def counted(lexer):
+        passes.append((lexer.src, lexer.stop))
+        return run(lexer)
+
+    monkeypatch.setattr(parser._Lexer, "run", counted)
+    parser.caret_context.cache_clear()
+    parser._caret_lexer.cache_clear()
+    assert pv.word_span(source, 5, 0) is not None
+    server.attribute_context_p(source, 5, 0)
+    assert [stop for text, stop in passes if text == source] == [len(source)]
 
 
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
