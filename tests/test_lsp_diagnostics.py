@@ -16,6 +16,7 @@ import importlib.machinery
 import itertools
 import pathlib
 import re
+import shutil
 import sys
 import threading
 import time
@@ -1110,6 +1111,32 @@ def test_a_module_file_flipping_the_src_layout_republishes(outside_documents, cr
     run_bounded(scenario())
 
 
+def test_a_deleted_src_package_folder_republishes(outside_documents):
+    # Defect: rm -r src/pkg sends one event, for the folder, which names no
+    # module file, so the src layout is never asked again and the open
+    # document keeps searching a src that holds no Python.
+    editor, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    (outside / "src" / "pkg").mkdir(parents=True)
+    (outside / "src" / "pkg" / "__init__.py").write_text("")
+    scripts = outside / "scripts"
+    scripts.mkdir()
+    script = scripts / "x.lpy"
+    script.write_text("(= x 1)\n")
+
+    async def scenario():
+        uri = editor.open(script)
+        await until(lambda: uri in editor.published)
+        assert server.uri_module_names(uri)[3] == (str(scripts), str(outside / "src"))
+        count = len(editor.published[uri])
+        shutil.rmtree(outside / "src" / "pkg")
+        files_changed(editor, outside / "src" / "pkg", lsp.FileChangeType.Deleted)
+        await until(lambda: len(editor.published[uri]) > count, timeout=5)
+        assert server.uri_module_names(uri)[3] == (str(scripts),)
+
+    run_bounded(scenario())
+
+
 def test_a_save_sees_a_src_package_that_came_with_no_file_event(outside_documents):
     # Defect: a src package moved in whole (mv ../pkg src/) sends no event
     # for its files, and a save keeps the remembered no-Python answer, so
@@ -1427,6 +1454,9 @@ def test_module_files_are_watched_only_where_the_client_can_register(caplog):
     globs = [w.glob_pattern for w in registration.register_options.watchers]
     for suffix in finder_suffixes():  # every file FileFinder imports
         assert any(fnmatch.fnmatch("ns" + suffix, g.removeprefix("**/")) for g in globs)
+    # A src folder or a package folder in one, deleted or moved in whole.
+    for folder in ["proj/src", "proj/src/pkg"]:
+        assert any(fnmatch.fnmatch(folder, g) for g in globs)
     assert "refused" in caplog.text
 
 

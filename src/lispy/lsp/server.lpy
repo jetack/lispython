@@ -1674,13 +1674,17 @@
       (index-workspace folders))
   (watch-module-files ls)))
 
-(def module-file-globs []
-  "The client watch patterns of every module file: one per suffix the
+(def watched-file-globs []
+  "The client watch patterns: every module file, one per suffix the
    importer's FileFinder takes (finder-suffixes, .lpy included), since
    creating or deleting such a file may rename the modules around it
-   (renames-modules-p).  Their content never does, so only Create and
-   Delete are watched."
-  (return (list (.fromkeys dict [f"**/*{suffix}" for suffix in (finder-suffixes)]))))
+   (renames-modules-p); and every src directory and entry below one, since
+   a package folder deleted or moved in whole (rm -r src/pkg, mv ../pkg
+   src/) comes as one event for the folder, which may flip the src layout
+   (refresh-src-layout).  Content never matters, so only Create and Delete
+   are watched."
+  (return (list (.fromkeys dict (+ [f"**/*{suffix}" for suffix in (finder-suffixes)]
+                                   ["**/src" "**/src/**"])))))
 
 (def _registration-done [future]
   (if (and (not (.cancelled future)) (is-not (.exception future) None))
@@ -1688,15 +1692,16 @@
               (.exception future))))
 
 (def watch-module-files [ls]
-  "Ask the client to tell us (didChangeWatchedFiles) when a module file is
-   created or deleted anywhere, when it can register a file watch
+  "Ask the client to tell us (didChangeWatchedFiles) when a module file or
+   an entry of a src directory (watched-file-globs) is created or deleted
+   anywhere, in one registration, when it can register a file watch
    dynamically; a failure is logged, never raised."
   (if (not (client-capability-p
              ls ["workspace" "did_change_watched_files" "dynamic_registration"]))
       (return))
   (= kind (| lsp.WatchKind.Create lsp.WatchKind.Delete))
   (= watchers [(lsp.FileSystemWatcher :glob-pattern glob :kind kind)
-               for glob in (module-file-globs)])
+               for glob in (watched-file-globs)])
   (= options (lsp.DidChangeWatchedFilesRegistrationOptions :watchers watchers))
   (= registration (lsp.Registration :id "lispython-module-files"
                                     :method lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES
@@ -1736,15 +1741,29 @@
       (do (unindex-file uri)
           (.pop FILE-TREES uri None))))
 
+(def src-entry-shape-p [path]
+  "Whether path, by its spelling alone, may be a src directory or an entry
+   below one: a src component and no __pycache__ one, so the .pyc writes
+   the watch reports cost no stat."
+  (= parts (.split (osp.normpath path) os.sep))
+  (return (and (in "src" parts) (not-in "__pycache__" parts))))
+
+(def within-src-p [project-root real]
+  "Whether real (a document-path) is project-root's src or lies below it."
+  (= src (osp.join project-root "src"))
+  (return (or (== real src) (.startswith real (+ src os.sep)))))
+
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
 (def did-change-watched-files [ls params]
-  "Module files created or deleted (watch-module-files): an .lpy one is
+  "Files created or deleted (watch-module-files): an .lpy one is
    indexed again (reindex-watched-file), and when one may rename a module
    (renaming-file-p), or moved the src layout answer of its project
    (refresh-src-layout, asked once per project of a module file in the
-   batch outside a pruned directory, pruned-in-project-p: a file behind a
-   link into src included, a .venv install never), every open document is
-   published again.  The pruned check reads the event's path as
+   batch, or of any entry of its src (src-entry-shape-p, within-src-p: a
+   package folder deleted or moved in whole is one event), outside a
+   pruned directory, pruned-in-project-p: a file behind a link into src
+   included, a .venv install never), every open document is published
+   again.  The pruned check reads the event's path as
    document-path resolves it, since project-root-of answers a real root
    and a client reports a linked workspace folder's files by the link.  A
    change of content never matters."
@@ -1760,11 +1779,14 @@
           (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
-      (if (module-file-path-p path :suffixes suffixes)
+      (= module-file (module-file-path-p path :suffixes suffixes))
+      (if (or module-file (src-entry-shape-p path))
           (do (= project-root (project-root-of path (workspace-folders)))
-              (if (and (is-not project-root None)
-                       (not (pruned-in-project-p project-root (document-path path))))
-                  (.add projects project-root))))
+              (if (is-not project-root None)
+                  (do (= real (document-path (osp.normpath path)))
+                      (if (and (or module-file (within-src-p project-root real))
+                               (not (pruned-in-project-p project-root real)))
+                          (.add projects project-root))))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
   ;; Every project is refreshed, a renaming batch too, so none keeps the
