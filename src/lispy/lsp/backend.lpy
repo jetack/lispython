@@ -1041,9 +1041,8 @@
       (= real-root (osp.realpath root))
       (= rel None)
       (for base in (, root real-root)
-        (= candidate (osp.relpath path base))
-        (if (not (or (== candidate os.pardir) (.startswith candidate (+ os.pardir os.sep))))
-            (do (= rel candidate)
+        (if (below-p path base)
+            (do (= rel (osp.relpath path base))
                 (break))))
       (if (is rel None)
           (return (, "file" uri)))
@@ -1554,20 +1553,20 @@
           (._schedule self (.saved client lpy-uri)))
       ;; A file outside a project that another project's view shadows (the
       ;; real directory /out of its script link scripts/t.lpy -> /out/t.lpy,
-      ;; outside-view-dir) gets no file event from that project's
-      ;; workspace, so its save sweeps every other backend whose last sweep
-      ;; shadowed an outside dir (or a directory a link in one reaches)
-      ;; holding its real path, or that view keeps
-      ;; the old text until its next sweep.  By directory, not by source:
-      ;; a new file there has no shadow yet, and the real path matches
-      ;; whatever spelling the editor saved it through.
+      ;; outside-view-dir, or the target of a link in the project,
+      ;; src/acme -> /shared/acme) gets no file event that view reads, so
+      ;; its save sweeps every other backend whose last sweep named a
+      ;; directory holding its real path (ShadowManifest.save-dirs), or
+      ;; that view keeps the old text until its next sweep.  By directory,
+      ;; not by source: a new file there has no shadow yet, and the real
+      ;; path matches whatever spelling the editor saved it through.
       (= path (to-fs-path lpy-uri))
       (if (is-not path None)
           (do (= real (osp.realpath path))
               (for other in (list (.values self.clients))
                 (if (and (is-not other client)
                          (any ((below-p real directory)
-                               for directory in other.manifest.outside-dirs)))
+                               for directory in other.manifest.save-dirs)))
                     (._sweep-soon self other [])))))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))

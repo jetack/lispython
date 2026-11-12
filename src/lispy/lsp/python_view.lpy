@@ -2284,11 +2284,13 @@
    file-environments, the lpy path of each of those modules whose first
    search dir is not its environment root (a file-link script) -> its own
    search dirs, which a backend that takes a file as an environment
-   (pyright) gives it alone.  And outside-dirs, the real paths of the
-   outside dirs the last sweep shadowed (outside-view-dir), a frozenset
-   replaced whole by each sweep."
+   (pyright) gives it alone.  And save-dirs, the real directories whose
+   saves sweep this view (Backends.document-saved): the outside dirs the
+   last sweep shadowed (outside-view-dir) and the real directories the
+   links met in its walks of the project and of those dirs reach
+   (project-sources :linked), a frozenset replaced whole by each sweep."
   (def __init__ [self]
-    (= self.outside-dirs (frozenset))
+    (= self.save-dirs (frozenset))
     (= self.sources {})
     (= self.environments {})
     (= self.file-environments {})))
@@ -2655,7 +2657,8 @@
 
 (def _write-shadows [project-root root manifest open-paths]
   "write-shadows' sweep, under the view root's lock."
-  (= sources (project-sources project-root))
+  (= linked (set))
+  (= sources (project-sources project-root :linked linked))
   (= names-of {})
   (for lpy-path in sources
     (= (sub names-of lpy-path) (shadow-module-names project-root lpy-path)))
@@ -2682,13 +2685,17 @@
                (not-in (osp.realpath directory) spellings)
                (not-in directory outside-dirs))
           (.append outside-dirs directory))))
-  ;; manifest.outside-dirs is replaced whole, never mutated:
+  ;; manifest.save-dirs is replaced whole, never mutated:
   ;; Backends.document-saved reads it on the loop while a sweep thread
-  ;; runs.  It names the dirs before their walks (a file saved there during
-  ;; a long walk still sweeps), keeping the last sweep's linked dirs until
-  ;; this one's are known.
-  (= linked (set (map osp.realpath outside-dirs)))
-  (= manifest.outside-dirs (| manifest.outside-dirs linked))
+  ;; runs.  It names the outside dirs before their walks (a file saved
+  ;; there during a long walk still sweeps), keeping the last sweep's set
+  ;; until this one's linked dirs are all known.  The project walk's linked
+  ;; dirs are in it too: a link target's save (src/acme -> /shared/acme,
+  ;; another workspace folder's file) reaches another backend, and the
+  ;; client's Changed events are not read, so it sweeps this view only
+  ;; through them.
+  (.update linked (map osp.realpath outside-dirs))
+  (= manifest.save-dirs (| manifest.save-dirs linked))
   (= bases [(, project-root root sources)])
   (= outside-names {})
   (for directory in outside-dirs
@@ -2702,7 +2709,7 @@
           (= (sub outside-names lpy-path)
              (shadow-module-names project-root lpy-path)))))
   (.update names-of outside-names)
-  (= manifest.outside-dirs (frozenset linked))
+  (= manifest.save-dirs (frozenset linked))
   (= current (| (set sources) (set outside-names)))
   ;; None: a drop is due, so every entry is stale.
   (= macro-epoch (epoch))

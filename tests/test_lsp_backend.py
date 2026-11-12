@@ -2535,6 +2535,113 @@ def test_saving_through_a_link_in_an_outside_dir_sweeps_its_view(tmp_path, monke
     assert swept == [other, other]
 
 
+def test_saving_a_link_target_of_the_project_sweeps_its_view(tmp_path, monkeypatch):
+    # Defect: the project walk's links are not named, so a source the view
+    # shadows through src/acme -> /shared/acme (another workspace folder,
+    # whose save reaches that folder's backend) or a file link
+    # src/pkg/m.lpy -> /data/m.lpy, saved at its real path, sweeps nothing,
+    # and the view keeps the old text until its next sweep.
+    shared = tmp_path / "shared"
+    (shared / "acme").mkdir(parents=True)
+    (shared / "acme" / "x.lpy").write_text("(= x 1)\n")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "m.lpy").write_text("(= m 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "src" / "pkg").mkdir(parents=True)
+    (proj / "src" / "pkg" / "__init__.lpy").write_text("")
+    (proj / "src" / "acme").symlink_to(shared / "acme")
+    (proj / "src" / "pkg" / "m.lpy").symlink_to(data / "m.lpy")
+    assert {
+        str(proj / "src" / "acme" / "x.lpy"),
+        str(proj / "src" / "pkg" / "m.lpy"),
+    } <= set(pv.project_sources(str(proj)))
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, shared)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    client = backends.client_for((proj / "src" / "pkg" / "__init__.lpy").as_uri())
+    assert backends.client_for((shared / "acme" / "x.lpy").as_uri()) is not client
+    client._prepare_view_root([])
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((shared / "acme" / "x.lpy").as_uri())
+    backends.document_saved((data / "m.lpy").as_uri())
+    assert swept == [client, client]
+
+
+def test_a_sweep_keeps_the_last_sweeps_linked_dirs_during_its_walks(
+    tmp_path, monkeypatch
+):
+    # Defect: a sweep names only its own outside dirs before its walks, so
+    # a source the last sweep shadowed through a link (/out/lib ->
+    # /data/lib), saved at its real path while this sweep walks /out,
+    # sweeps nothing and the view keeps the old text.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import lib.m)\n")
+    data = tmp_path / "data" / "lib"
+    data.mkdir(parents=True)
+    (data / "m.lpy").write_text("(= m 1)\n")
+    (out / "lib").symlink_to(data)
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    other = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    other.state = "running"
+    other.process = SimpleNamespace(returncode=None)
+    backends.clients["elsewhere"] = other
+    other._prepare_view_root([])
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    walk = pv.project_sources
+
+    def saving_during_walk(directory, **kwargs):
+        if directory == str(out):
+            backends.document_saved((data / "m.lpy").as_uri())
+        return walk(directory, **kwargs)
+
+    monkeypatch.setattr(pv, "project_sources", saving_during_walk)
+    other._prepare_view_root([])
+    assert swept == [other]
+
+
+def test_locate_passes_a_real_file_on_another_drive(project, tmp_path, monkeypatch):
+    # Defect (Windows): relpath raises ValueError across drives, so a real
+    # file on another drive than the view root loses its location.  The
+    # drives are simulated as ntpath reads them: a path under drive_d is on
+    # D:, any other on C:.
+    client = backend.BackendClient(view_root(project, tmp_path), None)
+    drive_d = tmp_path / "d"
+    drive_d.mkdir()
+    real = drive_d / "lib.py"
+    real.write_text("x = 1\n")
+    splitdrive, relpath = os.path.splitdrive, os.path.relpath
+
+    def drive(path):
+        return "D:" if os.fspath(path).startswith(str(drive_d)) else "C:"
+
+    def fake_splitdrive(path):
+        return (drive(path), splitdrive(path)[1])
+
+    def fake_relpath(path, start=os.curdir):
+        if drive(path) != drive(os.path.abspath(start)):
+            raise ValueError("path is on mount 'D:', start on mount 'C:'")
+        return relpath(path, start)
+
+    monkeypatch.setattr(os.path, "splitdrive", fake_splitdrive)
+    monkeypatch.setattr(os.path, "relpath", fake_relpath)
+    place = client.locate(real.as_uri())
+    monkeypatch.undo()
+    assert place == ("file", real.as_uri())
+
+
 def test_an_outside_package_overlay_never_writes_through_a_swapped_link(
     tmp_path, monkeypatch
 ):
