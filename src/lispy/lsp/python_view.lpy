@@ -1791,8 +1791,8 @@
    (src/acme -> ../shared/acme), entering each real directory once, so a
    link back up ends.  A name counts only as a file (osp.isfile), as
    FileFinder's check refuses a broken link x.py.  A directory below src
-   that the walk cannot list counts exactly when it holds an init file, the
-   witness then: FileFinder lists its parent and stats pkg/__init__.py, so
+   that the walk cannot list counts exactly when it holds an init file
+   (_unlisted-init-file), the witness then: FileFinder lists its parent and stats pkg/__init__.py, so
    `import pkg` works, while it finds nothing inside (an empty cache), so
    `import pkg.m` and a namespace package's `import acme.tool` fail.  An
    unlistable src lets Python import nothing from it; a directory gone
@@ -1828,15 +1828,15 @@
 
 (def _unlisted-init-file [unlisted]
   "The init file of the first directory in unlisted (directories the walk
-   could not list, emptied as read) that holds one (has-init-file, the
-   importer's predicate), or None."
+   could not list, emptied as read) that holds one, or None.  An init name
+   counts only as a file (osp.isfile, FileFinder's own check), so a
+   directory named __init__.py is no witness."
   (while unlisted
     (= directory (.pop unlisted 0))
-    (if (has-init-file directory)
-        (for name in INIT-FILE-NAMES
-          (= path (osp.join directory name))
-          (if (osp.exists path)
-              (return path)))))
+    (for name in INIT-FILE-NAMES
+      (= path (osp.join directory name))
+      (if (osp.isfile path)
+          (return path))))
   (return None))
 
 (class _SrcLayout []

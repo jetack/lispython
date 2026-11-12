@@ -1814,6 +1814,11 @@ class TestShadows:
         self.write(other / "src" / "acme" / "tool" / "__init__.py", "")
         unlistable(other / "src" / "acme")
         assert pv.shared_import_roots(str(other)) == []
+        # FileFinder takes an __init__.py only as a file.
+        dirinit = tmp_path / "dirinit"
+        (dirinit / "src" / "pkg" / "__init__.py").mkdir(parents=True)
+        unlistable(dirinit / "src" / "pkg")
+        assert pv.shared_import_roots(str(dirinit)) == []
         broken = tmp_path / "broken"
         (broken / "src").mkdir(parents=True)
         (broken / "src" / "x.py").symlink_to(broken / "missing.py")
