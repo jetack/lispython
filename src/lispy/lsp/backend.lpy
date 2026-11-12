@@ -109,11 +109,13 @@
 ;; Backend name -> a function giving its argv, or None when it is not
 ;; installed.  "off" is the name of no backend.  A test adds a fake backend
 ;; here (any LSP over stdio).  With no backend setting, the first installed
-;; of DEFAULT-BACKENDS runs (resolve-backend): pyrefly answers the LSP's
-;; features as often as basedpyright, starts faster and takes a third of
-;; its memory.
+;; of DEFAULT-BACKENDS runs (resolve-backend): basedpyright, because pyrefly
+;; has no per-file search path (a file-link script's imports resolve wrongly
+;; under it; pyright gives each script its own executionEnvironment) and
+;; reports more false positives on unannotated code; pyrefly starts faster
+;; and takes about a third of the memory.
 (= OFF "off")
-(= DEFAULT-BACKENDS (, "pyrefly" "basedpyright"))
+(= DEFAULT-BACKENDS (, "basedpyright" "pyrefly"))
 (= BACKENDS {"basedpyright" _basedpyright-argv
              "pyrefly" _pyrefly-argv})
 

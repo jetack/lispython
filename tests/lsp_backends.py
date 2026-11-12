@@ -12,7 +12,7 @@ import pytest
 
 # lispy.lsp.backend.DEFAULT_BACKENDS, in its order (a test pins it); not
 # imported, so collecting the tests never loads the LSP.
-REAL_BACKENDS = ("pyrefly", "basedpyright")
+REAL_BACKENDS = ("basedpyright", "pyrefly")
 
 # The marker of a test that runs once, on the default backend.
 ONCE_MARKER = "lsp_backend_once"
