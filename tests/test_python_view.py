@@ -1804,12 +1804,18 @@ class TestShadows:
     @pytest.fixture
     def unlistable(self):
         """chmod 0o311 (searchable, not listable) each directory given,
-        restoring every one at teardown."""
+        restoring every one at teardown; the test skips where that does not
+        stop listing (root, or a filesystem ignoring modes)."""
         made = []
 
         def make(directory):
             directory.chmod(0o311)
             made.append(directory)
+            try:
+                os.listdir(directory)
+            except PermissionError:
+                return
+            pytest.skip("chmod does not stop listing a directory here")
 
         yield make
         for directory in made:
