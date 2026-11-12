@@ -2240,8 +2240,11 @@
    file-environments, the lpy path of each of those modules whose first
    search dir is not its environment root (a file-link script) -> its own
    search dirs, which a backend that takes a file as an environment
-   (pyright) gives it alone."
+   (pyright) gives it alone.  And outside-dirs, the real paths of the
+   outside dirs the last sweep shadowed (outside-view-dir), a frozenset
+   replaced whole by each sweep."
   (def __init__ [self]
+    (= self.outside-dirs (frozenset))
     (= self.sources {})
     (= self.environments {})
     (= self.file-environments {})))
@@ -2252,9 +2255,12 @@
   (return (any ((osp.isfile (osp.join directory name))
                 for name in (, "__init__.py" "__init__.pyi")))))
 
-(def _mirror-py-files [project-root root directory shadows links reserved]
+(def _mirror-py-files [project-root root view-base directory shadows links reserved]
   "Link the modules of directory, an import root with a shadow, into the
-   view beside its shadows: each real .py and .pyi file as a file link, each
+   view beside its shadows (view-base, the view directory project-root
+   maps to: the view root for the project, an outside-view-dir for an
+   outside dir; every write is checked against root, the view root itself,
+   so a link swapped in anywhere below it stops it): each real .py and .pyi file as a file link, each
    regular package (_regular-package-p) as one directory link, so the
    backend analyses them as view modules, under the view's config, and they
    see the shadows.  Left out: a view directory this sweep needs real, one
@@ -2268,7 +2274,7 @@
    whose view directory is real but holds no __init__: the import root is
    no package, so each still resolves on the real path.  Each link made or
    kept is added to links; a failure is logged and skipped."
-  (= view-dir (_view-dir project-root root directory))
+  (= view-dir (_view-dir project-root view-base directory))
   (if (is view-dir None)
       (return))
   ;; The entries of view-dir that hold a shadow or link of this sweep.
@@ -2317,8 +2323,11 @@
       (return project-root))
   (return top))
 
-(def _overlay-package [project-root root package source-dirs shadows links reserved]
-  "Mirror the package directory package into the view whole.  Its view
+(def _overlay-package [project-root root view-base package source-dirs shadows links
+                       reserved]
+  "Mirror the package directory package into the view whole, at its place
+   below view-base, the view directory project-root maps to, every write
+   checked against root, the view root itself (_mirror-py-files).  Its view
    directory is a regular package once its __init__.py is there, and so
    hides the real one from the backend: whatever the view lacks of it does
    not resolve.  So every directory on the way to a .lpy source
@@ -2332,7 +2341,7 @@
   (= stack [package])
   (while stack
     (= directory (.pop stack))
-    (= view-dir (_view-dir project-root root directory))
+    (= view-dir (_view-dir project-root view-base directory))
     (try
       (_real-view-dir root view-dir)
       (= entries (sorted (os.listdir directory)))
@@ -2547,6 +2556,16 @@
     (= self.written written)
     (= self.removed removed)))
 
+(def shadow-module-names [project-root lpy-path]
+  "The module-names a shadow of lpy-path compiles under in project-root's
+   view, for a project source and an outside dir's source alike: the
+   project's shared-import-roots count, as an editable install puts them on
+   sys.path for every run.  The one home of that naming: _write-shadows
+   compiles under it, and BackendClient.locate hands it with an outside
+   shadow's place, since the file's own document naming (in no project)
+   has no shared roots and would compile it to another text."
+  (return (module-names lpy-path :project-root project-root)))
+
 (def _shadow-source [root manifest macro-epoch lpy-path shadow names shadows written]
   "Bring the shadow at shadow, in view root root, of the source lpy-path,
    of module-names names, up to date for _write-shadows: kept when the
@@ -2596,7 +2615,7 @@
   (= sources (project-sources project-root))
   (= names-of {})
   (for lpy-path in sources
-    (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root)))
+    (= (sub names-of lpy-path) (shadow-module-names project-root lpy-path)))
   (for lpy-path in open-paths
     (if (not-in lpy-path names-of)
         (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root))))
@@ -2620,13 +2639,20 @@
       (if (and (_outside-dir-p project-root directory)
                (not-in (osp.realpath directory) spellings)
                (not (any ((== directory (sub base 0)) for base in bases))))
+          ;; The whole tree, as the project's walk: any directory below
+          ;; one on sys.path is importable (a namespace package), so a
+          ;; module at any depth of it may be the one an import names.
           (do (= found (project-sources directory))
               (.append bases (, directory (outside-view-dir root directory) found))
               (for lpy-path in found
                 (if (not-in lpy-path names-of)
                     (= (sub outside-names lpy-path)
-                       (module-names lpy-path :project-root project-root))))))))
+                       (shadow-module-names project-root lpy-path))))))))
   (.update names-of outside-names)
+  ;; Replaced whole, never mutated: Backends.document-saved reads it on the
+  ;; loop while a sweep thread runs.
+  (= manifest.outside-dirs (frozenset ((osp.realpath (sub base 0))
+                                       for base in (sub bases [: 1 None]))))
   (= current (| (set sources) (set outside-names)))
   ;; None: a drop is due, so every entry is stale.
   (= macro-epoch (epoch))
@@ -2653,8 +2679,10 @@
   (= reserved (_view-own-files project-root root manifest.environments))
   (= links (set))
   ;; Each base (the project, then each outside dir) overlays its packages
-  ;; and mirrors its import roots into its own view directory, with that
-  ;; directory as the root every write is checked against.
+  ;; and mirrors its import roots into its own view directory, every write
+  ;; checked against the view root itself: checked against the outside
+  ;; view directory, a link swapped in at .outside would pass, and a
+  ;; replaced view directory's rmtree could reach the real outside tree.
   (for [base-root base-view found] in bases
     (= packages (set))
     (= module-dirs (set))
@@ -2678,9 +2706,10 @@
             (continue))))
     (= source-dirs (_source-dirs base-root found))
     (for package in (sorted packages)
-      (_overlay-package base-root base-view package source-dirs shadows links reserved))
+      (_overlay-package base-root root base-view package source-dirs shadows links
+                        reserved))
     (for directory in (sorted module-dirs)
-      (_mirror-py-files base-root base-view directory shadows links reserved)))
+      (_mirror-py-files base-root root base-view directory shadows links reserved)))
   (= removed (_sweep-orphans root shadows links))
   (return (ShadowSweep (sorted shadows) (sorted written) (sorted removed))))
 

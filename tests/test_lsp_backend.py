@@ -2403,11 +2403,49 @@ def test_locate_names_the_file_of_an_outside_shadow(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     shadow = pathlib.Path(pv.outside_view_dir(client.view_root.path, str(out)))
-    assert client.locate((shadow / "sib.py").as_uri()) == (
-        "lpy",
-        (out / "sib.lpy").as_uri(),
-        None,
+    place = client.locate((shadow / "sib.py").as_uri())
+    assert place[:3] == ("lpy", (out / "sib.lpy").as_uri(), None)
+
+
+def test_a_location_in_an_outside_shadow_maps_through_its_shadow_naming(tmp_path):
+    # Defect: the disk view of /out/sib.lpy compiles under its own document
+    # naming, in no project, so its (require mac) of proj/src/mac.lpy (a
+    # shared root its shadow compiled with) fails, the texts differ, and
+    # every backend location in it is dropped.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(require mac)\n(= s (mac.twice 3))\n")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "mac.lpy").write_text("(defmacro twice [x] `(* 2 ~x))\n")
+    (proj / "scripts").mkdir()
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    shadow = pathlib.Path(pv.outside_view_dir(client.view_root.path, str(out)))
+    shadow = shadow / "sib.py"
+    lines = shadow.read_text().splitlines()
+    [line] = [i for i, text in enumerate(lines) if text.startswith("s = ")]
+    uri = shadow.as_uri()
+    rng = lsp.Range(
+        start=lsp.Position(line=line, character=0),
+        end=lsp.Position(line=line, character=1),
     )
+    doc = SimpleNamespace(uri=(out / "sib.lpy").as_uri())
+
+    async def place():
+        deadline = asyncio.get_running_loop().time() + 30
+        return await server.editor_location(
+            doc, client.locate(uri), uri, rng, {}, deadline
+        )
+
+    try:
+        location = run_bounded(place())
+    finally:
+        server.disk_views.forget((out / "sib.lpy").as_uri())
+    assert location is not None and location.uri == (out / "sib.lpy").as_uri()
+    assert (location.range.start.line, location.range.start.character) == (1, 3)
 
 
 def test_saving_an_outside_source_sweeps_the_view_that_shadows_it(
@@ -2442,6 +2480,51 @@ def test_saving_an_outside_source_sweeps_the_view_that_shadows_it(
     backends._sweep_soon = lambda client, uris: swept.append(client)
     backends.document_saved((out / "sib.lpy").as_uri())
     assert swept == [clients[0]]
+    # A file new since the sweep (no shadow yet), and one saved through
+    # another spelling of /out, sweep it too.
+    swept.clear()
+    (out / "new.lpy").write_text("(= n 1)\n")
+    backends.document_saved((out / "new.lpy").as_uri())
+    (tmp_path / "out-link").symlink_to(out)
+    backends.document_saved((tmp_path / "out-link" / "sib.lpy").as_uri())
+    assert swept == [clients[0], clients[0]]
+
+
+def test_an_outside_package_overlay_never_writes_through_a_swapped_link(
+    tmp_path, monkeypatch
+):
+    # Defect: an outside dir's overlay checks its writes against its own
+    # view directory, so a link swapped in at .outside after that directory
+    # was made real passes the check, and the package's links land in the
+    # directory the link names.
+    out = tmp_path / "out"
+    (out / "pkg").mkdir(parents=True)
+    (out / "pkg" / "__init__.py").write_text("")
+    (out / "pkg" / "m.lpy").write_text("(= m 1)\n")
+    (out / "t.lpy").write_text("(import pkg.m)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    view = tmp_path / "view"
+    outside_view = pathlib.Path(pv.outside_view_dir(str(view), str(out)))
+    victim = tmp_path / "victim"
+    real_view_dir = pv._real_view_dir
+
+    def swapping(root, directory):
+        real_view_dir(root, directory)
+        # _write-shadows' own call for the base, after both shadows: swap
+        # .outside for a link to a copy of it elsewhere.
+        if directory == str(outside_view) and (outside_view / "t.py").exists():
+            os.rename(view / ".outside", victim)
+            (view / ".outside").symlink_to(victim)
+
+    monkeypatch.setattr(pv, "_real_view_dir", swapping)
+    pv.write_shadows(str(proj), str(view))
+    moved = victim / outside_view.relative_to(view / ".outside")
+    assert (moved / "pkg" / "m.py").is_file()
+    assert not (moved / "pkg" / "__init__.py").exists()
+    assert not (moved / "t.py").is_symlink()
+    assert not (view / ".outside").is_symlink()
 
 
 def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
