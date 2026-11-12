@@ -43,6 +43,7 @@
 (from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
                              FROM-HEADS GENERATED-PREFIX IMPORT-HEADS IMPORT-ONLY-HEADS
                              PARSE-STAGE ViewCache caret-forms caret-tokens code-symbol-p
+                             state-entry-p
                              compile-buffer
                              glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
@@ -2802,7 +2803,7 @@
   (if (or (not stack) (!= (sub (sub stack -1) 0) "b"))
       (return False))
   (= entry (sub stack -1))
-  (= states (len [outer for outer in stack if (in (sub outer 0) "fq")]))
+  (= states (len [outer for outer in stack if (state-entry-p outer)]))
   (= tree (caret-forms source line col (sub entry 5) states (sub entry 1)))
   (if (is tree None)
       (return False))

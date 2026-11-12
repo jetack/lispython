@@ -111,7 +111,7 @@
         (do (del (sub stack [: index None]))
             (return)))))
 
-(def _state-entry-p [entry]
+(def state-entry-p [entry]
   "Whether an open-forms entry stands for a lexer state: a field or a
    literal (a format spec has no entry of its own)."
   (return (in (sub entry 0) "fq")))
@@ -153,7 +153,7 @@
       (return None)
 
       (== tktype "recovered")
-      (do (drop-states stack (sub extra 1) _state-entry-p)
+      (do (drop-states stack (sub extra 1) state-entry-p)
           (= open-literals (len [entry for entry in stack if (== (sub entry 0) "q")])))
 
       (== tktype "interpolated-start")
@@ -187,8 +187,9 @@
 
 (def open-form-closers [prefix]
   "The closers of the brackets still open at the end of prefix (open-forms),
-   innermost first, or None when open-forms is (prefix ends inside an
-   f/t-string, whose text must compile to the Python the buffer means).
+   innermost first, or None when open-forms is: the lexer cannot read
+   prefix, or it ends inside an f/t-string, whose text must compile to the
+   Python the buffer means.
    Appended to prefix, they make a mid-edit buffer parse up to the cursor."
   (= stack (open-forms prefix))
   (if (is stack None)

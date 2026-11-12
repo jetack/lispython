@@ -1252,11 +1252,9 @@ def _parse_tokens(src, tokens, stack, rst, states=0):
             if tktype == "error":
                 raise extra
             if tktype == "recovered":
-                kept = extra[1] - states
-                if kept < 0:
-                    # A state open outside the parsed tokens was dropped.
-                    raise extra[0]
-                drop_states(stack, kept, _state_entry_p)
+                # Never below states: open-forms drops a bracket whose
+                # enclosing state a later error drops, so none is parsed.
+                drop_states(stack, extra[1] - states, _state_entry_p)
                 continue
             if tktype == "deprecated":
                 if not _PARTIAL.get():
@@ -1712,8 +1710,11 @@ def caret_forms(line, col, before, start, states, closer):
     text cut at the caret, alone, as top-level code, so it never reads the
     text past the caret (``~|"`` the invert symbol, ``""|"`` an empty
     string). Inside a field's brackets top-level code reads that text the
-    same, but for a trailing ``\\``, which then reads as the whole text's
-    reader reads it anyway."""
+    same, but for a trailing ``\\``: a field reads ``\\`` before the cut
+    as a continuation, top-level code keeps it in the symbol, as the whole
+    text's reader does with the character after it (``me\\|x`` is the
+    symbol ``me\\x``); a ``\\`` before a line break is a continuation, never
+    in a token, so it is never lexed again."""
     text = before + line
     offset = len(before) + col
     lexer = _recovered_lexer(text, offset)[0]
