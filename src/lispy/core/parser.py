@@ -492,13 +492,15 @@ class _Lexer:
     a plain string in a field.
     """
 
-    def __init__(self, src, comments=False, stop=None):
+    def __init__(self, src, comments=False, stop=None, locate=None):
         self.src = src
         # With a stop offset (caret_context), lexing ends where it would read
         # past it, recording what the offset lies in.
         self.stop = stop
         self.comments = comments  # emit top-level "comment" tokens
-        self.locate = _source_locator(src)
+        # A pass resuming another over the same src takes its locator
+        # (_recovered_context), which found the line starts once.
+        self.locate = _source_locator(src) if locate is None else locate
         self.tokens = []
         self.stack = []  # _LiteralState / _FieldState, innermost last
         self.pos = 0
@@ -1544,7 +1546,7 @@ def _recovered_context(text, offset):
     found = caret_context(text, offset)
     if found is not None:
         return found
-    lexer = _caret_lexer(text, offset)
+    lexer = first = _caret_lexer(text, offset)
     offset_of = source_offset(text)
     resumed_at = 0
     while lexer.stop_context is None:
@@ -1564,12 +1566,13 @@ def _recovered_context(text, offset):
             stack.pop()
             while stack and isinstance(stack[-1], _FieldState):
                 stack.pop()
-        resumed = _Lexer(text, stop=offset)
-        resumed.locate = lexer.locate
+        resumed = _Lexer(text, stop=offset, locate=lexer.locate)
         # One deepcopy, so a field's literal stays the literal on the stack.
         resumed.stack = copy.deepcopy(stack)
-        # A field indexes its tokens (first, tail).
-        resumed.tokens = list(lexer.tokens)
+        # A field indexes its tokens (first, tail): copied off the cached
+        # first pass only, a resumed pass's own list being taken over, so k
+        # errors cost no k copies.
+        resumed.tokens = list(lexer.tokens) if lexer is first else lexer.tokens
         resumed.previous = lexer.previous
         resumed.closed_string_end = lexer.closed_string_end
         resumed.pos = resumed_at = max(end, resumed_at)

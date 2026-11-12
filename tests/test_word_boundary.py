@@ -11,6 +11,7 @@ import sys
 import pytest
 
 import lispy.macros
+from lispy.core import parser
 from lispy.core.compiler.literal import number_parts
 from lispy.core.nodes import Constant, Paren, Symbol
 from lispy.core.parser import (
@@ -408,6 +409,28 @@ def one_of(entries):
 def chars(entries):
     """A regex class of the code points ``entries``."""
     return "[" + "".join(re.escape(c) for c in entries) + "]"
+
+
+def test_resuming_past_many_errors_finds_the_line_starts_once(monkeypatch):
+    # Defect: each resumed pass finds the line starts of the whole text again
+    # (a fresh locator), so a buffer with k lexer errors before the caret
+    # costs k passes over all of it per keystroke. One pass's locator and the
+    # error offsets' (source_offset) are all a recovery needs, however many
+    # errors it resumes past.
+    calls = []
+    line_starts = parser._line_starts
+
+    def counted(src):
+        calls.append(len(src))
+        return line_starts(src)
+
+    monkeypatch.setattr(parser, "_line_starts", counted)
+    parser.caret_context.cache_clear()
+    parser._recovered_context.cache_clear()
+    parser._caret_lexer.cache_clear()
+    before = 'f"{x!}" (a b)\n' * 20
+    assert completion_word_span("(fo", 3, before) == (1, 1, 3)
+    assert len(calls) == 2
 
 
 # spec_word_span's answer where the reader refuses the text before the caret.
