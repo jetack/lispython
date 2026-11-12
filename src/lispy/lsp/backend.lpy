@@ -570,6 +570,7 @@
                             :open-paths open-paths))
     ((config-writer self.name) self.project-root self.view-root
                                :environments self.manifest.environments
+                               :file-environments self.manifest.file-environments
                                :check-types self.check-types)
     (return sweep))
 
@@ -1079,9 +1080,12 @@
     (if (or (not (or self.running self.starting)) (> self._sweeps-waiting 0)
             (and self.starting self._start-unswept))
         (return False))
+    (= locked (.locked self._sweep-lock))
     (return (new-environment-p self.project-root
-                               (ife (.locked self._sweep-lock) {} self.manifest.environments)
-                               path)))
+                               (ife locked {} self.manifest.environments)
+                               path
+                               :file-environments (ife locked {}
+                                                       self.manifest.file-environments))))
 
   (def close-document [self lpy-uri]
     "Forget document lpy-uri's full view and diagnostics, and didClose it if

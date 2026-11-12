@@ -2074,8 +2074,9 @@
   ;; A package module's import root keeps its spelling, as FileFinder
   ;; imports by it; a script searches its real path's directory, as the
   ;; run's sys.path[0] is, by its own directory's spelling when that is the
-  ;; same directory (scripts -> /out/scripts), so a search dir stays in the
-  ;; project wherever the run's does.
+  ;; same directory (scripts -> /out/scripts).  The backend's list spells a
+  ;; directory outside the project by a project directory when one is the
+  ;; same (_environments).
   (= real-directory (osp.dirname (osp.realpath lpy-path)))
   (= script-dir (ife (== (osp.realpath directory) real-directory) directory real-directory))
   (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root script-dir)]
@@ -2096,6 +2097,20 @@
               (in name _PRUNED-DIRS)
               (osp.exists (osp.join parent name "pyvenv.cfg")))))
 
+;; How many times a project-sources walk enters a real directory below a
+;; link met inside a tree it entered through a link after its first entry
+;; there, all told.  Each entry is a spelling an import can take, so none
+;; is skipped for leading where another went; only a DAG of links (each
+;; directory linking twice to the next) has exponentially many, and those
+;; are repeat entries.  A first entry is free and the rest of the walk
+;; enters each real directory once by its own spelling and once more per
+;; link met in such a directory, so this bounds the directories it lists,
+;; a DAG's included, while a big tree reached through a nested link (a
+;; vendored repository) takes none of it.  A walk past it is warned about
+;; once per project root (_CAPPED-WALKS).
+(= _MAX-REPEAT-LINK-DIRS 1000)
+(= _CAPPED-WALKS (set))
+
 (def project-sources [project-root]
   "The .lpy files under project-root, sorted, each spelled by the way the
    walk reached it.  The walk follows directory links by their spelled
@@ -2103,14 +2118,14 @@
    /outside/shared/acme lists src/acme/m.lpy, the module acme.m), and
    skips _pruned-p directories.  It never enters a link to a directory
    above it on the way, the project root's own ancestors included (proj/up
-   -> .. would walk the whole parent tree), so a loop ends.  A link met in
-   a directory reached by its own spelling (no link on the way) is always
-   followed, since each such spelling is a name an import can take
-   (src/acme and src/zeta -> shared/acme are the packages acme and zeta,
-   whatever else links there); inside a tree entered through a link, a
-   link to a real directory already entered through a link is not, so a
-   DAG of links stays linear.  Each path is its own module, so two paths
-   to one file (a file symlink beside it) are both listed."
+   -> .. would walk the whole parent tree), so a loop ends.  Every other
+   link is followed, since each spelling is a name an import can take
+   (src/a_sub and src/acme/sub -> shared/sub are the modules a_sub.m and
+   acme.sub.m, whichever the walk meets first), except that below a link
+   met inside a tree entered through a link it enters a real directory
+   again only _MAX-REPEAT-LINK-DIRS times in all, which bounds the
+   directories a DAG of links makes it list.  Each path is its own module, so two paths to
+   one file (a file symlink beside it) are both listed."
   (= found [])
   (= real-root (osp.realpath project-root))
   (= root-above (set [real-root]))
@@ -2118,12 +2133,16 @@
     (= real-root (osp.dirname real-root))
     (.add root-above real-root))
   ;; dirpath -> (the real paths of it and the directories above it on the
-  ;; way down, whose links would loop; whether a link is on the way).
-  (= ancestors {project-root (, (frozenset root-above) False)})
-  ;; The real directories entered through a link.
-  (= linked (set))
+  ;; way down, whose links would loop; whether a link is on the way;
+  ;; whether a link met below a link is).
+  (= ancestors {project-root (, (frozenset root-above) False False)})
+  ;; The real directories entered below a nested link, and the repeat
+  ;; entries so far.
+  (= nested-entered (set))
+  (= repeats 0)
+  (= capped False)
   (for [dirpath dirnames filenames] in (os.walk project-root :followlinks True)
-    (= [above via-link] (.pop ancestors dirpath))
+    (= [above via-link nested] (.pop ancestors dirpath))
     (= kept [])
     (for name in (sorted dirnames)
       (= path (osp.join dirpath name))
@@ -2133,17 +2152,25 @@
       (if (in real above)
           (continue))
       (= link (osp.islink path))
-      (if link
-          (do (if (and via-link (in real linked))
-                  (continue))
-              (.add linked real)))
-      (= (sub ancestors path) (, (.union above [real]) (or via-link link)))
+      (= below-nested (or nested (and link via-link)))
+      (if (and below-nested (in real nested-entered))
+          (do (if (>= repeats _MAX-REPEAT-LINK-DIRS)
+                  (do (= capped True)
+                      (continue)))
+              (+= repeats 1)))
+      (if below-nested
+          (.add nested-entered real))
+      (= (sub ancestors path) (, (.union above [real]) (or via-link link) below-nested))
       (.append kept name))
     (.clear dirnames)
     (.extend dirnames kept)
     (for filename in filenames
       (if (.endswith filename ".lpy")
           (.append found (osp.join dirpath filename)))))
+  (if (and capped (not-in project-root _CAPPED-WALKS))
+      (do (.add _CAPPED-WALKS project-root)
+          (.warning logger "lispython view: %s links to one directory under more than %d names; the rest get no shadow"
+                    project-root _MAX-REPEAT-LINK-DIRS)))
   (return (sorted found)))
 
 (class ShadowManifest []
@@ -2155,10 +2182,15 @@
    (module-names), which the config writers read (_search-paths,
    search-environments): environments, environment root (the directory
    holding a module's view file, _module-environment) -> the search dirs
-   its backend environment searches (_environments decides them)."
+   its backend environment searches (_environments decides them); and
+   file-environments, the lpy path of each of those modules whose first
+   search dir is not its environment root (a file-link script) -> its own
+   search dirs, which a backend that takes a file as an environment
+   (pyright) gives it alone."
   (def __init__ [self]
     (= self.sources {})
-    (= self.environments {})))
+    (= self.environments {})
+    (= self.file-environments {})))
 
 (def _regular-package-p [directory]
   "Whether directory is a regular package (it holds an __init__.py or
@@ -2357,47 +2389,88 @@
   (return (, (ife (sub names 1) (sub dirs 0) (osp.dirname (osp.abspath lpy-path)))
              dirs)))
 
-(def _environments [modules]
-  "ShadowManifest.environments of modules, (lpy path, module-names) pairs, in
-   order: environment root (_module-environment) -> the search dirs of the
+(def _environments [project-root modules spellings]
+  "(ShadowManifest.environments, ShadowManifest.file-environments) of
+   modules, (lpy path, module-names) pairs, in order, in project-root.
+   Each search dir outside the project whose real path is a key of
+   spellings (real path -> the first directory of the project's sources
+   that is it) is spelled as that project directory, which the view mirrors with shadows: scripts/a.lpy ->
+   /out/lib/a.lpy, with lib -> /out/lib, searches lib/, the run's
+   sys.path[0] /out/lib by another name.  environments:
+   environment root (_module-environment) -> the search dirs of the
    modules it is the root of, sorted by root.  Only the modules whose
    first search dir is the root (a package module, a script searching its
    own directory) give it search dirs, merged in order, each once; the
    first other module (a file-link script scripts/a.lpy -> lib/a.lpy,
    searching lib/) gives them only to a root that has none of those.
-   The modules are every source with a shadow and every document open in
-   the backend (write-shadows' open-paths): a buffer not yet saved has no
-   shadow but is synced to the backend at its view path, and analysing it
-   under the default list instead of its own search dirs leaves a sibling
-   import its run (`python scripts/y.py`) resolves unresolved until the
-   first save."
-  ;; One backend environment has one search list, and a plain script's run
-  ;; (python scripts/b.py) never searches the lib/ a link beside it
-  ;; searches, so the plain modules decide it and the link is analysed
-  ;; under their list (its own compile still searches lib/).
+   file-environments: each other module's path -> its own search dirs,
+   sorted by path.  The modules are every source with a shadow and every
+   document open in the backend (write-shadows' open-paths): a buffer not
+   yet saved has no shadow but is synced to the backend at its view path,
+   and analysing it under the default list instead of its own search dirs
+   leaves a sibling import its run (`python scripts/y.py`) resolves
+   unresolved until the first save."
+  ;; One directory environment has one search list, and a plain script's
+  ;; run (python scripts/b.py) never searches the lib/ a link beside it
+  ;; searches, so the plain modules decide it.  pyright takes a file as an
+  ;; environment root too, so the link gets its own list there; pyrefly
+  ;; reads search-path from a directory's pyrefly.toml alone (a sub-config
+  ;; refuses it), so there the link is analysed under its directory's list
+  ;; (its own compile still searches lib/).
   (= plain {})
   (= other {})
+  (= files {})
   (for [lpy-path names] in modules
-    (= [env-root dirs] (_module-environment lpy-path names))
-    (if (== (sub dirs 0) env-root)
+    (= [env-root raw-dirs] (_module-environment lpy-path names))
+    (= dirs (tuple (dict.fromkeys ((ife (_outside-p project-root d)
+                                        (.get spellings (osp.realpath d) d)
+                                        d)
+                                   for d in raw-dirs))))
+    (if (== (sub raw-dirs 0) env-root)
         (= (sub plain env-root)
            (tuple (dict.fromkeys (+ (.get plain env-root (,)) dirs))))
-        (.setdefault other env-root dirs)))
-  (return (dict (sorted (.items (| other plain))))))
+        (do (.setdefault other env-root dirs)
+            (= (sub files (osp.abspath lpy-path)) dirs))))
+  (return (, (dict (sorted (.items (| other plain))))
+             (dict (sorted (.items files))))))
 
-(def new-environment-p [project-root environments lpy-path]
+(def _outside-p [project-root directory]
+  "Whether directory lies outside project-root."
+  (= rel (osp.relpath directory project-root))
+  (return (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))))
+
+(def _real-dirs [dirs]
+  "The real paths of dirs in order, each once, or None for no dirs."
+  (if (is dirs None)
+      (return None))
+  (return (tuple (dict.fromkeys (map osp.realpath dirs)))))
+
+(def new-environment-p [project-root environments lpy-path :file-environments None]
   "Whether lpy-path, the absolute path of a document open in project-root's
    backend, has a search environment (search-environments) that
-   environments (ShadowManifest.environments) lacks: search-environments
+   environments and file-environments (ShadowManifest's) lack: it is a
+   module whose first search dir is not its environment root (a file-link
+   script) inside the project whose entry in file-environments is missing
+   or names other real directories (_real-dirs: the link was retargeted;
+   the entry's dirs may be respelled, never moved); or search-environments
    gives it one (the view root standing in for project-root's: only
-   whether an environment exists is asked) and its environment root
-   (_module-environment) is no key of environments, or the module is plain
-   (its first search dir is the root) while the root's list does not start
-   with the root, having come from a file-link script alone (_environments),
-   which the plain module's sweep replaces.  No loop: after that sweep the
-   open plain module makes the list start with the root."
+   whether an environment exists is asked) and its environment root (_module-environment) is no key of
+   environments, or the module is plain (its first search dir is the
+   root) while the root's list does not start with the root, having come
+   from a file-link script alone (_environments), which the plain module's
+   sweep replaces.  No loop: after that sweep the open module has its
+   entry and the open plain module makes the list start with the root.
+   Not seen: a directory link created since the sweep that gives an
+   entry's outside dir a project spelling (lib -> /out/lib after the sweep
+   of scripts/a.lpy -> /out/lib/a.lpy), since only a walk finds it; the
+   next sweep (a save) respells it."
   (= [env-root dirs] (_module-environment lpy-path
                                           (module-names lpy-path :project-root project-root)))
+  (if (and (!= (sub dirs 0) env-root)
+           (is-not (view-path project-root project-root lpy-path) None)
+           (!= (_real-dirs (.get (or file-environments {}) (osp.abspath lpy-path)))
+               (_real-dirs dirs)))
+      (return True))
   (if (not (search-environments project-root project-root {env-root dirs}))
       (return False))
   (if (not-in env-root environments)
@@ -2470,10 +2543,16 @@
   (for lpy-path in open-paths
     (if (not-in lpy-path names-of)
         (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root))))
-  (= manifest.environments
-     (_environments (+ [(, lpy-path (sub names-of lpy-path)) for lpy-path in (.values shadows)]
+  (= spellings {})
+  (for lpy-path in sources
+    (= directory (osp.dirname lpy-path))
+    (.setdefault spellings (osp.realpath directory) directory))
+  (= [manifest.environments manifest.file-environments]
+     (_environments project-root
+                    (+ [(, lpy-path (sub names-of lpy-path)) for lpy-path in (.values shadows)]
                        [(, lpy-path (sub names-of lpy-path))
-                        for lpy-path in (sorted open-paths)])))
+                        for lpy-path in (sorted open-paths)])
+                    spellings))
   (= packages (set))
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
@@ -2607,7 +2686,8 @@
    each once; an import root above the project (the project lying inside
    a package) is left out, while another directory outside it (the real
    directory of a script linked out of the project) is searched as
-   itself.  First the view counterpart of each inside the project, so `import pkg` finds
+   itself, so the backend resolves only its .py modules: the view mirrors
+   the project alone, and its .lpy modules have no shadow.  First the view counterpart of each inside the project, so `import pkg` finds
    the shadows before any real directory of uncompiled .lpy; then each
    real directory, so what the view lacks of one still resolves: its
    namespace packages, its extension modules and, whole, a package of it
@@ -2639,13 +2719,18 @@
                                            "site-packages")))))
   (return (list (dict.fromkeys paths))))
 
-(def search-environments [project-root root environments]
+(def search-environments [project-root root environments :files None]
   "The search environments of view root root besides its default list:
    (view directory, search paths) for each environment root of
    environments (ShadowManifest.environments) inside the project other
    than the project root, with the search paths of its search dirs
    (_search-paths): scripts/x.lpy searches scripts/ first, as
    `lpy scripts/x.lpy` does, and no module outside scripts/ searches it.
+   Then (view file, search paths) for each module of files
+   (ShadowManifest.file-environments) inside the project, the project
+   root's included, for a backend that takes a file as an environment
+   root (pyright): a file-link script searches its own list, never its
+   neighbours'.
    A shared root (src) gets one too, though the default list holds the same
    directories: that list leads with the project root, where pyright also
    searches its execution root (the view root) first, so a root utils.py
@@ -2661,6 +2746,10 @@
     (= view-dir (_view-dir project-root root env-root))
     (if (and (is-not view-dir None) (!= env-root project-root))
         (.append found (, view-dir (_search-paths project-root root dirs)))))
+  (for [lpy-path dirs] in (.items (or files {}))
+    (= view-file (view-path project-root root lpy-path))
+    (if (is-not view-file None)
+        (.append found (, view-file (_search-paths project-root root dirs)))))
   (return (sorted found :key (fn [entry] (, (- (len (.split (sub entry 0) os.sep)))
                                             (sub entry 0))))))
 
@@ -2690,12 +2779,14 @@
                 (.append found path)))))
   (return (sorted found)))
 
-(def write-pyright-config [project-root view-root :environments None :check-types True]
+(def write-pyright-config [project-root view-root :environments None
+                           :file-environments None :check-types True]
   "Write view-root's pyrightconfig.json when it changed: the project's
    rule settings (_rule-settings; check-types false, as when no diagnostic
    is forwarded, turns checking off), the default search paths
    (_search-paths, as extraPaths), one executionEnvironments entry per
-   search environment (search-environments: its view directory as root,
+   search environment (search-environments, file-environments included:
+   its view directory or file as root,
    its search paths as extraPaths, which replace the top-level ones for
    it; pyright searches an environment's root before its extraPaths, and
    takes the first environment whose root holds the file), and the
@@ -2713,7 +2804,8 @@
   (= config (_rule-settings project-root check-types))
   (= (sub config "extraPaths") (_search-paths project-root root
                                               (default-search-dirs project-root)))
-  (= envs (search-environments project-root root environments))
+  (= envs (search-environments project-root root environments
+                              :files file-environments))
   (if envs
       (= (sub config "executionEnvironments")
          [{"root" view-dir "extraPaths" paths} for [view-dir paths] in envs]))
@@ -2910,7 +3002,8 @@
           (except [OSError as e]
             (.warning logger "lispython view: cannot remove %s: %s" path e))))))
 
-(def write-pyrefly-config [project-root view-root :environments None :check-types True
+(def write-pyrefly-config [project-root view-root :environments None
+                          :file-environments None :check-types True
                           :python None :check None]
   "Write view-root's pyrefly.toml when it changed: the project's rule
    settings (_pyrefly-rule-settings; check-types false turns checking off),
@@ -2931,7 +3024,9 @@
    file's config from the nearest pyrefly.toml up from it, so each search
    environment (search-environments) gets a pyrefly.toml of its own in its
    view directory, the same settings with that environment's search paths,
-   and a nested one no environment has any more is removed.  A view root
+   and a nested one no environment has any more is removed.
+   file-environments is unused: a sub-config refuses search-path, so a
+   file-link script takes its directory's list.  A view root
    that overlaps the project is a ValueError; the writes hold the view
    root's lock.  Returns the root file's path (config-files lists them
    all)."

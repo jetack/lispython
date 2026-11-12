@@ -2040,20 +2040,99 @@ def test_the_sweep_never_walks_up_out_of_the_project(tmp_path, time_bound):
     assert pv.project_sources(str(proj)) == [str(proj / "a.lpy")]
 
 
-def test_the_sweep_walks_a_dag_of_links_in_linear_time(tmp_path, time_bound):
-    # Defect: a directory reached by two links is walked under each, so a
-    # chain of directories each linking twice to the next lists 2**n paths.
+def test_a_link_inside_a_linked_package_is_listed_whatever_came_first(
+    tmp_path, time_bound
+):
+    # Defect: a link met inside a tree entered through a link is skipped
+    # when its real directory was entered through another link first, so
+    # src/a_sub -> /out/sub (sorted first) takes /out/sub and src/acme/sub,
+    # the module acme.sub.m, gets no shadow.
+    out = tmp_path / "out"
+    (out / "sub").mkdir(parents=True)
+    (out / "sub" / "m.lpy").write_text("")
+    (out / "acme").mkdir()
+    (out / "acme" / "sub").symlink_to(out / "sub")
     proj = tmp_path / "proj"
-    count = 8
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a_sub").symlink_to(out / "sub")
+    (proj / "src" / "acme").symlink_to(out / "acme")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "src" / "a_sub" / "m.lpy"),
+        str(proj / "src" / "acme" / "sub" / "m.lpy"),
+    ]
+
+
+def test_two_links_to_a_package_holding_a_link_each_list_its_sources(
+    tmp_path, time_bound
+):
+    # Defect: the inner link is followed under the first link to the
+    # package only, so src/zeta/inner/m.lpy (zeta.inner.m) is left out.
+    out = tmp_path / "out"
+    (out / "other").mkdir(parents=True)
+    (out / "other" / "m.lpy").write_text("")
+    (out / "pkg").mkdir()
+    (out / "pkg" / "inner").symlink_to(out / "other")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    for name in ["acme", "zeta"]:
+        (proj / "src" / name).symlink_to(out / "pkg")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "src" / "acme" / "inner" / "m.lpy"),
+        str(proj / "src" / "zeta" / "inner" / "m.lpy"),
+    ]
+
+
+def test_the_sweep_bounds_a_dag_of_links(tmp_path, time_bound, caplog):
+    # Defect: every spelling of a chain of directories each linking twice
+    # to the next is walked, 2**n of them, so the sweep never ends; or the
+    # bound counts links, so each link followed brings a whole subtree of
+    # plain directories (width of them per level) and the walk still lists
+    # links times width.
+    proj = tmp_path / "proj"
+    count, width = 11, 40
     for i in range(count):
-        (proj / f"d{i}").mkdir(parents=True)
-        (proj / f"d{i}" / "m.lpy").write_text("")
+        level = proj / f"d{i}"
+        level.mkdir(parents=True)
+        (level / "m.lpy").write_text("")
+        for j in range(width):
+            (level / f"w{j}").mkdir()
+            (level / f"w{j}" / "m.lpy").write_text("")
     for i in range(count - 1):
         for name in ["a", "b"]:
             (proj / f"d{i}" / name).symlink_to(proj / f"d{i + 1}")
-    # Each directory by its own spelling, both its links from there, and
-    # inside those trees each directory at most once more: linear.
-    assert len(pv.project_sources(str(proj))) <= 4 * count
+    caplog.set_level(logging.WARNING, logger=pv.logger.name)
+    sources = pv.project_sources(str(proj))
+    pv.project_sources(str(proj))
+    # One source per directory: each real one by its own spelling, again
+    # through each link met there (its whole level), once more below a link
+    # met in such a tree, then at most _MAX_REPEAT_LINK_DIRS repeats.
+    real = count * (width + 1)
+    first_links = 2 * (count - 1) * (width + 1)
+    assert len(sources) <= real + first_links + real + pv._MAX_REPEAT_LINK_DIRS
+    # The cap fired, and says so once.
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
+def test_a_big_tree_behind_a_nested_link_leaves_later_spellings(tmp_path, time_bound):
+    # Defect: a global cap on directories entered below a nested link is
+    # spent by one big tree (a vendored repository), so a later, unrelated
+    # nested spelling (src/z/inner/m.lpy, the module z.inner.m) is dropped.
+    out = tmp_path / "out"
+    for j in range(1100):
+        (out / "big" / f"p{j}").mkdir(parents=True)
+    (out / "a").mkdir()
+    (out / "a" / "big").symlink_to(out / "big")
+    (out / "inner").mkdir()
+    (out / "inner" / "m.lpy").write_text("")
+    (out / "z").mkdir()
+    (out / "z" / "inner").symlink_to(out / "inner")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a").symlink_to(out / "a")
+    (proj / "src" / "z").symlink_to(out / "z")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "src" / "z" / "inner" / "m.lpy")
+    ]
 
 
 def environment_search_paths(client):
@@ -2092,8 +2171,10 @@ def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path
     assert client.manifest.environments[os.path.join(real, "scripts")] == (
         os.path.join(real, "lib"),
     )
+    lib = [str(view / "lib"), os.path.join(real, "lib")]
     assert environment_search_paths(client) == {
-        str(view / "scripts"): [str(view / "lib"), os.path.join(real, "lib")]
+        str(view / "scripts" / "a.py"): lib,
+        str(view / "scripts"): lib,
     }
 
 
@@ -2253,7 +2334,316 @@ def test_a_script_file_linked_out_searches_its_real_directory(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
-    assert environment_search_paths(client) == {str(view / "scripts"): [str(out)]}
+    assert environment_search_paths(client) == {
+        str(view / "scripts" / "t.py"): [str(out)],
+        str(view / "scripts"): [str(out)],
+    }
+
+
+def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
+    # Defect: the link proj/scripts/a.lpy -> ../lib/a.lpy, with proj/lib ->
+    # /out/lib, searches /out/lib as itself, which holds no shadow, so the
+    # backend leaves the (import sib) of lib/sib.lpy unresolved, where its
+    # run (sys.path[0] the real /out/lib) imports it.
+    out = tmp_path / "out" / "lib"
+    out.mkdir(parents=True)
+    (out / "a.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    (out / "a.py").write_text("import json, sys; print(json.dumps(sys.path[0]))\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "lib").symlink_to(out)
+    (proj / "scripts" / "a.lpy").symlink_to(os.path.join("..", "lib", "a.lpy"))
+    (proj / "scripts" / "a.py").symlink_to(os.path.join("..", "lib", "a.py"))
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert (view / "lib" / "sib.py").read_text() == "s = 1"
+    assert environment_search_paths(client)[str(view / "scripts")] == [
+        str(view / "lib"),
+        str(proj / "lib"),
+    ]
+    # Not -I: isolated mode puts no script directory on sys.path.
+    run = subprocess.run(
+        [sys.executable, "-E", "-s", str(proj / "scripts" / "a.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(run.stdout) == os.path.realpath(proj / "lib")
+
+
+def test_a_file_link_script_gets_its_own_pyright_environment(tmp_path):
+    # Defect: a file-link script is analysed under its directory's list, so
+    # scripts/a.lpy -> lib/a.lpy beside the plain scripts/b.lpy misses the
+    # lib/helper its run imports (pyright takes a file as a root; pyrefly
+    # cannot, so its directory list stays the plain scripts').
+    proj = tmp_path / "proj"
+    (proj / "lib").mkdir(parents=True)
+    (proj / "lib" / "a.lpy").write_text("(import helper)\n")
+    (proj / "lib" / "helper.py").write_text("h = 1\n")
+    (proj / "scripts").mkdir()
+    (proj / "scripts" / "b.lpy").write_text("(= b 1)\n")
+    (proj / "scripts" / "a.lpy").symlink_to(proj / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    envs = environment_search_paths(client)
+    assert envs[str(view / "scripts" / "a.py")] == [
+        str(view / "lib"),
+        str(proj / "lib"),
+    ]
+    assert envs[str(view / "scripts")] == [
+        str(view / "scripts"),
+        str(proj / "scripts"),
+    ]
+    # pyright takes the first environment whose root holds the file.
+    roots = list(envs)
+    assert roots.index(str(view / "scripts" / "a.py")) < roots.index(
+        str(view / "scripts")
+    )
+
+
+def test_a_root_script_linked_out_searches_its_real_directory(tmp_path):
+    # Defect: an environment rooted at the project root is skipped, so
+    # proj/t.lpy -> /out/t.lpy is analysed under the default list, without
+    # the /out its run puts on sys.path[0].
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "helper.py").write_text("h = 1\n")
+    (out / "t.lpy").write_text("(import helper)\n")
+    (out / "t.py").write_text("import json, sys; print(json.dumps(sys.path[0]))\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    (proj / "t.py").symlink_to(out / "t.py")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert environment_search_paths(client) == {str(view / "t.py"): [str(out)]}
+    # Not -I: isolated mode puts no script directory on sys.path.
+    run = subprocess.run(
+        [sys.executable, "-E", "-s", str(proj / "t.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(run.stdout) == str(out)
+
+
+def test_an_opened_retargeted_file_link_sweeps_again(tmp_path):
+    # Defect: an open asks only whether a file link has an entry, so
+    # scripts/a.lpy -> lib/a.lpy swept, then pointed at tools/a2.lpy, keeps
+    # lib/'s list until a save, and the backend misses tools/'s modules.
+    proj = tmp_path / "proj"
+    for name in ["lib", "tools", "scripts"]:
+        (proj / name).mkdir(parents=True)
+    (proj / "lib" / "a.lpy").write_text("(= a 1)\n")
+    (proj / "tools" / "a2.lpy").write_text("(= a 2)\n")
+    link = proj / "scripts" / "a.lpy"
+    link.symlink_to(os.path.join("..", "lib", "a.lpy"))
+    manifest = pv.ShadowManifest()
+    view = str(tmp_path / "view")
+    pv.write_shadows(str(proj), view, manifest=manifest)
+
+    def stale():
+        return pv.new_environment_p(
+            str(proj),
+            manifest.environments,
+            str(link),
+            file_environments=manifest.file_environments,
+        )
+
+    assert not stale()
+    link.unlink()
+    link.symlink_to(os.path.join("..", "tools", "a2.lpy"))
+    assert stale()
+    pv.write_shadows(str(proj), view, manifest=manifest)
+    assert not stale()
+
+
+def test_an_opened_respelled_file_link_does_not_sweep_again(tmp_path):
+    # Defect: an entry respelled by a project directory (/out/lib as lib/)
+    # differs from the open's dirs by spelling, so every open sweeps again.
+    out = tmp_path / "out" / "lib"
+    out.mkdir(parents=True)
+    (out / "a.lpy").write_text("(= a 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "lib").symlink_to(out)
+    link = proj / "scripts" / "a.lpy"
+    link.symlink_to(out / "a.lpy")
+    manifest = pv.ShadowManifest()
+    pv.write_shadows(str(proj), str(tmp_path / "view"), manifest=manifest)
+    assert manifest.file_environments[str(link)][0] == str(proj / "lib")
+    assert not pv.new_environment_p(
+        str(proj),
+        manifest.environments,
+        str(link),
+        file_environments=manifest.file_environments,
+    )
+
+
+def test_an_opened_file_link_with_no_environment_sweeps_again(tmp_path):
+    # Defect: an open asks only for its directory's environment, so a root
+    # file link opened before any sweep saw it is analysed under the
+    # default list until a save.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(= t 1)\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    path = str(proj / "t.lpy")
+    assert pv.new_environment_p(str(proj), {}, path)
+    manifest = pv.ShadowManifest()
+    pv.write_shadows(str(proj), str(tmp_path / "view"), manifest=manifest)
+    assert manifest.file_environments == {path: (str(out),)}
+    assert not pv.new_environment_p(
+        str(proj),
+        manifest.environments,
+        path,
+        file_environments=manifest.file_environments,
+    )
+
+
+@pytest.mark.parametrize(
+    "name", [name for name in REAL_BACKENDS if name == "basedpyright"]
+)
+def test_real_backend_resolves_an_import_of_a_root_script_linked_out(tmp_path, name):
+    # Defect: proj/t.lpy -> /out/t.lpy is analysed under the default list,
+    # so pyright reports the (import helper) of /out/helper.py, which its
+    # run (sys.path[0] the real /out) imports.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "helper.py").write_text("h = 1\n")
+    source = "(import helper)\n(print helper.h helper.nowhere)\n"
+    (out / "t.lpy").write_text(source)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "t.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: helper resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("helper" in m and "nowhere" not in m for m in found), found
+
+
+@pytest.mark.parametrize("absolute", [True, False])
+def test_a_file_link_out_searches_a_project_spelling_of_its_directory(
+    tmp_path, absolute
+):
+    # Defect: the in-project spelling of a script's real directory is found
+    # only where the link text passes through it, so an absolute link
+    # proj/scripts/a.lpy -> /out/lib/a.lpy (with proj/lib -> /out/lib), or a
+    # relative one in a linked directory (proj/scripts -> /out/scripts
+    # holding a.lpy -> ../lib/a.lpy, with proj/vendor/lib -> /out/lib, where
+    # the text reads proj/lib), searches /out/lib as itself, which holds no
+    # shadow, and the backend leaves the (import sib) of sib.lpy unresolved.
+    out = tmp_path / "out"
+    (out / "lib").mkdir(parents=True)
+    (out / "lib" / "a.lpy").write_text("(import sib)\n")
+    (out / "lib" / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    spelled = proj / "lib" if absolute else proj / "vendor" / "lib"
+    spelled.parent.mkdir(parents=True)
+    spelled.symlink_to(out / "lib")
+    if absolute:
+        (proj / "scripts").mkdir()
+        (proj / "scripts" / "a.lpy").symlink_to(out / "lib" / "a.lpy")
+    else:
+        (out / "scripts").mkdir()
+        (out / "scripts" / "a.lpy").symlink_to(os.path.join("..", "lib", "a.lpy"))
+        (proj / "scripts").symlink_to(out / "scripts")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    view_lib = view / spelled.relative_to(proj)
+    assert (view_lib / "sib.py").read_text() == "s = 1"
+    lib = [str(view_lib), str(spelled)]
+    assert environment_search_paths(client)[str(view / "scripts" / "a.py")] == lib
+
+
+@pytest.mark.parametrize(
+    "name", [name for name in REAL_BACKENDS if name == "basedpyright"]
+)
+def test_real_backend_resolves_a_file_link_scripts_own_import(tmp_path, name):
+    # Defect: scripts/a.lpy -> lib/a.lpy beside the plain scripts/b.lpy is
+    # analysed under b's list, so pyright reports the (import helper) of
+    # lib/helper.py, which `python scripts/a.py` imports from sys.path[0].
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    proj = tmp_path / "proj"
+    (proj / "lib").mkdir(parents=True)
+    (proj / "lib" / "helper.py").write_text("h = 1\n")
+    source = "(import helper)\n(print helper.h helper.nowhere)\n"
+    (proj / "lib" / "a.lpy").write_text(source)
+    (proj / "scripts").mkdir()
+    (proj / "scripts" / "b.lpy").write_text("(= b 1)\n")
+    (proj / "scripts" / "a.lpy").symlink_to(proj / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "scripts" / "a.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: helper resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("helper" in m and "nowhere" not in m for m in found), found
 
 
 def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
