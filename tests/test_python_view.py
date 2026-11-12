@@ -3876,7 +3876,7 @@ def test_every_lsp_compile_tracks_its_modules():
 
 
 def test_moved_helpers_keep_one_home():
-    for name in ["open_form_closers", "source_prefix", "py_name"]:
+    for name in ["open_forms", "source_prefix", "py_name"]:
         assert getattr(server, name) is getattr(pv, name)
 
 

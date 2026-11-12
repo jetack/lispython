@@ -1491,10 +1491,10 @@ _CONTEXT_TOKEN_RES = {
 _FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
 
 
-# The stop pass over text up to a caret, kept with its tokens for
-# caret_tokens. One is kept, since the tokens of a long buffer are large: a
-# request reads one caret's text, and _recovered_context keeps only the
-# context its resumed passes reach, never their lexers.
+# The stop pass over text up to a caret, kept with its tokens. One is kept,
+# since the tokens of a long buffer are large: a request reads one caret's
+# text. Past a lexer error the last resumed pass is kept the same way
+# (_recovered_lexer), and caret_tokens reads that one.
 @functools.lru_cache(maxsize=1)
 def _caret_lexer(text, offset):
     lexer = _Lexer(text, stop=offset)
@@ -1527,15 +1527,17 @@ def caret_context(text, offset):
     return lexer.stop_context, lexer.closed_string_end, lexer.stop_symbol
 
 
-@functools.lru_cache(maxsize=8)
-def _recovered_context(text, offset):
-    """caret_context's ``(context, resume, symbol)`` at ``offset`` of
-    ``text``, read on past each lexer error before the offset: the reader
-    resumes just after the error, in the innermost f/t literal open there
-    (every error lies in one), repeating until it reaches the offset, so
-    the text after an error keeps its reading (a later line continuing a
-    multi-line literal stays in it). ``resume`` is then never before the
-    last error's end.
+@functools.lru_cache(maxsize=1)
+def _recovered_lexer(text, offset):
+    """``(lexer, resumed_at)``: the stop pass over ``text`` up to ``offset``,
+    read on past each lexer error before the offset: the reader resumes just
+    after the error, in the innermost f/t literal open there (every error
+    lies in one), repeating until it reaches the offset, so the text after
+    an error keeps its reading (a later line continuing a multi-line literal
+    stays in it). ``lexer`` is the last pass (the cached first pass itself
+    when it met no error), its tokens those through the caret with each
+    error's token where it was met; ``resumed_at`` is where the last pass
+    resumed (0 when none).
 
     The stack kept is the stopped pass's up to its innermost literal (the
     fields above it dropped). An escaped literal refused at its own opening
@@ -1550,10 +1552,7 @@ def _recovered_context(text, offset):
     and each error's span as its refusals step.
 
     Each pass is a new ``_Lexer`` over a copy of the stopped one's stack, so
-    the cached first pass (caret_tokens) is never changed."""
-    found = caret_context(text, offset)
-    if found is not None:
-        return found
+    the cached first pass (caret_context) is never changed."""
     lexer = first = _caret_lexer(text, offset)
     offset_of = source_offset(text)
     resumed_at = 0
@@ -1588,6 +1587,19 @@ def _recovered_context(text, offset):
         resumed.pos = resumed_at = max(end, resumed_at)
         resumed.run()
         lexer = resumed
+    return lexer, resumed_at
+
+
+@functools.lru_cache(maxsize=8)
+def _recovered_context(text, offset):
+    """caret_context's ``(context, resume, symbol)`` at ``offset`` of
+    ``text``, read on past each lexer error before the offset as the reader
+    resumes there (_recovered_lexer). ``resume`` is then never before the
+    last error's end."""
+    found = caret_context(text, offset)
+    if found is not None:
+        return found
+    lexer, resumed_at = _recovered_lexer(text, offset)
     return (
         lexer.stop_context,
         max(lexer.closed_string_end, resumed_at),
@@ -1616,15 +1628,15 @@ def caret_tokens(line, col, before):
     They are tokenize's tokens of that text up to the token holding the
     caret, which the pass never emits (in ``(mo|d`` the list ends at ``(``,
     where tokenize would end in the symbol ``mo``); a token ending at the
-    caret is there. Lexing ends at the caret, or at an earlier error, the
-    last token as in tokenize (only _recovered_context reads on past it); a
-    string after a conversion's ``!`` holding the caret ends it in the
-    conversion's refusal. With the caret in a literal's text, the literal is
+    caret is there. Lexing reads on past each lexer error before the caret
+    as the reader resumes there (_recovered_lexer): the error's token stays
+    where it was met, where tokenize would end, and the tokens after it are
+    the resumed passes'. With the caret in a literal's text, the literal is
     open, where tokenize of the text cut at the caret ends in its
     unterminated error. The brackets, fields and literals open at the caret
-    are tokenize's whenever the caret is in code. The list is the cached
-    pass's own: read it, never change it."""
-    return _caret_lexer(before + line, len(before) + col).tokens
+    are tokenize's whenever the caret is in code and no error precedes it.
+    The list is the cached pass's own: read it, never change it."""
+    return _recovered_lexer(before + line, len(before) + col)[0].tokens
 
 
 def _debug_equals_p(line, end):

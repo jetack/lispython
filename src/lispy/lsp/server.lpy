@@ -47,7 +47,7 @@
                              glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
-                             open-form-closers partial-span project-import-roots py-name
+                             open-forms partial-span project-import-roots py-name
                              word-span
                              forget-false-src-layouts module-file-path-p
                              pruned-in-project-p pyrefly-fallback refresh-src-layout
@@ -2781,7 +2781,12 @@
    (. recv ...).  A cheap gate, read before any view is compiled (the
    Python view's attribute decides what the backend is asked); with no
    backend answer it limits the local answer (local-completion) to the
-   qualified macros of the cached full view."
+   qualified macros of the cached full view.  Only the innermost bracket
+   open at the cursor is parsed (from its opening, with the closers of it
+   and every form inside it), so a lexer error before that bracket is read
+   past as the reader resumes (caret-tokens); an error inside the bracket
+   itself (a refused f-string field in it) leaves no form to read, and
+   gives False."
   (= text (line-text source line))
   (= col (min col (len text)))
   (= span (partial-span source line col))
@@ -2792,11 +2797,27 @@
       (return True))
   (= prefix (source-prefix source line col))
   ;; prefix's tokens are those of partial-span's lexer pass, never lexed again.
-  (= closers (open-form-closers prefix :literals True
-                                :tokens (caret-tokens source line col)))
-  (if (is closers None)
+  (= stack (open-forms prefix :literals True
+                       :tokens (caret-tokens source line col)))
+  (if (is stack None)
       (return False))
-  (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))
+  (= inner None)
+  (for index in (range (- (len stack) 1) -1 -1)
+    (if (== (sub (sub stack index) 0) "b")
+        (do (= inner index)
+            (break))))
+  (if (is inner None)
+      (return False))
+  ;; The cursor's form is always the innermost bracket, so its own text
+  ;; is parsed with the cursor shifted to it: the forms before it, and any
+  ;; error among them, are never read.
+  (= entry (sub stack inner))
+  (= [oline ocol] (sub entry 2))
+  (= closers (.join "" (reversed [(sub inward 1)
+                                   for inward in (sub stack [: inner None])])))
+  (= tree (parse (+ (sub prefix [: (sub entry 4) None]) closers) :partial True))
+  (= [path leaf] (open-path tree (+ (- line oline) 1)
+                            (ife (== line oline) (- col ocol) col)))
   (if (or (not path) (!= (head-of (sub path -1)) "."))
       (return False))
   (= form (sub path -1))

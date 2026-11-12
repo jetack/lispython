@@ -1412,6 +1412,27 @@ def test_code_symbol_p_reads_past_a_lexer_error_as_the_reader_resumes(marked, ex
 
 
 @pytest.mark.parametrize(
+    ("marked", "expected"),
+    [
+        ('(= s f"{=}")\n(. obj me|', True),
+        ('f"{x!}"\n(. obj me|', True),
+        ('f"""a{=}\n{(. obj me|', True),
+        ('(= s f"{=}")\n(foo me|)', False),
+        ('(= s f"{=}")\n(. obj [me|', False),
+    ],
+)
+def test_attribute_context_p_reads_past_a_lexer_error_as_the_reader_resumes(
+    marked, expected
+):
+    # Defect: a lexer error earlier in the buffer leaves (. obj me|) with no
+    # attribute context: the forms open at the caret are read off a lexer
+    # pass that ends at the error, or the whole prefix is parsed with the
+    # error in it, so local completion offers the general list there.
+    source, line, col = _marked_caret(marked)
+    assert server.attribute_context_p(source, line, col) is expected
+
+
+@pytest.mark.parametrize(
     ("marked", "reader"),
     [("(os.pa|)", "code_symbol_p"), ("(pri|)", "attribute_context_p")],
 )
@@ -1445,6 +1466,7 @@ def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, 
     monkeypatch.setattr(server, reader, recorded)
     parser.caret_context.cache_clear()
     parser._recovered_context.cache_clear()
+    parser._recovered_lexer.cache_clear()
     parser._caret_lexer.cache_clear()
     run_completion(ls_with(source), position(line - 1, col))
     assert reads, f"the request never reached {reader}"
@@ -1467,6 +1489,7 @@ def test_open_forms_past_the_last_line_reuse_the_word_spans_pass(monkeypatch):
     monkeypatch.setattr(parser._Lexer, "run", counted)
     parser.caret_context.cache_clear()
     parser._recovered_context.cache_clear()
+    parser._recovered_lexer.cache_clear()
     parser._caret_lexer.cache_clear()
     assert pv.word_span(source, 5, 0) is not None
     server.attribute_context_p(source, 5, 0)

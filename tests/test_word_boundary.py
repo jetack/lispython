@@ -419,6 +419,7 @@ def _recover_past_errors(errors):
     cache emptied first, so the recovery runs in full."""
     parser.caret_context.cache_clear()
     parser._recovered_context.cache_clear()
+    parser._recovered_lexer.cache_clear()
     parser._caret_lexer.cache_clear()
     before = 'f"{x!}" (a b)\n' * errors
     assert completion_word_span("(fo", 3, before) == (1, 1, 3)
@@ -450,7 +451,7 @@ def test_resuming_past_many_errors_copies_the_tokens_once(monkeypatch):
     # Defect: each resumed pass copies the whole token list so far, so k
     # lexer errors before the caret copy k lists as long as the buffer's
     # tokens. Only the cached first pass's list is copied (it must stay
-    # unchanged for caret_tokens); every later pass takes over the list of
+    # unchanged for caret_context); every later pass takes over the list of
     # the pass it resumes, so all resumed passes share one list.
     lists = []
     run = parser._Lexer.run

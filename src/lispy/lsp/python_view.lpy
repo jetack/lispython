@@ -121,7 +121,11 @@
    index the opening's index in prefix, all three None for a field or
    literal.  literals: keep an open f/t-string too (open-form-closers).
    tokens: prefix's tokens when the caller has them (caret-tokens, for a
-   prefix ending at a caret), else prefix is lexed here."
+   prefix ending at a caret), else prefix is lexed here.  An error token
+   that ends the tokens (lexing stopped there, the text after it unread)
+   gives None; one followed by more tokens (caret-tokens read on past it as
+   the reader resumes) is skipped, and an entry it left open is popped by a
+   later field or literal end (_pop-through)."
   (if (is tokens None)
       (try
         (= tokens (list (tokenize prefix)))
@@ -134,14 +138,16 @@
   (= open-literals 0)
   (= awaiting-head None)
   (= offset (source-offset prefix))
-  (for [text tktype info _] in tokens
+  (= last (- (len tokens) 1))
+  (for [index [text tktype info _]] in (enumerate tokens)
     (= position (, (sub info "lineno") (sub info "col_offset")))
     (if (is-not awaiting-head None)
         (do (= (sub awaiting-head 3) position)
             (= awaiting-head None)))
     (cond
       (== tktype "error")
-      (return None)
+      (if (== index last)
+          (return None))
 
       (== tktype "interpolated-start")
       (do (+= open-literals 1)
