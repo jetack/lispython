@@ -2040,20 +2040,63 @@ def test_the_sweep_never_walks_up_out_of_the_project(tmp_path, time_bound):
     assert pv.project_sources(str(proj)) == [str(proj / "a.lpy")]
 
 
-def test_the_sweep_walks_a_dag_of_links_in_linear_time(tmp_path, time_bound):
-    # Defect: a directory reached by two links is walked under each, so a
-    # chain of directories each linking twice to the next lists 2**n paths.
+def test_a_link_inside_a_linked_package_is_listed_whatever_came_first(
+    tmp_path, time_bound
+):
+    # Defect: a link met inside a tree entered through a link is skipped
+    # when its real directory was entered through another link first, so
+    # src/a_sub -> /out/sub (sorted first) takes /out/sub and src/acme/sub,
+    # the module acme.sub.m, gets no shadow.
+    out = tmp_path / "out"
+    (out / "sub").mkdir(parents=True)
+    (out / "sub" / "m.lpy").write_text("")
+    (out / "acme").mkdir()
+    (out / "acme" / "sub").symlink_to(out / "sub")
     proj = tmp_path / "proj"
-    count = 8
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a_sub").symlink_to(out / "sub")
+    (proj / "src" / "acme").symlink_to(out / "acme")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "src" / "a_sub" / "m.lpy"),
+        str(proj / "src" / "acme" / "sub" / "m.lpy"),
+    ]
+
+
+def test_two_links_to_a_package_holding_a_link_each_list_its_sources(
+    tmp_path, time_bound
+):
+    # Defect: the inner link is followed under the first link to the
+    # package only, so src/zeta/inner/m.lpy (zeta.inner.m) is left out.
+    out = tmp_path / "out"
+    (out / "other").mkdir(parents=True)
+    (out / "other" / "m.lpy").write_text("")
+    (out / "pkg").mkdir()
+    (out / "pkg" / "inner").symlink_to(out / "other")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    for name in ["acme", "zeta"]:
+        (proj / "src" / name).symlink_to(out / "pkg")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "src" / "acme" / "inner" / "m.lpy"),
+        str(proj / "src" / "zeta" / "inner" / "m.lpy"),
+    ]
+
+
+def test_the_sweep_bounds_a_dag_of_links(tmp_path, time_bound):
+    # Defect: every spelling of a chain of directories each linking twice
+    # to the next is walked, 2**n of them, so the sweep never ends.
+    proj = tmp_path / "proj"
+    count = 24
     for i in range(count):
         (proj / f"d{i}").mkdir(parents=True)
         (proj / f"d{i}" / "m.lpy").write_text("")
     for i in range(count - 1):
         for name in ["a", "b"]:
             (proj / f"d{i}" / name).symlink_to(proj / f"d{i + 1}")
-    # Each directory by its own spelling, both its links from there, and
-    # inside those trees each directory at most once more: linear.
-    assert len(pv.project_sources(str(proj))) <= 4 * count
+    sources = pv.project_sources(str(proj))
+    # Each directory by its own spelling and both its links from there,
+    # then at most _MAX_NESTED_LINKS more.
+    assert len(sources) <= 3 * count + pv._MAX_NESTED_LINKS
 
 
 def environment_search_paths(client):
