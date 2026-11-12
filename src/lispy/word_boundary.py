@@ -132,6 +132,10 @@ CASE_INPUTS = (
     # An invalid conversion name is refused (the line then read alone); a
     # valid one, blanks and a continuation after it included, is text.
     'f"{x!z} (fo|',
+    'f"{x!} (fo|',
+    'f"{x! r} (fo|',
+    'f"{x!r x} (fo|',
+    'f"{x!r"a"} (fo|',
     'f"{x!r} (fo|',
     'f"{x!r \\\n} (fo|',
     'f"{x:>1|0}"',
