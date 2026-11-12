@@ -51,7 +51,8 @@
                                    symbol-name])
 (from lispy.core.utils [trampoline])
 (from lispy.core.unparse [unparse])
-(from lispy.core.importer [INIT-FILE-NAMES finder-suffixes has-init-file package-root])
+(from lispy.core.importer [INIT-FILE-NAMES finder-suffixes has-init-file package-module-p
+                           package-root])
 (from lispy.form-docs [BUILTIN-MACRO-NAMESPACE])
 (from lispy.lsp.macro-modules [current-epoch epoch fresh-modules])
 
@@ -1991,7 +1992,7 @@
    them (before sys.path while its macros run, compile-buffer), and so do
    the local definition fallback, resolve-module-to-file and the backend
    (write-shadows, the first being the module's environment root).  They
-   follow the one run mode Python gives the file (_package-module-p): a
+   follow the one run mode Python gives the file (package-module-p): a
    module inside a regular package is that module, searching its import
    root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
    script, searching its own directory, as `lpy x.lpy` puts it on sys.path;
@@ -2010,7 +2011,7 @@
   (= directory (osp.dirname (osp.abspath lpy-path)))
   (= roots (ife (is project-root None) [] (project-import-roots project-root)))
   (= [import-root parts] (package-root directory roots))
-  (= package-module (_package-module-p directory import-root))
+  (= package-module (package-module-p directory import-root))
   (= shared (ife (is project-root None) [] (shared-import-roots project-root)))
   (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root directory)]
                                           shared))))
@@ -2019,20 +2020,6 @@
   (if (== stem "__init__")
       (return (, package package import-root search-dirs)))
   (return (, (.join "." (+ parts [stem])) package import-root search-dirs)))
-
-(def _package-module-p [directory import-root]
-  "Whether a module in directory lies inside a regular package: directory
-   or a directory above it, up to but not including import-root, holds an
-   __init__ (has-init-file, the importer's predicate)."
-  (= current directory)
-  (while (!= current import-root)
-    (if (has-init-file current)
-        (return True))
-    (= parent (osp.dirname current))
-    (if (== parent current)
-        (return False))
-    (= current parent))
-  (return False))
 
 ;; Directory names a source sweep never enters: dependencies and caches, not
 ;; the project's own modules.  Dot-directories and virtualenvs (a directory

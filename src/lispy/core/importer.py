@@ -142,6 +142,28 @@ def package_root(dir_path, roots=()):
     return parent, [osp.basename(d) for d in between] + parts
 
 
+def package_module_p(dir_path, import_root):
+    """Whether a module in dir_path, imported from import_root (package_root's
+    import root, in dir_path's spelling), lies inside a regular package:
+    dir_path or a directory above it, up to but not including import_root,
+    holds an __init__ (has_init_file).
+
+    The one home of a file's run mode: such a module runs as that module
+    (``python -m pkg.m``), with package_root's parts as its __package__;
+    any other file is a script, run as ``lpy file.lpy`` with __package__
+    empty, though package_root may name it inside namespace packages.  The
+    LSP's module_names and the nREPL's file scopes read it."""
+    current = dir_path
+    while current != import_root:
+        if has_init_file(current):
+            return True
+        parent = osp.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return False
+
+
 def _lpy_code(source, path, compile_module, scope):
     """Compile .lpy source to code through ``compile_module(ast.Module)``.
 

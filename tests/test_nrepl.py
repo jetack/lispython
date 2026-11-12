@@ -688,33 +688,52 @@ def test_a_failed_load_file_keeps_the_recorded_spellings(isolated, tmp_path):
 
 @pytest.fixture
 def namespace(tmp_path, monkeypatch):
-    """A namespace package nreplnspkg (no __init__) holding mac.lpy and a
-    sibling b.lpy, under tmp_path, the server's working directory (its
-    sys.path snapshot); what an eval imports is dropped after the test."""
-    names = ["nreplnspkg", "nreplnspkg.mac"]
+    """A namespace package nreplnspkg (no __init__) holding mac.lpy, a
+    sibling b.lpy and the regular package sub (its own mac.lpy), under
+    tmp_path, the server's working directory (its sys.path snapshot); what
+    an eval imports is dropped after the test."""
+    names = ["nreplnspkg", "nreplnspkg.mac", "nreplnspkg.sub", "nreplnspkg.sub.mac"]
     for name in names:
         monkeypatch.delitem(sys.modules, name, raising=False)
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(tools, "_NREPL_IMPORT_ROOTS", [str(tmp_path)])
     pkg = tmp_path / "nreplnspkg"
-    pkg.mkdir()
-    (pkg / "mac.lpy").write_text("(defmacro twice [x] (return `(+ ~x ~x)))\n")
+    (pkg / "sub").mkdir(parents=True)
+    mac = "(defmacro twice [x] (return `(+ ~x ~x)))\n"
+    (pkg / "mac.lpy").write_text(mac)
+    (pkg / "sub" / "mac.lpy").write_text(mac)
+    (pkg / "sub" / "__init__.py").write_text("")
     (pkg / "b.lpy").write_text("(= b 1)\n")
     yield pkg
     for name in names:
         sys.modules.pop(name, None)
 
 
-def test_a_file_eval_requires_relatively_in_a_namespace_package(isolated, namespace):
+RELATIVE_REQUIRE = "(require .mac *)\n(= y (twice 2))\n(print y)"
+
+
+def test_a_namespace_script_scope_has_no_package(isolated, namespace):
+    # Defect: the file scope took the namespace walk's parts as its
+    # package, so a script in a namespace directory (no __init__ anywhere)
+    # had __package__ "nreplnspkg" and its relative require resolved, where
+    # `lpy nreplnspkg/a.lpy` runs it with no package and the require fails.
+    path = str(namespace / "a.lpy")
+    assert tools.nrepl_file_scope(path)["__package__"] == ""
+    reply = dispatch(isolated, code=RELATIVE_REQUIRE, file=path, line=1)
+    assert "no known parent package" in reply["error"]
+
+
+def test_a_file_eval_requires_relatively_in_a_regular_package(isolated, namespace):
     # Defects: the file scope gets no package, so the require fails with
     # "attempted relative import with no known parent package"; or the
-    # package is decided against the live sys.path, where loading the
-    # sibling b.lpy put the package directory itself, so a.lpy, first used
-    # after it, is again a top-level module.
+    # package is decided against the live sys.path, where loading b.lpy put
+    # the namespace directory itself, so sub/a.lpy, first used after it, is
+    # sub rather than nreplnspkg.sub (`python -m nreplnspkg.sub.a`).
     load = op(isolated, "load-file", path=str(namespace / "b.lpy"))
     assert load["error"] is None
-    code = "(require .mac *)\n(= y (twice 2))\n(print y)"
-    reply = dispatch(isolated, code=code, file=str(namespace / "a.lpy"), line=1)
+    path = str(namespace / "sub" / "a.lpy")
+    assert tools.nrepl_file_scope(path)["__package__"] == "nreplnspkg.sub"
+    reply = dispatch(isolated, code=RELATIVE_REQUIRE, file=path, line=1)
     assert reply["error"] is None
     assert reply["stdout"] == "4\n"
 
