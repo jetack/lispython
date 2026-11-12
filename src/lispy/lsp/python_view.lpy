@@ -1988,11 +1988,13 @@
    of the directories the module is analysed against: its compile searches
    them (before sys.path while its macros run, compile-buffer), and so do
    the local definition fallback, resolve-module-to-file and the backend
-   (write-shadows, the first being the module's environment root).  They
+   (write-shadows: the module's search environment, _environments).  They
    follow the one run mode Python gives the file (package-module-p): a
    module inside a regular package is that module, searching its import
    root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
-   script, searching its own directory, as `lpy x.lpy` puts it on sys.path;
+   script, searching the directory of its real path, as `lpy x.lpy` and
+   `python x.py` put it on sys.path (a link scripts/a.lpy -> lib/a.lpy
+   searches lib/, a link out of the project the directory it reaches);
    either then searches project-root's shared-import-roots, which an
    editable install puts on sys.path for every run, each dir once.  Nothing
    else: scripts/x.lpy does not search the project root unless a flat
@@ -2010,7 +2012,14 @@
   (= [import-root parts] (package-root directory roots))
   (= package-module (package-module-p directory import-root))
   (= shared (ife (is project-root None) [] (shared-import-roots project-root)))
-  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root directory)]
+  ;; A package module's import root keeps its spelling, as FileFinder
+  ;; imports by it; a script searches its real path's directory, as the
+  ;; run's sys.path[0] is, by its own directory's spelling when that is the
+  ;; same directory (scripts -> /out/scripts), so a search dir stays in the
+  ;; project wherever the run's does.
+  (= real-directory (osp.dirname (osp.realpath lpy-path)))
+  (= script-dir (ife (== (osp.realpath directory) real-directory) directory real-directory))
+  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root script-dir)]
                                           shared))))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (ife package-module (.join "." parts) ""))
@@ -2029,13 +2038,48 @@
               (osp.exists (osp.join parent name "pyvenv.cfg")))))
 
 (def project-sources [project-root]
-  "The .lpy files under project-root, sorted.  The walk follows no
-   directory symlink (a link back up would loop) and skips _pruned-p
-   directories.  Each path is its own module, so two paths to one file
-   (a file symlink beside it) are both listed."
+  "The .lpy files under project-root, sorted, each spelled by the way the
+   walk reached it.  The walk follows directory links by their spelled
+   name, as FileFinder imports a package through one (src/acme ->
+   /outside/shared/acme lists src/acme/m.lpy, the module acme.m), and
+   skips _pruned-p directories.  It never enters a link to a directory
+   above it on the way, the project root's own ancestors included (proj/up
+   -> .. would walk the whole parent tree), so a loop ends.  A link met in
+   a directory reached by its own spelling (no link on the way) is always
+   followed, since each such spelling is a name an import can take
+   (src/acme and src/zeta -> shared/acme are the packages acme and zeta,
+   whatever else links there); inside a tree entered through a link, a
+   link to a real directory already entered through a link is not, so a
+   DAG of links stays linear.  Each path is its own module, so two paths
+   to one file (a file symlink beside it) are both listed."
   (= found [])
-  (for [dirpath dirnames filenames] in (os.walk project-root :followlinks False)
-    (= kept (sorted (filter (fn [d] (not (_pruned-p dirpath d))) dirnames)))
+  (= real-root (osp.realpath project-root))
+  (= root-above (set [real-root]))
+  (while (!= (osp.dirname real-root) real-root)
+    (= real-root (osp.dirname real-root))
+    (.add root-above real-root))
+  ;; dirpath -> (the real paths of it and the directories above it on the
+  ;; way down, whose links would loop; whether a link is on the way).
+  (= ancestors {project-root (, (frozenset root-above) False)})
+  ;; The real directories entered through a link.
+  (= linked (set))
+  (for [dirpath dirnames filenames] in (os.walk project-root :followlinks True)
+    (= [above via-link] (.pop ancestors dirpath))
+    (= kept [])
+    (for name in (sorted dirnames)
+      (= path (osp.join dirpath name))
+      (if (_pruned-p dirpath name)
+          (continue))
+      (= real (osp.realpath path))
+      (if (in real above)
+          (continue))
+      (= link (osp.islink path))
+      (if link
+          (do (if (and via-link (in real linked))
+                  (continue))
+              (.add linked real)))
+      (= (sub ancestors path) (, (.union above [real]) (or via-link link)))
+      (.append kept name))
     (.clear dirnames)
     (.extend dirnames kept)
     (for filename in filenames
@@ -2050,9 +2094,9 @@
    same macro environment, is not compiled again.  And the search dirs of
    the written shadows' sources and of the documents open in the backend
    (module-names), which the config writers read (_search-paths,
-   search-environments): environments, environment root -> the search dirs
-   of the modules it is the first of, in order (merged, each once, should
-   two modules of one root differ; _environments)."
+   search-environments): environments, environment root (the directory
+   holding a module's view file, _module-environment) -> the search dirs
+   its backend environment searches (_environments decides them)."
   (def __init__ [self]
     (= self.sources {})
     (= self.environments {})))
@@ -2241,40 +2285,66 @@
   (with [(_view-root-lock root)]
     (return (_write-shadows project-root root manifest open-paths))))
 
-(def _module-environment [names]
-  "(environment root, search dirs) of a module of module-names names: the
-   root is its first search dir, the directory search-environments makes
-   its environment's root."
+(def _module-environment [lpy-path names]
+  "(environment root, search dirs) of the module at lpy-path, of
+   module-names names: the root, the directory search-environments makes
+   its environment's root, holds the module's view file, so it is a
+   package module's import root (its first search dir) and a script's own
+   spelled directory, which its first search dir (its real path's
+   directory, scripts/a.lpy -> lib/a.lpy searching lib/) need not be.  A
+   backend applies an environment only to the files under its root, so a
+   root elsewhere would leave the module under the default list."
   (= dirs (sub names 3))
-  (return (, (sub dirs 0) dirs)))
+  (return (, (ife (sub names 1) (sub dirs 0) (osp.dirname (osp.abspath lpy-path)))
+             dirs)))
 
-(def _environments [all-names]
-  "ShadowManifest.environments of the modules of module-names all-names, in
+(def _environments [modules]
+  "ShadowManifest.environments of modules, (lpy path, module-names) pairs, in
    order: environment root (_module-environment) -> the search dirs of the
-   modules it is the root of, merged in order, each once, sorted by root.
+   modules it is the root of, sorted by root.  Only the modules whose
+   first search dir is the root (a package module, a script searching its
+   own directory) give it search dirs, merged in order, each once; the
+   first other module (a file-link script scripts/a.lpy -> lib/a.lpy,
+   searching lib/) gives them only to a root that has none of those.
    The modules are every source with a shadow and every document open in
    the backend (write-shadows' open-paths): a buffer not yet saved has no
    shadow but is synced to the backend at its view path, and analysing it
    under the default list instead of its own search dirs leaves a sibling
    import its run (`python scripts/y.py`) resolves unresolved until the
    first save."
-  (= environments {})
-  (for names in all-names
-    (= [env-root dirs] (_module-environment names))
-    (= (sub environments env-root)
-       (tuple (dict.fromkeys (+ (.get environments env-root (,)) dirs)))))
-  (return (dict (sorted (.items environments)))))
+  ;; One backend environment has one search list, and a plain script's run
+  ;; (python scripts/b.py) never searches the lib/ a link beside it
+  ;; searches, so the plain modules decide it and the link is analysed
+  ;; under their list (its own compile still searches lib/).
+  (= plain {})
+  (= other {})
+  (for [lpy-path names] in modules
+    (= [env-root dirs] (_module-environment lpy-path names))
+    (if (== (sub dirs 0) env-root)
+        (= (sub plain env-root)
+           (tuple (dict.fromkeys (+ (.get plain env-root (,)) dirs))))
+        (.setdefault other env-root dirs)))
+  (return (dict (sorted (.items (| other plain))))))
 
 (def new-environment-p [project-root environments lpy-path]
   "Whether lpy-path, the absolute path of a document open in project-root's
    backend, has a search environment (search-environments) that
-   environments (ShadowManifest.environments) lacks: its environment root
-   (_module-environment) is no key of environments and search-environments
+   environments (ShadowManifest.environments) lacks: search-environments
    gives it one (the view root standing in for project-root's: only
-   whether an environment exists is asked)."
-  (= [env-root dirs] (_module-environment (module-names lpy-path :project-root project-root)))
-  (return (and (not-in env-root environments)
-               (bool (search-environments project-root project-root {env-root dirs})))))
+   whether an environment exists is asked) and its environment root
+   (_module-environment) is no key of environments, or the module is plain
+   (its first search dir is the root) while the root's list does not start
+   with the root, having come from a file-link script alone (_environments),
+   which the plain module's sweep replaces.  No loop: after that sweep the
+   open plain module makes the list start with the root."
+  (= [env-root dirs] (_module-environment lpy-path
+                                          (module-names lpy-path :project-root project-root)))
+  (if (not (search-environments project-root project-root {env-root dirs}))
+      (return False))
+  (if (not-in env-root environments)
+      (return True))
+  (return (and (== (sub dirs 0) env-root)
+               (!= (sub (sub environments env-root) [: 1]) (, env-root)))))
 
 (class ShadowSweep []
   "What one write-shadows sweep did: shadows, the sorted shadow paths;
@@ -2342,8 +2412,9 @@
     (if (not-in lpy-path names-of)
         (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root))))
   (= manifest.environments
-     (_environments (+ [(sub names-of lpy-path) for lpy-path in (.values shadows)]
-                       [(sub names-of lpy-path) for lpy-path in (sorted open-paths)])))
+     (_environments (+ [(, lpy-path (sub names-of lpy-path)) for lpy-path in (.values shadows)]
+                       [(, lpy-path (sub names-of lpy-path))
+                        for lpy-path in (sorted open-paths)])))
   (= packages (set))
   (= module-dirs (set))
   (for lpy-path in (.values shadows)
@@ -2474,8 +2545,10 @@
    default-search-dirs for the default list), in view root root of
    project-root (both absolute).  The dirs searched are dirs alone, in
    their order, so the backend resolves what the module's compile does,
-   each once and only inside the project (an import root above it, the
-   project lying inside a package, is left out).  First the view counterpart of each, so `import pkg` finds
+   each once; an import root above the project (the project lying inside
+   a package) is left out, while another directory outside it (the real
+   directory of a script linked out of the project) is searched as
+   itself.  First the view counterpart of each inside the project, so `import pkg` finds
    the shadows before any real directory of uncompiled .lpy; then each
    real directory, so what the view lacks of one still resolves: its
    namespace packages, its extension modules and, whole, a package of it
@@ -2488,12 +2561,20 @@
    for the file it runs."
   (= project-root (osp.abspath project-root))
   (= kept [])
+  (= views [])
   (for directory in dirs
     (= directory (osp.abspath directory))
-    (if (and (not (in directory kept))
-             (is-not (_view-dir project-root root directory) None))
-        (.append kept directory)))
-  (= paths (+ [(_view-dir project-root root directory) for directory in kept]
+    (= view-dir (_view-dir project-root root directory))
+    (= up (osp.relpath project-root directory))
+    (if (or (in directory kept)
+            ;; An import root holding the project.
+            (and (is view-dir None)
+                 (not (or (== up os.pardir) (.startswith up (+ os.pardir os.sep))))))
+        (continue))
+    (.append kept directory)
+    (if (is-not view-dir None)
+        (.append views view-dir)))
+  (= paths (+ views
               kept
               (sorted (glob.glob (osp.join project-root ".venv" "lib" "python*"
                                            "site-packages")))))

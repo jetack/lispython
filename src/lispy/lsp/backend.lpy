@@ -419,10 +419,14 @@
    since the start's sweep may have read the disk before the save.  The
    documents open in the editor (open-document) are environment sources
    of every sweep (write-shadows' open-paths), saved or not.
-   definition-walks-up is True for a backend in DEFINITION-WALKS-UP."
+   definition-walks-up is True for a backend in DEFINITION-WALKS-UP.
+   folders, when given, gives the workspace folders (objects with .uri) a
+   document's path is placed by (document-path); without it a document is
+   taken as spelled."
   (def __init__ [self view-root argv :name None :manifest None
-                 :check-types True :definition-walks-up False]
+                 :check-types True :definition-walks-up False :folders None]
     (= self.view-root view-root)
+    (= self.folders folders)
     (= self.name name)
     (= self.project-root (osp.realpath view-root.project-root))
     (= self.argv argv)
@@ -540,13 +544,16 @@
        without trying, so a caller need not prepare one."
       (return (not-in self.state (, OFF "closed")))))
 
+  (def _document-path [self path]
+    (return (document-path path (ife (is self.folders None) [] (self.folders)))))
+
   (def backend-uri [self lpy-uri]
     "The backend's uri for document lpy-uri (its shadow's), or None for a
      document outside the project."
     (= path (to-fs-path lpy-uri))
     (if (is path None)
         (return None))
-    (= shadow (view-path self.project-root self.view-root (document-path path)))
+    (= shadow (view-path self.project-root self.view-root (._document-path self path)))
     (if (is shadow None)
         (return None))
     (return (.as-uri (pathlib.Path shadow))))
@@ -999,7 +1006,9 @@
      other .py file under the view
      root is a shadow when its .lpy is in the project (view-path's
      inverse); a path that leaves the view root through a link (a mirrored
-     .py or .pyi, a linked directory) is the real file it reaches; anything
+     .py or .pyi, a linked directory) is the file it reaches, spelled as in
+     the project (project root plus its place in the view) when that
+     spelling reaches the same file, else by its real path; anything
      else under the view root (a temporary file, a shadow whose .lpy is
      gone) is dropped; a path outside it is a real file.  origins (lpy uri
      -> origin) names the origin of a document the caller knows better than
@@ -1032,7 +1041,15 @@
           (return (, "file" uri)))
       (= real (osp.realpath path))
       (if (!= real (osp.normpath (osp.join real-root rel)))
-          (return (, "file" (.as-uri (pathlib.Path real)))))
+          ;; A link out of the view: the project's own spelling of the
+          ;; file when it reaches the same one (src/acme/x.py through
+          ;; src/acme -> /outside/shared/acme, as the import spells it).
+          (do (= spelled (osp.join self.project-root rel))
+              (return (, "file" (.as-uri (pathlib.Path
+                                           (ife (and (osp.exists spelled)
+                                                     (== (osp.realpath spelled) real))
+                                                spelled
+                                                real)))))))
       (if (and (.endswith path ".py") (osp.isfile path))
           (do (= lpy-path (osp.join self.project-root (+ (sub (osp.splitext rel) 0) ".lpy")))
               (if (osp.isfile lpy-path)
@@ -1057,7 +1074,7 @@
     (= path (to-fs-path lpy-uri))
     (if (is path None)
         (return False))
-    (= path (document-path path))
+    (= path (._document-path self path))
     (= (sub self._open-paths lpy-uri) path)
     (if (or (not (or self.running self.starting)) (> self._sweeps-waiting 0)
             (and self.starting self._start-unswept))
@@ -1256,33 +1273,57 @@
 ;; The LSP's backends
 ;; ---------------------------------------------------------------------------
 
-(def document-path [path]
-  "path, a document's file, with its directory resolved and the file kept:
-   a file link proj/scripts/a.lpy -> proj/lib/a.lpy is its own module
-   scripts/a.lpy, as project-sources lists it and package-root names it, so
-   its shadow (backend-uri) and search environment (open-document) are
-   that module's, and one into /elsewhere stays in proj (project-root-of).
-   The one home of that rule."
-  (return (osp.join (osp.realpath (osp.dirname (osp.abspath path))) (osp.basename path))))
-
-(def project-root-of [path folders]
-  "The real path of the innermost of folders (workspace folders, objects
-   with .uri) holding path, or None: path's project, the one home of that
-   rule (a document's backend, the module names its compiles take).  The
-   file's directory is resolved, never the file: a file link
-   proj/ns/a.lpy -> /elsewhere/a.lpy is in proj, as write-shadows' walk
-   and package-root see it."
-  (= real (pathlib.Path (osp.dirname (document-path path))))
+;; A path is judged by its spelling below its workspace folder, resolving
+;; only the folder itself, as Python imports: FileFinder imports through a
+;; directory link by its spelled name (src/acme -> /outside/shared/acme is
+;; the package acme, its __file__ src/acme/m.py), so a resolved directory
+;; would leave the project through such a link, or prune a link into a
+;; dot-directory, where the import does neither.  A file link stays where
+;; it is spelled too: proj/scripts/a.lpy -> proj/lib/a.lpy is its own
+;; module scripts/a.lpy, and proj/ns/a.lpy -> /elsewhere/a.lpy is in proj.
+;; Only a script's own search dir is taken at its real path (module-names),
+;; as python and lpy put the real script's directory on sys.path[0].
+(def project-place [path folders]
+  "(real project root, spelled relative path) of path in the innermost of
+   folders (workspace folders, objects with .uri) holding it, each matched
+   by its own spelling or its real path, or None outside every folder.
+   Innermost is the longest prefix that matched path, whichever spelling
+   it was, so an inner folder that is a link wins over the folder spelled
+   around it.  The one home of a path's project, for documents
+   (project-root-of, document-path) and file events alike."
+  (= path (osp.normpath (osp.abspath path)))
   (= best None)
+  (= best-length -1)
   (for folder in folders
     (= folder-path (to-fs-path folder.uri))
     (if (is folder-path None)
         (continue))
-    (= root (osp.realpath folder-path))
-    (if (and (.is-relative-to real root)
-             (or (is best None) (> (len root) (len best))))
-        (= best root)))
+    (= real (osp.realpath folder-path))
+    (for prefix in [(osp.normpath (osp.abspath folder-path)) real]
+      (if (and (> (len prefix) best-length)
+               (or (== path prefix) (.startswith path (osp.join prefix ""))))
+          (do (= best (, real (osp.relpath path prefix)))
+              (= best-length (len prefix))))))
   (return best))
+
+(def document-path [path folders]
+  "The canonical path of path, a document's file: inside a project
+   (project-place) its spelled relative path below the project's real
+   root, else path itself, absolute and normalized.  Its shadow
+   (backend-uri), search environment (open-document) and module names
+   (document-module-names in server.lpy) are taken at it, so a document
+   reached through a link spelling of its folder is named as the real
+   folder's module."
+  (= place (project-place path folders))
+  (if (is place None)
+      (return (osp.normpath (osp.abspath path))))
+  (return (osp.normpath (osp.join *place))))
+
+(def project-root-of [path folders]
+  "The real root of path's project (project-place), or None: a document's
+   backend, the module names its compiles take."
+  (= place (project-place path folders))
+  (return (ife (is place None) None (sub place 0))))
 
 (class Backends []
   "The BackendClient of each workspace project, for lispython's LSP.
@@ -1386,7 +1427,8 @@
                                      :name self.name
                                      :check-types self.forwards-diagnostics
                                      :definition-walks-up
-                                     (in self.name DEFINITION-WALKS-UP)))
+                                     (in self.name DEFINITION-WALKS-UP)
+                                     :folders self.folders))
             (= client.on-diagnostics self._diagnostics-arrived)
             (= client.on-view-prepared self._view-prepared)
             (= client.on-input-changed self._input-changed)

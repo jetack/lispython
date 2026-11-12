@@ -53,7 +53,7 @@
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
 (from lispy.lsp.backend [Backends REQUEST-TIMEOUT document-path own-place
-                         project-root-of suppression-tool])
+                         project-place project-root-of suppression-tool])
 ;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
 (import lispy.lsp.macro-modules as macro-modules)
 
@@ -162,10 +162,9 @@
 
 (def under-workspace [path folders]
   "True when path lies inside one of the workspace folders: it has a
-   project (project-root-of), so the index agrees with the compiles about a
-   file.  Real paths are compared by components, not by string prefix, so
-   /ws-other is not inside /ws; a directory symlink counts where its target
-   lives, a file link where the link is."
+   project (project-root-of, by its spelling below the folder), so the
+   index agrees with the compiles about a file.  Paths are compared by
+   components, not by string prefix, so /ws-other is not inside /ws."
   (return (is-not (project-root-of path folders) None)))
 
 (def workspace-folders []
@@ -180,12 +179,16 @@
       (return (list)))))
 
 (def document-module-names [path :folders None]
-  "module-names of the .lpy file at path, under its project (the innermost
-   of folders holding it, default the client's workspace folders,
-   project-root-of), so its namespace packages count as the importer
-   counts them; a file in no folder takes the regular-package rule alone."
+  "module-names of the .lpy file at path, at its document-path, under its
+   project (the innermost of folders holding it, default the client's
+   workspace folders, project-root-of), so its namespace packages count as
+   the importer counts them and its import root and search dirs lie under
+   the project's real root whatever spelling of the folder the editor
+   opened it through; a file in no folder takes the regular-package rule
+   alone."
   (= folders (ife (is folders None) (workspace-folders) folders))
-  (return (module-names path :project-root (project-root-of path folders))))
+  (return (module-names (document-path path folders)
+                        :project-root (project-root-of path folders))))
 
 (def uri-module-names [uri]
   "document-module-names of document uri's file, or for a buffer with no
@@ -1719,20 +1722,25 @@
    user's: it names a module file (module-file-path-p) that renames
    modules (renames-modules-p) and is no installed code, so an install of
    a dependency, one event per file, republishes nothing.  Inside a
-   project (watched-place, over folders, the workspace folders when None)
+   project (project-place, over folders, the workspace folders when None)
    it is installed code only when its spelled parts below the project
    hold a library part (macro_modules.library-parts-p: a .venv's
    site-packages), so a link proj/x.py -> a site-packages file is the
    user's module x; outside every project it is a library path
-   (macro_modules.library-path-p, on document-path).  An editable
+   (macro_modules.library-path-p, its directory resolved).  An editable
    lispython checkout is the user's code like any other.  The name checks
    run first and any stat or realpath only for a file passing them,
    because the watch reports every .pyc write."
   (if (not (and (module-file-path-p path) (renames-modules-p path)))
       (return False))
-  (= place (watched-place path (ife (is folders None) (workspace-folders) folders)))
+  (= place (project-place path (ife (is folders None) (workspace-folders) folders)))
+  ;; The directory alone is resolved, as library-path-p compares real
+  ;; library dirs: the file itself never, because a link x.py -> a
+  ;; site-packages file is the module x of the directory it sits in.
   (if (is place None)
-      (return (not (macro-modules.library-path-p (document-path path)))))
+      (return (not (macro-modules.library-path-p
+                     (osp.join (osp.realpath (osp.dirname (osp.abspath path)))
+                               (osp.basename path))))))
   (return (not (macro-modules.library-parts-p (.split (sub place 1) os.sep)))))
 
 (def reindex-watched-file [uri path]
@@ -1753,42 +1761,12 @@
   (= parts (.split (osp.normpath path) os.sep))
   (return (and (in "src" parts) (not-in "__pycache__" parts))))
 
-;; A watched file is judged by its spelling below the workspace folder,
-;; resolving only the folder itself: the src layout walk
-;; (_src-python-witness) and FileFinder import through a link by its
-;; spelled name (src/acme -> .shared/acme is the package acme), so a
-;; resolved path would prune a link into a dot-directory, or leave the
-;; project through one, where the import does neither.  This differs on
-;; purpose from project-root-of (backend.lpy), which resolves a document's
-;; directory: events feed the src walk and module renames, which follow
-;; links below the folder by spelled names.
-(def watched-place [path folders]
-  "(real project root, spelled relative path) of path in the innermost of
-   folders (objects with .uri) holding it, each matched by its own spelling
-   or its real path, or None outside every folder.  Innermost is the
-   longest prefix that matched path, whichever spelling it was, so an inner
-   folder that is a link wins over the folder spelled around it."
-  (= path (osp.normpath (osp.abspath path)))
-  (= best None)
-  (= best-length -1)
-  (for folder in folders
-    (= folder-path (to-fs-path folder.uri))
-    (if (is folder-path None)
-        (continue))
-    (= real (osp.realpath folder-path))
-    (for prefix in [(osp.normpath (osp.abspath folder-path)) real]
-      (if (and (> (len prefix) best-length)
-               (or (== path prefix) (.startswith path (osp.join prefix ""))))
-          (do (= best (, real (osp.relpath path prefix)))
-              (= best-length (len prefix))))))
-  (return best))
-
 (def watched-project [path module-file folders]
   "The project whose src layout a created or deleted path may move, or
-   None: its project (watched-place) when it is a module file or an entry
+   None: its project (project-place) when it is a module file or an entry
    of the project's src (its spelled relative path starts at src), outside
    a pruned directory (pruned-in-project-p, by spelled parts)."
-  (= place (watched-place path folders))
+  (= place (project-place path folders))
   (if (is place None)
       (return None))
   (= [root rel] place)
@@ -1807,7 +1785,7 @@
    batch, or of any entry of its src (src-entry-shape-p, watched-project:
    a package folder deleted or moved in whole is one event), outside a
    pruned directory, judged by spelling below the workspace folder
-   (watched-place: a file behind a link into src included, a .venv
+   (project-place: a file behind a link into src included, a .venv
    install never), every open document is published again.  A change of
    content never matters."
   (= renamed False)
