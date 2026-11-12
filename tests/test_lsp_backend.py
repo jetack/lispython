@@ -2614,6 +2614,9 @@ def test_a_file_link_names_its_target_alone_for_saves(tmp_path, monkeypatch):
     (proj / "src" / "pkg").mkdir(parents=True)
     (proj / "src" / "pkg" / "__init__.lpy").write_text("")
     (proj / "src" / "pkg" / "m.lpy").symlink_to(data / "m.lpy")
+    # A package module, which searches its import root, not /data.
+    names = pv.shadow_module_names(str(proj), str(proj / "src" / "pkg" / "m.lpy"))
+    assert names[:2] == ("pkg.m", "pkg")
     folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, data)]
     backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
@@ -2629,7 +2632,43 @@ def test_a_file_link_names_its_target_alone_for_saves(tmp_path, monkeypatch):
     assert swept == [client]
 
 
-def test_a_sweep_keeps_the_last_sweeps_linked_dirs_during_its_walks(
+def test_a_script_file_link_in_an_outside_dir_names_its_real_directory(
+    tmp_path, monkeypatch
+):
+    # Defect: /out/a.lpy -> /elsewhere/a.lpy is a script, whose shadow
+    # compiles searching /elsewhere (its run's sys.path[0]), so its
+    # (require mac) reads /elsewhere/mac.lpy; with only /elsewhere/a.lpy
+    # named, saving mac.lpy sweeps nothing and the shadow goes stale.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(= t 1)\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "mac.lpy").write_text("(defmacro m [] 1)\n")
+    (elsewhere / "a.lpy").write_text("(require mac)\n(= a (mac.m))\n")
+    (out / "a.lpy").symlink_to(elsewhere / "a.lpy")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    names = pv.shadow_module_names(str(proj), str(out / "a.lpy"))
+    assert names[1] == "" and names[3][0] == str(elsewhere)
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    other = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    other.state = "running"
+    other.process = SimpleNamespace(returncode=None)
+    backends.clients["elsewhere"] = other
+    other._prepare_view_root([])
+    assert str(out / "a.lpy") in other.manifest.sources
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((elsewhere / "mac.lpy").as_uri())
+    assert swept == [other]
+
+
+def test_a_sweep_keeps_the_last_sweeps_save_paths_during_its_walks(
     tmp_path, monkeypatch
 ):
     # Defect: a sweep names only its own outside dirs before its walks, so
