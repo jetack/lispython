@@ -375,7 +375,7 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 6 and spec["columns"] == "code points"
+    assert spec["version"] == 7 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"], case["before"])
@@ -537,6 +537,7 @@ def spec_word_span(rule):
     signs = "".join(rule["signs"])
     braces = rule["fieldBraces"]
     whitespace = set(rule["whitespace"])
+    continuation_re = re.compile(rule["fieldContinuation"])
 
     def body(text, i, quote, raw, kind, doubled):
         """(stop, at): the body step from i."""
@@ -650,6 +651,18 @@ def spec_word_span(rule):
                     ]
                     if not ends:
                         return "text", resume
+                    name_end = start + 1
+                    while text[name_end].isalnum() or text[name_end] == "_":
+                        name_end += 1
+                    if text[start + 1 : name_end] not in rule["conversionNames"]:
+                        return None
+                    while name_end < ends[0] and (
+                        text[name_end] in whitespace
+                        or continuation_re.match(text, name_end)
+                    ):
+                        name_end += 1
+                    if name_end < ends[0]:
+                        return None
                     pos = ends[0]
                     continue
             if kind == "comment" and end >= stop:
@@ -782,38 +795,55 @@ def test_the_published_rule_alone_reproduces_every_case(published):
         assert (got or (None, None, None)) == expected, (case["text"], case["caret"])
 
 
-# Every text up to the length over each alphabet, at every caret.
+# The entry's prefix followed by every text up to the length over its
+# alphabet, at every caret; with refusals set, the rule must also refuse
+# exactly the texts the reader refuses.
 DIFFERENTIAL = [
-    ("-+*^:'`~@([{\" .1jx;#", 4),
-    ("-+*:1jx.e{", 4),
+    ("-+*^:'`~@([{\" .1jx;#", 4, "", False),
+    ("-+*:1jx.e{", 4, "", False),
     # Strings and fields: delimiters, debug =, conversions, specs.
-    ("f\"{}:!x='", 5),
+    ("f\"{}:!x='", 5, "", False),
     # Raw and \N{ escapes, escaped quotes, brackets and comments in a field.
-    ('rf\\N{}"(;x ', 4),
+    ('rf\\N{}"(;x ', 4, "", False),
     # Strings, fields and comments across lines.
-    ('f"{}x;\n', 5),
+    ('f"{}x;\n', 5, "", False),
     # A debug = and the line break or continuation after it.
-    ('f"{}x=\n\\', 5),
+    ('f"{}x=\n\\', 5, "", False),
+    # A conversion past its !: valid and invalid names, the blanks (Unicode
+    # whitespace, a line break, a continuation) up to its end, anything else.
+    # No case may be a refused text, so the conversion check (conversionNames,
+    # the blanks) is pinned by the rule refusing where the reader does.
+    ("rsaz \x85:}\n\\(", 4, 'f"{x!', True),
 ]
 
 
-@pytest.mark.parametrize("alphabet, length", DIFFERENTIAL)
+@pytest.mark.parametrize("alphabet, length, prefix, refusals", DIFFERENTIAL)
 def test_the_published_rule_agrees_with_the_reader_everywhere(
-    published, alphabet, length
+    published, alphabet, length, prefix, refusals
 ):
     # Defect: the rule and completion_word_span part on a line no case
     # names (an ordering of the token patterns, a lookahead, the peel's
-    # re-typing), so a client pinned on the cases still differs from the
-    # reader as the user types.
+    # re-typing, the blanks a conversion takes), so a client pinned on the
+    # cases still differs from the reader as the user types.
     word_span = spec_word_span(published["rule"])
+    ends = published["rule"]["conversionEnds"]
     for size in range(length + 1):
         for chars in itertools.product(alphabet, repeat=size):
-            text = "".join(chars)
-            for at in range(size + 1):
+            text = prefix + "".join(chars)
+            # Past the conversion's end the reader refuses texts the rule
+            # leaves to it (a line break in a single-quoted spec).
+            end = next(
+                (k for k in range(len(prefix), len(text)) if text[k] in ends),
+                len(text),
+            )
+            for at in range(len(text) + 1):
                 before, line, caret = case_input(text[:at] + "|" + text[at:])
-                if caret_context(before + line, len(before) + caret) is None:
-                    continue  # the reader refuses the text: no agreement asked
                 got = word_span(line, caret, before)
+                refused = caret_context(before + line, len(before) + caret) is None
+                if refusals and at <= end + 1:
+                    assert (got == REFUSED) == refused, (text, at)
+                if refused:
+                    continue  # the reader refuses the text: no span asked
                 assert got == completion_word_span(line, caret, before), (text, at)
 
 
