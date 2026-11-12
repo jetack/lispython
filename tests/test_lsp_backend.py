@@ -34,6 +34,7 @@ from tests.lsp_backends import REAL_BACKENDS
 
 backend = importlib.import_module("lispy.lsp.backend")
 pv = importlib.import_module("lispy.lsp.python_view")
+server = importlib.import_module("lispy.lsp.server")
 
 # argv: [--slow-init SECONDS] [--linger].  --slow-init delays the answer to
 # initialize; --linger keeps the process alive 30 s after its stdin closes
@@ -1840,6 +1841,119 @@ def test_a_sweep_queued_behind_shutdown_never_runs(project, tmp_path):
 
     run_bounded(scenario())
     assert calls == []
+
+
+def linked_package(tmp_path, init=True):
+    """proj/src/acme, a directory link out of the project to
+    <tmp>/shared/acme, which holds m.lpy and its .py twin (and __init__.py
+    when init); the project and its one workspace folder."""
+    shared = tmp_path / "shared" / "acme"
+    shared.mkdir(parents=True)
+    if init:
+        (shared / "__init__.py").write_text("")
+    (shared / "m.lpy").write_text("(= m 1)\n")
+    (shared / "m.py").write_text("m = 1\n")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "acme").symlink_to(shared)
+    return proj, [SimpleNamespace(uri=proj.as_uri())]
+
+
+def test_a_document_behind_a_directory_link_is_in_its_project(tmp_path):
+    # Defect: the document's directory is resolved, so proj/src/acme/m.lpy
+    # lies in <tmp>/shared, in no workspace folder, and gets no backend and
+    # no shadow, while Python imports it through the link as acme.m.
+    proj, folders = linked_package(tmp_path)
+    doc = str(proj / "src" / "acme" / "m.lpy")
+    assert backend.project_root_of(doc, folders) == os.path.realpath(proj)
+    assert backend.document_path(doc, folders) == doc
+    client = backend.BackendClient(
+        view_root(proj, tmp_path), ["unused"], folders=lambda: folders
+    )
+    assert (
+        client.backend_uri(pathlib.Path(doc).as_uri())
+        == (pathlib.Path(client.view_root.path) / "src" / "acme" / "m.py").as_uri()
+    )
+
+
+@pytest.mark.parametrize("init", [True, False])
+def test_a_linked_package_is_named_as_python_imports_it(tmp_path, init):
+    # Defect: with the directory resolved the document has no project, so
+    # the namespace package acme behind the link is lost (the script m
+    # instead of acme.m from proj/src).  A real python run pins the name
+    # and the spelled __file__ the import takes through the link.
+    proj, folders = linked_package(tmp_path, init=init)
+    src = str(proj / "src")
+    name, _, import_root, search_dirs = server.document_module_names(
+        str(proj / "src" / "acme" / "m.lpy"), folders=folders
+    )
+    code = (
+        "import json, sys; sys.path.insert(0, sys.argv[1]); import acme.m; "
+        "print(json.dumps([acme.m.__name__, acme.m.__file__]))"
+    )
+    run = subprocess.run(
+        [sys.executable, "-I", "-c", code, src],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    py_name, py_file = json.loads(run.stdout)
+    assert (name, import_root) == (py_name, src)
+    assert py_file == str(proj / "src" / "acme" / "m.py")
+    assert src in search_dirs
+
+
+def test_a_document_through_a_folder_link_is_named_under_the_real_root(tmp_path):
+    # Defect: the document keeps the folder link's spelling, so its import
+    # root is link/src while the project root and the shadow sweep's
+    # sources are spelled by the real root: one file, two namings.
+    proj = tmp_path / "proj"
+    (proj / "src" / "pkg").mkdir(parents=True)
+    (proj / "src" / "pkg" / "__init__.py").write_text("")
+    (proj / "src" / "pkg" / "m.lpy").write_text("(= m 1)\n")
+    link = tmp_path / "link"
+    link.symlink_to(proj)
+    folders = [SimpleNamespace(uri=link.as_uri())]
+    spelled = str(link / "src" / "pkg" / "m.lpy")
+    real = str(proj / "src" / "pkg" / "m.lpy")
+    assert backend.document_path(spelled, folders) == real
+    names = server.document_module_names(spelled, folders=folders)
+    assert names == server.document_module_names(real, folders=folders)
+    assert names[2] == str(proj / "src")
+
+
+def test_the_sweep_shadows_a_package_linked_into_src(tmp_path):
+    # Defect: the sweep follows no directory link, so src/acme -> a package
+    # outside the project gets no shadow, and the backend resolves acme.m to
+    # nothing the user wrote.
+    proj, _ = linked_package(tmp_path)
+    doc = str(proj / "src" / "acme" / "m.lpy")
+    assert pv.project_sources(str(proj)) == [doc]
+    view = tmp_path / "view"
+    sweep = pv.write_shadows(str(proj), str(view))
+    shadow = view / "src" / "acme" / "m.py"
+    assert sweep.shadows == [str(shadow)]
+    assert shadow.read_text() == "m = 1"
+    init = view / "src" / "acme" / "__init__.py"
+    assert os.readlink(init) == str(proj / "src" / "acme" / "__init__.py")
+
+
+def test_a_package_linked_within_the_project_is_listed_under_each_spelling(
+    tmp_path,
+):
+    # Defect: a walk entering each real directory once enters shared/acme
+    # (sorted first) and skips src/acme, so the spelling Python imports as
+    # acme.m gets no shadow; only a link back up (a loop) is skipped.
+    proj = tmp_path / "proj"
+    (proj / "shared" / "acme").mkdir(parents=True)
+    (proj / "shared" / "acme" / "m.lpy").write_text("")
+    (proj / "src").mkdir()
+    (proj / "src" / "acme").symlink_to(proj / "shared" / "acme")
+    (proj / "src" / "acme" / "up").symlink_to(proj / "src")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "shared" / "acme" / "m.lpy"),
+        str(proj / "src" / "acme" / "m.lpy"),
+    ]
 
 
 def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path):

@@ -2029,13 +2029,28 @@
               (osp.exists (osp.join parent name "pyvenv.cfg")))))
 
 (def project-sources [project-root]
-  "The .lpy files under project-root, sorted.  The walk follows no
-   directory symlink (a link back up would loop) and skips _pruned-p
-   directories.  Each path is its own module, so two paths to one file
-   (a file symlink beside it) are both listed."
+  "The .lpy files under project-root, sorted, each spelled by the way the
+   walk reached it.  The walk follows directory links by their spelled
+   name, as FileFinder imports a package through one (src/acme ->
+   /outside/shared/acme lists src/acme/m.lpy, the module acme.m), and
+   skips _pruned-p directories.  A link back to a directory above it on
+   the way is not entered, so a loop ends; any other directory reached by
+   two spellings is walked under each.  Each path is its own module, so
+   two paths to one file (a file symlink beside it, a package linked into
+   src from elsewhere in the project) are both listed."
   (= found [])
-  (for [dirpath dirnames filenames] in (os.walk project-root :followlinks False)
-    (= kept (sorted (filter (fn [d] (not (_pruned-p dirpath d))) dirnames)))
+  ;; dirpath -> the real paths of it and the directories above it on the
+  ;; way down, whose links would loop.
+  (= ancestors {project-root (frozenset [(osp.realpath project-root)])})
+  (for [dirpath dirnames filenames] in (os.walk project-root :followlinks True)
+    (= above (.pop ancestors dirpath))
+    (= kept [])
+    (for name in (sorted dirnames)
+      (if (not (_pruned-p dirpath name))
+          (do (= real (osp.realpath (osp.join dirpath name)))
+              (if (not-in real above)
+                  (do (= (sub ancestors (osp.join dirpath name)) (.union above [real]))
+                      (.append kept name))))))
     (.clear dirnames)
     (.extend dirnames kept)
     (for filename in filenames
