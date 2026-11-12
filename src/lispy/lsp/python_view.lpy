@@ -2413,17 +2413,8 @@
   ;; One directory environment has one search list, and a plain script's
   ;; run (python scripts/b.py) never searches the lib/ a link beside it
   ;; searches, so the plain modules decide it.  pyright takes a file as an
-  ;; environment root too, so the link gets its own list there.  pyrefly
-  ;; reads search-path from a directory's pyrefly.toml alone (a sub-config
-  ;; refuses it: its documented limit, not lispython's), so there the link
-  ;; is analysed under its directory's list (its own compile still searches
-  ;; lib/).  Three cases get a wrong list, and so false unresolved imports
-  ;; under pyrefly only: a root-level script linked out of the project gets
-  ;; the default list, a link beside plain scripts takes their list, a
-  ;; directory of only links takes the first link's.  No config shape fixes
-  ;; it (a directory has one list, and a union of runs is forbidden).  When
-  ;; test_pyrefly_takes_search_path_from_a_directory_config_only fails,
-  ;; write file-environments as [[sub-config]] search-path entries.
+  ;; environment root too, so the link gets its own list there; pyrefly
+  ;; cannot (a limit, see write-pyrefly-config).
   (= plain {})
   (= other {})
   (= files {})
@@ -3036,11 +3027,12 @@
    sub-config refuses search-path, so a file-link script takes its
    directory's list: a root-level script linked out of the project gets the
    default list, a link beside plain scripts takes theirs, a directory of
-   only links takes the first link's, each a false unresolved import under
-   pyrefly only (no config shape fixes it: a directory has one list, and a
-   union of runs is forbidden).  When
-   test_pyrefly_takes_search_path_from_a_directory_config_only fails,
-   write file-environments as [[sub-config]] search-path entries.  A view root
+   only link scripts takes the first link's, which is wrong for any link
+   that searches elsewhere; each is a false unresolved import under pyrefly
+   only. No config shape fixes it (a directory has one list, and a union of
+   runs is forbidden). When
+   test_pyrefly_takes_search_path_from_a_directory_config_only fails, write
+   file-environments as [[sub-config]] search-path entries.  A view root
    that overlaps the project is a ValueError; the writes hold the view
    root's lock.  Returns the root file's path (config-files lists them
    all)."
