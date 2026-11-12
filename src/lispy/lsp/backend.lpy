@@ -1546,7 +1546,7 @@
     "A buffer was saved: BackendClient.saved for a running backend or one
      starting, which replays it once it runs (its sweep may predate the
      save), and a sweep (_sweep-soon) of every other backend whose view
-     may shadow the file at its real path (ShadowManifest.save-dirs: its
+     may shadow the file at its real path (ShadowManifest.save-paths: its
      project, a nested workspace folder's file included, its outside dirs
      and the targets of the links its walks met).  Call on the loop."
     (try
@@ -1560,7 +1560,7 @@
       ;; folder's file, proj/vendor/x.lpy) gets no file event that view
       ;; reads, so its save sweeps every other backend whose last sweep
       ;; named its real path or a directory holding it
-      ;; (ShadowManifest.save-dirs), or that view keeps the old text until
+      ;; (ShadowManifest.save-paths), or that view keeps the old text until
       ;; its next sweep.  By directory where one is shadowed whole, not by
       ;; source: a new file there has no shadow yet, and the real path
       ;; matches whatever spelling the editor saved it through.
@@ -1569,8 +1569,8 @@
           (do (= real (osp.realpath path))
               (for other in (list (.values self.clients))
                 (if (and (is-not other client)
-                         (any ((below-p real directory)
-                               for directory in other.manifest.save-dirs)))
+                         (any ((below-p real place)
+                               for place in other.manifest.save-paths)))
                     (._sweep-soon self other [])))))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))
