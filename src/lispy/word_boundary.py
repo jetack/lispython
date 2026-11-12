@@ -196,6 +196,11 @@ CASE_INPUTS = (
     'f"{x!\\"a"} fo|',
     "f\"{x!r''':{a.'''b|",
     "f\"{x!f''':{a.'''b|",
+    # A valid prefix is refused at its first character, any other name
+    # over itself.
+    'f"{x!rb"a"} fo|',
+    'f"{x!fr"a"} fo|',
+    'f"{x!ub"a"} fo|',
     'f"{!""":"|',
     # A single } in a literal's text; a leading = in a field, commas aside.
     'f"}"\nf"{x|!r}"',
@@ -340,6 +345,9 @@ def rule():
         "fieldDelimiter": parser._FIELD_DELIMITER,
         "conversionNames": sorted(parser.conversion_dict),
         "plainStringPrefixes": list(PLAIN_STRING_PREFIXES),
+        "interpolatedStringPrefixes": list(
+            parser._F_STRING_PREFIXES + parser._T_STRING_PREFIXES
+        ),
         "conversionEnds": list(parser._CONVERSION_ENDS),
         "fieldContinuation": parser._FIELD_CONTINUATION,
         "fieldSymbolBackslash": parser._FIELD_SYMBOL_BACKSLASH,
@@ -381,11 +389,13 @@ def rule():
             "fieldContinuation matches. With no name, a name character after "
             "the blanks is a refusal (span: the !); anything else there is "
             "refused (span: its first character), a string opening there "
-            "read first (conversion string). A name that, lower-cased, is a "
-            "plainStringPrefixes entry, followed directly by a stringOpenings "
-            "or escapedStringOpenings entry: that string is read (conversion "
-            "string), then the name is refused (span: the name). Any other "
-            "name not in conversionNames is refused (span: the name). Else "
+            "read first (conversion string). A name followed directly by a "
+            "stringOpenings or escapedStringOpenings entry is that string's "
+            "prefix when, lower-cased, it is a plainStringPrefixes entry (that "
+            "string is read, conversion string) or an "
+            "interpolatedStringPrefixes entry (not read): then the name is "
+            "refused (span: its first character). Any other name not in "
+            "conversionNames is refused (span: the name). Else "
             "past the name's blanks the conversionEnds character resumes field "
             "mode, and anything else is refused (span: its first character). "
             "A conversion string is a plain string read by the body step "

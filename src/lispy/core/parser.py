@@ -1532,7 +1532,7 @@ def _recovered_context(text, offset):
     """caret_context's ``(context, resume, symbol)`` at ``offset`` of
     ``text``, read on past each lexer error before the offset: the reader
     resumes just after the error, in the innermost f/t literal open there
-    (top-level code when none), repeating until it reaches the offset, so
+    (every error lies in one), repeating until it reaches the offset, so
     the text after an error keeps its reading (a later line continuing a
     multi-line literal stays in it). ``resume`` is then never before the
     last error's end.
@@ -1542,8 +1542,10 @@ def _recovered_context(text, offset):
     (a bare " in ``f\\"a"``) is dropped too, with the fields above the next
     one: resumed in, it would meet the same bare " again. The pass resumes
     at the error's end, or where the last pass resumed when that is later
-    (an escaped literal's opening lies before it), so the reading always
-    ends: each pass moves forward or holds fewer literals.
+    (an escaped literal's opening lies before it). Any other error not
+    ending past where its pass resumed drops the innermost literal kept as
+    well (none does today), so the reading always ends: each pass moves
+    forward or holds fewer literals.
     ``python -m lispy.word_boundary`` publishes this as its context step,
     and each error's span as its refusals step.
 
@@ -1565,11 +1567,11 @@ def _recovered_context(text, offset):
         while stack and isinstance(stack[-1], _FieldState):
             stack.pop()
         # A bare " refusing the escaped literal itself is placed at its
-        # opening quote (_escaped_error).
-        if (
-            stack
-            and stack[-1].escaped_in is not None
-            and stack[-1].quote_start == start
+        # opening quote (_escaped_error); any error not past where its pass
+        # resumed would be met again from there, so the literal goes too.
+        escaped = stack and stack[-1].escaped_in is not None
+        if stack and (
+            (escaped and stack[-1].quote_start == start) or end <= resumed_at
         ):
             stack.pop()
             while stack and isinstance(stack[-1], _FieldState):
