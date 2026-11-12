@@ -388,6 +388,18 @@ def test_under_workspace_compares_path_components(tmp_path):
     assert not server.under_workspace(str(tmp_path / "ws" / "a.lpy"), [])
 
 
+def test_watched_place_in_a_root_folder(tmp_path):
+    # Defect: the prefix test appended a separator to "/", so "//" matched
+    # nothing and a root workspace folder held no path.
+    root = SimpleNamespace(uri="file:///")
+    place = server.watched_place("/tmp/x/src/m.py", [root])
+    assert place is not None
+    assert place[1] == "tmp/x/src/m.py"
+    folder = SimpleNamespace(uri=(tmp_path / "ws").as_uri())
+    place = server.watched_place(str(tmp_path / "ws" / "src" / "m.py"), [folder])
+    assert place[1] == "src/m.py"
+
+
 def test_a_file_link_in_the_workspace_is_a_workspace_file(tmp_path):
     # Defect: the link's target is tested, so a file link ws/a.lpy into
     # another tree publishes no workspace symbols, while it compiles as a

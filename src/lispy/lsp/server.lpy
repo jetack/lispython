@@ -1778,7 +1778,7 @@
     (= real (osp.realpath folder-path))
     (for prefix in [(osp.normpath (osp.abspath folder-path)) real]
       (if (and (> (len prefix) best-length)
-               (or (== path prefix) (.startswith path (+ prefix os.sep))))
+               (or (== path prefix) (.startswith path (osp.join prefix ""))))
           (do (= best (, real (osp.relpath path prefix)))
               (= best-length (len prefix))))))
   (return best))
