@@ -813,7 +813,7 @@ DIFFERENTIAL = [
     # whitespace, a line break, a continuation) up to its end, anything else.
     # No case may be a refused text, so the conversion check (conversionNames,
     # the blanks) is pinned by the rule refusing where the reader does.
-    ("rz \x85:}\n\\(", 4, 'f"{x!', True),
+    ("rsaz \x85:}\n\\(", 4, 'f"{x!', True),
 ]
 
 
