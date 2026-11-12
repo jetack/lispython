@@ -35,7 +35,7 @@ from lispy.core.parser import (
 )
 from lispy.core.utils import augassignop_dict
 
-VERSION = 6
+VERSION = 7
 
 # The case inputs, each a text with ``|`` at the caret, the caret's line its
 # last line holding the caret. Only the inputs are written here: the
@@ -129,6 +129,11 @@ CASE_INPUTS = (
     'f"{x|!r}"',
     'f"{x|:>10}"',
     'f"{x!|r}"',
+    # An invalid conversion name is refused (the line then read alone); a
+    # valid one, blanks and a continuation after it included, is text.
+    'f"{x!z} (fo|',
+    'f"{x!r} (fo|',
+    'f"{x!r \\\n} (fo|',
     'f"{x:>1|0}"',
     'f"{x|=}"',
     'f"{x =|}"',
@@ -293,6 +298,7 @@ def rule():
         # What _skip_blanks skips: str.isspace.
         "whitespace": [chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()],
         "fieldDelimiter": parser._FIELD_DELIMITER,
+        "conversionNames": sorted(parser.conversion_dict),
         "conversionEnds": list(parser._CONVERSION_ENDS),
         "fieldContinuation": parser._FIELD_CONTINUATION,
         "fieldSymbolBackslash": parser._FIELD_SYMBOL_BACKSLASH,
@@ -332,7 +338,12 @@ def rule():
             "expression: at : the format spec's text follows; at ! the "
             "conversion, which ends at the first conversionEnds character "
             "after the !, where field mode resumes: with none before the "
-            "caret, the caret is in its text. Any other token: a string "
+            "caret, the caret is in its text; else the conversion is the name "
+            "right after the ! (characters str.isalnum holds, or _), then only "
+            "blanks (whitespace characters and fieldContinuation matches) up "
+            "to that character: a name not in conversionNames (an empty one "
+            "included), or anything else there, is a refusal of the text. "
+            "Any other token: a string "
             "opening reads its prefix (stringPrefix) lower-cased: the first "
             "kindLetters entry whose letter it holds makes it an f/t-string, "
             "rawLetter raw; an f/t-string opening opens a literal (its quote "

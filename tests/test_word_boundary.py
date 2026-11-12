@@ -375,7 +375,7 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 6 and spec["columns"] == "code points"
+    assert spec["version"] == 7 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"], case["before"])
@@ -537,6 +537,7 @@ def spec_word_span(rule):
     signs = "".join(rule["signs"])
     braces = rule["fieldBraces"]
     whitespace = set(rule["whitespace"])
+    continuation_re = re.compile(rule["fieldContinuation"])
 
     def body(text, i, quote, raw, kind, doubled):
         """(stop, at): the body step from i."""
@@ -650,6 +651,18 @@ def spec_word_span(rule):
                     ]
                     if not ends:
                         return "text", resume
+                    name_end = start + 1
+                    while text[name_end].isalnum() or text[name_end] == "_":
+                        name_end += 1
+                    if text[start + 1 : name_end] not in rule["conversionNames"]:
+                        return None
+                    while name_end < ends[0] and (
+                        text[name_end] in whitespace
+                        or continuation_re.match(text, name_end)
+                    ):
+                        name_end += 1
+                    if name_end < ends[0]:
+                        return None
                     pos = ends[0]
                     continue
             if kind == "comment" and end >= stop:
