@@ -2335,10 +2335,241 @@ def test_a_script_file_linked_out_searches_its_real_directory(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
+    # /out holds t.lpy, so its own shadows are searched before it.
+    outside = pv.outside_view_dir(str(view), str(out))
+    assert (pathlib.Path(outside) / "helper.py").resolve() == out / "helper.py"
     assert environment_search_paths(client) == {
-        str(view / "scripts" / "t.py"): [str(out)],
-        str(view / "scripts"): [str(out)],
+        outside: [outside, str(out)],
+        str(view / "scripts" / "t.py"): [outside, str(out)],
+        str(view / "scripts"): [outside, str(out)],
     }
+
+
+def test_a_script_file_linked_out_gets_shadows_of_its_real_directory(tmp_path):
+    # Defect: /out, the real directory of proj/scripts/t.lpy -> /out/t.lpy
+    # and its run's sys.path[0], is searched as itself, where sib.lpy has
+    # no .py, so the backend reports the (import sib) the run resolves.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    outside = pathlib.Path(pv.outside_view_dir(str(view), str(out)))
+    assert (outside / "sib.py").read_text() == "s = 1"
+    envs = environment_search_paths(client)
+    for env in [view / "scripts" / "t.py", view / "scripts"]:
+        assert envs[str(env)][:2] == [str(outside), str(out)]
+    # A sweep with nothing outside left removes the outside shadows.
+    (proj / "scripts" / "t.lpy").unlink()
+    client._prepare_view_root([])
+    assert not (view / ".outside").exists()
+
+
+def test_a_package_outside_the_project_is_overlaid_into_its_view(tmp_path):
+    # Defect: a regular package /out/pkg beside a script linked out of the
+    # project is no package in the view, so the backend misses pkg.m.
+    out = tmp_path / "out"
+    (out / "pkg").mkdir(parents=True)
+    (out / "pkg" / "__init__.py").write_text("")
+    (out / "pkg" / "m.lpy").write_text("(= m 1)\n")
+    (out / "t.lpy").write_text("(import pkg.m)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    pkg = pathlib.Path(pv.outside_view_dir(str(view), str(out))) / "pkg"
+    assert os.readlink(pkg / "__init__.py") == str(out / "pkg" / "__init__.py")
+    assert not (pkg / "m.py").is_symlink()
+    assert (pkg / "m.py").read_text() == "m = 1"
+
+
+def test_locate_names_the_file_of_an_outside_shadow(tmp_path):
+    # Defect: a backend location in the shadow of /out/sib.lpy is taken for
+    # a project file, which does not exist, and is dropped.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    shadow = pathlib.Path(pv.outside_view_dir(client.view_root.path, str(out)))
+    place = client.locate((shadow / "sib.py").as_uri())
+    assert place[:3] == ("lpy", (out / "sib.lpy").as_uri(), None)
+
+
+def test_a_location_in_an_outside_shadow_maps_through_its_shadow_naming(tmp_path):
+    # Defect: the disk view of /out/sib.lpy compiles under its own document
+    # naming, in no project, so its (require mac) of proj/src/mac.lpy (a
+    # shared root its shadow compiled with) fails, the texts differ, and
+    # every backend location in it is dropped.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(require mac)\n(= s (mac.twice 3))\n")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "mac.lpy").write_text("(defmacro twice [x] `(* 2 ~x))\n")
+    (proj / "scripts").mkdir()
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    shadow = pathlib.Path(pv.outside_view_dir(client.view_root.path, str(out)))
+    shadow = shadow / "sib.py"
+    lines = shadow.read_text().splitlines()
+    [line] = [i for i, text in enumerate(lines) if text.startswith("s = ")]
+    uri = shadow.as_uri()
+    rng = lsp.Range(
+        start=lsp.Position(line=line, character=0),
+        end=lsp.Position(line=line, character=1),
+    )
+    doc = SimpleNamespace(uri=(out / "sib.lpy").as_uri())
+
+    async def place():
+        deadline = asyncio.get_running_loop().time() + 30
+        return await server.editor_location(
+            doc, client.locate(uri), uri, rng, {}, deadline
+        )
+
+    try:
+        location = run_bounded(place())
+    finally:
+        server.disk_views.forget((out / "sib.lpy").as_uri())
+    assert location is not None and location.uri == (out / "sib.lpy").as_uri()
+    assert (location.range.start.line, location.range.start.character) == (1, 3)
+
+
+def test_saving_an_outside_source_sweeps_the_view_that_shadows_it(
+    tmp_path, monkeypatch
+):
+    # Defect: /out/sib.lpy lies in no project, so its save sweeps nothing,
+    # and the project whose script link scripts/t.lpy -> /out/t.lpy shadows
+    # it keeps the old text until its next sweep.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "main.lpy").write_text("(= y 1)\n")
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, other)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    clients = [
+        backends.client_for((proj / "scripts" / "t.lpy").as_uri()),
+        backends.client_for((other / "main.lpy").as_uri()),
+    ]
+    for client in clients:
+        client._prepare_view_root([])
+        client.state = "running"
+        client.process = SimpleNamespace(returncode=None)
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((out / "sib.lpy").as_uri())
+    assert swept == [clients[0]]
+    # A file new since the sweep (no shadow yet), and one saved through
+    # another spelling of /out, sweep it too.
+    swept.clear()
+    (out / "new.lpy").write_text("(= n 1)\n")
+    backends.document_saved((out / "new.lpy").as_uri())
+    (tmp_path / "out-link").symlink_to(out)
+    backends.document_saved((tmp_path / "out-link" / "sib.lpy").as_uri())
+    assert swept == [clients[0], clients[0]]
+
+
+def test_saving_through_a_link_in_an_outside_dir_sweeps_its_view(tmp_path, monkeypatch):
+    # Defects: a file new in /out saved during the first sweep's walk of
+    # /out sweeps nothing, as the view names /out only once every walk is
+    # done; and a source shadowed through a link in /out (/out/lib ->
+    # /data/lib, /out/f.lpy -> /data2/f.lpy) saved at its real path lies
+    # below no outside dir, so the view keeps its old text.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import lib.m f)\n")
+    data = tmp_path / "data" / "lib"
+    data.mkdir(parents=True)
+    (data / "m.lpy").write_text("(= m 1)\n")
+    (out / "lib").symlink_to(data)
+    (tmp_path / "data2").mkdir()
+    (tmp_path / "data2" / "f.lpy").write_text("(= f 1)\n")
+    (out / "f.lpy").symlink_to(tmp_path / "data2" / "f.lpy")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    other = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    other.state = "running"
+    other.process = SimpleNamespace(returncode=None)
+    backends.clients["elsewhere"] = other
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    walk = pv.project_sources
+
+    def saving_during_walk(directory, **kwargs):
+        if directory == str(out):
+            backends.document_saved((out / "new.lpy").as_uri())
+        return walk(directory, **kwargs)
+
+    monkeypatch.setattr(pv, "project_sources", saving_during_walk)
+    other._prepare_view_root([])
+    assert swept == [other]
+    swept.clear()
+    backends.document_saved((data / "m.lpy").as_uri())
+    backends.document_saved((tmp_path / "data2" / "f.lpy").as_uri())
+    assert swept == [other, other]
+
+
+def test_an_outside_package_overlay_never_writes_through_a_swapped_link(
+    tmp_path, monkeypatch
+):
+    # Defect: an outside dir's overlay checks its writes against its own
+    # view directory, so a link swapped in at .outside after that directory
+    # was made real passes the check, and the package's links land in the
+    # directory the link names.
+    out = tmp_path / "out"
+    (out / "pkg").mkdir(parents=True)
+    (out / "pkg" / "__init__.py").write_text("")
+    (out / "pkg" / "m.lpy").write_text("(= m 1)\n")
+    (out / "t.lpy").write_text("(import pkg.m)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    view = tmp_path / "view"
+    outside_view = pathlib.Path(pv.outside_view_dir(str(view), str(out)))
+    victim = tmp_path / "victim"
+    real_view_dir = pv._real_view_dir
+
+    def swapping(root, directory):
+        real_view_dir(root, directory)
+        # _write-shadows' own call for the base, after both shadows: swap
+        # .outside for a link to a copy of it elsewhere.
+        if directory == str(outside_view) and (outside_view / "t.py").exists():
+            os.rename(view / ".outside", victim)
+            (view / ".outside").symlink_to(victim)
+
+    monkeypatch.setattr(pv, "_real_view_dir", swapping)
+    pv.write_shadows(str(proj), str(view))
+    moved = victim / outside_view.relative_to(view / ".outside")
+    assert (moved / "pkg" / "m.py").is_file()
+    assert not (moved / "pkg" / "__init__.py").exists()
+    assert not (moved / "t.py").is_symlink()
+    assert not (view / ".outside").is_symlink()
 
 
 def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
@@ -2421,7 +2652,11 @@ def test_a_root_script_linked_out_searches_its_real_directory(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
-    assert environment_search_paths(client) == {str(view / "t.py"): [str(out)]}
+    outside = pv.outside_view_dir(str(view), str(out))
+    assert environment_search_paths(client) == {
+        outside: [outside, str(out)],
+        str(view / "t.py"): [outside, str(out)],
+    }
     # Not -I: isolated mode puts no script directory on sys.path.
     run = subprocess.run(
         [sys.executable, "-E", "-s", str(proj / "t.py")],
@@ -2628,6 +2863,56 @@ def test_real_backend_resolves_an_import_of_a_root_script_linked_out(tmp_path, n
     found = run_bounded(scenario(), timeout=90)
     assert found is not None and any("nowhere" in m for m in found), found
     assert not any("helper" in m and "nowhere" not in m for m in found), found
+
+
+@pytest.mark.parametrize("name", list(REAL_BACKENDS))
+def test_real_backend_resolves_an_lpy_sibling_of_a_script_linked_out(tmp_path, name):
+    # Defect: /out, the real directory of proj/scripts/t.lpy -> /out/t.lpy,
+    # is searched as itself, where sib.lpy has no .py, so the backend
+    # reports the (import sib) its run (sys.path[0] the real /out) resolves.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    source = "(import sib)\n(print sib.s sib.nowhere)\n"
+    (out / "t.lpy").write_text(source)
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "scripts" / "t.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: sib resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("sib" in m and "nowhere" not in m for m in found), found
 
 
 @pytest.mark.parametrize("absolute", [True, False])

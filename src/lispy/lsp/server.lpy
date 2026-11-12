@@ -3395,10 +3395,13 @@
           (.append found (, item.target-uri item.target-selection-range))))
   (return found))
 
-(def disk-origin [lpy-uri shadow-path generation]
+(def disk-origin [lpy-uri shadow-path generation :names None]
   "(source, view) of the .lpy file at lpy-uri as it is on disk, or None: its
    view must be exactly the text of shadow-path, the shadow the backend
-   read, since the backend's positions lie in that text.  It runs the
+   read, since the backend's positions lie in that text.  It compiles
+   under names (module-names) when given, the naming the shadow compiled
+   under (an outside shadow's place, BackendClient.locate), else the
+   file's document-module-names.  It runs the
    file's macros, so callers run it in a thread, reading disk-views'
    generation before the hand-off.  A file that cannot be read loses its
    disk-views entry, so a deleted file's view does not stay resident."
@@ -3413,7 +3416,7 @@
     (except [(, OSError ValueError)]
       (.forget disk-views lpy-uri)
       (return None)))
-  (= [name package _ search-dirs] (document-module-names lpy-path))
+  (= [name package _ search-dirs] (or names (document-module-names lpy-path)))
   (= view (.view disk-views lpy-uri source source :name name :package package
                  :search-dirs search-dirs :generation generation))
   (if (or (is view None) (!= view.text shadow))
@@ -3512,13 +3515,14 @@
                                         (asyncio.to-thread file-range doc (sub place 1) rng)
                                         None))))
           (return (ife (is mapped None) None (lsp.Location :uri (sub place 1) :range mapped)))))
-  (= [_ lpy-uri origin] place)
+  (= [_ lpy-uri origin *names] place)
   (if (is origin None)
       (do (if (not-in lpy-uri origins)
               (= (sub origins lpy-uri)
                  (await (within deadline
                                 (asyncio.to-thread disk-origin lpy-uri (to-fs-path uri)
-                                                   disk-views.generation)
+                                                   disk-views.generation
+                                                   :names (ife names (sub names 0) None))
                                 None))))
           (= origin (sub origins lpy-uri))))
   (if (is origin None)
