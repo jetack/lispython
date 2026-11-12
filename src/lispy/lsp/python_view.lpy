@@ -45,6 +45,7 @@
                          wrapper-form-keys])
 (from lispy.core.parser [caret-symbol-p completion-word-span parse source-offset
                           split-lines tokenize word-parts])
+(from lispy.core.parser [caret-tokens as caret-tokens-of])
 (from lispy.core.macro [compile-unit-forms])
 (from lispy.core.macro-table [MacroTable find-macro])
 (from lispy.core.compiler.literal [hyphen-spelling name-key python-name python-name-p
@@ -110,7 +111,7 @@
         (do (del (sub stack [: index None]))
             (return)))))
 
-(def open-forms [prefix :literals False]
+(def open-forms [prefix :literals False :tokens None]
   "The forms still open at the end of prefix, outermost first, or None
    when the lexer cannot read it or it ends inside an f/t-string, which no
    bracket can close: each a list [kind closer opening head index], kind
@@ -118,11 +119,14 @@
    head are the (1-based line, code-point column) of a bracket's token (its
    prefix included) and of the token after it (None when there is none),
    index the opening's index in prefix, all three None for a field or
-   literal.  literals: keep an open f/t-string too (open-form-closers)."
-  (try
-    (= tokens (list (tokenize prefix)))
-    (except [Exception]
-      (return None)))
+   literal.  literals: keep an open f/t-string too (open-form-closers).
+   tokens: prefix's tokens when the caller has them (caret-tokens, for a
+   prefix ending at a caret), else prefix is lexed here."
+  (if (is tokens None)
+      (try
+        (= tokens (list (tokenize prefix)))
+        (except [Exception]
+          (return None))))
   ;; A stray closer pops only a bracket; a field or literal end pops back
   ;; to its own entry, if any, so a typo never misaligns the closers or
   ;; empties the stack.
@@ -167,14 +171,14 @@
       (return None))
   (return stack))
 
-(def open-form-closers [prefix :literals False]
+(def open-form-closers [prefix :literals False :tokens None]
   "The closers of the forms still open at the end of prefix (open-forms),
    innermost first, or None when open-forms is.  Appended to prefix, they
    make a mid-edit buffer parse up to the cursor.  literals: close an open
    f/t-string too (its fields' }, its quote), for a reader of the forms
    inside a field; the cursor view never asks for it, its text must
-   compile to the Python the buffer means."
-  (= stack (open-forms prefix :literals literals))
+   compile to the Python the buffer means.  tokens: as open-forms."
+  (= stack (open-forms prefix :literals literals :tokens tokens))
   (if (is stack None)
       (return None))
   (return (.join "" (reversed [(sub entry 1) for entry in stack]))))
@@ -241,6 +245,15 @@
   (if (is caret None)
       (return (completion-word-span "" 0 source)))
   (return (completion-word-span *caret)))
+
+(def caret-tokens [source line col]
+  "The tokens of the text of source before the 1-based line and code-point
+   col (caret_tokens): source-prefix's tokens, out of word-span's lexer
+   pass (_caret-line), so a reader of both lexes that text once."
+  (= caret (_caret-line source line col))
+  (if (is caret None)
+      (return (list (tokenize source))))
+  (return (caret-tokens-of *caret)))
 
 (def code-symbol-p [source line col]
   "Whether the text of source before the 1-based line and code-point col

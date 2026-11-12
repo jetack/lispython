@@ -42,7 +42,8 @@
                        TYPE-ALIAS-DOC hover-markdown])
 (from lispy.lsp.python-view [COMPILE-STAGE CURSOR-SENTINEL DEFAULT-PYREFLY-PRESET
                              FROM-HEADS GENERATED-PREFIX IMPORT-HEADS IMPORT-ONLY-HEADS
-                             PARSE-STAGE ViewCache code-symbol-p compile-buffer
+                             PARSE-STAGE ViewCache caret-tokens code-symbol-p
+                             compile-buffer
                              glued-base
                              hyphen-spelling lpy-diagnostic-range lpy-range
                              marked-source module-names name-key
@@ -2790,7 +2791,9 @@
   (if (and (> start 0) (== (sub text (- start 1)) "."))
       (return True))
   (= prefix (source-prefix source line col))
-  (= closers (open-form-closers prefix :literals True))
+  ;; prefix's tokens are those of partial-span's lexer pass, never lexed again.
+  (= closers (open-form-closers prefix :literals True
+                                :tokens (caret-tokens source line col)))
   (if (is closers None)
       (return False))
   (= [path leaf] (open-path (parse (+ prefix closers) :partial True) line col))

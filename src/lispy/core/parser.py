@@ -1484,6 +1484,17 @@ _CONTEXT_TOKEN_RES = {
 _FIELD_DELIMITER_RE = re.compile(_FIELD_DELIMITER)
 
 
+# The stop pass over text up to a caret, kept with its tokens for
+# caret_tokens. Few are kept, since the tokens of a long buffer are large; a
+# second entry keeps the full text's pass through the line-alone read
+# (_line_context) of the same request.
+@functools.lru_cache(maxsize=2)
+def _caret_lexer(text, offset):
+    lexer = _Lexer(text, stop=offset)
+    lexer.run()
+    return lexer
+
+
 # One request asks for the word at one caret several times (the LSP's
 # ranges, base, cursor view): the buffer is lexed once.
 @functools.lru_cache(maxsize=8)
@@ -1502,8 +1513,7 @@ def caret_context(text, offset):
     text never lexes as code again (``'''a-b'''``). ``symbol`` is whether the
     token of code ending at or holding the offset is a symbol
     (caret_symbol_p)."""
-    lexer = _Lexer(text, stop=offset)
-    lexer.run()
+    lexer = _caret_lexer(text, offset)
     if lexer.stop_context is None:
         return None
     return lexer.stop_context, lexer.closed_string_end, lexer.stop_symbol
@@ -1520,6 +1530,23 @@ def caret_symbol_p(line, col, before):
     same ``before``, so a request asking both lexes the text once."""
     found = caret_context(before + line, len(before) + col)
     return found is not None and found[2]
+
+
+def caret_tokens(line, col, before):
+    """The tokens (tokenize's, no comments) of the text ``before`` ``line``
+    up to code-point column ``col`` of ``line``, as caret_context's pass with
+    the same ``before`` lexed them, so a caller of both lexes that text once.
+
+    They are tokenize's tokens of that text up to the token holding the
+    caret, which the pass never emits (in ``(mo|d`` the list ends at ``(``,
+    where tokenize would end in the symbol ``mo``); a token ending at the
+    caret is there. Lexing ends at the caret, or at an earlier error, the
+    last token as in tokenize; with the caret in a literal's text, the
+    literal is open, where tokenize of the text cut at the caret ends in its
+    unterminated error. The brackets, fields and literals open at the caret
+    are tokenize's whenever the caret is in code. The list is the cached
+    pass's own: read it, never change it."""
+    return _caret_lexer(before + line, len(before) + col).tokens
 
 
 def _debug_equals_p(line, end):

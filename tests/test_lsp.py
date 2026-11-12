@@ -1396,14 +1396,20 @@ def test_code_symbol_p_reads_the_caret_as_the_text_before_it_lexes(marked, expec
     assert (lexed_alone == (line, col)) is expected
 
 
-def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch):
-    # Defect: a completion at mod.| lexes the whole text before the caret
-    # twice, once for the word's context (caret_context) and again for the
-    # qualified base's code check, doubling the per-keystroke cost of a long
-    # buffer. Every lexer pass over that text is counted, the caret_context
-    # cache emptied first so its one pass is this request's.
-    marked = "(import os)\n(os.pa|)\n(print 1)\n"
-    source, line, col = _marked_caret(marked)
+@pytest.mark.parametrize(
+    ("marked", "reader"),
+    [("(os.pa|)", "code_symbol_p"), ("(pri|)", "attribute_context_p")],
+)
+def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, reader):
+    # Defect: a completion lexes the whole text before the caret twice, once
+    # for the word's context (caret_context) and again for the qualified
+    # base's code check (at mod.|) or for the forms open at the caret
+    # (attribute-context-p's open-form-closers, at any word), doubling the
+    # per-keystroke cost of a long buffer. Every lexer pass over that text
+    # is counted, the caret caches emptied first so their one pass is this
+    # request's; reader is the second reader of that text, which the request
+    # must reach.
+    source, line, col = _marked_caret(f"(import os)\n{marked}\n(print 1)\n")
     prefix = pv.source_prefix(source, line, col)
     passes = []
     run = parser._Lexer.run
@@ -1413,18 +1419,19 @@ def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch):
             passes.append(lexer.stop)
         return run(lexer)
 
-    checked = []
-    code_symbol_p = server.code_symbol_p
+    reads = []
+    read = getattr(server, reader)
 
-    def checked_code_symbol_p(*args):
-        checked.append(args)
-        return code_symbol_p(*args)
+    def recorded(*args, **kwargs):
+        reads.append(args)
+        return read(*args, **kwargs)
 
     monkeypatch.setattr(parser._Lexer, "run", counted)
-    monkeypatch.setattr(server, "code_symbol_p", checked_code_symbol_p)
+    monkeypatch.setattr(server, reader, recorded)
     parser.caret_context.cache_clear()
+    parser._caret_lexer.cache_clear()
     run_completion(ls_with(source), position(line - 1, col))
-    assert checked, "the request never read the qualified base"
+    assert reads, f"the request never reached {reader}"
     assert passes == [len(prefix)]
 
 
