@@ -261,9 +261,9 @@
    ends in a symbol the reader reads there (caret-symbol-p: the token of
    code ending at or holding the cursor is a symbol): code, never a string
    literal or comment, whose text the reader gives no symbol.  A field of
-   an f/t string is code, read as such; a text the lexer refuses before the
-   cursor (an unterminated f/t-string there) holds none.  It shares
-   word-span's lexer pass (_caret-line)."
+   an f/t string is code, read as such; past a lexer error before the
+   cursor it is read as the reader resumes there.  It shares word-span's
+   lexer pass (_caret-line)."
   (= caret (_caret-line source line col))
   (return (and (is-not caret None) (caret-symbol-p *caret))))
 

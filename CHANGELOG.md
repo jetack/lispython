@@ -107,14 +107,18 @@ follows [Semantic Versioning](https://semver.org/).
   the number `1` then `{2}`. The word boundary spec
   (`python -m lispy.word_boundary`) has `{` in `stopChars`, and its
   `numberEndChars` field is what may follow a number token.
-- The completion word is read in the caret's context, from the start of
-  the text: no word is typed in a string's, f-string literal's or format
-  spec's text, a conversion or a comment, and there the LSP offers no
-  completion (it offered every form, macro and builtin); in an f/t-string
-  field the word is the field's own token. The word boundary spec is
-  version 6: its input is the text before the caret's line plus that line,
-  a case may span lines (`before`), its bounds are null where there is no
-  word, and its rule publishes the reader's field and string-body pieces.
+- The completion word is read in the caret's context, as the reader lexes
+  the text before the caret: no word is typed in a string's, f-string
+  literal's or format spec's text, a conversion or a comment, and there the
+  LSP offers no completion (it offered every form, macro and builtin); in an
+  f/t-string field the word is the field's own token. The word boundary spec
+  is version 6: its input is the text before the caret's line plus that
+  line, a case may span lines (`before`), its bounds are null where there is
+  no word, and its rule publishes the reader's field and string-body pieces.
+  After a lexer error before the caret the reader resumes just after it, in
+  the f/t-string literal open there, so later text keeps its reading (a
+  later line of a docstring is still its text); the spec's cases hold no
+  text the reader refuses.
 - nREPL: an eval's output is captured per thread, no longer by swapping
   `sys.stdout` for the whole process. Output of a thread the evaluated code
   starts now goes to the server's own stdout/stderr, plain evals included,
@@ -337,10 +341,11 @@ follows [Semantic Versioning](https://semver.org/).
   it, in the LSP and in every editor following the word boundary spec.
 - Completion in an f-string field before a conversion, a format spec or a
   debug `=` (`f"{x|!r}"`, `f"{x|:>10}"`, `f"{x|=}"`, an `=` ending its line
-  included), on any line of a multi-line literal and after an error on an
-  earlier line, replaces the field's name only: it ate `!r`, `:>10` or
-  `=`. A string closed just before the caret (`'''a-b'''|`) is no longer
-  read as part of the word.
+  included), on any line of a multi-line literal, replaces the field's name
+  only: it ate `!r`, `:>10` or `=`; after a lexer error the reader resumes
+  in the literal open there, so a field later in it does too. A string
+  closed just before the caret (`'''a-b'''|`) is no longer read as part of
+  the word.
 - LSP: go-to-definition without a backend resolves a relative module, of a
   `require` or a `from`, as Python does: in the document's package, never
   beyond its top-level package, and not at all for a buffer with no file.

@@ -1380,14 +1380,12 @@ def _marked_caret(marked):
         ('f"{x:{mod.|}}"', True),
         ('f"""\n{mod.|\n}"""', True),
         ('f"text mod.|', False),
-        ('(= s f"{=}")\n(mod.|)', False),
     ],
 )
 def test_code_symbol_p_reads_the_caret_as_the_text_before_it_lexes(marked, expected):
     # Defects: the caret's symbol is read from the caret_context pass, so a
     # token holding the caret (mod.ma|cro) or ending at it is missed, a
-    # string's or comment's text counts as code, a field is not code, or the
-    # line-alone reading after an earlier lexer error lets mod.| through.
+    # string's or comment's text counts as code, or a field is not code.
     # Each answer is the one the text before the caret, lexed alone with its
     # comments, gives (its last token a symbol ending at the caret).
     source, line, col = _marked_caret(marked)
@@ -1396,6 +1394,21 @@ def test_code_symbol_p_reads_the_caret_as_the_text_before_it_lexes(marked, expec
     [_, tktype, end, _] = tokens[-1]
     lexed_alone = tktype == "symbol" and (end["end_lineno"], end["end_col_offset"])
     assert (lexed_alone == (line, col)) is expected
+
+
+@pytest.mark.parametrize(
+    ("marked", "expected"),
+    [
+        ('(= s f"{=}")\n(mod.|)', True),
+        ('f"{x!}"\n"""doc\nmod.|', False),
+    ],
+)
+def test_code_symbol_p_reads_past_a_lexer_error_as_the_reader_resumes(marked, expected):
+    # Defect: a lexer error before the caret makes every later mod.| no code
+    # (no qualified macros after it), or the caret's line is read alone, so a
+    # multi-line string's later line passes for code.
+    source, line, col = _marked_caret(marked)
+    assert pv.code_symbol_p(source, line, col) is expected
 
 
 @pytest.mark.parametrize(
@@ -1431,6 +1444,7 @@ def test_a_completion_lexes_the_text_before_the_caret_once(monkeypatch, marked, 
     monkeypatch.setattr(parser._Lexer, "run", counted)
     monkeypatch.setattr(server, reader, recorded)
     parser.caret_context.cache_clear()
+    parser._recovered_context.cache_clear()
     parser._caret_lexer.cache_clear()
     run_completion(ls_with(source), position(line - 1, col))
     assert reads, f"the request never reached {reader}"
@@ -1452,6 +1466,7 @@ def test_open_forms_past_the_last_line_reuse_the_word_spans_pass(monkeypatch):
 
     monkeypatch.setattr(parser._Lexer, "run", counted)
     parser.caret_context.cache_clear()
+    parser._recovered_context.cache_clear()
     parser._caret_lexer.cache_clear()
     assert pv.word_span(source, 5, 0) is not None
     server.attribute_context_p(source, 5, 0)

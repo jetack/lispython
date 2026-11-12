@@ -173,12 +173,7 @@ CASE_INPUTS = (
     'f"""{x|=\n}"""',
     'f"""{x|= \n}"""',
     'f"{x|=\\\n}"',
-    # An error lines above leaves the caret's line its own reading.
-    'f"}"\nf"{x|!r}"',
-    'f"{x!}"\n(print "ab|c")',
-    'x = f"{a:\n}"\n"abc|"',
-    # A string after a conversion's ! is refused, whatever holds the caret.
-    'f"{!""":"|',
+    # A continuation's backslash before a debug =.
     'f"{\\|=}"',
     'f"{\\=|}"',
     # A field's { ends the word before it, in a format spec and after text:
@@ -319,10 +314,14 @@ def rule():
             "there is no word: start, replaceStart and end are null (an editor "
             "offers no completion there). The reader's scan is its lexer: "
             "where that lexer refuses the text before the caret (a malformed "
-            "literal, field or conversion) the reader scans the caret's line "
-            "alone (its start taken as top level, resume then counted from "
-            "it), and takes code where it refuses that too; a client need "
-            "not agree on a text the reader refuses",
+            "literal, field or conversion) the reader resumes just after the "
+            "error, in the innermost f/t literal open there (top level when "
+            "none, resume then the error's end at the earliest), repeating on "
+            "each further error until it reaches the caret (an error not ending "
+            "past where its scan resumed also drops the innermost literal "
+            "kept); the cases hold no "
+            "such text, and a client need not agree on a text the reader "
+            "refuses",
             "code, field and bracket mode: find the next token with the mode's "
             "patterns (a character no pattern matches is skipped); none, or "
             "one starting at or after the caret, stops the scan in the mode. "
