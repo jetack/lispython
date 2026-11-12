@@ -2082,21 +2082,57 @@ def test_two_links_to_a_package_holding_a_link_each_list_its_sources(
     ]
 
 
-def test_the_sweep_bounds_a_dag_of_links(tmp_path, time_bound):
+def test_the_sweep_bounds_a_dag_of_links(tmp_path, time_bound, caplog):
     # Defect: every spelling of a chain of directories each linking twice
-    # to the next is walked, 2**n of them, so the sweep never ends.
+    # to the next is walked, 2**n of them, so the sweep never ends; or the
+    # bound counts links, so each link followed brings a whole subtree of
+    # plain directories (width of them per level) and the walk still lists
+    # links times width.
     proj = tmp_path / "proj"
-    count = 24
+    count, width = 11, 40
     for i in range(count):
-        (proj / f"d{i}").mkdir(parents=True)
-        (proj / f"d{i}" / "m.lpy").write_text("")
+        level = proj / f"d{i}"
+        level.mkdir(parents=True)
+        (level / "m.lpy").write_text("")
+        for j in range(width):
+            (level / f"w{j}").mkdir()
+            (level / f"w{j}" / "m.lpy").write_text("")
     for i in range(count - 1):
         for name in ["a", "b"]:
             (proj / f"d{i}" / name).symlink_to(proj / f"d{i + 1}")
+    caplog.set_level(logging.WARNING, logger=pv.logger.name)
     sources = pv.project_sources(str(proj))
-    # Each directory holds one source: entered by its own spelling, through
-    # both links met there, then at most _MAX_NESTED_LINK_DIRS more.
-    assert len(sources) <= 3 * count + pv._MAX_NESTED_LINK_DIRS
+    pv.project_sources(str(proj))
+    # One source per directory: each real one by its own spelling, again
+    # through each link met there (its whole level), once more below a link
+    # met in such a tree, then at most _MAX_REPEAT_LINK_DIRS repeats.
+    real = count * (width + 1)
+    first_links = 2 * (count - 1) * (width + 1)
+    assert len(sources) <= real + first_links + real + pv._MAX_REPEAT_LINK_DIRS
+    # The cap fired, and says so once.
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
+def test_a_big_tree_behind_a_nested_link_leaves_later_spellings(tmp_path, time_bound):
+    # Defect: a global cap on directories entered below a nested link is
+    # spent by one big tree (a vendored repository), so a later, unrelated
+    # nested spelling (src/z/inner/m.lpy, the module z.inner.m) is dropped.
+    out = tmp_path / "out"
+    for j in range(1100):
+        (out / "big" / f"p{j}").mkdir(parents=True)
+    (out / "a").mkdir()
+    (out / "a" / "big").symlink_to(out / "big")
+    (out / "inner").mkdir()
+    (out / "inner" / "m.lpy").write_text("")
+    (out / "z").mkdir()
+    (out / "z" / "inner").symlink_to(out / "inner")
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a").symlink_to(out / "a")
+    (proj / "src" / "z").symlink_to(out / "z")
+    assert pv.project_sources(str(proj)) == [
+        str(proj / "src" / "z" / "inner" / "m.lpy")
+    ]
 
 
 def environment_search_paths(client):
