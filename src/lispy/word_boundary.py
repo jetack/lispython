@@ -9,8 +9,11 @@ counting UTF-16 units converts (the astral case is there for it).
 
 Every character set and pattern in the rule is read off the reader's own
 patterns and tables, never written here; a pattern is Python ``re`` syntax
-over str (``\\d``, ``\\w`` and ``\\s`` are Unicode). No pygls or lsprotocol
-import: this runs wherever lispython does.
+over str (``\\d``, ``\\w`` and ``\\s`` are Unicode as the running Python's
+own tables define them; the Unicode version varies by CPython release, so the
+spec names none, and a client approximates ``\\w`` and ``\\d`` with its own
+engine's tables). No pygls or lsprotocol import: this runs wherever
+lispython does.
 """
 
 import itertools
@@ -18,7 +21,6 @@ import json
 import re
 import string
 import sys
-import unicodedata
 
 from lispy.core import parser
 from lispy.core.parser import (
@@ -29,7 +31,7 @@ from lispy.core.parser import (
 )
 from lispy.core.utils import augassignop_dict
 
-VERSION = 4
+VERSION = 5
 
 # The case inputs, each a line with ``|`` at the caret. Only the inputs are
 # written here: the expected spans are completion_word_span's.
@@ -185,7 +187,6 @@ def _class_members(char_class):
 def rule():
     """The rule as data an implementer reproduces, read off the reader."""
     return {
-        "unicode": unicodedata.unidata_version,
         # Python's re \s for str: the code points str.isspace holds.
         "stopChars": _class_members(parser._SYMBOL_STOP),
         "formEndChars": _class_members(parser._FORM_END),
@@ -245,7 +246,8 @@ def spec():
         "version": VERSION,
         "columns": "code points",
         "patterns": "Python re syntax over str: \\d, \\w and \\s are Unicode "
-        "(\\w holds 한, \\d holds ١)",
+        "as the running Python's tables define them (\\w holds 한, \\d holds ١); "
+        "a client approximates \\w and \\d with its own engine's tables",
         "rule": rule(),
         "cases": [case(marked) for marked in CASE_INPUTS],
     }

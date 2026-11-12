@@ -211,7 +211,7 @@ def test_the_spec_command_prints_the_canonical_spans():
         check=True,
     )
     spec = json.loads(result.stdout.decode("utf-8"))
-    assert spec["version"] == 4 and spec["columns"] == "code points"
+    assert spec["version"] == 5 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
         expected = completion_word_span(case["text"], case["caret"])
