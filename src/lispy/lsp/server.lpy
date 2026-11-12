@@ -1727,14 +1727,16 @@
    hold a library part (macro_modules.library-parts-p: a .venv's
    site-packages), so a link proj/x.py -> a site-packages file is the
    user's module x; outside every project it is a library path
-   (macro_modules.library-path-p, on its real directory, the shape that
-   predicate reads).  An editable
+   (macro_modules.library-path-p, its directory resolved).  An editable
    lispython checkout is the user's code like any other.  The name checks
    run first and any stat or realpath only for a file passing them,
    because the watch reports every .pyc write."
   (if (not (and (module-file-path-p path) (renames-modules-p path)))
       (return False))
   (= place (project-place path (ife (is folders None) (workspace-folders) folders)))
+  ;; The directory alone is resolved, as library-path-p compares real
+  ;; library dirs: the file itself never, because a link x.py -> a
+  ;; site-packages file is the module x of the directory it sits in.
   (if (is place None)
       (return (not (macro-modules.library-path-p
                      (osp.join (osp.realpath (osp.dirname (osp.abspath path)))
