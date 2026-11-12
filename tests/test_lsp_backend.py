@@ -2532,7 +2532,14 @@ def _pyrefly_error_names(tmp_path, config_text):
         text=True,
         timeout=120,
     )
-    return sorted(error["name"] for error in json.loads(found.stdout)["errors"])
+    return sorted(
+        error["name"]
+        for error in json.loads(found.stdout)["errors"]
+        # Only the kinds the test reasons about, so an unrelated new lint
+        # cannot fail it.
+        if error["name"]
+        in ("missing-import", "unsupported-operation", "bad-assignment")
+    )
 
 
 @needs_pyrefly
@@ -2552,6 +2559,9 @@ def test_pyrefly_takes_search_path_from_a_directory_config_only(tmp_path):
         tmp_path / "sub",
         '[[sub-config]]\nmatches = "scripts/a.py"\nsearch-path = [{lib}]\n'
         "[sub-config.errors]\nbad-assignment = false\n",
+    )
+    assert "bad-assignment" not in names, (
+        "the sub-config no longer matches scripts/a.py: fix the fixture"
     )
     assert names == ["missing-import"], (
         "pyrefly now takes search-path per sub-config: write "
