@@ -179,8 +179,9 @@ CASE_INPUTS = (
     # A continuation's backslash before a debug =.
     'f"{\\|=}"',
     'f"{\\=|}"',
-    # Past a refusal before the caret the reader reads on in place: in the
-    # innermost literal open there, from the refusal's end. A conversion's
+    # Past a refusal before the caret the reader reads on in place: from the
+    # refusal's end (or the last resume, when later), in the innermost
+    # literal the stack then holds (context step). A conversion's
     # name that is none, after a gap, missing, or followed by more.
     'f"{x!z}" (fo|',
     'f"{x! r}" fo|',
