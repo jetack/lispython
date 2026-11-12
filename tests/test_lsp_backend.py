@@ -2572,6 +2572,63 @@ def test_saving_a_link_target_of_the_project_sweeps_its_view(tmp_path, monkeypat
     assert swept == [client, client]
 
 
+def test_saving_a_nested_folders_file_sweeps_the_enclosing_view(tmp_path, monkeypatch):
+    # Defect: proj's walk lists proj/vendor/x.lpy, so proj's view shadows
+    # it, but the nested workspace folder vendor owns the file, so its save
+    # reaches vendor's backend alone and proj's shadow keeps the old text.
+    proj = tmp_path / "proj"
+    vendor = proj / "vendor"
+    vendor.mkdir(parents=True)
+    (proj / "main.lpy").write_text("(= y 1)\n")
+    (vendor / "x.lpy").write_text("(= x 1)\n")
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, vendor)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    client = backends.client_for((proj / "main.lpy").as_uri())
+    nested = backends.client_for((vendor / "x.lpy").as_uri())
+    assert nested is not client
+    client._prepare_view_root([])
+    nested._prepare_view_root([])
+    assert str(vendor / "x.lpy") in client.manifest.sources
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((vendor / "x.lpy").as_uri())
+    assert swept == [client]
+    # proj's own save sweeps neither proj's view (its own backend) nor
+    # vendor's.
+    swept.clear()
+    backends.document_saved((proj / "main.lpy").as_uri())
+    assert swept == []
+
+
+def test_a_file_link_names_its_target_alone_for_saves(tmp_path, monkeypatch):
+    # Defect: a file link src/pkg/m.lpy -> /data/m.lpy names all of /data,
+    # so every save there ($HOME, for a link to ~/m.lpy) sweeps the view,
+    # though no file beside the target is shadowed through the link.
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "m.lpy").write_text("(= m 1)\n")
+    (data / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "src" / "pkg").mkdir(parents=True)
+    (proj / "src" / "pkg" / "__init__.lpy").write_text("")
+    (proj / "src" / "pkg" / "m.lpy").symlink_to(data / "m.lpy")
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, data)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    client = backends.client_for((proj / "src" / "pkg" / "__init__.lpy").as_uri())
+    assert backends.client_for((data / "sib.lpy").as_uri()) is not client
+    client._prepare_view_root([])
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((data / "sib.lpy").as_uri())
+    assert swept == []
+    backends.document_saved((data / "m.lpy").as_uri())
+    assert swept == [client]
+
+
 def test_a_sweep_keeps_the_last_sweeps_linked_dirs_during_its_walks(
     tmp_path, monkeypatch
 ):
