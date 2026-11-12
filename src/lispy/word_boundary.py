@@ -169,6 +169,16 @@ CASE_INPUTS = (
     # The debug = is lexed off as the reader does: a\= is a then a
     # continuation, \= no symbol at all.
     'f"{a\\|=}"',
+    # A debug = followed only by blanks to the line's end.
+    'f"""{x|=\n}"""',
+    'f"""{x|= \n}"""',
+    'f"{x|=\\\n}"',
+    # An error lines above leaves the caret's line its own reading.
+    'f"}"\nf"{x|!r}"',
+    'f"{x!}"\n(print "ab|c")',
+    'x = f"{a:\n}"\n"abc|"',
+    # A string after a conversion's ! is refused, whatever holds the caret.
+    'f"{!""":"|',
     'f"{\\|=}"',
     'f"{\\=|}"',
     # A field's { ends the word before it, in a format spec and after text:
@@ -309,8 +319,10 @@ def rule():
             "there is no word: start, replaceStart and end are null (an editor "
             "offers no completion there). The reader's scan is its lexer: "
             "where that lexer refuses the text before the caret (a malformed "
-            "literal, field or conversion) the reader takes code, and a "
-            "client need not agree there",
+            "literal, field or conversion) the reader scans the caret's line "
+            "alone (its start taken as top level, resume then counted from "
+            "it), and takes code where it refuses that too; a client need "
+            "not agree on a text the reader refuses",
             "code, field and bracket mode: find the next token with the mode's "
             "patterns (a character no pattern matches is skipped); none, or "
             "one starting at or after the caret, stops the scan in the mode. "
@@ -395,8 +407,9 @@ def rule():
             "debug =: in field mode a symbol word token ending in = whose "
             "character before the = is no debugBlockers entry, followed by "
             "only whitespace characters and backslashes ending the line, then "
-            "a } or a fieldDelimiter match, loses its =: lex again from the "
-            "token's start with the line ending at the = (for every lookahead "
+            "a } or a fieldDelimiter match or the line's end, loses its =: "
+            "lex again from the token's start with the line ending at the = "
+            "(for every lookahead "
             "too) and take the word token of that lex; none, or one ending "
             "before the caret, is the empty word at the caret",
             "peel the word token's front, repeatedly: never a neverPeeled "

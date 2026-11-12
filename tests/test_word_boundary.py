@@ -190,8 +190,20 @@ SPANS = [
     ('f"{a\\|=}"', (5, 5, 5)),
     ('f"{\\|=}"', (4, 4, 4)),
     # Where the reader refuses the text before the caret (an invalid
-    # conversion), the caret is in top-level code.
+    # conversion), the caret's line is read alone; refused there too, the
+    # caret is in top-level code.
     ('f"{x!z}" (fo|', (10, 10, 12)),
+    # An error lines above leaves the caret's line its own reading.
+    ('f"}"\nf"{x|!r}"', (3, 3, 4)),
+    ('f"{x!}"\n(print "ab|c")', None),
+    ('x = f"{a:\n}"\n"abc|"', None),
+    # A string after a conversion's ! is refused, whatever holds the caret.
+    ('f"{!""":"|', (9, 9, 9)),
+    # A debug = followed only by blanks to the line's end: the field's
+    # delimiter comes on a later line.
+    ('f"""{x|=\n}"""', (5, 5, 6)),
+    ('f"""{x|= \n}"""', (5, 5, 6)),
+    ('f"{x|=\\\n}"', (3, 3, 4)),
 ]
 
 
@@ -213,6 +225,14 @@ def test_completion_word_span(marked, expected):
     # conversion, the spec or the debug =; a word found in a string's text or
     # a comment.
     assert span_at(marked) == expected
+
+
+@pytest.mark.parametrize("text", ['f"{!""":"', "f\"{x!r'''}\""])
+def test_a_string_after_a_conversion_bang_has_no_caret_context(text):
+    # Defect: a string lexed after ! that reaches the caret reports its text
+    # context, though the reader refuses the conversion whatever the string
+    # holds, so a client would read the line as text the reader never lexes.
+    assert caret_context(text, len(text)) is None
 
 
 def reader_leaf(line):
@@ -583,7 +603,7 @@ def spec_word_span(rule):
             line[at] in whitespace or (line[at] == backslash and at + 1 == len(line))
         ):
             at += 1
-        return at < len(line) and (
+        return at == len(line) or (
             line[at] == braces[1] or bool(delimiter_re.match(line, at))
         )
 
@@ -605,13 +625,17 @@ def spec_word_span(rule):
 
     def word_span(line, caret, before=""):
         found = context(before + line, len(before) + caret)
-        [mode, resume] = ("code", 0) if found is None else found
+        if found is not None:
+            [mode, resume] = [found[0], max(found[1] - len(before), 0)]
+        else:
+            # Refused: the caret's line alone, else code.
+            [mode, resume] = context(line, caret) or ("code", 0)
         if mode == "text":
             return None
         run_start = caret
         while run_start > 0 and not stop_re.match(line[run_start - 1]):
             run_start -= 1
-        run_start = max(run_start, resume - len(before))
+        run_start = max(run_start, resume)
         token = word_token(line, run_start, caret, mode, len(line))
         if token is None or token[2] not in ("symbol", "number"):
             return caret, caret, caret
@@ -683,6 +707,8 @@ DIFFERENTIAL = [
     ('rf\\N{}"(;x ', 4),
     # Strings, fields and comments across lines.
     ('f"{}x;\n', 5),
+    # A debug = and the line break or continuation after it.
+    ('f"{}x=\n\\', 5),
 ]
 
 

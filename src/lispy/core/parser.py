@@ -1000,6 +1000,10 @@ class _Lexer:
             self._fail(error)
             return False
         self._string(at, opening)
+        if self.stop_context is not None:
+            # The string holds the stop, but the reader refuses the
+            # conversion whatever it holds: no context there.
+            self.stop_context = None
         return not self.done
 
     def _skip_blanks(self, i):
@@ -1500,11 +1504,13 @@ def _debug_equals_p(line, end):
     """Whether the symbol ending at ``end`` of ``line``, at a field's own
     level, ends in the ``=`` of ``{x=}``, as ``_Lexer._delimiter`` reads it:
     an ``=`` not ending an operator (``_DEBUG_BLOCKERS`` before it), with only
-    blanks between it and a delimiter of the field."""
+    blanks between it and a delimiter of the field or the line's end: no
+    second form can follow it in the field's expression, so what comes on a
+    later line (``f\"\"\"{x=<LF>}\"\"\"``) is the field's delimiter."""
     if end < 2 or line[end - 1] != "=" or line[end - 2] in _DEBUG_BLOCKERS:
         return False
     at = _skip_blanks(line, end)
-    return at < len(line) and (
+    return at == len(line) or (
         line[at] == "}" or _FIELD_DELIMITER_RE.match(line, at) is not None
     )
 
@@ -1523,6 +1529,21 @@ def _word_token(line, start, col, context, endpos=None):
     return None
 
 
+def _line_context(line, col, before):
+    """``(context, resume)`` of caret_context at ``col`` of ``line`` after
+    ``before``, ``resume`` a column of the line (0 before it). Where the
+    reader refuses the text before the caret, the line alone is read (its
+    start taken as top-level code), so an error lines above leaves later
+    lines their reading; where it refuses that too, or with ``before`` None,
+    the caret is in top-level code."""
+    if before is None:
+        return "code", 0
+    found = caret_context(before + line, len(before) + col)
+    if found is not None:
+        return found[0], max(found[1] - len(before), 0)
+    return caret_context(line, col) or ("code", 0)
+
+
 def completion_word_span(line, col, before=""):
     """``(start, replace_start, end)`` of the word being typed at code-point
     column ``col`` (0 <= col <= len(line)) of ``line``, or None where no
@@ -1535,8 +1556,8 @@ def completion_word_span(line, col, before=""):
     the line up to ``col``) is the reader's; None takes the caret to be in
     top-level code with no scan, for a position the reader gave a node (the
     LSP's name mapping, which would otherwise lex the buffer per node).
-    Where the reader refuses the text before the caret the context is
-    top-level code.
+    Where the reader refuses the text before the caret, the caret's line is
+    read alone (``_line_context``).
 
     The word is the reader's own: the symbol or number token (run_tokens)
     that ends at or holds ``col``, less the prefixes token_parse peels
@@ -1558,14 +1579,13 @@ def completion_word_span(line, col, before=""):
 
     No word in code (an opening or a quote mark at ``col``, ``(|``) is the
     empty span at ``col``."""
-    found = None if before is None else caret_context(before + line, len(before) + col)
-    [context, resume] = found or ("code", 0)
+    [context, resume] = _line_context(line, col, before)
     if context == "text":
         return None
     run_start = col
     while run_start > 0 and not symbol_stop_p(line[run_start - 1]):
         run_start -= 1
-    run_start = max(run_start, resume - len(before or ""))
+    run_start = max(run_start, resume)
     token = _word_token(line, run_start, col, context)
     if token is None or token[2] not in _WORD_TOKENS:
         return col, col, col

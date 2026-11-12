@@ -336,8 +336,9 @@ follows [Semantic Versioning](https://semver.org/).
   no longer runs back through the field's `{` into the text or spec before
   it, in the LSP and in every editor following the word boundary spec.
 - Completion in an f-string field before a conversion, a format spec or a
-  debug `=` (`f"{x|!r}"`, `f"{x|:>10}"`, `f"{x|=}"`), on any line of a
-  multi-line literal, replaces the field's name only: it ate `!r`, `:>10` or
+  debug `=` (`f"{x|!r}"`, `f"{x|:>10}"`, `f"{x|=}"`, an `=` ending its line
+  included), on any line of a multi-line literal and after an error on an
+  earlier line, replaces the field's name only: it ate `!r`, `:>10` or
   `=`. A string closed just before the caret (`'''a-b'''|`) is no longer
   read as part of the word.
 - LSP: go-to-definition without a backend resolves a relative module, of a
