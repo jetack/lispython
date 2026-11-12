@@ -419,6 +419,7 @@ def _recover_past_errors(errors):
     cache emptied first, so the recovery runs in full."""
     parser.caret_context.cache_clear()
     parser._recovered_context.cache_clear()
+    parser._recovered_lexer.cache_clear()
     parser._caret_lexer.cache_clear()
     before = 'f"{x!}" (a b)\n' * errors
     assert completion_word_span("(fo", 3, before) == (1, 1, 3)
@@ -450,7 +451,7 @@ def test_resuming_past_many_errors_copies_the_tokens_once(monkeypatch):
     # Defect: each resumed pass copies the whole token list so far, so k
     # lexer errors before the caret copy k lists as long as the buffer's
     # tokens. Only the cached first pass's list is copied (it must stay
-    # unchanged for caret_tokens); every later pass takes over the list of
+    # unchanged for caret_context); every later pass takes over the list of
     # the pass it resumes, so all resumed passes share one list.
     lists = []
     run = parser._Lexer.run
@@ -939,11 +940,11 @@ def test_the_published_rule_agrees_with_the_reader_everywhere(
 
 def reader_error_span(text):
     """(start, end) of the first error the reader's scan to the end of
-    ``text`` meets (caret_tokens' last token, an error token or a string
-    carrying its error), or None."""
+    ``text`` meets (caret_tokens' first "recovered" token, standing where
+    that error was met), or None."""
     tokens = caret_tokens(text, len(text), "")
-    error = tokens[-1][3] if tokens else None
-    if not isinstance(error, SyntaxError):
+    error = next((t[3][0] for t in tokens if t[1] == "recovered"), None)
+    if error is None:
         return None
     offset_of = source_offset(text)
     return (
