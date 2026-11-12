@@ -2036,35 +2036,6 @@
    shared-import-roots, each once."
   (return (tuple (dict.fromkeys (+ [project-root] (shared-import-roots project-root))))))
 
-(def _script-dir [lpy-path project-root]
-  "The directory a script at lpy-path searches: its real path's, as the
-   run's sys.path[0] is, by its own directory's spelling when that is the
-   same directory (scripts -> /out/scripts), else by the spelling inside
-   project-root of a hop of its file link (scripts/a.lpy -> ../lib/a.lpy
-   with lib -> /out/lib searches lib/), so a search dir stays in the
-   project, where the view mirrors it, wherever the run's does."
-  (= real-directory (osp.dirname (osp.realpath lpy-path)))
-  (= path (osp.abspath lpy-path))
-  (if (== (osp.realpath (osp.dirname path)) real-directory)
-      (return (osp.dirname path)))
-  (if (is project-root None)
-      (return real-directory))
-  (= project-root (osp.abspath project-root))
-  ;; A chain of links ends within the kernel's own limit of 40 hops.
-  (for _ in (range 40)
-    (if (not (osp.islink path))
-        (break))
-    (try
-      (= path (osp.normpath (osp.join (osp.dirname path) (os.readlink path))))
-      (except [OSError]
-        (break)))
-    (= directory (osp.dirname path))
-    (= rel (osp.relpath directory project-root))
-    (if (and (!= rel os.pardir) (not (.startswith rel (+ os.pardir os.sep)))
-             (== (osp.realpath directory) real-directory))
-        (return directory)))
-  (return real-directory))
-
 (def module-names [lpy-path :project-root None]
   "(__name__, __package__, import root, search dirs) of lpy-path as Python
    imports it (package-root): the packages are the directories up from its
@@ -2082,9 +2053,7 @@
    root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
    script, searching the directory of its real path, as `lpy x.lpy` and
    `python x.py` put it on sys.path (a link scripts/a.lpy -> lib/a.lpy
-   searches lib/, a link out of the project the directory it reaches,
-   spelled inside the project where the link passes through it,
-   _script-dir);
+   searches lib/, a link out of the project the directory it reaches);
    either then searches project-root's shared-import-roots, which an
    editable install puts on sys.path for every run, each dir once.  Nothing
    else: scripts/x.lpy does not search the project root unless a flat
@@ -2104,10 +2073,13 @@
   (= shared (ife (is project-root None) [] (shared-import-roots project-root)))
   ;; A package module's import root keeps its spelling, as FileFinder
   ;; imports by it; a script searches its real path's directory, as the
-  ;; run's sys.path[0] is, spelled as _script-dir finds it.
-  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module
-                                                import-root
-                                                (_script-dir lpy-path project-root))]
+  ;; run's sys.path[0] is, by its own directory's spelling when that is the
+  ;; same directory (scripts -> /out/scripts).  The backend's list spells a
+  ;; directory outside the project by a project directory when one is the
+  ;; same (_environments).
+  (= real-directory (osp.dirname (osp.realpath lpy-path)))
+  (= script-dir (ife (== (osp.realpath directory) real-directory) directory real-directory))
+  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root script-dir)]
                                           shared))))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (ife package-module (.join "." parts) ""))
@@ -2401,9 +2373,14 @@
   (return (, (ife (sub names 1) (sub dirs 0) (osp.dirname (osp.abspath lpy-path)))
              dirs)))
 
-(def _environments [modules]
+(def _environments [project-root modules spellings]
   "(ShadowManifest.environments, ShadowManifest.file-environments) of
-   modules, (lpy path, module-names) pairs, in order.  environments:
+   modules, (lpy path, module-names) pairs, in order, in project-root.
+   Each search dir outside the project whose real path is a key of
+   spellings (real path -> the first directory of the project's sources
+   that is it) is spelled as that project directory, which the view mirrors with shadows: scripts/a.lpy ->
+   /out/lib/a.lpy, with lib -> /out/lib, searches lib/, the run's
+   sys.path[0] /out/lib by another name.  environments:
    environment root (_module-environment) -> the search dirs of the
    modules it is the root of, sorted by root.  Only the modules whose
    first search dir is the root (a package module, a script searching its
@@ -2428,8 +2405,12 @@
   (= other {})
   (= files {})
   (for [lpy-path names] in modules
-    (= [env-root dirs] (_module-environment lpy-path names))
-    (if (== (sub dirs 0) env-root)
+    (= [env-root raw-dirs] (_module-environment lpy-path names))
+    (= dirs (tuple (dict.fromkeys ((ife (_outside-p project-root d)
+                                        (.get spellings (osp.realpath d) d)
+                                        d)
+                                   for d in raw-dirs))))
+    (if (== (sub raw-dirs 0) env-root)
         (= (sub plain env-root)
            (tuple (dict.fromkeys (+ (.get plain env-root (,)) dirs))))
         (do (.setdefault other env-root dirs)
@@ -2437,13 +2418,17 @@
   (return (, (dict (sorted (.items (| other plain))))
              (dict (sorted (.items files))))))
 
+(def _outside-p [project-root directory]
+  "Whether directory lies outside project-root."
+  (= rel (osp.relpath directory project-root))
+  (return (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))))
+
 (def new-environment-p [project-root environments lpy-path :file-environments None]
   "Whether lpy-path, the absolute path of a document open in project-root's
    backend, has a search environment (search-environments) that
    environments and file-environments (ShadowManifest's) lack: it is a
    module whose first search dir is not its environment root (a file-link
-   script) inside the project whose search dirs are not its entry of
-   file-environments; or search-environments gives it one (the view root
+   script) inside the project with no entry in file-environments; or search-environments gives it one (the view root
    standing in for project-root's: only whether an environment exists is
    asked) and its environment root (_module-environment) is no key of
    environments, or the module is plain (its first search dir is the
@@ -2455,7 +2440,7 @@
                                           (module-names lpy-path :project-root project-root)))
   (if (and (!= (sub dirs 0) env-root)
            (is-not (view-path project-root project-root lpy-path) None)
-           (!= (.get (or file-environments {}) (osp.abspath lpy-path)) dirs))
+           (not-in (osp.abspath lpy-path) (or file-environments {})))
       (return True))
   (if (not (search-environments project-root project-root {env-root dirs}))
       (return False))
@@ -2529,10 +2514,16 @@
   (for lpy-path in open-paths
     (if (not-in lpy-path names-of)
         (= (sub names-of lpy-path) (module-names lpy-path :project-root project-root))))
+  (= spellings {})
+  (for lpy-path in sources
+    (= directory (osp.dirname lpy-path))
+    (.setdefault spellings (osp.realpath directory) directory))
   (= [manifest.environments manifest.file-environments]
-     (_environments (+ [(, lpy-path (sub names-of lpy-path)) for lpy-path in (.values shadows)]
+     (_environments project-root
+                    (+ [(, lpy-path (sub names-of lpy-path)) for lpy-path in (.values shadows)]
                        [(, lpy-path (sub names-of lpy-path))
-                        for lpy-path in (sorted open-paths)])))
+                        for lpy-path in (sorted open-paths)])
+                    spellings))
   (= packages (set))
   (= module-dirs (set))
   (for lpy-path in (.values shadows)

@@ -2470,6 +2470,91 @@ def test_real_backend_resolves_an_import_of_a_root_script_linked_out(tmp_path, n
     assert not any("helper" in m and "nowhere" not in m for m in found), found
 
 
+@pytest.mark.parametrize("absolute", [True, False])
+def test_a_file_link_out_searches_a_project_spelling_of_its_directory(
+    tmp_path, absolute
+):
+    # Defect: the in-project spelling of a script's real directory is found
+    # only where the link text passes through it, so an absolute link
+    # proj/scripts/a.lpy -> /out/lib/a.lpy (with proj/lib -> /out/lib), or a
+    # relative one in a linked directory (proj/s2 -> /out/scripts holding
+    # a.lpy -> ../lib/a.lpy), searches /out/lib as itself, which holds no
+    # shadow, and the backend leaves the (import sib) of lib/sib.lpy
+    # unresolved.
+    out = tmp_path / "out"
+    (out / "lib").mkdir(parents=True)
+    (out / "lib" / "a.lpy").write_text("(import sib)\n")
+    (out / "lib" / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "lib").symlink_to(out / "lib")
+    if absolute:
+        (proj / "scripts").mkdir()
+        (proj / "scripts" / "a.lpy").symlink_to(out / "lib" / "a.lpy")
+    else:
+        (out / "scripts").mkdir()
+        (out / "scripts" / "a.lpy").symlink_to(os.path.join("..", "lib", "a.lpy"))
+        (proj / "scripts").symlink_to(out / "scripts")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert (view / "lib" / "sib.py").read_text() == "s = 1"
+    lib = [str(view / "lib"), str(proj / "lib")]
+    assert environment_search_paths(client)[str(view / "scripts" / "a.py")] == lib
+
+
+@pytest.mark.parametrize(
+    "name", [name for name in REAL_BACKENDS if name == "basedpyright"]
+)
+def test_real_backend_resolves_a_file_link_scripts_own_import(tmp_path, name):
+    # Defect: scripts/a.lpy -> lib/a.lpy beside the plain scripts/b.lpy is
+    # analysed under b's list, so pyright reports the (import helper) of
+    # lib/helper.py, which `python scripts/a.py` imports from sys.path[0].
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    proj = tmp_path / "proj"
+    (proj / "lib").mkdir(parents=True)
+    (proj / "lib" / "helper.py").write_text("h = 1\n")
+    source = "(import helper)\n(print helper.h helper.nowhere)\n"
+    (proj / "lib" / "a.lpy").write_text(source)
+    (proj / "scripts").mkdir()
+    (proj / "scripts" / "b.lpy").write_text("(= b 1)\n")
+    (proj / "scripts" / "a.lpy").symlink_to(proj / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "scripts" / "a.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: helper resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("helper" in m and "nowhere" not in m for m in found), found
+
+
 def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
     # Defect: each open whose environment is new schedules a sweep of its
     # own, so two opens in one new directory (or a folders change, which
