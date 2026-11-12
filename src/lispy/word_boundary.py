@@ -2,7 +2,10 @@
 
 ``python -m lispy.word_boundary`` prints, as JSON, the rule of
 ``completion_word_span`` (``core/parser.py``, its one home) and a set of
-cases whose expected spans that function computes. lpy-mode and vsc-lispy
+cases whose expected spans that function computes. The rule's input is the
+text before the caret's line, the caret's line and the caret's column: the
+caret's context (code, an f/t-string field, or a string's or comment's text)
+is read from the start of the text. lpy-mode and vsc-lispy
 compute the boundary natively on every keystroke, so they pin their copies
 against these cases. Columns are code points (Python str indices); a client
 counting UTF-16 units converts (the astral case is there for it).
@@ -28,13 +31,15 @@ from lispy.core.parser import (
     SIGNS,
     TOKEN_PREFIXES,
     completion_word_span,
+    split_lines,
 )
 from lispy.core.utils import augassignop_dict
 
 VERSION = 6
 
-# The case inputs, each a line with ``|`` at the caret. Only the inputs are
-# written here: the expected spans are completion_word_span's.
+# The case inputs, each a text with ``|`` at the caret, the caret's line its
+# last line holding the caret. Only the inputs are written here: the
+# expected spans are completion_word_span's.
 CASE_INPUTS = (
     "foo|",
     "fo|o",
@@ -145,11 +150,27 @@ CASE_INPUTS = (
     "'''ab|'''",
     "'''a'''b|",
     'f"{\\"a\\" b|}"',
-    # A string that does not close on the line: its quote ends an earlier
-    # line's string, and a field before the line's end is still a field.
-    'b") (fo|',
+    # A string closed in the run: a word starts after it at the earliest.
+    "(f '''a-b'''|)",
+    "'''x:'''|",
+    "f\"{'''a-b'''|}\"",
+    # The context is read from the text's start: a multi-line f-string's
+    # later lines are in its literal, a multi-line string's end closes it.
+    'f"""\n  Name: {name|!r}\n"""',
+    'f"""\n  Width: {w|:>10}\n"""',
+    'f"""\n  {x|=}\n"""',
+    'f"""\n  te|xt {x}\n"""',
+    '(print "doc\nend." (fo|o))',
+    '"a\nb|"',
+    "; c\nfo|",
+    # A string never closed is text to the end.
     '(print "ab|',
     'f"{x|!r}',
+    # The debug = is lexed off as the reader does: a\= is a then a
+    # continuation, \= no symbol at all.
+    'f"{a\\|=}"',
+    'f"{\\|=}"',
+    'f"{\\=|}"',
     # A field's { ends the word before it, in a format spec and after text:
     # the line is lexed as code, so the word is the field's own name.
     'f"{1:{wi|',
@@ -185,13 +206,26 @@ CASE_INPUTS = (
 )
 
 
+def case_input(marked):
+    """``(before, line, caret)`` of ``marked`` (a text with ``|`` at the
+    caret): the text before the caret's line, that line and the caret's
+    column in it."""
+    at = marked.index("|")
+    source = marked[:at] + marked[at + 1 :]
+    before = "".join(split_lines(source[:at], keepends=True)[:-1])
+    line = split_lines(source[len(before) :])[0]
+    return before, line, at - len(before)
+
+
 def case(marked):
-    """The case of ``marked`` (a line with ``|`` at the caret)."""
-    caret = marked.index("|")
-    text = marked[:caret] + marked[caret + 1 :]
-    start, replace_start, end = completion_word_span(text, caret)
+    """The case of ``marked``: no word (null bounds) in a string's or
+    comment's text."""
+    before, line, caret = case_input(marked)
+    span = completion_word_span(line, caret, before)
+    [start, replace_start, end] = (None, None, None) if span is None else span
     return {
-        "text": text,
+        "before": before,
+        "text": line,
         "caret": caret,
         "start": start,
         "replaceStart": replace_start,
@@ -245,6 +279,14 @@ def rule():
         "plainBodyStops": _members(parser._PLAIN_BODY_STOP),
         "interpolatedBodyStops": _members(parser._INTERPOLATED_BODY_STOP),
         "fieldBraces": list(parser._FIELD_BRACES),
+        "backslash": parser._BACKSLASH,
+        "namedEscape": list(parser._NAMED_ESCAPE),
+        "quoteChars": list(parser._QUOTE_CHARS),
+        "escapedQuote": parser._ESCAPED_QUOTE,
+        "bareQuote": parser._BARE_QUOTE,
+        "lineBreakChars": _class_members(parser._LINE_BREAK_CHARS),
+        # What _skip_blanks skips: str.isspace.
+        "whitespace": [chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()],
         "fieldDelimiter": parser._FIELD_DELIMITER,
         "conversionEnds": list(parser._CONVERSION_ENDS),
         "fieldContinuation": parser._FIELD_CONTINUATION,
@@ -254,62 +296,67 @@ def rule():
         "numberToken": parser._NUMBER_TOKEN,
         "signedComplex": parser._SIGNED_COMPLEX,
         "steps": [
-            "context: read the line from its start to the caret as starting in "
-            "top-level code (a string or field opened on an earlier line is "
-            "not seen), over a stack of the f/t literals and fields open, in "
-            "one of four modes: code (top level), field (a field's own level), "
-            "bracket (inside a field's brackets), text (a string's body, a "
-            "literal's or format spec's text, a conversion, a comment). The "
-            "context is the mode at the caret; in text the word is empty at "
-            "the caret",
-            "code, field and bracket mode: find the next token from the "
-            "position with the mode's patterns (a character no pattern "
-            "matches, whitespace other than a space, is skipped); none, or one "
-            "starting at or after the caret, ends the scan in the mode. In "
+            "input: the text before the caret's line (its line breaks "
+            "included), the caret's line and the caret's column; the scan "
+            "reads the text before the line followed by the line, from its "
+            "start, and stops at the caret: where it would read a character "
+            "at or past the caret",
+            "context: lex that text over a stack of the f/t literals and "
+            "fields open, in one of four modes: code (top level), field (a "
+            "field's own level), bracket (inside a field's brackets), text (a "
+            "string's body, a literal's or format spec's text, a conversion, a "
+            "comment); the context is the mode the caret lies in. In text "
+            "there is no word: start, replaceStart and end are null (an editor "
+            "offers no completion there). The reader's scan is its lexer: "
+            "where that lexer refuses the text before the caret (a malformed "
+            "literal, field or conversion) the reader takes code, and a "
+            "client need not agree there",
+            "code, field and bracket mode: find the next token with the mode's "
+            "patterns (a character no pattern matches is skipped); none, or "
+            "one starting at or after the caret, stops the scan in the mode. "
+            "A comment ending at or after the caret, or any other token ending "
+            "after it, holds the caret: text for a comment, else the mode. In "
             "field mode a token starting with } closes the field (back to its "
             "literal's text); one starting at a fieldDelimiter match ends the "
-            "expression: at : the format spec's text follows, at ! the "
-            "conversion, which runs to the next conversionEnds character (text "
-            "when none comes before the caret), where field mode resumes. Any "
-            "other token: a comment ending at or after the caret is text; a "
-            "token ending after the caret ends the scan in the mode; a string "
+            "expression: at : the format spec's text follows; at ! the "
+            "conversion, which ends at the first conversionEnds character "
+            "after the !, where field mode resumes: with none before the "
+            "caret, the caret is in its text. Any other token: a string "
             "opening reads its prefix (stringPrefix) lower-cased: the first "
             "kindLetters entry whose letter it holds makes it an f/t-string, "
             "rawLetter raw; an f/t-string opening opens a literal (its quote "
             "as written) whose text is read next; a plain string reads its "
-            "body (body step): text when its closing quote ends after the "
-            "caret, a restart when it never closes; in field or bracket mode an "
-            "opening token, "
-            "or a bad prefix ending in an openings entry, opens a bracket and "
-            "a closing token closes one (if any is open)",
+            "body (body step): text when it does not close before the caret "
+            "(its closing quote ending after it, or none), else the scan goes "
+            "on after its closing quote; in field or bracket mode an opening "
+            "token, or a bad prefix ending in an openings entry, opens a "
+            "bracket and a closing token closes one (if any is open)",
             "text of a literal or a format spec: at or past the caret it is "
-            "text; read the body (body step); the line's end (or a bare \" "
-            "ending an escaped string) is a restart; any other stop at or after "
-            "the caret is text, except that a closing quote is text only when "
-            "it ends after the caret; the quote closes the literal (in a "
-            "format spec, the field and the literal); a { opens a field (in a "
-            "format spec, marking the spec nested); a } in a format spec "
-            "closes its field, and is skipped in a literal's own text",
-            "restart: a string that does not close on the line is the end of "
-            "one opened on an earlier line: empty the stack and read on in code "
-            "mode from just after the opening quote of the outermost string "
-            "open (the plain string's own when none is), so the code after a "
-            "multi-line string's end keeps its words",
+            "text; read the body (body step): a closing quote ending after the "
+            "caret, or any other stop at or after it, is text; the closing "
+            "quote closes the literal; a { opens a field (in a format spec, "
+            "marking the spec nested); a } in a format spec closes its field",
+            "resume: where the last string or literal the scan closed ends "
+            "(its closing quote's end)",
             "body: read from the position to the next plainBodyStops "
             "character (a plain string) or interpolatedBodyStops character (an "
             "f/t-string). A backslash pairs with the character after it (raw "
-            "too), except: one ending the line stands alone; in a non-raw "
-            "string \\N{ runs through the next } (to the line's end when "
-            "none); in an f/t-string one before a fieldBraces character stands "
-            "alone, the brace read next. A quote character is the closing "
-            "quote where the string's quote starts, else text. In an escaped "
-            "string (its quote an escapedStringOpenings entry) its quote closes "
-            'it, a backslash, backslash and " are one piece, and a bare " ends '
-            "the scan (text). A doubled brace is text where it is in the "
-            "doubled set: both braces in a literal's own text, none in a format "
-            "spec before its first nested field, only { after one; else it, as "
-            "a single brace, ends the read",
-            "run: the stretch of the line around the caret holding no stopChars",
+            "too), except: one ending the text stands alone; in a non-raw "
+            "string a backslash followed by namedEscape's opening runs through "
+            "the next namedEscape close (to the text's end when none); in an "
+            "f/t-string one before a fieldBraces character stands alone, the "
+            "brace read next. A quoteChars character is the closing quote "
+            "where the string's quote starts, else text. In an escaped string "
+            "(its quote an escapedStringOpenings entry) its quote closes it, a "
+            "backslash before escapedQuote is one piece with it, and a "
+            "bareQuote ends the scan (the reader refuses it). A doubled brace "
+            "is text where it is in the doubled set: both braces in a "
+            "literal's own text, none in a format spec before its first "
+            "nested field, only { after one; else it, as a single brace, ends "
+            "the read",
+            "run: the stretch of the line around the caret holding no "
+            "stopChars; it starts at resume instead when that lies later on "
+            "the caret's line",
             "lex the line, not the run alone, from the run's start, token "
             "after token with the context's patterns, until a token reaches or "
             "passes the run's end; at each token start try, in this order: an "
@@ -321,9 +368,10 @@ def rule():
             "entry, followed by anything but a formEndChars character or the "
             "line's end); a bad prefix (^ + one or more *, then an openings "
             "entry, a metaChars entry, or before a stopChars character or the "
-            "line's end); a comment (; to the line's end); a number "
-            "(numberToken, followed by a numberEndChars character or the "
-            "line's end); a comma; else a symbol (the rest of the run); spaces "
+            "line's end); a comment (; up to a lineBreakChars character); a "
+            "number (numberToken, followed by a numberEndChars character or "
+            "the line's end); a "
+            "comma; else a symbol (the rest of the run); spaces "
             "(a run of spaces). Entries are tried longest first. ~ is a "
             "metaChars entry and no danglingQuotes one: a ~ followed by a "
             "formEndChars character or the line's end matches none of these "
@@ -346,9 +394,11 @@ def rule():
             "match makes the word empty",
             "debug =: in field mode a symbol word token ending in = whose "
             "character before the = is no debugBlockers entry, followed by "
-            "only whitespace and backslashes ending the line, then a } or a "
-            "fieldDelimiter match, loses its =; when nothing is left or the "
-            "caret is past its end, the word is empty at the caret",
+            "only whitespace characters and backslashes ending the line, then "
+            "a } or a fieldDelimiter match, loses its =: lex again from the "
+            "token's start with the line ending at the = (for every lookahead "
+            "too) and take the word token of that lex; none, or one ending "
+            "before the caret, is the empty word at the caret",
             "peel the word token's front, repeatedly: never a neverPeeled "
             "token; never a number token that does not start with a signs "
             "character or that matches signedComplex whole; never a token "

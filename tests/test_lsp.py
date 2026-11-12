@@ -1332,6 +1332,30 @@ def test_local_completion_tags_special_forms_in_label_details_not_detail():
     assert items["ife"].detail is None
 
 
+@pytest.mark.parametrize(
+    "marked",
+    [
+        "; call fo|",
+        '(print "say fo| x")',
+        '(print f"{foo!r|}")',
+        'f"""\n  text fo| {x}\n"""',
+    ],
+)
+def test_completion_offers_nothing_in_a_strings_or_comments_text(marked):
+    # Defect: the caret in a string's, comment's or conversion's text is
+    # taken for an empty word (or for the word fo), so every form, macro and
+    # builtin is offered while the user writes prose. The same word in code
+    # is answered, so the empty list is the text's, not the handler's.
+    at = marked.index("|")
+    source = marked[:at] + marked[at + 1 :]
+    line = marked[:at].count("\n")
+    col = at - (marked.rfind("\n", 0, at) + 1)
+    answer = run_completion(ls_with(source), position(line, col))
+    assert answer.is_incomplete and answer.items == []
+    code = run_completion(ls_with("(print fo"), position(0, 9))
+    assert "format" in {item.label for item in code.items}
+
+
 def test_general_completion_offers_every_built_in_macro_and_no_phantoms():
     items = server.general_items(SimpleNamespace(source="", uri=URI))
     macros = {
@@ -1745,7 +1769,7 @@ def test_the_cursor_word_is_the_word_its_view_restores(line):
         if word is None:
             continue
         start, end, _ = word
-        assert (start, end) == pv.partial_span(line, end), col
+        assert (start, end) == pv.partial_span(line, 1, end), col
     assert server.cursor_word(doc, 1, len(line) - 1) is not None
 
 

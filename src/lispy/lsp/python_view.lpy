@@ -218,19 +218,39 @@
 ;; word spelling a Python name) is the reader's (completion-word-span,
 ;; word-parts in core/parser.py), never a character table of its own.
 
-(def partial-span [text col]
-  "The partial word at code-point column col of line text, as view-at-cursor
-   reads it: (start, end), the reader's word from after its last dot before
-   col through to the next dot after col or the token's end
-   (completion-word-span's replace-start..end)."
-  (= [_ start end] (completion-word-span text col))
+(def word-span [source line col]
+  "completion-word-span's (start, replace-start, end) at the 1-based line and
+   code-point col of source (clamped to the line), the caret's context read
+   from the start of source; None in a string's or comment's text, where no
+   word is typed.  The one LSP caller of completion-word-span for a caret
+   (a node's position, _lpy-name-span, is read with no scan)."
+  (= lines (split-lines source))
+  (if (not (<= 1 line (len lines)))
+      (return (completion-word-span "" 0 source)))
+  (= text (sub lines (- line 1)))
+  (= line-start ((source-offset source) line 0))
+  (return (completion-word-span text (min col (len text)) (sub source [: line-start]))))
+
+(def partial-span [source line col]
+  "The partial word at the 1-based line and code-point col of source, as
+   view-at-cursor reads it: (start, end), the reader's word from after its
+   last dot before col through to the next dot after col or the token's end
+   (word-span's replace-start..end); None where no word is typed."
+  (= span (word-span source line col))
+  (if (is span None)
+      (return None))
+  (= [_ start end] span)
   (return (, start end)))
 
-(def glued-base [text col]
-  "The dotted name written glued to the dot before the word at code-point
-   column col of line text (a.b for a.b.c|), or None when no dot is there
-   or no name runs into it (x .c, (.c x), a..c)."
-  (= [start replace-start _] (completion-word-span text col))
+(def glued-base [source line col]
+  "The dotted name written glued to the dot before the word at the 1-based
+   line and code-point col of source (a.b for a.b.c|), or None when no dot
+   is there, no name runs into it (x .c, (.c x), a..c) or no word is typed."
+  (= span (word-span source line col))
+  (if (is span None)
+      (return None))
+  (= [start replace-start _] span)
+  (= text (sub (split-lines source) (- line 1)))
   (= base (sub text [: start (max start (- replace-start 1))]))
   (if (or (not base) (in "" (.split base ".")))
       (return None))
@@ -390,17 +410,19 @@
    node with it, a method call (.ff x) starts it right after the dot, a
    keyword parameter after its colon, and a macro may put anything there;
    so each place is tried and the one that spells name (_spells-p) wins.  span
-   lies inside lines (_in-buffer-p)."
+   lies inside lines (_in-buffer-p).  The words are read with no context scan
+   (completion-word-span's before None): the node is code the reader read,
+   and a scan of the buffer per node would make the map quadratic."
   (= [[line col] [end-line end-col]] span)
   (= text (sub lines (- line 1)))
   (if (and (== line end-line) (_spells-p (sub text [: col end-col]) name))
       (return (, (, line col) (, line end-col))))
   (= end-text (sub lines (- end-line 1)))
-  (= start (sub (completion-word-span end-text end-col) 1))
+  (= start (sub (completion-word-span end-text end-col None) 1))
   (if (and (< start end-col) (_spells-p (sub end-text [: start end-col]) name))
       (return (, (, end-line start) (, end-line end-col))))
   (= start (ife (and (< col (len text)) (in (sub text col) ".:")) (+ col 1) col))
-  (= end (sub (completion-word-span text start) 2))
+  (= end (sub (completion-word-span text start None) 2))
   (if (and (< start end) (_spells-p (sub text [: start end]) name))
       (return (, (, line start) (, line end))))
   (return None))
@@ -969,9 +991,10 @@
 (def marked-source [source line col]
   "(marked, word-start, start, end, partial) at 1-based line, code-point col
    of source, or None when that is outside it: marked is source with the
-   word at the cursor (completion-word-span's start..end on that line, the
-   rest of the word after the caret included) replaced by CURSOR-SENTINEL,
-   partial the word as typed up to the caret.  The one home of that
+   word at the cursor (word-span's start..end on that line, the rest of the
+   word after the caret included; none, empty at col, in a string's or
+   comment's text) replaced by CURSOR-SENTINEL, partial the word as typed up
+   to the caret.  The one home of that
    replacement: the cursor view compiles marked, and the buffer's
    definitions are read off it (buffer-definition-names in server.lpy), so
    neither takes the word being typed for a name the buffer has."
@@ -981,7 +1004,7 @@
   (= text (sub lines (- line 1)))
   (if (not (<= 0 col (len text)))
       (return None))
-  (= [word-start start end] (completion-word-span text col))
+  (= [word-start start end] (or (word-span source line col) (, col col col)))
   (= marked (+ (source-prefix source line start) CURSOR-SENTINEL
                (sub source [: (len (source-prefix source line end)) None])))
   (return (, marked word-start start end (sub text [: start col]))))

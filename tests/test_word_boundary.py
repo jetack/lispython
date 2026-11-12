@@ -15,14 +15,16 @@ from lispy.core.compiler.literal import number_parts
 from lispy.core.nodes import Constant, Paren, Symbol
 from lispy.core.parser import (
     _signed_complex_p,
+    caret_context,
     completion_word_span,
     parse,
     token_prefixes,
     tokenize,
 )
-from lispy.word_boundary import CASE_INPUTS
+from lispy.word_boundary import CASE_INPUTS, case_input
 
-# (line with | at the caret, (start, replace_start, end)), checked by hand.
+# (text with | at the caret, (start, replace_start, end) on the caret's line
+# or None for no word), checked by hand.
 SPANS = [
     ("foo|", (0, 0, 3)),
     ("fo|o", (0, 0, 3)),
@@ -104,8 +106,8 @@ SPANS = [
     ("*|[1 2]", (1, 1, 1)),
     ('a|"', (1, 1, 1)),
     ('f|"x"', (1, 1, 1)),
-    # A string opening inside the run, the caret after it.
-    ("x'''|", (4, 4, 4)),
+    # A string opening inside the run: the caret after it is in its body.
+    ("x'''|", None),
     # \w is Unicode: 한" is a string opening, so the caret before its quote is
     # at no word.
     ('한|"', (1, 1, 1)),
@@ -138,9 +140,10 @@ SPANS = [
     ('t"{x|!r}"', (3, 3, 4)),
     ('f"""{x|:>4}"""', (5, 5, 6)),
     ('f"{x|=}"', (3, 3, 4)),
-    # Past the expression (a conversion, a spec, a debug =) there is no word.
-    ('f"{x!|r}"', (5, 5, 5)),
-    ('f"{x:>1|0}"', (7, 7, 7)),
+    # Past the expression: a conversion and a spec are text; after a debug
+    # = the word is empty.
+    ('f"{x!|r}"', None),
+    ('f"{x:>1|0}"', None),
     ('f"{x=|}"', (5, 5, 5)),
     ('f"{x =|}"', (6, 6, 6)),
     # != and == are operators, never a delimiter or a debug =.
@@ -155,27 +158,48 @@ SPANS = [
     ('f"{\\"a\\" b|}"', (9, 9, 10)),
     # A string's body, a literal's text and a comment hold no word: the
     # caret there is no name being typed.
-    ('"ab|"', (3, 3, 3)),
-    ('f"{{ab|"', (6, 6, 6)),
-    ("; ab|", (4, 4, 4)),
-    ("a;b|", (3, 3, 3)),
-    ("'''ab|'''", (5, 5, 5)),
+    ('"ab|"', None),
+    ('f"{{ab|"', None),
+    ("; ab|", None),
+    ("a;b|", None),
+    ("'''ab|'''", None),
+    ('(print "ab|', None),
     ("'''a'''b|", (7, 7, 8)),
     # \N{...} is one escape in a non-raw literal; a raw one opens a field.
     ('rf"\\N{ab|}"', (6, 6, 8)),
-    ('f"\\N{ab|}"', (7, 7, 7)),
-    # A string that does not close on the line is read as the end of one
-    # from an earlier line, so the code after a multi-line string's end
-    # keeps its words; a field before the line's end is still a field.
-    ('b") (fo|', (5, 5, 7)),
-    ('(print "ab|', (8, 8, 10)),
+    ('f"\\N{ab|}"', None),
+    # A string closed in the run: the word starts after it at the earliest,
+    # never with the string's text.
+    ("(f '''a-b'''|)", (12, 12, 12)),
+    ("'''x:'''|", (8, 8, 8)),
+    ("f\"{'''a-b'''|}\"", (12, 12, 12)),
+    # The context is read from the text's start: the later lines of a
+    # multi-line f-string are its literal, a multi-line string's end closes
+    # it, a comment ends at its line's end.
+    ('f"""\n  Name: {name|!r}\n"""', (9, 9, 13)),
+    ('f"""\n  Width: {w|:>10}\n"""', (10, 10, 11)),
+    ('f"""\n  {x|=}\n"""', (3, 3, 4)),
+    ('f"""\n  te|xt {x}\n"""', None),
+    ('(print "doc\nend." (fo|o))', (7, 7, 10)),
+    ('"a\nb|"', None),
+    ("; c\nfo|", (0, 0, 2)),
+    # An unclosed literal is text, but a field before its end is a field.
     ('f"{x|!r}', (3, 3, 4)),
+    # The debug = is lexed off as the reader does: a\= is the symbol a then
+    # a continuation, \= no symbol at all.
+    ('f"{a\\|=}"', (5, 5, 5)),
+    ('f"{\\|=}"', (4, 4, 4)),
+    # Where the reader refuses the text before the caret (an invalid
+    # conversion), the caret is in top-level code.
+    ('f"{x!z}" (fo|', (10, 10, 12)),
 ]
 
 
 def span_at(marked):
-    caret = marked.index("|")
-    return completion_word_span(marked[:caret] + marked[caret + 1 :], caret)
+    """The span at the caret of ``marked``, a text with ``|`` at the caret:
+    its line's columns, the text before its line passed as before."""
+    before, line, caret = case_input(marked)
+    return completion_word_span(line, caret, before)
 
 
 @pytest.mark.parametrize("marked, expected", SPANS, ids=[m for m, _ in SPANS])
@@ -246,18 +270,26 @@ def test_the_word_is_the_readers_leaf(token):
 
 
 # Lines the lexer reads: each template's {} filled with every string over the
-# alphabet up to the length, at the top level, in a field and in a spec.
-READER_TEMPLATES = ["{}", 'f"{{{}}}"', 'rf"\\N{{{}}}"', 't"a{{x:{}}}"']
-READER_ALPHABET = 'x=:!r("; {}'
+# alphabet up to the length, at the top level, in a field, in a spec, and
+# right after a string that closed in the run.
+READER_TEMPLATES = [
+    "{}",
+    'f"{{{}}}"',
+    'rf"\\N{{{}}}"',
+    't"a{{x:{}}}"',
+    "'''a:'''{}",
+]
+READER_ALPHABET = "x=:!r(\"; {}'"
 
 
 def test_every_word_is_a_token_the_reader_lexes():
     # Defect: the word scan and the lexer part in a string or field (a word
     # run past a field's delimiter, a word in a literal's or spec's text, a
     # field's token missed), so a completion replaces text the reader never
-    # read as that name. Only lines the lexer reads whole: one it stops on (a
+    # read as that name, or a string closed in the run read again as code
+    # ('''a-b'''). Only lines the lexer reads whole: one it stops on (a
     # string never closed, an error token or a string's error) has a reading
-    # of its own (_word_context).
+    # of its own (caret_context).
     for template in READER_TEMPLATES:
         for size in range(5):
             for chars in itertools.product(READER_ALPHABET, repeat=size):
@@ -276,9 +308,11 @@ def test_every_word_is_a_token_the_reader_lexes():
                 for start, end, text, tktype in words:
                     leaf = token_prefixes(text, tktype)[1]
                     span = completion_word_span(line, end)
+                    assert span is not None, (line, end)
                     assert (span[0], span[2]) == (end - len(leaf), end), (line, end)
                 for caret in range(len(line) + 1):
-                    start, _, end = completion_word_span(line, caret)
+                    span = completion_word_span(line, caret)
+                    [start, _, end] = span or (caret, caret, caret)
                     assert start == end or any(
                         tk_start <= start and end <= tk_end and caret <= tk_end
                         for tk_start, tk_end, _, _ in words
@@ -297,8 +331,9 @@ def test_the_spec_command_prints_the_canonical_spans():
     assert spec["version"] == 6 and spec["columns"] == "code points"
     assert len(spec["cases"]) == len(CASE_INPUTS)
     for case in spec["cases"]:
-        expected = completion_word_span(case["text"], case["caret"])
-        assert (case["start"], case["replaceStart"], case["end"]) == expected
+        expected = completion_word_span(case["text"], case["caret"], case["before"])
+        got = (case["start"], case["replaceStart"], case["end"])
+        assert got == (expected or (None, None, None))
 
 
 def test_the_specs_stop_characters_end_the_readers_symbol():
@@ -331,9 +366,10 @@ def chars(entries):
 
 
 def spec_word_span(rule):
-    """A function (line, caret) -> (start, replaceStart, end), as an editor
-    client reproduces it from the published rule alone: no parser internal is
-    read here. The rule's regexes are compiled once."""
+    """A function (line, caret, before) -> (start, replaceStart, end), or
+    None for no word, as an editor client reproduces it from the published
+    rule alone: no parser internal is read here. The rule's regexes are
+    compiled once."""
     stop = chars(rule["stopChars"])
     wrapper = f"(?:{one_of(rule['wrappers'])})"
     opening = f"(?:{one_of(rule['openings'])})"
@@ -343,6 +379,9 @@ def spec_word_span(rule):
     continuation = rule["fieldContinuation"]
     escaped = one_of(rule["escapedStringOpenings"])
     openings = one_of(rule["stringOpenings"])
+    line_break = chars(rule["lineBreakChars"])
+    backslash = rule["backslash"]
+    [named_open, named_close] = rule["namedEscape"]
 
     def token_regex(mode):
         """The token patterns of code, field or bracket mode."""
@@ -351,20 +390,21 @@ def spec_word_span(rule):
         end = f"{continuation}|{end}" if in_field else end
         form_end = f"(?:{chars(rule['formEndChars'])}|{end})"
         number_end = f"(?:{chars(rule['numberEndChars'])}|{end})"
+        comment = f";(?:(?!{line_break}).)*"
         if in_field:
             string = f"{rule['stringPrefix']}(?:{escaped}|{openings})"
             bad_end = f"(?={stop}|{escaped}|{end})"
             guard = f"(?!{delimiter})" if mode == "field" else ""
-            char = f"{guard}(?!{stop})[^\\\\]"
+            char = f"{guard}(?!{stop})(?!{re.escape(backslash)})(?s:.)"
             symbol = f"(?:{char}|{rule['fieldSymbolBackslash']})+"
             if mode == "field":
                 symbol += f"|{delimiter}"
-            comment = f";(?:(?!{delimiter})[^}}])*" if mode == "field" else ";.*"
+                comment = f";(?:(?!{delimiter}|{line_break}|}})(?s:.))*"
             spaces = f"(?: |{continuation})+"
         else:
             string = f"{rule['stringPrefix']}(?:{openings})"
             bad_end = f"(?={stop}|{end})"
-            [symbol, comment, spaces] = [f"(?:(?!{stop}).)+", ";.*", " +"]
+            [symbol, spaces] = [f"(?:(?!{stop})(?s:.))+", " +"]
         return re.compile(
             "|".join(
                 f"(?P<{kind}>{pattern})"
@@ -392,74 +432,78 @@ def spec_word_span(rule):
     signed_complex_re = re.compile(rule["signedComplex"])
     signs = "".join(rule["signs"])
     braces = rule["fieldBraces"]
-    quote_chars = set(rule["plainBodyStops"]) - {"\\"}
+    whitespace = set(rule["whitespace"])
 
-    def body(line, i, quote, raw, kind, doubled):
+    def body(text, i, quote, raw, kind, doubled):
         """(stop, at): the body step from i."""
         escaped_quote = quote in rule["escapedStringOpenings"]
         stops = rule["plainBodyStops" if kind == "string" else "interpolatedBodyStops"]
-        n = len(line)
+        n = len(text)
         while True:
-            j = next((k for k in range(i, n) if line[k] in stops), None)
+            j = next((k for k in range(i, n) if text[k] in stops), None)
             if j is None:
-                return "eof", n
-            c = line[j]
-            if c == "\\":
-                if escaped_quote and line.startswith(quote, j):
+                return "end", n
+            c = text[j]
+            if c == backslash:
+                if escaped_quote and text.startswith(quote, j):
                     return "quote", j
                 if j + 1 >= n:
                     i = j + 1
-                elif escaped_quote and line.startswith('\\"', j + 1):
-                    i = j + 3
-                elif not raw and line.startswith("N{", j + 1):
-                    close = line.find("}", j + 3)
+                elif escaped_quote and text.startswith(rule["escapedQuote"], j + 1):
+                    i = j + 1 + len(rule["escapedQuote"])
+                elif not raw and text.startswith(named_open, j + 1):
+                    close = text.find(named_close, j + 1 + len(named_open))
                     i = n if close < 0 else close + 1
-                elif kind != "string" and line[j + 1] in braces:
+                elif kind != "string" and text[j + 1] in braces:
                     i = j + 1
                 else:
                     i = j + 2
-            elif c in quote_chars:
-                if escaped_quote and c == '"':
-                    return "mixed", j
-                if line.startswith(quote, j):
+            elif c in rule["quoteChars"]:
+                if escaped_quote and c == rule["bareQuote"]:
+                    return "refused", j
+                if text.startswith(quote, j):
                     return "quote", j
                 i = j + 1
-            elif line.startswith(c, j + 1) and c in doubled:
+            elif text.startswith(c, j + 1) and c in doubled:
                 i = j + 2
             else:
-                return ("field" if c == "{" else "close"), j
+                return ("field" if c == braces[0] else "close"), j
 
     def string_kind(prefix):
         lowered = prefix.lower()
         kinds = [kind for letter, kind in rule["kindLetters"] if letter in lowered]
         return rule["rawLetter"] in lowered, (kinds + ["string"])[0]
 
-    def context(line, caret):
-        """The context step: code, field, bracket or text."""
-        # Literals: ["literal", quote, raw, kind, body start]; fields: a dict.
-        stack, pos = [], 0
+    def context(text, stop):
+        """(mode at stop, resume), the context and resume steps, or None
+        where the reader refuses the text before stop (no agreement asked)."""
+        # Literals: ["literal", quote, raw, kind]; fields: ["field", dict].
+        stack, pos, resume = [], 0, 0
         while True:
             top = stack[-1] if stack else None
             if top is not None and (top[0] == "literal" or top[1]["spec"]):
                 [literal, spec] = (
                     [top, None] if top[0] == "literal" else [top[1]["literal"], top[1]]
                 )
-                if pos >= caret:
-                    return "text"
-                doubled = "{}" if spec is None else "{" if spec["nested"] else ""
+                if pos >= stop:
+                    return "text", resume
+                doubled = (
+                    braces if spec is None else braces[0] if spec["nested"] else ""
+                )
                 stop_kind, at = body(
-                    line, pos, literal[1], literal[2], literal[3], doubled
+                    text, pos, literal[1], literal[2], literal[3], doubled
                 )
                 if stop_kind == "quote":
-                    pos = at + len(literal[1])
-                    if pos > caret:
-                        return "text"
-                    del stack[-1 if spec is None else -2 :]
-                elif stop_kind in ("eof", "mixed"):
-                    # Never closed: its quote closed an earlier line's string.
-                    stack, pos = [], stack[0][4]
-                elif at >= caret:
-                    return "text"
+                    if at + len(literal[1]) > stop:
+                        return "text", resume
+                    if spec is not None:
+                        return None
+                    pos = resume = at + len(literal[1])
+                    stack.pop()
+                elif stop_kind == "refused" and at < stop:
+                    return None
+                elif stop_kind in ("end", "refused") or at >= stop:
+                    return "text", resume
                 elif stop_kind == "field":
                     if spec is not None:
                         spec["nested"] = True
@@ -471,59 +515,60 @@ def spec_word_span(rule):
                     }
                     stack.append(["field", field])
                     pos = at + 1
-                else:
-                    if spec is not None:
-                        stack.pop()
+                elif spec is not None:
+                    stack.pop()
                     pos = at + 1
+                else:
+                    return None
                 continue
             field = None if top is None else top[1]
             mode = (
                 "code" if top is None else "bracket" if field["brackets"] else "field"
             )
-            if pos >= caret:
-                return mode
-            m = token_res[mode].search(line, pos)
-            if m is None or m.start() >= caret:
-                return mode
+            m = token_res[mode].search(text, pos)
+            if m is None or m.start() >= stop:
+                return mode, resume
             start, end, kind = m.start(), m.end(), m.lastgroup
             if mode == "field":
-                if line[start] == "}":
+                if text[start] == braces[1]:
                     stack.pop()
                     pos = start + 1
                     continue
-                if delimiter_re.match(line, start):
-                    if line[start] == ":":
+                if delimiter_re.match(text, start):
+                    if text[start] == ":":
                         field["spec"] = True
                         pos = start + 1
                         continue
-                    ends = [line.find(c, start + 1) for c in rule["conversionEnds"]]
-                    ends = [e for e in ends if e >= 0]
-                    if not ends or min(ends) >= caret:
-                        return "text"
-                    pos = min(ends)
+                    ends = [
+                        k
+                        for k in range(start + 1, stop)
+                        if text[k] in rule["conversionEnds"]
+                    ]
+                    if not ends:
+                        return "text", resume
+                    pos = ends[0]
                     continue
-            if kind == "comment" and end >= caret:
-                return "text"
-            if end > caret:
-                return mode
+            if kind == "comment" and end >= stop:
+                return "text", resume
+            if end > stop:
+                return mode, resume
             pos = end
             if kind == "string":
-                prefix = prefix_re.match(line, start).group()
-                quote = line[start + len(prefix) : end]
+                prefix = prefix_re.match(text, start).group()
+                quote = text[start + len(prefix) : end]
                 raw, string = string_kind(prefix)
                 if string != "string":
-                    stack.append(["literal", quote, raw, string, end])
+                    stack.append(["literal", quote, raw, string])
                     continue
-                stop_kind, at = body(line, end, quote, raw, string, "")
-                if stop_kind != "quote":
-                    stack, pos = [], stack[0][4] if stack else end
-                    continue
-                pos = at + len(quote)
-                if pos > caret:
-                    return "text"
+                stop_kind, at = body(text, end, quote, raw, string, "")
+                if stop_kind == "refused" and at < stop:
+                    return None
+                if stop_kind != "quote" or at + len(quote) > stop:
+                    return "text", resume
+                pos = resume = at + len(quote)
             elif field is not None:
                 if kind == "opening" or (
-                    kind == "bad" and line[end - 1] in rule["openings"]
+                    kind == "bad" and text[end - 1] in rule["openings"]
                 ):
                     field["brackets"] += 1
                 elif kind == "closing" and field["brackets"]:
@@ -535,37 +580,48 @@ def spec_word_span(rule):
             return False
         at = end
         while at < len(line) and (
-            line[at].isspace() or (line[at] == "\\" and at + 1 == len(line))
+            line[at] in whitespace or (line[at] == backslash and at + 1 == len(line))
         ):
             at += 1
         return at < len(line) and (
-            line[at] == "}" or bool(delimiter_re.match(line, at))
+            line[at] == braces[1] or bool(delimiter_re.match(line, at))
         )
 
-    def word_span(line, caret):
-        mode = context(line, caret)
-        if mode == "text":
-            return caret, caret, caret
-        run_start, run_end = caret, caret
-        while run_start > 0 and not stop_re.match(line[run_start - 1]):
-            run_start -= 1
-        while run_end < len(line) and not stop_re.match(line[run_end]):
+    def word_token(line, run_start, caret, mode, endpos):
+        """The word token step over the line up to endpos, or None."""
+        run_end = run_start
+        while run_end < endpos and not stop_re.match(line[run_end]):
             run_end += 1
-        # Lex the line from the run's start until a token reaches the run's end.
-        pos, kind = run_start, None
+        pos = run_start
         while pos < run_end:
-            m = token_res[mode].match(line, pos)
+            m = token_res[mode].match(line, pos, endpos)
             start, end, kind = pos, m.end(), m.lastgroup
             if mode == "field" and delimiter_re.match(line, start):
-                return caret, caret, caret
+                return None
             if end > caret or (end == caret and kind in ("symbol", "number")):
-                break
-            pos, kind = end, None
-        if kind not in ("symbol", "number"):
+                return start, end, kind
+            pos = end
+        return None
+
+    def word_span(line, caret, before=""):
+        found = context(before + line, len(before) + caret)
+        [mode, resume] = ("code", 0) if found is None else found
+        if mode == "text":
+            return None
+        run_start = caret
+        while run_start > 0 and not stop_re.match(line[run_start - 1]):
+            run_start -= 1
+        run_start = max(run_start, resume - len(before))
+        token = word_token(line, run_start, caret, mode, len(line))
+        if token is None or token[2] not in ("symbol", "number"):
             return caret, caret, caret
+        [start, end, kind] = token
         if mode == "field" and kind == "symbol" and debug_equals(line, end):
-            end -= 1
-            if end <= start or end < caret:
+            token = word_token(line, start, caret, mode, end - 1)
+            if token is None or token[2] not in ("symbol", "number"):
+                return caret, caret, caret
+            [start, end, kind] = token
+            if end < caret:
                 return caret, caret, caret
         leaf = line[start:end]
         while leaf not in rule["neverPeeled"] and len(leaf) >= 2:
@@ -613,18 +669,20 @@ def test_the_published_rule_alone_reproduces_every_case(published):
     word_span = spec_word_span(published["rule"])
     for case in published["cases"]:
         expected = (case["start"], case["replaceStart"], case["end"])
-        got = word_span(case["text"], case["caret"])
-        assert got == expected, (case["text"], case["caret"])
+        got = word_span(case["text"], case["caret"], case["before"])
+        assert (got or (None, None, None)) == expected, (case["text"], case["caret"])
 
 
-# Every line up to the length over each alphabet, at every caret.
+# Every text up to the length over each alphabet, at every caret.
 DIFFERENTIAL = [
     ("-+*^:'`~@([{\" .1jx;#", 4),
-    ("-+*:1jx.e{", 5),
+    ("-+*:1jx.e{", 4),
     # Strings and fields: delimiters, debug =, conversions, specs.
     ("f\"{}:!x='", 5),
     # Raw and \N{ escapes, escaped quotes, brackets and comments in a field.
     ('rf\\N{}"(;x ', 4),
+    # Strings, fields and comments across lines.
+    ('f"{}x;\n', 5),
 ]
 
 
@@ -639,10 +697,13 @@ def test_the_published_rule_agrees_with_the_reader_everywhere(
     word_span = spec_word_span(published["rule"])
     for size in range(length + 1):
         for chars in itertools.product(alphabet, repeat=size):
-            line = "".join(chars)
-            for caret in range(size + 1):
-                got = word_span(line, caret)
-                assert got == completion_word_span(line, caret), (line, caret)
+            text = "".join(chars)
+            for at in range(size + 1):
+                before, line, caret = case_input(text[:at] + "|" + text[at:])
+                if caret_context(before + line, len(before) + caret) is None:
+                    continue  # the reader refuses the text: no agreement asked
+                got = word_span(line, caret, before)
+                assert got == completion_word_span(line, caret, before), (text, at)
 
 
 def number_token_corpus():
