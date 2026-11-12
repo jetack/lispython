@@ -2299,6 +2299,39 @@ def test_a_script_file_linked_out_searches_its_real_directory(tmp_path):
     assert environment_search_paths(client) == {str(view / "scripts"): [str(out)]}
 
 
+def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
+    # Defect: the link proj/scripts/a.lpy -> ../lib/a.lpy, with proj/lib ->
+    # /out/lib, searches /out/lib as itself, which holds no shadow, so the
+    # backend leaves the (import sib) of lib/sib.lpy unresolved, where its
+    # run (sys.path[0] the real /out/lib) imports it.
+    out = tmp_path / "out" / "lib"
+    out.mkdir(parents=True)
+    (out / "a.lpy").write_text("(import sib)\n")
+    (out / "sib.lpy").write_text("(= s 1)\n")
+    (out / "a.py").write_text("import json, sys; print(json.dumps(sys.path[0]))\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "lib").symlink_to(out)
+    (proj / "scripts" / "a.lpy").symlink_to(os.path.join("..", "lib", "a.lpy"))
+    (proj / "scripts" / "a.py").symlink_to(os.path.join("..", "lib", "a.py"))
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert (view / "lib" / "sib.py").read_text() == "s = 1"
+    assert environment_search_paths(client)[str(view / "scripts")] == [
+        str(view / "lib"),
+        str(proj / "lib"),
+    ]
+    # Not -I: isolated mode puts no script directory on sys.path.
+    run = subprocess.run(
+        [sys.executable, "-E", "-s", str(proj / "scripts" / "a.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(run.stdout) == os.path.realpath(proj / "lib")
+
+
 def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
     # Defect: each open whose environment is new schedules a sweep of its
     # own, so two opens in one new directory (or a folders change, which

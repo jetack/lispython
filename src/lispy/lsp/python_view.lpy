@@ -2036,6 +2036,35 @@
    shared-import-roots, each once."
   (return (tuple (dict.fromkeys (+ [project-root] (shared-import-roots project-root))))))
 
+(def _script-dir [lpy-path project-root]
+  "The directory a script at lpy-path searches: its real path's, as the
+   run's sys.path[0] is, by its own directory's spelling when that is the
+   same directory (scripts -> /out/scripts), else by the spelling inside
+   project-root of a hop of its file link (scripts/a.lpy -> ../lib/a.lpy
+   with lib -> /out/lib searches lib/), so a search dir stays in the
+   project, where the view mirrors it, wherever the run's does."
+  (= real-directory (osp.dirname (osp.realpath lpy-path)))
+  (= path (osp.abspath lpy-path))
+  (if (== (osp.realpath (osp.dirname path)) real-directory)
+      (return (osp.dirname path)))
+  (if (is project-root None)
+      (return real-directory))
+  (= project-root (osp.abspath project-root))
+  ;; A chain of links ends within the kernel's own limit of 40 hops.
+  (for _ in (range 40)
+    (if (not (osp.islink path))
+        (break))
+    (try
+      (= path (osp.normpath (osp.join (osp.dirname path) (os.readlink path))))
+      (except [OSError]
+        (break)))
+    (= directory (osp.dirname path))
+    (= rel (osp.relpath directory project-root))
+    (if (and (!= rel os.pardir) (not (.startswith rel (+ os.pardir os.sep)))
+             (== (osp.realpath directory) real-directory))
+        (return directory)))
+  (return real-directory))
+
 (def module-names [lpy-path :project-root None]
   "(__name__, __package__, import root, search dirs) of lpy-path as Python
    imports it (package-root): the packages are the directories up from its
@@ -2053,7 +2082,9 @@
    root, as `import pkg.m` and `python -m pkg.m` see it; any other file is a
    script, searching the directory of its real path, as `lpy x.lpy` and
    `python x.py` put it on sys.path (a link scripts/a.lpy -> lib/a.lpy
-   searches lib/, a link out of the project the directory it reaches);
+   searches lib/, a link out of the project the directory it reaches,
+   spelled inside the project where the link passes through it,
+   _script-dir);
    either then searches project-root's shared-import-roots, which an
    editable install puts on sys.path for every run, each dir once.  Nothing
    else: scripts/x.lpy does not search the project root unless a flat
@@ -2073,12 +2104,10 @@
   (= shared (ife (is project-root None) [] (shared-import-roots project-root)))
   ;; A package module's import root keeps its spelling, as FileFinder
   ;; imports by it; a script searches its real path's directory, as the
-  ;; run's sys.path[0] is, by its own directory's spelling when that is the
-  ;; same directory (scripts -> /out/scripts), so a search dir stays in the
-  ;; project wherever the run's does.
-  (= real-directory (osp.dirname (osp.realpath lpy-path)))
-  (= script-dir (ife (== (osp.realpath directory) real-directory) directory real-directory))
-  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module import-root script-dir)]
+  ;; run's sys.path[0] is, spelled as _script-dir finds it.
+  (= search-dirs (tuple (dict.fromkeys (+ [(ife package-module
+                                                import-root
+                                                (_script-dir lpy-path project-root))]
                                           shared))))
   (= stem (sub (osp.splitext (osp.basename lpy-path)) 0))
   (= package (ife package-module (.join "." parts) ""))
