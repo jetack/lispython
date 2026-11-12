@@ -2439,24 +2439,37 @@
   (= rel (osp.relpath directory project-root))
   (return (or (== rel os.pardir) (.startswith rel (+ os.pardir os.sep)))))
 
+(def _real-dirs [dirs]
+  "The real paths of dirs in order, each once, or None for no dirs."
+  (if (is dirs None)
+      (return None))
+  (return (tuple (dict.fromkeys (map osp.realpath dirs)))))
+
 (def new-environment-p [project-root environments lpy-path :file-environments None]
   "Whether lpy-path, the absolute path of a document open in project-root's
    backend, has a search environment (search-environments) that
    environments and file-environments (ShadowManifest's) lack: it is a
    module whose first search dir is not its environment root (a file-link
-   script) inside the project with no entry in file-environments; or search-environments gives it one (the view root
-   standing in for project-root's: only whether an environment exists is
-   asked) and its environment root (_module-environment) is no key of
+   script) inside the project whose entry in file-environments is missing
+   or names other real directories (_real-dirs: the link was retargeted;
+   the entry's dirs may be respelled, never moved); or search-environments
+   gives it one (the view root standing in for project-root's: only
+   whether an environment exists is asked) and its environment root (_module-environment) is no key of
    environments, or the module is plain (its first search dir is the
    root) while the root's list does not start with the root, having come
    from a file-link script alone (_environments), which the plain module's
    sweep replaces.  No loop: after that sweep the open module has its
-   entry and the open plain module makes the list start with the root."
+   entry and the open plain module makes the list start with the root.
+   Not seen: a directory link created since the sweep that gives an
+   entry's outside dir a project spelling (lib -> /out/lib after the sweep
+   of scripts/a.lpy -> /out/lib/a.lpy), since only a walk finds it; the
+   next sweep (a save) respells it."
   (= [env-root dirs] (_module-environment lpy-path
                                           (module-names lpy-path :project-root project-root)))
   (if (and (!= (sub dirs 0) env-root)
            (is-not (view-path project-root project-root lpy-path) None)
-           (not-in (osp.abspath lpy-path) (or file-environments {})))
+           (!= (_real-dirs (.get (or file-environments {}) (osp.abspath lpy-path)))
+               (_real-dirs dirs)))
       (return True))
   (if (not (search-environments project-root project-root {env-root dirs}))
       (return False))

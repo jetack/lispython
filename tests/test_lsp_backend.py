@@ -2431,6 +2431,59 @@ def test_a_root_script_linked_out_searches_its_real_directory(tmp_path):
     assert json.loads(run.stdout) == str(out)
 
 
+def test_an_opened_retargeted_file_link_sweeps_again(tmp_path):
+    # Defect: an open asks only whether a file link has an entry, so
+    # scripts/a.lpy -> lib/a.lpy swept, then pointed at tools/a2.lpy, keeps
+    # lib/'s list until a save, and the backend misses tools/'s modules.
+    proj = tmp_path / "proj"
+    for name in ["lib", "tools", "scripts"]:
+        (proj / name).mkdir(parents=True)
+    (proj / "lib" / "a.lpy").write_text("(= a 1)\n")
+    (proj / "tools" / "a2.lpy").write_text("(= a 2)\n")
+    link = proj / "scripts" / "a.lpy"
+    link.symlink_to(os.path.join("..", "lib", "a.lpy"))
+    manifest = pv.ShadowManifest()
+    view = str(tmp_path / "view")
+    pv.write_shadows(str(proj), view, manifest=manifest)
+
+    def stale():
+        return pv.new_environment_p(
+            str(proj),
+            manifest.environments,
+            str(link),
+            file_environments=manifest.file_environments,
+        )
+
+    assert not stale()
+    link.unlink()
+    link.symlink_to(os.path.join("..", "tools", "a2.lpy"))
+    assert stale()
+    pv.write_shadows(str(proj), view, manifest=manifest)
+    assert not stale()
+
+
+def test_an_opened_respelled_file_link_does_not_sweep_again(tmp_path):
+    # Defect: an entry respelled by a project directory (/out/lib as lib/)
+    # differs from the open's dirs by spelling, so every open sweeps again.
+    out = tmp_path / "out" / "lib"
+    out.mkdir(parents=True)
+    (out / "a.lpy").write_text("(= a 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "lib").symlink_to(out)
+    link = proj / "scripts" / "a.lpy"
+    link.symlink_to(out / "a.lpy")
+    manifest = pv.ShadowManifest()
+    pv.write_shadows(str(proj), str(tmp_path / "view"), manifest=manifest)
+    assert manifest.file_environments[str(link)][0] == str(proj / "lib")
+    assert not pv.new_environment_p(
+        str(proj),
+        manifest.environments,
+        str(link),
+        file_environments=manifest.file_environments,
+    )
+
+
 def test_an_opened_file_link_with_no_environment_sweeps_again(tmp_path):
     # Defect: an open asks only for its directory's environment, so a root
     # file link opened before any sweep saw it is analysed under the
