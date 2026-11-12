@@ -1158,6 +1158,40 @@ def test_a_module_file_in_a_pruned_directory_walks_no_src(
     assert asked == [str(outside)]
 
 
+def test_a_linked_workspace_folders_pruned_files_walk_no_src(
+    outside_documents, monkeypatch
+):
+    # Defect: the pruned check measured the event's path, spelled through
+    # the linked workspace folder, against the folder's real root, so every
+    # file of a .venv install under the link asked the src layout again.
+    _, outside, _, folders = outside_documents
+    link = outside.parent / "outside-link"
+    link.symlink_to(outside)
+    folders.append(SimpleNamespace(uri=link.as_uri()))
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    for rel in [".venv/lib/site-packages/dep/m.py", "node_modules/x/m.py"]:
+        files_changed(SimpleNamespace(), link / rel)
+    assert asked == []
+    files_changed(SimpleNamespace(), link / "src" / "m.py")  # the control
+    assert asked == [str(outside)]
+
+
+def test_a_module_file_linked_to_a_library_file_renames_modules(tmp_path):
+    # Defect: the library check resolved the file itself, so a link
+    # proj/x.py -> a site-packages file, which ends the namespace package
+    # proj/x beside it, counted as installed code and renamed nothing.
+    library = tmp_path / "venv" / "lib" / "site-packages" / "x.py"
+    (library.parent / "x").mkdir(parents=True)
+    library.write_text("")
+    project = tmp_path / "proj"
+    (project / "x").mkdir(parents=True)
+    link = project / "x.py"
+    link.symlink_to(library)
+    assert server.renaming_file_p(str(link))
+    assert not server.renaming_file_p(str(library))  # the control
+
+
 def test_an_init_file_in_lispythons_own_package_renames_modules():
     # Defect: naming borrowed the tracking exclusions, which leave out
     # lispython's own package, so an __init__ created in an editable

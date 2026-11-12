@@ -52,8 +52,8 @@
                              source-prefix
                              spelled-in suppression-comments view-at-cursor
                              wrapper-forms])
-(from lispy.lsp.backend [Backends REQUEST-TIMEOUT own-place project-root-of
-                         suppression-tool])
+(from lispy.lsp.backend [Backends REQUEST-TIMEOUT document-path own-place
+                         project-root-of suppression-tool])
 ;; Read through the module, so WAIT-LIMIT and epoch are looked up at each use.
 (import lispy.lsp.macro-modules as macro-modules)
 
@@ -1711,13 +1711,19 @@
 
 (def renaming-file-p [path]
   "Whether a file created or deleted at path can rename a module of the
-   user's: it renames modules (renames-modules-p) and is no library path
+   user's: it names a module file (module-file-path-p) that renames
+   modules (renames-modules-p) at no library path
    (macro_modules.library-path-p: site-packages, the stdlib), so an
    install of a dependency, one event per file, republishes nothing.  An
    editable lispython checkout is the user's code like any other.  The
-   name check runs first, because the watch reports every .pyc write."
-  (return (and (renames-modules-p path)
-               (not (macro-modules.library-path-p (osp.realpath path))))))
+   library check reads document-path (directory resolved, file kept), so a
+   link proj/x.py -> a site-packages file is the user's module x, and a
+   file under a linked workspace folder is judged where it really lies.
+   The name checks run first and the stat and realpath only for a file
+   passing them, because the watch reports every .pyc write."
+  (return (and (module-file-path-p path)
+               (renames-modules-p path)
+               (not (macro-modules.library-path-p (document-path path))))))
 
 (def reindex-watched-file [uri path]
   "Keep the workspace index to an .lpy file created or deleted on disk:
@@ -1738,9 +1744,13 @@
    (refresh-src-layout, asked once per project of a module file in the
    batch outside a pruned directory, pruned-in-project-p: a file behind a
    link into src included, a .venv install never), every open document is
-   published again.  A change of content never matters."
+   published again.  The pruned check reads the event's path as
+   document-path resolves it, since project-root-of answers a real root
+   and a client reports a linked workspace folder's files by the link.  A
+   change of content never matters."
   (= renamed False)
   (= projects (set))
+  (= suffixes (tuple (finder-suffixes)))
   (for change in params.changes
     (if (not-in change.type (, lsp.FileChangeType.Created lsp.FileChangeType.Deleted))
         (continue))
@@ -1750,10 +1760,10 @@
           (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
-      (if (module-file-path-p path)
+      (if (module-file-path-p path :suffixes suffixes)
           (do (= project-root (project-root-of path (workspace-folders)))
               (if (and (is-not project-root None)
-                       (not (pruned-in-project-p project-root path)))
+                       (not (pruned-in-project-p project-root (document-path path))))
                   (.add projects project-root))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
