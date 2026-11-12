@@ -2507,6 +2507,76 @@ def test_an_opened_file_link_with_no_environment_sweeps_again(tmp_path):
     )
 
 
+def _pyrefly_error_names(tmp_path, config_text):
+    # The sorted names, among the three kinds counted below, of the errors
+    # `pyrefly check` reports on proj/scripts/a.py under this config. a.py
+    # imports helper (only out/lib holds it), adds a str to helper.X (an
+    # int: an error only when the import resolved) and assigns a str to an
+    # int (an error unless the config turns it off).
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (tmp_path / "out" / "lib").mkdir(parents=True)
+    (tmp_path / "out" / "lib" / "helper.py").write_text("X = 1\n")
+    (proj / "scripts" / "a.py").write_text(
+        'import helper\nhelper.X + ""\nY: int = ""\n'
+    )
+    (proj / "pyrefly.toml").write_text(
+        f"python-interpreter-path = {json.dumps(sys.executable)}\n"
+        + config_text.format(lib=json.dumps(str(tmp_path / "out" / "lib")))
+    )
+    found = subprocess.run(
+        [backend.backend_argv("pyrefly")[0], "check", "--color", "never"]
+        + ["--output-format", "json", "-c", str(proj / "pyrefly.toml")]
+        + [str(proj / "scripts" / "a.py")],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return sorted(
+        error["name"]
+        for error in json.loads(found.stdout)["errors"]
+        # Only the kinds the test reasons about, so an unrelated new lint
+        # cannot fail it.
+        if error["name"]
+        in ("missing-import", "unsupported-operation", "bad-assignment")
+    )
+
+
+@needs_pyrefly
+def test_pyrefly_takes_search_path_from_a_directory_config_only(tmp_path):
+    # Trip-wire for pyrefly's documented limit (see write-pyrefly-config): a
+    # [[sub-config]] refuses search-path, so ShadowManifest.file-environments
+    # goes unused there.
+    # Control: the top-level list resolves the import, so the str + int is
+    # the error it can now see, beside the assignment's.
+    assert _pyrefly_error_names(tmp_path / "control", "search-path = [{lib}]\n") == [
+        "bad-assignment",
+        "unsupported-operation",
+    ]
+    # Control: with no search-path at all the import is unresolved, which
+    # proves missing-import is pyrefly's name for it.
+    assert _pyrefly_error_names(tmp_path / "none", "") == [
+        "bad-assignment",
+        "missing-import",
+    ]
+    # The sub-config matches a.py (its other key turns bad-assignment off)
+    # yet its search-path is dropped: the import stays unresolved.
+    names = _pyrefly_error_names(
+        tmp_path / "sub",
+        '[[sub-config]]\nmatches = "scripts/a.py"\nsearch-path = [{lib}]\n'
+        "[sub-config.errors]\nbad-assignment = false\n",
+    )
+    assert "bad-assignment" not in names, (
+        "the sub-config no longer matches scripts/a.py: fix the fixture"
+    )
+    assert names == ["missing-import"], (
+        "pyrefly now takes search-path per sub-config: write "
+        "ShadowManifest.file-environments as sub-configs in "
+        "write-pyrefly-config and drop this test"
+    )
+
+
 @pytest.mark.parametrize(
     "name", [name for name in REAL_BACKENDS if name == "basedpyright"]
 )
