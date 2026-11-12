@@ -1714,21 +1714,26 @@
     (except [Exception]
       (.exception logger "lispython LSP: cannot register the module file watch"))))
 
-(def renaming-file-p [path]
+(def renaming-file-p [path :folders None]
   "Whether a file created or deleted at path can rename a module of the
    user's: it names a module file (module-file-path-p) that renames
-   modules (renames-modules-p) at no library path
-   (macro_modules.library-path-p: site-packages, the stdlib), so an
-   install of a dependency, one event per file, republishes nothing.  An
-   editable lispython checkout is the user's code like any other.  The
-   library check reads document-path (directory resolved, file kept), so a
-   link proj/x.py -> a site-packages file is the user's module x, and a
-   file under a linked workspace folder is judged where it really lies.
-   The name checks run first and the stat and realpath only for a file
-   passing them, because the watch reports every .pyc write."
-  (return (and (module-file-path-p path)
-               (renames-modules-p path)
-               (not (macro-modules.library-path-p (document-path path))))))
+   modules (renames-modules-p) and is no installed code, so an install of
+   a dependency, one event per file, republishes nothing.  Inside a
+   project (watched-place, over folders, the workspace folders when None)
+   it is installed code only when its spelled parts below the project
+   hold a library part (macro_modules.library-parts-p: a .venv's
+   site-packages), so a link proj/x.py -> a site-packages file is the
+   user's module x; outside every project it is a library path
+   (macro_modules.library-path-p, on document-path).  An editable
+   lispython checkout is the user's code like any other.  The name checks
+   run first and any stat or realpath only for a file passing them,
+   because the watch reports every .pyc write."
+  (if (not (and (module-file-path-p path) (renames-modules-p path)))
+      (return False))
+  (= place (watched-place path (ife (is folders None) (workspace-folders) folders)))
+  (if (is place None)
+      (return (not (macro-modules.library-path-p (document-path path)))))
+  (return (not (macro-modules.library-parts-p (.split (sub place 1) os.sep)))))
 
 (def reindex-watched-file [uri path]
   "Keep the workspace index to an .lpy file created or deleted on disk:
@@ -1748,37 +1753,44 @@
   (= parts (.split (osp.normpath path) os.sep))
   (return (and (in "src" parts) (not-in "__pycache__" parts))))
 
-(def src-base [project-root real]
-  "The src directory real (a document-path) is or lies below: project-root's
-   src, or that src's real path when src is a directory link
-   (proj/src -> ../shared/src, whose entries document-path resolves
-   there); None when neither holds it."
-  (= src (osp.join project-root "src"))
-  (for base in [src (osp.realpath src)]
-    (if (or (== real base) (.startswith real (+ base os.sep)))
-        (return base)))
-  (return None))
+;; A watched file is judged by its spelling below the workspace folder,
+;; resolving only the folder itself: the src layout walk
+;; (_src-python-witness) and FileFinder import through a link by its
+;; spelled name (src/acme -> .shared/acme is the package acme), so a
+;; resolved path would prune a link into a dot-directory, or leave the
+;; project through one, where the import does neither.
+(def watched-place [path folders]
+  "(real project root, spelled relative path) of path in the innermost of
+   folders (objects with .uri) holding it, each matched by its own spelling
+   or its real path, or None outside every folder."
+  (= path (osp.normpath (osp.abspath path)))
+  (= best None)
+  (for folder in folders
+    (= folder-path (to-fs-path folder.uri))
+    (if (is folder-path None)
+        (continue))
+    (= real (osp.realpath folder-path))
+    (for spelled in [(osp.normpath (osp.abspath folder-path)) real]
+      (if (or (== path spelled) (.startswith path (+ spelled os.sep)))
+          (do (if (or (is best None) (> (len real) (len (sub best 0))))
+                  (= best (, real (osp.relpath path spelled))))
+              (break)))))
+  (return best))
 
-(def src-entry-project [path folders]
-  "The project (project-root-of, over folders) whose src the event's path,
-   src-entry-shape-p's, is or lies below (src-base) outside a pruned
-   directory (pruned-in-project-p, measured from that src), or None.  The
-   project is that of the path's deepest src component as spelled, never of
-   the resolved path, which a linked src takes out of the project."
-  (= src-path (osp.normpath path))
-  (while (!= (osp.basename src-path) "src")
-    (= parent (osp.dirname src-path))
-    (if (== parent src-path)
-        (return None))
-    (= src-path parent))
-  (= project-root (project-root-of src-path folders))
-  (if (is project-root None)
+(def watched-project [path module-file folders]
+  "The project whose src layout a created or deleted path may move, or
+   None: its project (watched-place) when it is a module file or an entry
+   of the project's src (its spelled relative path starts at src), outside
+   a pruned directory (pruned-in-project-p, by spelled parts)."
+  (= place (watched-place path folders))
+  (if (is place None)
       (return None))
-  (= real (document-path (osp.normpath path)))
-  (= base (src-base project-root real))
-  (if (or (is base None) (pruned-in-project-p base real))
+  (= [root rel] place)
+  (if (and (not module-file) (!= (sub (.split rel os.sep) 0) "src"))
       (return None))
-  (return project-root))
+  (if (pruned-in-project-p root (osp.join root rel))
+      (return None))
+  (return root))
 
 (deco (server.feature lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
 (def did-change-watched-files [ls params]
@@ -1786,14 +1798,12 @@
    indexed again (reindex-watched-file), and when one may rename a module
    (renaming-file-p), or moved the src layout answer of its project
    (refresh-src-layout, asked once per project of a module file in the
-   batch, or of any entry of its src (src-entry-shape-p, src-entry-project:
+   batch, or of any entry of its src (src-entry-shape-p, watched-project:
    a package folder deleted or moved in whole is one event), outside a
-   pruned directory, pruned-in-project-p: a file behind a link into src
-   included, a .venv install never), every open document is published
-   again.  The pruned check reads the event's path as
-   document-path resolves it, since project-root-of answers a real root
-   and a client reports a linked workspace folder's files by the link.  A
-   change of content never matters."
+   pruned directory, judged by spelling below the workspace folder
+   (watched-place: a file behind a link into src included, a .venv
+   install never), every open document is published again.  A change of
+   content never matters."
   (= renamed False)
   (= projects (set))
   (= suffixes (tuple (finder-suffixes)))
@@ -1806,16 +1816,11 @@
           (reindex-watched-file change.uri path))
       (if (and (not renamed) (renaming-file-p path))
           (= renamed True))
-      (= project-root None)
-      (if (module-file-path-p path :suffixes suffixes)
-          (do (= project-root (project-root-of path (workspace-folders)))
-              (if (and (is-not project-root None)
-                       (pruned-in-project-p project-root (document-path path)))
-                  (= project-root None))))
-      (if (and (is project-root None) (src-entry-shape-p path))
-          (= project-root (src-entry-project path (workspace-folders))))
-      (if (is-not project-root None)
-          (.add projects project-root))
+      (= module-file (module-file-path-p path :suffixes suffixes))
+      (if (or module-file (src-entry-shape-p path))
+          (do (= project-root (watched-project path module-file (workspace-folders)))
+              (if (is-not project-root None)
+                  (.add projects project-root))))
       (except [Exception]
         (.exception logger "lispython LSP: cannot handle the file event of %s" path))))
   ;; Every project is refreshed, a renaming batch too, so none keeps the

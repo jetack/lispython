@@ -343,13 +343,19 @@
     (except [ValueError]
       (return False))))
 
+(def library-parts-p [parts]
+  "Whether path parts hold a site-packages or dist-packages directory, the
+   part of library-path-p's rule that reads a path's spelling alone (the
+   server judges a watched file inside a project by it)."
+  (return (not (.isdisjoint _LIBRARY-PARTS parts))))
+
 (def library-path-p [real]
   "Whether the file or directory at the real path real is installed code,
    never the user's: it lies in the interpreter's library directories
    (_LIBRARY-DIRS) or in any site-packages or dist-packages directory.  The
    one home of that rule: tracking (_trackable-path-p) and the server's
    module naming (renaming-file-p) read it."
-  (if (not (.isdisjoint _LIBRARY-PARTS (.split real os.sep)))
+  (if (library-parts-p (.split real os.sep))
       (return True))
   (return (any ((_within-p real directory) for directory in _LIBRARY-DIRS))))
 

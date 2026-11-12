@@ -1210,6 +1210,32 @@ def test_a_linked_workspace_folders_pruned_files_walk_no_src(
     assert asked == [str(outside)]
 
 
+@pytest.mark.parametrize("outside_project", [False, True])
+def test_a_module_file_behind_a_src_package_link_walks_src(
+    outside_documents, monkeypatch, outside_project
+):
+    # Defect: the event's path was resolved below the workspace folder, so
+    # behind src/acme -> .shared/acme a module file was in a pruned
+    # dot-directory, and behind src/acme -> ../shared/acme in no project,
+    # and its deletion asked nothing, where the src walk and FileFinder
+    # import through the link by its spelled name.
+    _, outside, _, folders = outside_documents
+    folders.append(SimpleNamespace(uri=outside.as_uri()))
+    base = outside.parent / "shared" if outside_project else outside / ".shared"
+    shared = base / "acme"
+    shared.mkdir(parents=True)
+    (outside / "src").mkdir()
+    (outside / "src" / "acme").symlink_to(shared)
+    asked = []
+    monkeypatch.setattr(server, "refresh_src_layout", lambda root: asked.append(root))
+    files_changed(
+        SimpleNamespace(),
+        outside / "src" / "acme" / "tool.py",
+        lsp.FileChangeType.Deleted,
+    )
+    assert asked == [str(outside)]
+
+
 def test_a_module_file_linked_to_a_library_file_renames_modules(tmp_path):
     # Defect: the library check resolved the file itself, so a link
     # proj/x.py -> a site-packages file, which ends the namespace package
