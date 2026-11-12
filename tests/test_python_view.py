@@ -1782,6 +1782,43 @@ class TestShadows:
             directory.rmdir()
         assert pv.shared_import_roots(str(project)) == [str(project)]
 
+    @pytest.fixture
+    def unlistable(self):
+        """chmod 0o311 (searchable, not listable) each directory given,
+        restoring every one at teardown."""
+        made = []
+
+        def make(directory):
+            directory.chmod(0o311)
+            made.append(directory)
+
+        yield make
+        for directory in made:
+            directory.chmod(0o755)
+
+    def test_an_unlistable_src_package_is_python_as_its_imports_see_it(
+        self, tmp_path, unlistable
+    ):
+        # Defects: the walk skipped a directory it cannot list, so a
+        # regular package src/pkg that Python imports (FileFinder lists src
+        # and stats pkg/__init__.py) was no src layout; and a broken link
+        # src/x.py, which FileFinder refuses, was one.
+        project = tmp_path / "project"
+        src = project / "src"
+        self.write(src / "pkg" / "__init__.py", "")
+        self.write(src / "pkg" / "m.py", "")
+        unlistable(src / "pkg")
+        assert pv.shared_import_roots(str(project)) == [str(src)]
+        # An unlistable namespace directory imports nothing below it.
+        other = tmp_path / "other"
+        self.write(other / "src" / "acme" / "tool" / "__init__.py", "")
+        unlistable(other / "src" / "acme")
+        assert pv.shared_import_roots(str(other)) == []
+        broken = tmp_path / "broken"
+        (broken / "src").mkdir(parents=True)
+        (broken / "src" / "x.py").symlink_to(broken / "missing.py")
+        assert pv.shared_import_roots(str(broken)) == []
+
     # scripts/run.lpy importing a module of a shared root that holds no .lpy:
     # a pure-.py regular package mylib at the root (the flat layout), or
     # nsp.mod from a src holding only the namespace package nsp.
