@@ -2135,8 +2135,10 @@ def test_a_linked_documents_shadow_and_environment_are_its_own(project, tmp_path
     assert client.manifest.environments[os.path.join(real, "scripts")] == (
         os.path.join(real, "lib"),
     )
+    lib = [str(view / "lib"), os.path.join(real, "lib")]
     assert environment_search_paths(client) == {
-        str(view / "scripts"): [str(view / "lib"), os.path.join(real, "lib")]
+        str(view / "scripts" / "a.py"): lib,
+        str(view / "scripts"): lib,
     }
 
 
@@ -2296,7 +2298,10 @@ def test_a_script_file_linked_out_searches_its_real_directory(tmp_path):
     client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
     client._prepare_view_root([])
     view = pathlib.Path(client.view_root.path)
-    assert environment_search_paths(client) == {str(view / "scripts"): [str(out)]}
+    assert environment_search_paths(client) == {
+        str(view / "scripts" / "t.py"): [str(out)],
+        str(view / "scripts"): [str(out)],
+    }
 
 
 def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
@@ -2330,6 +2335,139 @@ def test_a_file_link_through_a_linked_directory_searches_its_view(tmp_path):
         check=True,
     )
     assert json.loads(run.stdout) == os.path.realpath(proj / "lib")
+
+
+def test_a_file_link_script_gets_its_own_pyright_environment(tmp_path):
+    # Defect: a file-link script is analysed under its directory's list, so
+    # scripts/a.lpy -> lib/a.lpy beside the plain scripts/b.lpy misses the
+    # lib/helper its run imports (pyright takes a file as a root; pyrefly
+    # cannot, so its directory list stays the plain scripts').
+    proj = tmp_path / "proj"
+    (proj / "lib").mkdir(parents=True)
+    (proj / "lib" / "a.lpy").write_text("(import helper)\n")
+    (proj / "lib" / "helper.py").write_text("h = 1\n")
+    (proj / "scripts").mkdir()
+    (proj / "scripts" / "b.lpy").write_text("(= b 1)\n")
+    (proj / "scripts" / "a.lpy").symlink_to(proj / "lib" / "a.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    envs = environment_search_paths(client)
+    assert envs[str(view / "scripts" / "a.py")] == [
+        str(view / "lib"),
+        str(proj / "lib"),
+    ]
+    assert envs[str(view / "scripts")] == [
+        str(view / "scripts"),
+        str(proj / "scripts"),
+    ]
+    # pyright takes the first environment whose root holds the file.
+    roots = list(envs)
+    assert roots.index(str(view / "scripts" / "a.py")) < roots.index(
+        str(view / "scripts")
+    )
+
+
+def test_a_root_script_linked_out_searches_its_real_directory(tmp_path):
+    # Defect: an environment rooted at the project root is skipped, so
+    # proj/t.lpy -> /out/t.lpy is analysed under the default list, without
+    # the /out its run puts on sys.path[0].
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "helper.py").write_text("h = 1\n")
+    (out / "t.lpy").write_text("(import helper)\n")
+    (out / "t.py").write_text("import json, sys; print(json.dumps(sys.path[0]))\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    (proj / "t.py").symlink_to(out / "t.py")
+    client = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    client._prepare_view_root([])
+    view = pathlib.Path(client.view_root.path)
+    assert environment_search_paths(client) == {str(view / "t.py"): [str(out)]}
+    # Not -I: isolated mode puts no script directory on sys.path.
+    run = subprocess.run(
+        [sys.executable, "-E", "-s", str(proj / "t.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(run.stdout) == str(out)
+
+
+def test_an_opened_file_link_with_no_environment_sweeps_again(tmp_path):
+    # Defect: an open asks only for its directory's environment, so a root
+    # file link opened before any sweep saw it is analysed under the
+    # default list until a save.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(= t 1)\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    path = str(proj / "t.lpy")
+    assert pv.new_environment_p(str(proj), {}, path)
+    manifest = pv.ShadowManifest()
+    pv.write_shadows(str(proj), str(tmp_path / "view"), manifest=manifest)
+    assert manifest.file_environments == {path: (str(out),)}
+    assert not pv.new_environment_p(
+        str(proj),
+        manifest.environments,
+        path,
+        file_environments=manifest.file_environments,
+    )
+
+
+@pytest.mark.parametrize(
+    "name", [name for name in REAL_BACKENDS if name == "basedpyright"]
+)
+def test_real_backend_resolves_an_import_of_a_root_script_linked_out(tmp_path, name):
+    # Defect: proj/t.lpy -> /out/t.lpy is analysed under the default list,
+    # so pyright reports the (import helper) of /out/helper.py, which its
+    # run (sys.path[0] the real /out) imports.
+    argv = backend.backend_argv(name)
+    if argv is None:
+        pytest.skip(f"{name} is not installed (its lsp extra)")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "helper.py").write_text("h = 1\n")
+    source = "(import helper)\n(print helper.h helper.nowhere)\n"
+    (out / "t.lpy").write_text(source)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.lpy").symlink_to(out / "t.lpy")
+    client = backend.BackendClient(view_root(proj, tmp_path), argv, name=name)
+    uri = (proj / "t.lpy").as_uri()
+    view = pv.compile_view(source)
+
+    def messages():
+        found = client.diagnostics_for(uri, view.text)
+        return None if found is None else [d.message for d, _ in found]
+
+    async def scenario():
+        try:
+            await client.request(
+                lsp.TEXT_DOCUMENT_HOVER, hover_params(client.backend_uri(uri))
+            )
+            client.push_buffer(uri, source, view)
+            deadline = asyncio.get_running_loop().time() + 30
+            # The positive control: helper resolved, so its missing attribute.
+            while not any("nowhere" in m for m in messages() or []):
+                heard.clear()
+                left = deadline - asyncio.get_running_loop().time()
+                if left <= 0:
+                    break
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(heard.wait(), left)
+            return messages()
+        finally:
+            await client.shutdown()
+
+    heard = asyncio.Event()
+    client.on_diagnostics = lambda lpy_uri: heard.set()
+    found = run_bounded(scenario(), timeout=90)
+    assert found is not None and any("nowhere" in m for m in found), found
+    assert not any("helper" in m and "nowhere" not in m for m in found), found
 
 
 def test_opens_in_one_new_directory_sweep_once(project, tmp_path, fake_default):
