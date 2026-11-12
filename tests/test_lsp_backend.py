@@ -199,9 +199,9 @@ def fake_argv(fake_script):
 
 @pytest.fixture
 def fake_default(monkeypatch, fake_argv):
-    """The fake stands for basedpyright, the default backend when pyrefly is
-    not installed (as here), so Backends resolves to it whatever is
-    installed."""
+    """The fake stands for basedpyright, the default backend (pyrefly is made
+    not installed, so it is not the fallback), so Backends resolves to it
+    whatever is installed."""
     monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: fake_argv)
 
@@ -264,19 +264,20 @@ def kill_quietly(pid):
 
 
 def test_backend_setting(monkeypatch):
-    # Defects: with no setting, basedpyright runs where pyrefly is installed
-    # too, or the default picks a backend that is not installed; or an
-    # explicit backend that is missing falls back to another one.
+    # Defects: with no setting, pyrefly runs where basedpyright is installed
+    # too (its imports of a file-link script resolve wrongly), or the default
+    # picks a backend that is not installed; or an explicit backend that is
+    # missing falls back to another one.
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["node", "bp"])
     monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: ["pyrefly", "lsp"])
-    assert backend.resolve_backend(None) == "pyrefly"
-    assert backend.resolve_backend({"backend": None}) == "pyrefly"
-    assert backend.resolve_backend({"backend": "basedpyright"}) == "basedpyright"
-    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     assert backend.resolve_backend(None) == "basedpyright"
-    assert backend.resolve_backend({"backend": "pyrefly"}) == "off"
-    assert backend.resolve_backend({"backend": "no-such"}) == "off"
+    assert backend.resolve_backend({"backend": None}) == "basedpyright"
+    assert backend.resolve_backend({"backend": "pyrefly"}) == "pyrefly"
     monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: None)
+    assert backend.resolve_backend(None) == "pyrefly"
+    assert backend.resolve_backend({"backend": "basedpyright"}) == "off"
+    assert backend.resolve_backend({"backend": "no-such"}) == "off"
+    monkeypatch.setitem(backend.BACKENDS, "pyrefly", lambda: None)
     assert backend.resolve_backend(None) == "off"
     assert backend.resolve_backend({}) == "off"
 
@@ -945,7 +946,7 @@ def test_exit_kills_a_backend_whose_folder_was_removed(project, tmp_path, fake_d
 # ---------------------------------------------------------------------------
 
 # Runs lispython's LSP with the fake as basedpyright, the default backend
-# with pyrefly not installed, and
+# (pyrefly not installed), and
 # one extra request, lispy-test/backendHover, that hovers through the
 # server's own Backends (no feature routes to a backend yet).
 LAUNCHER = textwrap.dedent(

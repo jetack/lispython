@@ -9,10 +9,10 @@ nox.options.default_venv_backend = "uv"
 PYTHONS = ["3.11", "3.12", "3.13", "3.14", "3.15"]
 
 
-# Both backends (pyrefly: lsp, basedpyright: lsp-basedpyright), so every
+# Both backends (basedpyright: lsp, pyrefly: lsp-pyrefly), so every
 # real-backend test runs. The CI test job runs the same extras
 # (tests/test_ci_workflow.py).
-EXTRAS = ["dev", "lsp", "lsp-basedpyright"]
+EXTRAS = ["dev", "lsp", "lsp-pyrefly"]
 
 
 @nox.session(python=PYTHONS)
