@@ -1041,9 +1041,8 @@
       (= real-root (osp.realpath root))
       (= rel None)
       (for base in (, root real-root)
-        (= candidate (osp.relpath path base))
-        (if (not (or (== candidate os.pardir) (.startswith candidate (+ os.pardir os.sep))))
-            (do (= rel candidate)
+        (if (below-p path base)
+            (do (= rel (osp.relpath path base))
                 (break))))
       (if (is rel None)
           (return (, "file" uri)))
@@ -1546,28 +1545,32 @@
   (def document-saved [self lpy-uri]
     "A buffer was saved: BackendClient.saved for a running backend or one
      starting, which replays it once it runs (its sweep may predate the
-     save), and a sweep (_sweep-soon) of every other backend that shadows
-     the file as one outside its project.  Call on the loop."
+     save), and a sweep (_sweep-soon) of every other backend whose view
+     may shadow the file at its real path (ShadowManifest.save-paths: its
+     project, a nested workspace folder's file included, its outside dirs
+     and the targets of the links its walks met).  Call on the loop."
     (try
       (= client (._existing self lpy-uri))
       (if (and (is-not client None) (or client.running client.starting))
           (._schedule self (.saved client lpy-uri)))
-      ;; A file outside a project that another project's view shadows (the
-      ;; real directory /out of its script link scripts/t.lpy -> /out/t.lpy,
-      ;; outside-view-dir) gets no file event from that project's
-      ;; workspace, so its save sweeps every other backend whose last sweep
-      ;; shadowed an outside dir (or a directory a link in one reaches)
-      ;; holding its real path, or that view keeps
-      ;; the old text until its next sweep.  By directory, not by source:
-      ;; a new file there has no shadow yet, and the real path matches
-      ;; whatever spelling the editor saved it through.
+      ;; A file that another project's view shadows but whose save goes
+      ;; elsewhere (the real directory /out of its script link
+      ;; scripts/t.lpy -> /out/t.lpy, outside-view-dir; the target of a
+      ;; link in the project, src/acme -> /shared/acme; a nested workspace
+      ;; folder's file, proj/vendor/x.lpy) gets no file event that view
+      ;; reads, so its save sweeps every other backend whose last sweep
+      ;; named its real path or a directory holding it
+      ;; (ShadowManifest.save-paths), or that view keeps the old text until
+      ;; its next sweep.  By directory where one is shadowed whole, not by
+      ;; source: a new file there has no shadow yet, and the real path
+      ;; matches whatever spelling the editor saved it through.
       (= path (to-fs-path lpy-uri))
       (if (is-not path None)
           (do (= real (osp.realpath path))
               (for other in (list (.values self.clients))
                 (if (and (is-not other client)
-                         (any ((below-p real directory)
-                               for directory in other.manifest.outside-dirs)))
+                         (any ((below-p real place)
+                               for place in other.manifest.save-paths)))
                     (._sweep-soon self other [])))))
       (except [Exception]
         (.exception logger "lispython LSP: backend save failed for %s" lpy-uri))))

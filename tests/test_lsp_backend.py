@@ -2535,6 +2535,209 @@ def test_saving_through_a_link_in_an_outside_dir_sweeps_its_view(tmp_path, monke
     assert swept == [other, other]
 
 
+def test_saving_a_link_target_of_the_project_sweeps_its_view(tmp_path, monkeypatch):
+    # Defect: the project walk's links are not named, so a source the view
+    # shadows through src/acme -> /shared/acme (another workspace folder,
+    # whose save reaches that folder's backend) or a file link
+    # src/pkg/m.lpy -> /data/m.lpy, saved at its real path, sweeps nothing,
+    # and the view keeps the old text until its next sweep.
+    shared = tmp_path / "shared"
+    (shared / "acme").mkdir(parents=True)
+    (shared / "acme" / "x.lpy").write_text("(= x 1)\n")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "m.lpy").write_text("(= m 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "src" / "pkg").mkdir(parents=True)
+    (proj / "src" / "pkg" / "__init__.lpy").write_text("")
+    (proj / "src" / "acme").symlink_to(shared / "acme")
+    (proj / "src" / "pkg" / "m.lpy").symlink_to(data / "m.lpy")
+    assert {
+        str(proj / "src" / "acme" / "x.lpy"),
+        str(proj / "src" / "pkg" / "m.lpy"),
+    } <= set(pv.project_sources(str(proj)))
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, shared)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    client = backends.client_for((proj / "src" / "pkg" / "__init__.lpy").as_uri())
+    assert backends.client_for((shared / "acme" / "x.lpy").as_uri()) is not client
+    client._prepare_view_root([])
+    client.state = "running"
+    client.process = SimpleNamespace(returncode=None)
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((shared / "acme" / "x.lpy").as_uri())
+    backends.document_saved((data / "m.lpy").as_uri())
+    assert swept == [client, client]
+
+
+def test_saving_a_nested_folders_file_sweeps_the_enclosing_view(tmp_path, monkeypatch):
+    # Defect: proj's walk lists proj/vendor/x.lpy, so proj's view shadows
+    # it, but the nested workspace folder vendor owns the file, so its save
+    # reaches vendor's backend alone and proj's shadow keeps the old text.
+    proj = tmp_path / "proj"
+    vendor = proj / "vendor"
+    vendor.mkdir(parents=True)
+    (proj / "main.lpy").write_text("(= y 1)\n")
+    (vendor / "x.lpy").write_text("(= x 1)\n")
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, vendor)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    client = backends.client_for((proj / "main.lpy").as_uri())
+    nested = backends.client_for((vendor / "x.lpy").as_uri())
+    assert nested is not client
+    client._prepare_view_root([])
+    nested._prepare_view_root([])
+    assert str(vendor / "x.lpy") in client.manifest.sources
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((vendor / "x.lpy").as_uri())
+    assert swept == [client]
+    # proj's own save sweeps neither proj's view (its own backend) nor
+    # vendor's.
+    swept.clear()
+    backends.document_saved((proj / "main.lpy").as_uri())
+    assert swept == []
+
+
+def test_a_file_link_names_its_target_alone_for_saves(tmp_path, monkeypatch):
+    # Defect: a file link src/pkg/m.lpy -> /data/m.lpy names all of /data,
+    # so every save there ($HOME, for a link to ~/m.lpy) sweeps the view,
+    # though no file beside the target is shadowed through the link.
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "m.lpy").write_text("(= m 1)\n")
+    (data / "sib.lpy").write_text("(= s 1)\n")
+    proj = tmp_path / "proj"
+    (proj / "src" / "pkg").mkdir(parents=True)
+    (proj / "src" / "pkg" / "__init__.lpy").write_text("")
+    (proj / "src" / "pkg" / "m.lpy").symlink_to(data / "m.lpy")
+    # A package module, which searches its import root, not /data.
+    names = pv.shadow_module_names(str(proj), str(proj / "src" / "pkg" / "m.lpy"))
+    assert names[:2] == ("pkg.m", "pkg")
+    folders = [SimpleNamespace(uri=p.as_uri()) for p in (proj, data)]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    client = backends.client_for((proj / "src" / "pkg" / "__init__.lpy").as_uri())
+    assert backends.client_for((data / "sib.lpy").as_uri()) is not client
+    client._prepare_view_root([])
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((data / "sib.lpy").as_uri())
+    assert swept == []
+    backends.document_saved((data / "m.lpy").as_uri())
+    assert swept == [client]
+
+
+def test_a_script_file_link_in_an_outside_dir_names_its_real_directory(
+    tmp_path, monkeypatch
+):
+    # Defect: /out/a.lpy -> /elsewhere/a.lpy is a script, whose shadow
+    # compiles searching /elsewhere (its run's sys.path[0]), so its
+    # (require mac) reads /elsewhere/mac.lpy; with only /elsewhere/a.lpy
+    # named, saving mac.lpy sweeps nothing and the shadow goes stale.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(= t 1)\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "mac.lpy").write_text("(defmacro m [] 1)\n")
+    (elsewhere / "a.lpy").write_text("(require mac)\n(= a (mac.m))\n")
+    (out / "a.lpy").symlink_to(elsewhere / "a.lpy")
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    names = pv.shadow_module_names(str(proj), str(out / "a.lpy"))
+    assert names[1] == "" and names[3][0] == str(elsewhere)
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    other = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    other.state = "running"
+    other.process = SimpleNamespace(returncode=None)
+    backends.clients["elsewhere"] = other
+    other._prepare_view_root([])
+    assert str(out / "a.lpy") in other.manifest.sources
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    backends.document_saved((elsewhere / "mac.lpy").as_uri())
+    assert swept == [other]
+
+
+def test_a_sweep_keeps_the_last_sweeps_save_paths_during_its_walks(
+    tmp_path, monkeypatch
+):
+    # Defect: a sweep names only its own outside dirs before its walks, so
+    # a source the last sweep shadowed through a link (/out/lib ->
+    # /data/lib), saved at its real path while this sweep walks /out,
+    # sweeps nothing and the view keeps the old text.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "t.lpy").write_text("(import lib.m)\n")
+    data = tmp_path / "data" / "lib"
+    data.mkdir(parents=True)
+    (data / "m.lpy").write_text("(= m 1)\n")
+    (out / "lib").symlink_to(data)
+    proj = tmp_path / "proj"
+    (proj / "scripts").mkdir(parents=True)
+    (proj / "scripts" / "t.lpy").symlink_to(out / "t.lpy")
+    folders = [SimpleNamespace(uri=proj.as_uri())]
+    backends = backend.Backends(lambda: folders, cache_home=str(tmp_path / "cache"))
+    monkeypatch.setitem(backend.BACKENDS, "basedpyright", lambda: ["unused"])
+    backends.configure({"backend": "basedpyright"})
+    other = backend.BackendClient(view_root(proj, tmp_path), ["unused"])
+    other.state = "running"
+    other.process = SimpleNamespace(returncode=None)
+    backends.clients["elsewhere"] = other
+    other._prepare_view_root([])
+    swept = []
+    backends._sweep_soon = lambda client, uris: swept.append(client)
+    walk = pv.project_sources
+
+    def saving_during_walk(directory, **kwargs):
+        if directory == str(out):
+            backends.document_saved((data / "m.lpy").as_uri())
+        return walk(directory, **kwargs)
+
+    monkeypatch.setattr(pv, "project_sources", saving_during_walk)
+    other._prepare_view_root([])
+    assert swept == [other]
+
+
+def test_locate_passes_a_real_file_on_another_drive(project, tmp_path, monkeypatch):
+    # Defect (Windows): relpath raises ValueError across drives, so a real
+    # file on another drive than the view root loses its location.  The
+    # drives are simulated as ntpath reads them: a path under drive_d is on
+    # D:, any other on C:.
+    client = backend.BackendClient(view_root(project, tmp_path), None)
+    drive_d = tmp_path / "d"
+    drive_d.mkdir()
+    real = drive_d / "lib.py"
+    real.write_text("x = 1\n")
+    splitdrive, relpath = os.path.splitdrive, os.path.relpath
+
+    def drive(path):
+        return "D:" if os.fspath(path).startswith(str(drive_d)) else "C:"
+
+    def fake_splitdrive(path):
+        return (drive(path), splitdrive(path)[1])
+
+    def fake_relpath(path, start=os.curdir):
+        if drive(path) != drive(os.path.abspath(start)):
+            raise ValueError("path is on mount 'D:', start on mount 'C:'")
+        return relpath(path, start)
+
+    monkeypatch.setattr(os.path, "splitdrive", fake_splitdrive)
+    monkeypatch.setattr(os.path, "relpath", fake_relpath)
+    place = client.locate(real.as_uri())
+    monkeypatch.undo()
+    assert place == ("file", real.as_uri())
+
+
 def test_an_outside_package_overlay_never_writes_through_a_swapped_link(
     tmp_path, monkeypatch
 ):
